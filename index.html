@@ -250,9 +250,13 @@ const MODELS = {
       {n:'sku',l:'SKU',t:'text'},{n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant',t:'text'},
       {n:'name',l:'Name',t:'text'},{n:'pack_g',l:'Pack (g)',t:'number'},
       {n:'sell_price',l:'Sell price',t:'currency'},{n:'par_packs',l:'Par (packs)',t:'number'},
-      {n:'feeding_style',l:'Feeding style',t:'select',o:['Raw Feeding','Gently Cooked','BARF','PMR','Mix']}],
+      {n:'feeding_style',l:'Feeding style',t:'select',o:['Raw Feeding','Gently Cooked','BARF','PMR','Mix']},
+      {n:'sticker_bulacan_on_hand',l:'Labels — Bulacan on hand',t:'number'},{n:'sticker_bulacan_par',l:'Labels — Bulacan PAR',t:'number'},
+      {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'},
+      {n:'sticker_supplier',l:'Label supplier',t:'text'},{n:'sticker_art_url',l:'Label artwork URL',t:'text'}],
     list:['name','family','variant','pack_g','feeding_style','sell_price'],
-    groups:[['sku','family','variant','name'],['pack_g','sell_price','par_packs','feeding_style']],
+    groups:[['sku','family','variant','name'],['pack_g','sell_price','par_packs','feeding_style'],['sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par','sticker_supplier','sticker_art_url']],
+    tabs:[{l:'📦 Product', groups:[0,1], o2m:true},{l:'🏷️ Stickers', groups:[2]}],
     o2m:{ field:'bom', model:'bom_lines', fk:'product_sku', label:'Recipe (BOM)',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'usable_g',l:'Usable g',t:'number'},{n:'method_override',l:'Method',t:'text'}] } },
 
@@ -495,7 +499,7 @@ async function renderList(){
 }
 
 /* -------- form view -------- */
-let formRec={}, formChildren=[], formIsNew=false, relCache={};
+let formRec={}, formChildren=[], formIsNew=false, relCache={}, formTab=0;
 async function relOptions(model){
   if(relCache[model]) return relCache[model];
   const m=MODELS[model]; const rows=await db.list(model,{});
@@ -505,7 +509,7 @@ async function relOptions(model){
 async function openForm(idEnc){
   const m=MODELS[state.model]; state.view='form';
   if(m.customForm==='count') return renderCountForm(idEnc);
-  formIsNew = !idEnc;
+  formIsNew = !idEnc; formTab=0;
   if(idEnc){ const pkval=decodeURIComponent(idEnc);
     const rows=await db.list(state.model,{}); formRec={...(rows.find(r=>String(r[m.pk])===pkval)||{})};
   } else { formRec={}; if(m.status) formRec[m.status.f]=m.status.stages[0]; if(m.fields.find(f=>f.n==='order_date')) formRec.order_date=new Date().toISOString().slice(0,10); }
@@ -531,7 +535,8 @@ async function renderForm(){
     if(f.t==='currency'||f.t==='number') return `<input type="number" step="any" value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
     return `<input value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
   };
-  const grpHtml = m.groups.map(col=>`<div>${col.map(fn=>{const f=m.fields.find(x=>x.n===fn); if(!f)return''; return `<div class="fld"><label>${f.l}</label><div class="val">${fieldInput(f)}</div></div>`;}).join('')}</div>`).join('');
+  const gcol=(col)=>`<div>${col.map(fn=>{const f=m.fields.find(x=>x.n===fn); if(!f)return''; return `<div class="fld"><label>${f.l}</label><div class="val">${fieldInput(f)}</div></div>`;}).join('')}</div>`;
+  const grpHtml = m.groups.map(gcol).join('');
   const fullHtml = (m.full||[]).map(fn=>{const f=m.fields.find(x=>x.n===fn); return `<div class="fld" style="align-items:flex-start"><label>${f.l}</label><div class="val">${fieldInput(f)}</div></div>`;}).join('');
   let notebook='';
   if(m.o2m){
@@ -553,18 +558,28 @@ async function renderForm(){
      ${!formIsNew?`<button class="btn sec" style="color:var(--danger)" onclick="deleteForm()">Delete</button>`:''}
      <span style="flex:1"></span><span style="color:var(--muted)">${isLive()?'Live · Supabase':'Demo (local only)'}</span>
    </div>`:`<div class="formbar"><button class="btn sec" onclick="printForm()">🖨 Print</button><span style="flex:1"></span><span style="color:var(--muted)">Read-only view</span></div>`;
+  let fieldsArea;
+  if(m.tabs){
+    if(formTab>=m.tabs.length) formTab=0;
+    const tabbtns=m.tabs.map((t,i)=>`<button class="${i===formTab?'on':''}" onclick="switchFormTab(${i})">${t.l}</button>`).join('');
+    const panes=m.tabs.map((t,i)=>`<div class="ftabpane" id="ftab${i}" style="${i===formTab?'':'display:none'}"><div class="groups">${(t.groups||[]).map(gi=>gcol(m.groups[gi])).join('')}</div>${t.o2m?notebook:''}</div>`).join('');
+    fieldsArea=`<div class="nbtabs ftabs">${tabbtns}</div>${panes}`;
+  } else {
+    fieldsArea=`<div class="groups">${grpHtml}</div>${fullHtml?`<div style="padding:0 22px 10px">${fullHtml}</div>`:''}${notebook}`;
+  }
   const sheet=`<div class="sheet">${statusbar}${wfbar}
     <div class="hd"><input class="ttl" placeholder="${titleField.l}" value="${esc(r[titleField.n]||'')}" oninput="fSet('${titleField.n}',this.value)" ${m.readonly?'disabled':''}>
       <div class="sub">${esc(m.label)} ${formIsNew?'· new record':''}</div></div>
-    <div class="groups">${grpHtml}</div>
-    ${fullHtml?`<div style="padding:0 22px 10px">${fullHtml}</div>`:''}
-    ${notebook}
+    ${fieldsArea}
     ${!formIsNew?`<div style="padding:4px 22px 14px">${attachHtml()}</div>`:''}</div>`;
   const left=sheet+formbar;
   $('content').innerHTML=`<div class="formwrap">${ !formIsNew ? `<div class="formcols"><div>${left}</div>${chatterHtml()}</div>` : left }</div>`;
   if(m.o2m) renderLines();
 }
 function fSet(n,v){ formRec[n]=v; }
+function switchFormTab(i){ formTab=i; const m=MODELS[state.model];
+  (m.tabs||[]).forEach((t,j)=>{ const p=document.getElementById('ftab'+j); if(p) p.style.display=(j===i?'':'none'); });
+  document.querySelectorAll('.ftabs button').forEach((b,j)=>b.classList.toggle('on',j===i)); }
 function renderLines(){
   const o=MODELS[state.model].o2m; const tb=$('lineBody'); if(!tb) return;
   tb.innerHTML=formChildren.map((ln,i)=>`<tr>${o.cols.map(c=>{
@@ -1053,13 +1068,31 @@ async function renderReporting(){
 async function renderStdReports(){
   let cards=STD_REPORTS.map(r=>`<div class="qcard" onclick="runStd('${r.id}')"><div class="ic">📊</div><div><div class="t">${r.name}</div><div class="d">${r.desc}</div></div></div>`).join('');
   cards+=`<div class="qcard" onclick="runRecipeCost()"><div class="ic">🧮</div><div><div class="t">Recipe cost per product</div><div class="d">Computed ingredient cost & margin per product.</div></div></div>`;
+  cards+=`<div class="qcard" onclick="runLabelsReorder()"><div class="ic">🏷️</div><div><div class="t">Labels to reorder</div><div class="d">Products whose sticker stock is below its PAR.</div></div></div>`;
   let result='';
   if(repActive==='recipe'){ result=await recipeCostHtml(); }
+  else if(repActive==='labels'){ result=await labelsReorderHtml(); }
   else if(repActive){ const r=STD_REPORTS.find(x=>x.id===repActive); if(r){ const {data,rows,m}=await pivot(r.source,r.cfg); result=pivotTable(r.name,data,rows,r.cfg,m); } }
   $('content').innerHTML=`<div class="dash"><div class="qcards">${cards}</div><div style="margin-top:16px">${result}</div></div>`;
 }
 function runStd(id){ repActive=id; renderStdReports(); }
 function runRecipeCost(){ repActive='recipe'; renderStdReports(); }
+function runLabelsReorder(){ repActive='labels'; renderStdReports(); }
+async function labelsReorderHtml(){
+  const prods=await db.list('products',{});
+  const sites=[{k:'bulacan',l:'Bulacan'},{k:'pasig',l:'Pasig'}];
+  let anyPar=false; const rows=[];
+  prods.forEach(p=>{ sites.forEach(s=>{ const oh=+p['sticker_'+s.k+'_on_hand']||0, par=+p['sticker_'+s.k+'_par']||0;
+    if(par>0){ anyPar=true; if(oh<par) rows.push({p,site:s.l,oh,par,ro:par-oh}); } }); });
+  rows.sort((a,b)=>b.ro-a.ro);
+  const totOrder=rows.reduce((s,r)=>s+r.ro,0);
+  let h=`<div class="repcard"><h3 style="margin:0 0 8px">Labels to reorder</h3>
+    <table><thead><tr><th>Product</th><th>SKU</th><th>Site</th><th class="num">On hand</th><th class="num">PAR</th><th class="num">Reorder</th><th>Label supplier</th></tr></thead><tbody>`;
+  rows.forEach(r=>{ h+=`<tr><td>${esc(r.p.name)}</td><td><code>${esc(r.p.sku)}</code></td><td>${r.site}</td><td class="num">${r.oh}</td><td class="num">${r.par}</td><td class="num"><b style="color:var(--berry)">${r.ro}</b></td><td>${esc(r.p.sticker_supplier||'')}</td></tr>`; });
+  if(!rows.length) h+=`<tr><td colspan="7" class="empty">${anyPar?'All labels at or above PAR at both sites ✅':'Set a Label PAR (Bulacan / Pasig) on products to track sticker reorders.'}</td></tr>`;
+  h+=`</tbody></table><div class="pager">${rows.length} site-level shortfall(s) · ${totOrder.toLocaleString('en-PH')} labels to order</div></div>`;
+  return h;
+}
 async function recipeCostHtml(){
   const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await db.list('ingredients',{});
   const cost=p=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=ings.find(i=>i.sku===b.ingredient_sku)||{}; const y=(+it.yield_pct||100)/100; const rawg=(+b.usable_g||0)/(y||1); c+=(rawg/1000)*(+it.list_price_kg||0); }); return c; };
