@@ -809,7 +809,7 @@ async function renderUsers(){
   const mods=MODULES.flatMap(m=>m.items).filter(x=>!['users','studio'].includes(x));
   h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Role → module access (navigation)</h3><table><thead><tr><th>Role</th>${mods.map(x=>`<th style="font-size:10px">${MODELS[x]?MODELS[x].label:x}</th>`).join('')}</tr></thead><tbody>`;
   roles.forEach(r=>{ h+=`<tr><td><b>${r}</b></td>${mods.map(x=>`<td style="text-align:center"><input type="checkbox" ${roleCan(r,x)?'checked':''} ${r==='Admin'?'disabled':''} onchange="setAccess('${r}','${x}',this.checked)"></td>`).join('')}</tr>`; });
-  h+=`</tbody></table><div class="hint" style="margin-top:8px">This controls the app's navigation per role. <b>Real enforcement</b> lives in Supabase — Row-Level Security (RLS) policies + Supabase Auth. Ask me to generate the matching RLS SQL for these roles.</div></div>`;
+  h+=`</tbody></table><div class="hint" style="margin-top:8px">This controls the app's navigation per role. <b>Real enforcement</b> is live in Supabase via Row-Level Security (RLS) + Supabase Auth: each signed-in user's role (from their profile) governs what they can read and write at the database level.</div></div>`;
   $('content').innerHTML=h;
 }
 function addUser(){ const n=prompt('User name:'); if(!n)return; USERS.push({name:n,role:'Warehouse'}); saveUsers(); renderUsers(); renderUserSel(); }
@@ -1114,7 +1114,7 @@ function renderAutomations(){
   $('cp').innerHTML=`<div class="title">Automation Configuration</div><div class="sp"></div><span style="color:var(--muted)">one-stop hub for integrations</span>`;
   let h='<div class="repcard"><p class="hint" style="margin:0 0 12px">Configure the n8n-powered integrations here. Toggle on and paste the webhook / sheet / folder URL. This is the single place to manage every automation.</p><table><thead><tr><th>Automation</th><th style="width:70px;text-align:center">On</th><th>URL / config</th></tr></thead><tbody>';
   Object.keys(AUTOS).forEach(k=>{ const a=AUTOS[k]; h+=`<tr><td><b>${esc(a.label)}</b><div class="mini">${esc(a.hint)}</div></td><td style="text-align:center"><input type="checkbox" ${a.on?'checked':''} onchange="AUTOS['${k}'].on=this.checked;saveAutos();toast('Saved')"></td><td><input value="${esc(a.url)}" placeholder="https://..." style="width:100%;border:1px solid var(--line);border-radius:5px;padding:6px" onchange="AUTOS['${k}'].url=this.value;saveAutos()"></td></tr>`; });
-  h+='</tbody></table><div class="hint" style="margin-top:8px">Config is stored in the app; the actual workflows run in <b>n8n</b> (see the implementation runbook). Ask me to generate any of these n8n workflow JSONs.</div></div>';
+  h+='</tbody></table><div class="hint" style="margin-top:8px">Config is stored in the app; the actual workflows run in <b>n8n</b>. Toggle one on, paste its webhook / sheet / folder URL, then import the matching workflow JSON into your n8n instance and attach its credentials.</div></div>';
   $('content').innerHTML=h;
 }
 
@@ -1124,7 +1124,10 @@ function parseDemandCSV(text){ const map={}; text.split(/\r?\n/).forEach(line=>{
 function applyDemandMap(map){ Object.keys(map).forEach(sku=>{ mrpDemand[sku]=+map[sku]||0; }); renderMRP(); }
 function mrpImport(){ const t=prompt('Paste demand lines — SKU,qty (one per line):'); if(!t)return; applyDemandMap(parseDemandCSV(t)); toast('Demand imported by SKU'); }
 function mrpFileImport(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader(); rd.onload=()=>{ applyDemandMap(parseDemandCSV(String(rd.result))); toast('Imported from '+f.name); }; rd.readAsText(f); }
-function mrpSheetSync(){ const a=AUTOS.sheets_demand; if(!a||!a.on||!a.url){ toast('Enable Google Sheets sync in Automations first',true); return; } toast('Live SKU sync runs via n8n from your sheet. In-app, use Import / Upload.'); }
+async function mrpSheetSync(){ const a=AUTOS.sheets_demand;
+  if(isLive()){ try{ const rows=await sb('demand?select=sku,qty&plan_date=eq.'+encodeURIComponent(MRPDATE)); if(!rows.length){ toast('No synced demand for '+MRPDATE+' yet — n8n writes it from your sheet',true); return; } const map={}; rows.forEach(r=>{ map[r.sku]=+r.qty||0; }); applyDemandMap(map); toast('Pulled '+rows.length+' demand rows for '+MRPDATE); }catch(e){ toast(e.message,true); } return; }
+  if(!a||!a.on||!a.url){ toast('Enable Google Sheets sync in Automations first',true); return; }
+  toast('Connect Supabase to pull demand synced by n8n. In demo, use Import / Upload.'); }
 
 /* ============ Internal Transfer — load Bulacan finished stock ============ */
 async function loadBulacanStock(){
