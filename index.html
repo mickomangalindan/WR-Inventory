@@ -190,10 +190,9 @@
   <div class="brand">🐇 Wholesome Rabbit <span style="opacity:.6;font-weight:400">ERP</span></div>
   <div class="crumb" id="crumb"></div>
   <div class="sp"></div>
-  <span style="opacity:.85">👤</span><select id="userSel" onchange="setUser(this.value)" style="background:rgba(255,255,255,.16);color:#fff;border:none;border-radius:5px;padding:5px 8px;font-size:12px"></select>
+  <span id="userBox" style="display:flex;align-items:center;gap:6px;font-size:12px"></span>
   <span class="mode demo" id="modeTag">DEMO</span>
   <button onclick="openKB()">❔ Guide</button>
-  <button onclick="openSettings()">⚙ Connect Supabase</button>
 </div>
 <div class="app">
   <div class="side" id="side"></div>
@@ -218,7 +217,7 @@ const MODULES = [
   {id:'ops',    label:'Operations',  items:['production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
   {id:'analytics', label:'Analytics', items:['reporting']},
-  {id:'admin',  label:'Administration', items:['users','studio','automations','selftest']},
+  {id:'admin',  label:'Administration', items:['connection','users','fieldacl','studio','automations','selftest']},
 ];
 const MODELS = {
   suppliers:{ label:'Suppliers', icon:'🏢', name:'name', pk:'name',
@@ -323,6 +322,8 @@ const MODELS = {
   reporting:{ label:'Reports', icon:'📊', special:'reporting' },
   users:{ label:'Users & Access', icon:'👤', special:'users' },
   studio:{ label:'Studio (beta)', icon:'🛠️', special:'studio' },
+  connection:{ label:'Connection', icon:'🔌', special:'connection' },
+  fieldacl:{ label:'Field Access', icon:'🔐', special:'fieldacl' },
   automations:{ label:'Automations', icon:'⚡', special:'automations' },
   selftest:{ label:'System Check', icon:'🩺', special:'selftest' },
 };
@@ -432,6 +433,8 @@ function route(){
     if(m.special==='users') return renderUsers();
     if(m.special==='studio') return renderStudio();
     if(m.special==='automations') return renderAutomations();
+    if(m.special==='connection') return renderConnection();
+    if(m.special==='fieldacl') return renderFieldAcl();
     if(m.special==='selftest') return renderSelfTest();
   }
   setCrumb();
@@ -477,7 +480,7 @@ async function renderList(){
   try{ rows=await db.list(state.model,{search:state.search}); }
   catch(e){ $('content').innerHTML=`<div class="empty">⚠ ${esc(e.message)}<br><br>Check your Supabase connection / RLS.</div>`; return; }
   state._rows=rows; const bulk=!m.readonly;
-  const cols=m.list.map(n=>m.fields.find(f=>f.n===n)).filter(Boolean);
+  const cols=m.list.map(n=>m.fields.find(f=>f.n===n)).filter(f=>f && fieldMode(state.model,f.n)!=='hide');
   const bcb=r=>`<td onclick="event.stopPropagation()"><input type="checkbox" class="selcb" ${(state.sel||[]).includes(String(r[m.pk]))?'checked':''} onclick="toggleSel('${encodeURIComponent(r[m.pk])}',this.checked)"></td>`;
   const cell=(f,r)=>{
     let v=r[f.n];
@@ -535,8 +538,9 @@ async function renderForm(){
   const m=MODELS[state.model]; const r=formRec;
   setCrumb(formIsNew?'New':(r[m.name]||r[m.pk]||'New'));
   const statusbar = m.status? `<div class="statusbar">${m.status.stages.map(s=>`<div class="stg ${r[m.status.f]===s?'on':''}">${s}</div>`).join('')}</div>`:'';
+  const faMode=(f)=> fieldMode(state.model, f.n);
   const fieldInput=(f)=>{
-    const v=r[f.n]==null?'':r[f.n]; const dis=(m.readonly||f.ro)?'disabled':'';
+    const v=r[f.n]==null?'':r[f.n]; const dis=(m.readonly||f.ro||faMode(f)==='read')?'disabled':'';
     if(f.t==='formula') return `<input value="${esc(evalF(f.expr,r))}" disabled title="ƒ ${esc(f.expr)}">`;
     if(f.t==='longtext') return `<textarea rows="2" oninput="fSet('${f.n}',this.value)" ${dis}>${esc(v)}</textarea>`;
     if(f.t==='bool') return `<select onchange="fSet('${f.n}',this.value==='true')" ${dis}><option value="false" ${!v?'selected':''}>No</option><option value="true" ${v?'selected':''}>Yes</option></select>`;
@@ -546,9 +550,9 @@ async function renderForm(){
     if(f.t==='currency'||f.t==='number') return `<input type="number" step="any" value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
     return `<input value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
   };
-  const gcol=(col)=>`<div>${col.map(fn=>{const f=m.fields.find(x=>x.n===fn); if(!f)return''; return `<div class="fld"><label>${f.l}</label><div class="val">${fieldInput(f)}</div></div>`;}).join('')}</div>`;
+  const gcol=(col)=>`<div>${col.map(fn=>{const f=m.fields.find(x=>x.n===fn); if(!f||faMode(f)==='hide')return''; return `<div class="fld"><label>${f.l}${faMode(f)==='read'?' <span style="opacity:.5;font-size:10px">read-only</span>':''}</label><div class="val">${fieldInput(f)}</div></div>`;}).join('')}</div>`;
   const grpHtml = m.groups.map(gcol).join('');
-  const fullHtml = (m.full||[]).map(fn=>{const f=m.fields.find(x=>x.n===fn); return `<div class="fld" style="align-items:flex-start"><label>${f.l}</label><div class="val">${fieldInput(f)}</div></div>`;}).join('');
+  const fullHtml = (m.full||[]).map(fn=>{const f=m.fields.find(x=>x.n===fn); if(!f||faMode(f)==='hide')return''; return `<div class="fld" style="align-items:flex-start"><label>${f.l}</label><div class="val">${fieldInput(f)}</div></div>`;}).join('');
   let notebook='';
   if(m.o2m){
     const o=m.o2m;
@@ -685,7 +689,7 @@ function openSettings(){
 async function signIn(){ const email=($('s_email').value||'').trim(), pw=$('s_pw').value; if(!email||!pw){ toast('Enter email & password',true); return; }
   try{ const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
+    await loadFieldAcl(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
   }catch(e){ toast(e.message,true); } }
 function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.email; delete SUPA.role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } updateMode(); renderSide();
   if(REQUIRE_AUTH && isLive()){ closeModal(); showGate('Signed out.'); } else { toast('Signed out (anon)'); openSettings(); } }
@@ -698,6 +702,31 @@ function saveSettings(){
 }
 function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={}; updateMode(); closeModal(); toast('Back to demo mode'); openModel(state.model); }
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';} }
+
+/* ===== Connection page (Administration → Connection) ===== */
+function renderConnection(){
+  $('cp').innerHTML=`<div class="title">Connection</div><div class="sp"></div><span style="color:var(--muted)">Supabase project &amp; sign-in</span>`;
+  const signed=!!(SUPA&&SUPA.token); const inp='width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--line);border-radius:6px;margin:4px 0 10px';
+  $('content').innerHTML=`<div class="repcard" style="max-width:600px">
+    <h3 style="margin:0 0 4px">Supabase project</h3>
+    <div class="hint">Project URL and <b>anon</b> key (Supabase → Project Settings → API). Never the database password or service_role key.</div>
+    <label style="font-size:12px;color:var(--muted)">Project URL</label><input id="s_url" style="${inp}" placeholder="https://xxxx.supabase.co" value="${SUPA?esc(SUPA.url):''}">
+    <label style="font-size:12px;color:var(--muted)">anon key</label><input id="s_key" style="${inp}" placeholder="eyJ..." value="${SUPA?esc(SUPA.key):''}">
+    <div style="display:flex;gap:8px;margin-top:4px">
+      <button class="btn" onclick="saveSettings()">Save connection</button>
+      ${SUPA?`<button class="btn sec" style="color:var(--danger)" onclick="disconnect()">Disconnect</button>`:''}
+    </div>
+    <div class="hint" style="margin-top:10px">Status: ${isLive()?'<b style="color:var(--ok)">Connected</b>':'Not connected (demo mode)'}${signed?` · signed in as <b>${esc(CURRENT_USER||SUPA.email)}</b> (${esc(curRole())})`:''}</div>
+    ${isLive()?`<hr style="margin:16px 0;border:none;border-top:1px solid var(--line)">
+      <h3 style="margin:0 0 4px;font-size:15px">Sign-in</h3>
+      ${signed?`<div>Signed in as <b>${esc(SUPA.email||CURRENT_USER)}</b> · role <b>${esc(curRole())}</b> &nbsp;<button class="btn sec sm" onclick="signOut()">Sign out</button></div>`
+      :`<div class="hint">Sign in as a Supabase Auth user so Users &amp; Access (RLS) is enforced.</div>
+        <label style="font-size:12px;color:var(--muted)">Email</label><input id="s_email" type="email" style="${inp}" placeholder="you@wholesomerabbit.ph">
+        <label style="font-size:12px;color:var(--muted)">Password</label><input id="s_pw" type="password" style="${inp}">
+        <div><button class="btn" onclick="signIn()">Sign in</button></div>`}`:''}
+    <div class="hint" style="margin-top:12px">Keys are stored only in this browser. To require sign-in for everyone, embed your URL + anon key in the app's <code>SUPA_DEFAULT</code> config.</div>
+  </div>`;
+}
 
 /* ===== Sign-in gate (full-screen; shown when REQUIRE_AUTH and not signed in) ===== */
 function showGate(msg){
@@ -724,7 +753,7 @@ async function gateSignIn(){
   try{
     const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    hideGate(); updateMode(); renderUserSel(); renderSide(); openModel('home');
+    await loadFieldAcl(); hideGate(); updateMode(); renderUserSel(); renderSide(); openModel('home');
   }catch(e){ $('g_err').textContent=e.message; }
 }
 
@@ -734,11 +763,42 @@ let USERS = JSON.parse(localStorage.getItem('wr_users')||'null') || [
 let CURRENT_USER = localStorage.getItem('wr_cur') || USERS[0].name;
 let ACCESS = JSON.parse(localStorage.getItem('wr_access')||'{}');
 let STUDIO = JSON.parse(localStorage.getItem('wr_studio')||'{}');
+// Field-level access per role: FIELDACL[role][model][field] = 'read' | 'hide' (absent = edit)
+// Recommended starter policy: hide cost / price / valuation / margin fields from the
+// floor roles (Warehouse, Pasig). Purchasing + Finance + Admin see everything. Adjust in
+// Administration → Field Access.
+const _floorHide = {
+  ingredients:        { list_price_kg:'hide', moving_avg_cost_kg:'hide' },
+  products:           { sell_price:'hide' },
+  production_batches: { cost_per_pack:'hide' },
+  inventory_movements:{ unit_cost:'hide' },
+  stock_balance:      { stock_value:'hide' },
+  variance_log:       { gap_value:'hide' },
+  suppliers:          { payment_term:'hide' }
+};
+const RECOMMENDED_ACL = { Warehouse:_floorHide, Pasig:_floorHide };
+let FIELDACL = JSON.parse(localStorage.getItem('wr_fieldacl')||'null') || JSON.parse(JSON.stringify(RECOMMENDED_ACL));
+function fieldMode(model, field, role){ role=role||curRole(); if(role==='Admin')return 'edit';
+  const mm=(FIELDACL[role]||{})[model]||{}; return mm[field]||'edit'; }
+async function loadFieldAcl(){   // team-wide policy from Supabase app_config; localStorage fallback
+  if(isLive() && SUPA && SUPA.token){ try{ const r=await sb("app_config?select=value&key=eq.field_acl"); if(r&&r[0]&&r[0].value){ FIELDACL=r[0].value; localStorage.setItem('wr_fieldacl',JSON.stringify(FIELDACL)); } }catch(e){} }
+}
+async function saveFieldAcl(){ localStorage.setItem('wr_fieldacl',JSON.stringify(FIELDACL));
+  if(isLive() && SUPA && SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'field_acl',value:FIELDACL})}); }catch(e){ toast('Saved locally; DB sync failed: '+e.message,true); return; } }
+}
 function saveUsers(){ localStorage.setItem('wr_users',JSON.stringify(USERS)); }
 function setUser(u){ CURRENT_USER=u; localStorage.setItem('wr_cur',u); toast('Acting as '+u); }
 function curRole(){ if(SUPA&&SUPA.token&&SUPA.role) return SUPA.role; const u=USERS.find(x=>x.name===CURRENT_USER); return u?u.role:'Admin'; }
-function roleCan(role,mod){ if(role==='Admin')return true; if(['users','studio'].includes(mod))return false; if(!ACCESS[role])return true; return ACCESS[role][mod]!==false; }
-function renderUserSel(){ const s=$('userSel'); if(!s)return; s.innerHTML=USERS.map(u=>`<option ${u.name===CURRENT_USER?'selected':''}>${esc(u.name)}</option>`).join(''); }
+function roleCan(role,mod){ if(role==='Admin')return true; if(['users','studio','connection','fieldacl'].includes(mod))return false; if(!ACCESS[role])return true; return ACCESS[role][mod]!==false; }
+function renderUserSel(){ const box=$('userBox'); if(!box)return;
+  if(isLive() && SUPA && SUPA.token){
+    // real signed-in user: show name + role, no switcher
+    box.innerHTML=`<span style="opacity:.85">👤</span> <b>${esc(CURRENT_USER||SUPA.email||'user')}</b><span style="opacity:.7">· ${esc(curRole())}</span>`;
+  } else {
+    // demo mode: keep the role switcher so you can preview each role
+    box.innerHTML=`<span style="opacity:.85">👤</span><select id="userSel" onchange="setUser(this.value)" style="background:rgba(255,255,255,.16);color:#fff;border:none;border-radius:5px;padding:5px 8px;font-size:12px">${USERS.map(u=>`<option ${u.name===CURRENT_USER?'selected':''}>${esc(u.name)}</option>`).join('')}</select><span style="opacity:.6">demo</span>`;
+  }
+}
 function evalF(expr,r){ try{ return Function('r','with(r){return ('+expr+')}')(r); }catch(e){ return ''; } }
 
 /* audit log → writes into the record's chatter */
@@ -889,6 +949,35 @@ function addUser(){ const n=prompt('User name:'); if(!n)return; USERS.push({name
 function delUser(i){ if(USERS.length<=1)return; USERS.splice(i,1); saveUsers(); renderUsers(); renderUserSel(); }
 function setRole(i,r){ USERS[i].role=r; saveUsers(); }
 function setAccess(r,mod,on){ ACCESS[r]=ACCESS[r]||{}; ACCESS[r][mod]=on; localStorage.setItem('wr_access',JSON.stringify(ACCESS)); renderSide(); }
+
+/* ===== Field Access (per-role field visibility across all modules) ===== */
+let faModel='products';
+function renderFieldAcl(){
+  const roles=['Purchasing','Warehouse','Pasig','Finance'];
+  const sources=Object.keys(MODELS).filter(k=>MODELS[k].fields && !MODELS[k].special);
+  if(!MODELS[faModel]||!MODELS[faModel].fields) faModel=sources[0];
+  const m=MODELS[faModel];
+  $('cp').innerHTML=`<div class="title">Field Access</div><div class="sp"></div><span style="color:var(--muted)">hide or lock fields per role — every module</span>`;
+  let h=`<div class="repcard"><div class="repbar"><span>Module</span>
+    <select onchange="faModel=this.value;renderFieldAcl()">${sources.map(k=>`<option value="${k}" ${k===faModel?'selected':''}>${MODELS[k].label}</option>`).join('')}</select>
+    <button class="btn sm sec" onclick="resetFieldAcl()">↺ Reset to recommended</button>
+    <span style="color:var(--muted);font-size:12px">Admin always sees everything.</span></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Field</th>${roles.map(r=>`<th style="text-align:center">${r}</th>`).join('')}</tr></thead><tbody>`;
+  m.fields.forEach(f=>{ h+=`<tr><td><b>${esc(f.l)}</b> <span class="mini">${esc(f.n)}</span></td>${roles.map(r=>{ const cur=fieldMode(faModel,f.n,r);
+    return `<td style="text-align:center"><select onchange="setFieldAcl('${r}','${esc(f.n)}',this.value)">
+      <option value="edit" ${cur==='edit'?'selected':''}>Edit</option>
+      <option value="read" ${cur==='read'?'selected':''}>Read-only</option>
+      <option value="hide" ${cur==='hide'?'selected':''}>Hidden</option></select></td>`; }).join('')}</tr>`; });
+  h+=`</tbody></table></div>
+    <div class="hint" style="margin-top:10px"><b>Edit</b> = full access · <b>Read-only</b> = visible but locked · <b>Hidden</b> = not shown in forms or lists. Saved to Supabase (<code>app_config</code>) so it applies to everyone.</div>
+    <div class="hint" style="margin-top:4px">This is UI-level control for a trusted team. For hard database enforcement of a sensitive field (e.g. cost / margin), ask me to add a column-masking view.</div></div>`;
+  $('content').innerHTML=h;
+}
+function setFieldAcl(role,field,mode){ FIELDACL[role]=FIELDACL[role]||{}; FIELDACL[role][faModel]=FIELDACL[role][faModel]||{};
+  if(mode==='edit') delete FIELDACL[role][faModel][field]; else FIELDACL[role][faModel][field]=mode;
+  saveFieldAcl(); renderSide(); toast('Field access saved'); }
+function resetFieldAcl(){ if(!confirm('Reset ALL field access back to the recommended policy? This overwrites your current settings.'))return;
+  FIELDACL=JSON.parse(JSON.stringify(RECOMMENDED_ACL)); saveFieldAcl(); renderSide(); renderFieldAcl(); toast('Reset to recommended policy'); }
 
 /* Studio (beta) — field labels, list columns, custom + formula fields */
 let studioModel='ingredients';
@@ -1295,6 +1384,7 @@ if(!DEMO.variance_log.length) DEMO.variance_log=[
   {id:1,check_type:'4 · Transfer',source_ref:'WR-TR-DEMO',expected:6,actual:5,gap_qty:-1,gap_value:130,location:'in-transit',responsible_user:'Warehouse',status:'open',note:''},
   {id:2,check_type:'1 · 3-way match',source_ref:'WR-PO-0012',expected:5,actual:4.2,gap_qty:-0.8,gap_value:224,location:'bulacan',responsible_user:'Purchasing',status:'open',note:''}];
 applyStudio(); updateMode(); renderUserSel(); renderSide();
+if(isLive() && SUPA && SUPA.token) loadFieldAcl();
 if(needAuth()) showGate(); else openModel('home');
 </script>
 </body>
