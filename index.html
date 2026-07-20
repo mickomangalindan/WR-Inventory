@@ -220,7 +220,7 @@ const MODULES = [
   {id:'admin',  label:'Administration', items:['connection','users','fieldacl','studio','automations','selftest']},
 ];
 const MODELS = {
-  suppliers:{ label:'Suppliers', icon:'🏢', name:'name', pk:'name',
+  suppliers:{ label:'Suppliers', icon:'🏢', name:'name', pk:'name', archivable:true,
     fields:[
       {n:'name',l:'Supplier',t:'text'},{n:'contact',l:'Contact person',t:'text'},
       {n:'mobile',l:'Mobile',t:'text'},{n:'payment_term',l:'Payment term',t:'select',o:['Dynamic','COD','CBD','Net 7','Net 15','Net 30','TBC']},
@@ -228,7 +228,7 @@ const MODELS = {
     list:['name','payment_term','sells_by','mobile'],
     groups:[['name','contact','mobile'],['payment_term','sells_by']], full:['notes'] },
 
-  ingredients:{ label:'Ingredients', icon:'🥩', name:'name', pk:'sku',
+  ingredients:{ label:'Ingredients', icon:'🥩', name:'name', pk:'sku', archivable:true,
     fields:[
       {n:'sku',l:'SKU',t:'text'},{n:'name',l:'Name',t:'text'},
       {n:'source',l:'Source',t:'text'},{n:'category',l:'Category',t:'text'},
@@ -245,7 +245,7 @@ const MODELS = {
             ['list_price_kg','moving_avg_cost_kg','par_g','reorder_g','min_order_kg','lead_time_days','is_live_animal','is_intermediate']],
     full:['notes'] },
 
-  products:{ label:'Products', icon:'📦', name:'name', pk:'sku',
+  products:{ label:'Products', icon:'📦', name:'name', pk:'sku', archivable:true,
     fields:[
       {n:'sku',l:'SKU',t:'text'},{n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant',t:'text'},
       {n:'name',l:'Name',t:'text'},{n:'pack_g',l:'Pack (g)',t:'number'},
@@ -261,7 +261,7 @@ const MODELS = {
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'usable_g',l:'Usable g',t:'number'},{n:'method_override',l:'Method',t:'text'}] } },
 
   purchase_orders:{ label:'Purchase Orders', icon:'🧾', name:'po_ref', pk:'po_ref',
-    status:{f:'status',stages:['open','received','invoiced','closed']},
+    status:{f:'status',stages:['open','received','invoiced','closed','cancelled']}, cancelable:true,
     fields:[
       {n:'po_ref',l:'PO Reference',t:'text'},{n:'supplier_name',l:'Vendor',t:'rel',rel:'suppliers'},
       {n:'order_date',l:'Order date',t:'date'},{n:'status',l:'Status',t:'select',o:['open','received','invoiced','closed']},
@@ -283,19 +283,23 @@ const MODELS = {
     list:['ref_sku','location_code','on_hand','stock_value'], groups:[[],[]] },
 
   production_batches:{ label:'Production', icon:'🏭', name:'batch_ref', pk:'batch_ref',
+    status:{f:'status',stages:['open','posted','cancelled']}, cancelable:true,
     fields:[{n:'batch_ref',l:'Batch Ref',t:'text'},{n:'product_sku',l:'Product',t:'rel',rel:'products'},
+      {n:'status',l:'Status',t:'select',o:['open','posted','cancelled']},
       {n:'good_packs',l:'Good packs',t:'number'},{n:'reject_packs',l:'Reject packs',t:'number'},
       {n:'waste_g',l:'Waste (g)',t:'number'},{n:'output_lot',l:'Output lot',t:'text'},
       {n:'production_date',l:'Date',t:'date'},{n:'cost_per_pack',l:'₱/pack',t:'currency'},{n:'operator',l:'Operator',t:'text',ro:true}],
-    list:['batch_ref','product_sku','good_packs','cost_per_pack','production_date'],
+    list:['batch_ref','product_sku','status','good_packs','cost_per_pack','production_date'],
     groups:[['batch_ref','product_sku','production_date'],['good_packs','reject_packs','waste_g','output_lot','cost_per_pack']],
     o2m:{field:'issues',model:'batch_issues',fk:'batch_ref',label:'Ingredients Issued',
       cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'expected_raw_g',l:'Expected g',t:'number'},{n:'actual_raw_g',l:'Actual g',t:'number'}]} },
 
   transfers:{ label:'Internal Transfer', icon:'🚚', name:'transfer_ref', pk:'transfer_ref',
+    status:{f:'status',stages:['sent','received','cancelled']}, cancelable:true,
     fields:[{n:'transfer_ref',l:'Reference',t:'text'},{n:'from_code',l:'From',t:'select',o:['bulacan','pasig']},
-      {n:'to_code',l:'To',t:'select',o:['pasig','bulacan']},{n:'transfer_date',l:'Date',t:'date'},{n:'created_by',l:'Created by',t:'text',ro:true}],
-    list:['transfer_ref','from_code','to_code','transfer_date'],
+      {n:'to_code',l:'To',t:'select',o:['pasig','bulacan']},{n:'status',l:'Status',t:'select',o:['sent','received','cancelled']},
+      {n:'transfer_date',l:'Date',t:'date'},{n:'created_by',l:'Created by',t:'text',ro:true}],
+    list:['transfer_ref','from_code','to_code','status','transfer_date'],
     groups:[['transfer_ref','from_code','to_code'],['transfer_date','created_by']],
     o2mLoader:{label:'⬇ Load Bulacan finished stock', fn:'loadBulacanStock'},
     o2m:{field:'lines',model:'transfer_lines',fk:'transfer_ref',label:'Products',
@@ -381,7 +385,7 @@ const db = {
   },
   async update(model, pk, pkval, rec){
     if(isLive()) return (await sb(model+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'PATCH', body:JSON.stringify(rec)}))[0];
-    const arr=DEMO[model]; const i=arr.findIndex(r=>r[pk]===pkval); if(i>=0) arr[i]={...arr[i],...rec}; return arr[i];
+    const arr=DEMO[model]=DEMO[model]||[]; const i=arr.findIndex(r=>r[pk]===pkval); if(i>=0){arr[i]={...arr[i],...rec}; return arr[i];} return rec;
   },
   async del(model, pk, pkval){
     if(isLive()) return await sb(model+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'DELETE', prefer:'return=minimal'});
@@ -462,6 +466,7 @@ function controlPanel(){
     ${chips}
     <div class="search">🔎<input id="q" placeholder="Search ${m.label}..." value="${esc(state.search)}" oninput="onSearch(this.value)"></div>
     ${state.view!=='report'?gb:''}
+    ${m.archivable?`<button class="btn sec sm" onclick="state.showArchived=!state.showArchived;route()">${state.showArchived?'Hide archived':'Show archived'}</button>`:''}
     <div class="vswitch">${vbtn('list','≣','List')}${m.status?vbtn('kanban','▥','Kanban'):''}${canForm?vbtn('form','▤','Form'):''}${vbtn('report','▦','Report')}</div>`;
 }
 let searchTimer;
@@ -479,6 +484,8 @@ async function renderList(){
   let rows;
   try{ rows=await db.list(state.model,{search:state.search}); }
   catch(e){ $('content').innerHTML=`<div class="empty">⚠ ${esc(e.message)}<br><br>Check your Supabase connection / RLS.</div>`; return; }
+  let archivedCount=0;
+  if(m.archivable && !state.showArchived){ archivedCount=rows.filter(r=>r.active===false).length; rows=rows.filter(r=>r.active!==false); }
   state._rows=rows; const bulk=!m.readonly;
   const cols=m.list.map(n=>m.fields.find(f=>f.n===n)).filter(f=>f && fieldMode(state.model,f.n)!=='hide');
   const bcb=r=>`<td onclick="event.stopPropagation()"><input type="checkbox" class="selcb" ${(state.sel||[]).includes(String(r[m.pk]))?'checked':''} onclick="toggleSel('${encodeURIComponent(r[m.pk])}',this.checked)"></td>`;
@@ -516,7 +523,8 @@ async function renderList(){
 let formRec={}, formChildren=[], formIsNew=false, relCache={}, formTab=0;
 async function relOptions(model){
   if(relCache[model]) return relCache[model];
-  const m=MODELS[model]; const rows=await db.list(model,{});
+  const m=MODELS[model]; let rows=await db.list(model,{});
+  if(m.archivable) rows=rows.filter(r=>r.active!==false);   // don't offer archived records in pickers
   relCache[model]=rows.map(r=>({v:r[m.pk], t:r[m.name]+(r[m.pk]!==r[m.name]?` (${r[m.pk]})`:'')}));
   return relCache[model];
 }
@@ -566,11 +574,22 @@ async function renderForm(){
   const tiles=smartTiles(state.model,formRec,formChildren);
   const smart=tiles.length?`<div class="smart">${tiles.map(t=>`<div class="stile"><div class="v">${esc(t.v)}</div><div class="l">${esc(t.l)}</div></div>`).join('')}</div>`:'';
   const wfbar=(wfbtns||smart)?`<div class="wfbar">${wfbtns}${smart}</div>`:'';
+  // safeguard actions: archive master data / cancel documents; hard delete Admin-only + dependency-checked
+  let safeActions='';
+  if(!formIsNew){
+    if(m.archivable){ safeActions += formRec.active===false
+        ? `<button class="btn sec" onclick="archiveForm(false)">♻ Restore</button>`
+        : `<button class="btn sec" onclick="archiveForm(true)">🗄 Archive</button>`; }
+    else if(m.cancelable && m.status && cur!=='cancelled'){ safeActions += `<button class="btn sec" style="color:var(--earth)" onclick="cancelForm()">✖ Cancel</button>`; }
+    if(curRole()==='Admin') safeActions += `<button class="btn sec" style="color:var(--danger)" onclick="deleteForm()">Delete</button>`;
+  }
+  const stateBadge = (m.archivable && formRec.active===false) ? '<span class="badge b-draft" style="margin-left:8px">Archived</span>'
+                    : (m.status && cur==='cancelled') ? '<span class="badge b-draft" style="margin-left:8px">Cancelled</span>' : '';
   const formbar = !m.readonly?`<div class="formbar">
      <button class="btn" onclick="saveForm()">💾 Save</button>
      <button class="btn sec" onclick="discardForm()">Discard</button>
      ${!formIsNew?`<button class="btn sec" onclick="printForm()">🖨 Print</button>`:''}
-     ${!formIsNew?`<button class="btn sec" style="color:var(--danger)" onclick="deleteForm()">Delete</button>`:''}
+     ${safeActions}
      <span style="flex:1"></span><span style="color:var(--muted)">${isLive()?'Live · Supabase':'Demo (local only)'}</span>
    </div>`:`<div class="formbar"><button class="btn sec" onclick="printForm()">🖨 Print</button><span style="flex:1"></span><span style="color:var(--muted)">Read-only view</span></div>`;
   let fieldsArea;
@@ -584,7 +603,7 @@ async function renderForm(){
   }
   const sheet=`<div class="sheet">${statusbar}${wfbar}
     <div class="hd"><input class="ttl" placeholder="${titleField.l}" value="${esc(r[titleField.n]||'')}" oninput="fSet('${titleField.n}',this.value)" ${m.readonly?'disabled':''}>
-      <div class="sub">${esc(m.label)} ${formIsNew?'· new record':''}</div></div>
+      <div class="sub">${esc(m.label)} ${formIsNew?'· new record':''}${stateBadge}</div></div>
     ${fieldsArea}
     ${!formIsNew?`<div style="padding:4px 22px 14px">${attachHtml()}</div>`:''}</div>`;
   const left=sheet+formbar;
@@ -626,9 +645,37 @@ async function saveForm(){
     toast('Saved '+pkval); relCache={}; state.view='list'; route();
   }catch(e){ toast(e.message,true); }
 }
+// Which tables reference each record (external usage that must block a hard delete).
+// A model's OWN o2m children (a product's recipe, a PO's lines) are excluded — those
+// are cleared with the parent.
+const DEPENDENTS = {
+  suppliers:  [{model:'item_suppliers',fk:'supplier_name'},{model:'ingredients',fk:'supplier'},{model:'purchase_orders',fk:'supplier_name'}],
+  ingredients:[{model:'bom_lines',fk:'ingredient_sku'},{model:'item_suppliers',fk:'ingredient_sku'},{model:'item_yields',fk:'ingredient_sku'},{model:'po_lines',fk:'ingredient_sku'}],
+  products:   [{model:'production_batches',fk:'product_sku'},{model:'transfer_lines',fk:'product_sku'},{model:'order_lines',fk:'product_sku'}]
+};
+async function countDependents(model, pkval){
+  const defs=DEPENDENTS[model]||[]; let total=0; const parts=[];
+  for(const d of defs){ let n=0;
+    if(isLive()){ try{ const rows=await sb(d.model+'?select='+d.fk+'&'+d.fk+'=eq.'+encodeURIComponent(pkval)+'&limit=500'); n=rows.length; }catch(e){} }
+    else { n=(DEMO[d.model]||[]).filter(r=>String(r[d.fk])===String(pkval)).length; }
+    if(n>0){ total+=n; parts.push(n+'× '+((MODELS[d.model]||{}).label||d.model)); }
+  }
+  return {total, detail:parts.join(', ')};
+}
+async function archiveForm(on){ const m=MODELS[state.model];
+  try{ await db.update(state.model,m.pk,formRec[m.pk],{active:!on}); formRec.active=!on; relCache={};
+    sysLog(state.model,formRec[m.pk],(on?'🗄 Archived by ':'♻ Restored by ')+CURRENT_USER); toast(on?'Archived — kept for history':'Restored'); renderForm(); }
+  catch(e){ toast(e.message,true); } }
+async function cancelForm(){ const m=MODELS[state.model]; if(!confirm('Cancel '+formRec[m.pk]+'? The record is kept for audit; it just will not be actioned.'))return;
+  try{ await db.update(state.model,m.pk,formRec[m.pk],{[m.status.f]:'cancelled'}); formRec[m.status.f]='cancelled';
+    sysLog(state.model,formRec[m.pk],'✖ Cancelled by '+CURRENT_USER); toast('Cancelled — record kept'); renderForm(); }
+  catch(e){ toast(e.message,true); } }
 async function deleteForm(){
-  const m=MODELS[state.model]; if(!confirm('Delete '+formRec[m.pk]+'?')) return;
-  try{ if(m.o2m) await db.replaceChildren(m.o2m, formRec[m.pk], []); await db.del(state.model,m.pk,formRec[m.pk]); toast('Deleted'); state.view='list'; route(); }
+  const m=MODELS[state.model]; const pkval=formRec[m.pk];
+  const dep=await countDependents(state.model, pkval);
+  if(dep.total>0){ const alt=m.archivable?'Archive it instead':(m.cancelable?'Cancel it instead':'Remove those first'); toast(`Can't delete — used by ${dep.total} record(s): ${dep.detail}. ${alt}.`,true); return; }
+  if(!confirm('Permanently delete '+pkval+'? This cannot be undone — for master data or documents, prefer Archive/Cancel.')) return;
+  try{ if(m.o2m) await db.replaceChildren(m.o2m, pkval, []); await db.del(state.model,m.pk,pkval); relCache={}; toast('Deleted'); state.view='list'; route(); }
   catch(e){ toast(e.message,true); }
 }
 
@@ -1015,7 +1062,9 @@ const FLOW = { purchase_orders:{ buttons:[
   {when:'invoiced',label:'Close',to:'closed'} ]},
   variance_log:{ buttons:[
   {when:'open',label:'Mark Explained',to:'explained'},
-  {when:'explained',label:'Resolve',to:'resolved'} ]}};
+  {when:'explained',label:'Resolve',to:'resolved'} ]},
+  production_batches:{ buttons:[ {when:'open',label:'Mark Posted',to:'posted'} ]},
+  transfers:{ buttons:[ {when:'sent',label:'Mark Received',to:'received'} ]}};
 function smartTiles(model, rec, children){
   if(model==='purchase_orders'){ const tot=children.reduce((s,l)=>s+(+l.ordered_kg||0)*(+l.price_kg||0),0);
     return [{v:children.length,l:'Lines'},{v:'₱'+Math.round(tot).toLocaleString('en-PH'),l:'Est. total'}]; }
