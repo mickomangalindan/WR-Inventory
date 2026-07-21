@@ -215,10 +215,10 @@ const MODULES = [
   {id:'master', label:'Master Data', items:['suppliers','ingredients','products']},
   {id:'plan',   label:'Planning',    items:['mrp']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders']},
-  {id:'ops',    label:'Operations',  items:['production_batches','transfers','count_sessions']},
+  {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
   {id:'analytics', label:'Analytics', items:['reporting']},
-  {id:'admin',  label:'Administration', items:['connection','users','fieldacl','refs','automations','notif','studio','selftest']},
+  {id:'admin',  label:'Administration', items:['connection','users','fieldacl','refs','automations','notif','studio','selftest','cleanser']},
 ];
 const MODELS = {
   suppliers:{ label:'Suppliers', icon:'🏢', name:'name', pk:'name', archivable:true,
@@ -284,13 +284,14 @@ const MODELS = {
     list:['ref_sku','location_code','on_hand','stock_value'], groups:[[],[]] },
 
   production_batches:{ label:'Production', icon:'🏭', name:'batch_ref', pk:'batch_ref',
-    status:{f:'status',stages:['open','posted','cancelled']}, cancelable:true,
+    status:{f:'status',stages:['draft','confirmed','cancelled']}, cancelable:true,
     fields:[{n:'batch_ref',l:'Batch Ref',t:'text'},{n:'product_sku',l:'Product',t:'rel',rel:'products'},
-      {n:'status',l:'Status',t:'select',o:['open','posted','cancelled']},
+      {n:'status',l:'Status',t:'select',o:['draft','confirmed','cancelled']},
+      {n:'planned_packs',l:'Planned packs',t:'number'},
       {n:'good_packs',l:'Good packs',t:'number'},{n:'reject_packs',l:'Reject packs',t:'number'},
       {n:'waste_g',l:'Waste (g)',t:'number'},{n:'output_lot',l:'Output lot',t:'text'},
       {n:'production_date',l:'Date',t:'date'},{n:'cost_per_pack',l:'₱/pack',t:'currency'},{n:'operator',l:'Operator',t:'text',ro:true}],
-    list:['batch_ref','product_sku','status','good_packs','cost_per_pack','production_date'],
+    list:['batch_ref','product_sku','status','planned_packs','good_packs','production_date'],
     groups:[['batch_ref','product_sku','production_date'],['good_packs','reject_packs','waste_g','output_lot','cost_per_pack']],
     o2m:{field:'issues',model:'batch_issues',fk:'batch_ref',label:'Ingredients Issued',
       cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'expected_raw_g',l:'Expected g',t:'number'},{n:'actual_raw_g',l:'Actual g',t:'number'}]} },
@@ -327,10 +328,12 @@ const MODELS = {
   reporting:{ label:'Reports', icon:'📊', special:'reporting' },
   users:{ label:'Users & Access', icon:'👤', special:'users' },
   studio:{ label:'Studio (beta)', icon:'🛠️', special:'studio' },
+  prodplan:{ label:'Production Plan', icon:'🏭', special:'prodplan' },
   connection:{ label:'Connection', icon:'🔌', special:'connection' },
   fieldacl:{ label:'Field Access', icon:'🔐', special:'fieldacl' },
   refs:{ label:'Internal References', icon:'🔢', special:'refs' },
   notif:{ label:'Notifications', icon:'🔔', special:'notif' },
+  cleanser:{ label:'Data Cleanser', icon:'🧹', special:'cleanser' },
   automations:{ label:'Automations', icon:'⚡', special:'automations' },
   selftest:{ label:'System Check', icon:'🩺', special:'selftest' },
 };
@@ -436,6 +439,7 @@ function route(){
   const m=MODELS[state.model];
   if(m.special){ setCrumb();
     if(m.special==='mrp') return renderMRP();
+    if(m.special==='prodplan') return renderProdPlan();
     if(m.special==='reporting') return renderReporting();
     if(m.special==='users') return renderUsers();
     if(m.special==='studio') return renderStudio();
@@ -444,6 +448,7 @@ function route(){
     if(m.special==='fieldacl') return renderFieldAcl();
     if(m.special==='refs') return renderRefs();
     if(m.special==='notif') return renderNotif();
+    if(m.special==='cleanser') return renderCleanser();
     if(m.special==='selftest') return renderSelfTest();
   }
   setCrumb();
@@ -759,6 +764,55 @@ function saveSettings(){
 function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={}; updateMode(); closeModal(); toast('Back to demo mode'); openModel(state.model); }
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';} }
 
+/* ===== Data Cleanser (Administration → Data Cleanser) ===== */
+// Wipe transactional data (test / day-1 play) while KEEPING all master data.
+const CLEANSE_GROUPS = [
+  {key:'purch',  label:'Purchase orders (+ receipts & invoices)', tables:[['gr_lines','id'],['goods_receipts','gr_ref'],['invoice_lines','id'],['supplier_invoices','invoice_ref'],['po_lines','id'],['purchase_orders','po_ref']]},
+  {key:'deliv',  label:'Deliveries & sales orders',                tables:[['delivery_lines','id'],['deliveries','delivery_ref'],['order_lines','id'],['sales_orders','order_ref']]},
+  {key:'count',  label:'Weekly inventory counts',                  tables:[['count_lines','id'],['count_sessions','count_ref']]},
+  {key:'prod',   label:'Production batches',                       tables:[['batch_issues','id'],['production_batches','batch_ref']]},
+  {key:'trans',  label:'Internal transfers',                       tables:[['transfer_lines','id'],['transfers','transfer_ref']]},
+  {key:'mov',    label:'Inventory movements (the stock ledger)',   tables:[['inventory_movements','id']]},
+  {key:'var',    label:'Variances',                                tables:[['variance_log','id']]},
+  {key:'demand', label:'Demand plots & synced demand',             tables:[['mrp_plan_lines','id'],['mrp_plans','id'],['demand','id']]},
+  {key:'refs',   label:'Reset reference counters (DP/PO/DR/RR/PR → 01)', tables:[['ref_counters','key']]}
+];
+let cleanseSel={};
+function renderCleanser(){
+  $('cp').innerHTML=`<div class="title">Data Cleanser</div><div class="sp"></div><span style="color:var(--muted)">wipe test transactions — master data is kept</span>`;
+  let h=`<div class="repcard">
+    <div style="background:#f7dcd6;border:1px solid #e6b5ad;color:#7a241a;border-radius:10px;padding:12px 14px;font-size:13.5px">⚠ This permanently deletes the selected transaction data. <b>Master data is never touched</b> — suppliers, ingredients, products, recipes, users, field-access, and numbering formats all stay.</div>
+    <h3 style="margin:14px 0 6px">Select what to wipe</h3>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <label class="sck"><input type="checkbox" onchange="cleanseAll(this.checked)"> <b>Everything below (fresh start)</b></label>
+      ${CLEANSE_GROUPS.map(g=>`<label class="sck"><input type="checkbox" data-k="${g.key}" ${cleanseSel[g.key]?'checked':''} onchange="cleanseSel['${g.key}']=this.checked"> ${esc(g.label)}</label>`).join('')}
+    </div>
+    <div style="margin-top:16px"><label style="font-size:13px">Type <b>CLEANSE</b> to enable the button: &nbsp;<input id="clConfirm" oninput="cleanseGuard(this.value)" style="border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:140px"></label></div>
+    <div style="margin-top:12px"><button class="btn" id="clBtn" disabled style="background:#b23b2e" onclick="runCleanse()">🧹 Wipe selected</button></div>
+    <div class="hint" style="margin-top:10px">Prefer a full database reset? Run <code>wr_cleanse.sql</code> in the Supabase SQL Editor.</div></div>`;
+  $('content').innerHTML=h;
+}
+function cleanseAll(on){ CLEANSE_GROUPS.forEach(g=>cleanseSel[g.key]=on); renderCleanser(); }
+function cleanseGuard(v){ const b=$('clBtn'); if(b) b.disabled = (String(v).trim().toUpperCase()!=='CLEANSE'); }
+async function runCleanse(){
+  if(curRole()!=='Admin'){ toast('Only an Admin can run the cleanser',true); return; }                 // 1) role gate
+  const guard=(($('clConfirm')&&$('clConfirm').value)||'').trim().toUpperCase();
+  if(guard!=='CLEANSE'){ toast('Type CLEANSE in the box to confirm',true); return; }                     // 2) type-to-confirm
+  const groups=CLEANSE_GROUPS.filter(g=>cleanseSel[g.key]);
+  if(!groups.length){ toast('Select at least one dataset',true); return; }
+  if(!confirm('You are about to PERMANENTLY DELETE:\n\n• '+groups.map(g=>g.label).join('\n• ')+'\n\nMaster data (suppliers, ingredients, products, recipes, users) is kept.\nThis cannot be undone. Continue?')) return;   // 3) itemized confirm
+  let done=0; const errs=[];
+  for(const g of groups){ for(const [t,pk] of g.tables){
+    try{ if(isLive()){ await sb(t+'?'+pk+'=not.is.null',{method:'DELETE',prefer:'return=minimal'}); } else { DEMO[t]=[]; } done++; }
+    catch(e){ errs.push(t); } } }
+  if(cleanseSel.demand){ localStorage.removeItem('wr_mrp_plans'); mrpDemand={}; mrpManual={}; window._mrpPlan=null; mrpPlanCache=[]; }
+  if(cleanseSel.refs){ localStorage.removeItem('wr_refseq'); }
+  if(cleanseSel.prod){ prodPlanLines=[]; prodRunRef=''; }
+  sysLog('cleanser','wipe','🧹 Cleansed '+done+' table(s): '+groups.map(g=>g.key).join(', ')+' by '+CURRENT_USER);
+  toast('Cleansed '+done+' table(s)'+(errs.length?' · '+errs.length+' error(s): '+errs.join(','):''), errs.length>0);
+  cleanseSel={}; renderCleanser();
+}
+
 /* ===== Notification content (Administration → Notifications) ===== */
 const NOTIF_DEFAULTS = {
   po_confirmed: {label:'PO confirmed alert', ph:'{po_ref} · {supplier} · {status}', text:'🐇 PO confirmed: {po_ref} — {supplier} ({status})'},
@@ -894,7 +948,7 @@ async function saveFieldAcl(){ localStorage.setItem('wr_fieldacl',JSON.stringify
 function saveUsers(){ localStorage.setItem('wr_users',JSON.stringify(USERS)); }
 function setUser(u){ CURRENT_USER=u; localStorage.setItem('wr_cur',u); toast('Acting as '+u); }
 function curRole(){ if(SUPA&&SUPA.token&&SUPA.role) return SUPA.role; const u=USERS.find(x=>x.name===CURRENT_USER); return u?u.role:'Admin'; }
-function roleCan(role,mod){ if(role==='Admin')return true; if(['users','studio','connection','fieldacl','refs','notif'].includes(mod))return false; if(!ACCESS[role])return true; return ACCESS[role][mod]!==false; }
+function roleCan(role,mod){ if(role==='Admin')return true; if(['users','studio','connection','fieldacl','refs','notif','cleanser'].includes(mod))return false; if(!ACCESS[role])return true; return ACCESS[role][mod]!==false; }
 function renderUserSel(){ const box=$('userBox'); if(!box)return;
   if(isLive() && SUPA && SUPA.token){
     // real signed-in user: show name + role, no switcher
@@ -1011,6 +1065,7 @@ async function genRef(type,opts){ opts=opts||{}; const dd=_mmddyyyy(opts.date);
   if(type==='DP'){ const cat=(opts.category||'RAW').toUpperCase(); const it=await nextSeq('DP-'+dd+'-'+cat); return {ref:'DP-'+dd+' ['+cat+'] V'+_p2(it), it, dd}; }
   if(type==='PO'){ return {ref:'PO-'+dd+' V'+_p2(opts.xx||1)+'.'+_p2(opts.zz||1), dd}; }
   if(type==='DR'||type==='RR'){ const it=await nextSeq(type+'-'+dd); return {ref:type+'-'+dd+' V'+_p2(it), it, dd}; }
+  if(type==='PR'){ const it=await nextSeq('PR-'+dd); return {ref:'PR-'+dd+' V'+_p2(it), it, dd}; }
   return {ref:''};
 }
 
@@ -1154,7 +1209,7 @@ const FLOW = { purchase_orders:{ buttons:[
   variance_log:{ buttons:[
   {when:'open',label:'Mark Explained',to:'explained'},
   {when:'explained',label:'Resolve',to:'resolved'} ]},
-  production_batches:{ buttons:[ {when:'open',label:'Mark Posted',to:'posted'} ]},
+  production_batches:{ buttons:[ {when:'draft',label:'Confirm production',to:'confirmed'} ]},
   transfers:{ buttons:[ {when:'sent',label:'Mark Received',to:'received'} ]}};
 function smartTiles(model, rec, children){
   if(model==='purchase_orders'){ const tot=children.reduce((s,l)=>s+(+l.ordered_kg||0)*(+l.price_kg||0),0);
@@ -1322,6 +1377,63 @@ document.addEventListener('keydown',e=>{
   else if(e.key==='ArrowUp'){ e.preventDefault(); cmdSel=Math.max(0,cmdSel-1); renderCmd(); }
   else if(e.key==='Enter') cmdRun(cmdSel);
 });
+
+/* ============ Production Plan (bulk load from demand → draft → confirm) ============ */
+let prodPlanDate=new Date().toISOString().slice(0,10);
+let prodPlanLines=[]; let prodRunRef='';
+async function renderProdPlan(){
+  $('cp').innerHTML=`<div class="title">Production Plan <span onclick="openKB('production_batches')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <button class="btn" onclick="prodLoadDemand()">⬇ Load from demand</button>
+    <button class="btn sec" onclick="prodSaveDraft()">💾 Save draft</button>
+    <button class="wfbtn" onclick="prodConfirm()">✅ Confirm production</button>
+    <div class="sp"></div><span style="color:var(--muted)">plan the week’s batches from demand, then encode & confirm</span>`;
+  drawProdPlan();
+}
+function drawProdPlan(){
+  const tot=prodPlanLines.reduce((s,l)=>s+(+l.good_packs||0),0);
+  let h=`<div class="repcard"><div class="repbar"><span>Production date</span>
+    <input type="date" value="${prodPlanDate}" onchange="prodPlanDate=this.value">
+    ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
+    <span style="color:var(--muted);font-size:12px">Planned = product demand. Edit good packs, rejects, waste & lot, then Confirm.</span></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>SKU</th><th class="num">Planned</th><th class="num">Good packs</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th></tr></thead><tbody>
+    ${prodPlanLines.map((l,i)=>`<tr><td>${esc(l.name)}</td><td><code>${esc(l.product_sku)}</code></td>
+      <td class="num"><input type="number" style="width:70px;text-align:right" value="${l.planned_packs||''}" onchange="prodPlanLines[${i}].planned_packs=+this.value||0"></td>
+      <td class="num"><input type="number" style="width:74px;text-align:right" value="${l.good_packs||''}" onchange="prodPlanLines[${i}].good_packs=+this.value||0"></td>
+      <td class="num"><input type="number" style="width:60px;text-align:right" value="${l.reject_packs||''}" onchange="prodPlanLines[${i}].reject_packs=+this.value||0"></td>
+      <td class="num"><input type="number" style="width:70px;text-align:right" value="${l.waste_g||''}" onchange="prodPlanLines[${i}].waste_g=+this.value||0"></td>
+      <td><input style="width:120px" value="${esc(l.output_lot||'')}" onchange="prodPlanLines[${i}].output_lot=this.value"></td></tr>`).join('')||'<tr><td colspan="7" class="empty">Click “Load from demand” to pull the week’s products, or start blank for a rush run.</td></tr>'}
+    </tbody></table></div><div class="pager">${prodPlanLines.length} product(s) · ${tot} good packs planned</div></div>`;
+  $('content').innerHTML=h;
+}
+async function prodLoadDemand(){
+  const prods=(await db.list('products',{})).filter(p=>p.active!==false);
+  let dm={...mrpDemand};
+  if(!Object.keys(dm).some(k=>+dm[k]>0)){ try{ mrpPlanCache=await mrpPlans(); const last=mrpPlanCache[0]; if(last){ const d=last.data||last; dm={...(d.demand||{})}; } }catch(e){} }
+  let lines=prods.map(p=>{ const pk=+dm[p.sku]||0; return {product_sku:p.sku,name:p.name,planned_packs:pk,good_packs:pk,reject_packs:0,waste_g:0,output_lot:''}; }).filter(l=>l.planned_packs>0);
+  if(!lines.length){ lines=prods.map(p=>({product_sku:p.sku,name:p.name,planned_packs:0,good_packs:0,reject_packs:0,waste_g:0,output_lot:''})); toast('No demand found — loaded all products at 0 (encode rush orders)',true); }
+  else toast('Loaded '+lines.length+' product(s) from demand');
+  prodPlanLines=lines; drawProdPlan();
+}
+async function prodPersist(status){
+  const active=prodPlanLines.filter(l=>(+l.planned_packs||0)>0||(+l.good_packs||0)>0);
+  if(!active.length){ toast('Nothing to save — load demand or enter packs',true); return null; }
+  if(!prodRunRef){ prodRunRef=(await genRef('PR',{date:prodPlanDate})).ref; }
+  const recs=active.map((l,i)=>({batch_ref:prodRunRef+'/'+_p2(i+1), run_ref:prodRunRef, product_sku:l.product_sku, planned_packs:+l.planned_packs||0, good_packs:+l.good_packs||0, reject_packs:+l.reject_packs||0, waste_g:+l.waste_g||0, output_lot:l.output_lot||'', production_date:prodPlanDate, status, operator:CURRENT_USER}));
+  if(isLive()){
+    try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef),{method:'DELETE',prefer:'return=minimal'}); }catch(e){}
+    try{ await sb('production_batches',{method:'POST',prefer:'return=minimal',body:JSON.stringify(recs)}); }catch(e){ toast(e.message,true); return null; }
+  } else { DEMO.production_batches=(DEMO.production_batches||[]).filter(b=>b.run_ref!==prodRunRef).concat(recs); }
+  return recs;
+}
+async function prodSaveDraft(){ const r=await prodPersist('draft'); if(r){ sysLog('production_batches',prodRunRef,'📝 Draft production plan saved ('+r.length+' batches) by '+CURRENT_USER); toast('Draft saved · '+prodRunRef); drawProdPlan(); } }
+async function prodConfirm(){
+  if(!confirm('Confirm this production run? Good packs post to finished stock at Bulacan.'))return;
+  const recs=await prodPersist('confirmed'); if(!recs)return;
+  let posted=0;
+  for(const r of recs){ if((+r.good_packs||0)>0){ try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:+r.good_packs,unit_cost:0,movement_type:'batch_output',note:'Production '+r.batch_ref}); posted++; }catch(e){} } }
+  sysLog('production_batches',prodRunRef,'✅ Production confirmed ('+recs.length+' batches) by '+CURRENT_USER);
+  toast('Confirmed · '+posted+' product(s) posted to stock'); prodRunRef=''; drawProdPlan();
+}
 
 /* ============ Weekly Inventory (scope + auto book qty + approval) ============ */
 let countRec={}, countLines=[];
