@@ -948,7 +948,16 @@ async function saveFieldAcl(){ localStorage.setItem('wr_fieldacl',JSON.stringify
 function saveUsers(){ localStorage.setItem('wr_users',JSON.stringify(USERS)); }
 function setUser(u){ CURRENT_USER=u; localStorage.setItem('wr_cur',u); toast('Acting as '+u); }
 function curRole(){ if(SUPA&&SUPA.token&&SUPA.role) return SUPA.role; const u=USERS.find(x=>x.name===CURRENT_USER); return u?u.role:'Admin'; }
-function roleCan(role,mod){ if(role==='Admin')return true; if(['users','studio','connection','fieldacl','refs','notif','cleanser'].includes(mod))return false; if(!ACCESS[role])return true; return ACCESS[role][mod]!==false; }
+const ADMIN_ONLY=['users','studio','connection','fieldacl','refs','notif','cleanser'];
+// Sensible menu defaults per role (Admin can override in Users & Access). Floor roles
+// don't plan or purchase; Pasig doesn't produce.
+const NAV_HIDE={ Warehouse:['mrp','purchase_orders','reporting'], Pasig:['mrp','prodplan','production_batches','purchase_orders','reporting'] };
+function roleCan(role,mod){ if(role==='Admin')return true; if(ADMIN_ONLY.includes(mod))return false;
+  if(ACCESS[role]&&ACCESS[role][mod]!==undefined) return ACCESS[role][mod]!==false;   // explicit override wins
+  if(NAV_HIDE[role]&&NAV_HIDE[role].includes(mod)) return false;                       // default hide
+  return true; }
+// True when the current role's field policy hides money — used to mask dashboard/report money.
+function moneyHidden(){ return fieldMode('products','sell_price')==='hide' || fieldMode('ingredients','moving_avg_cost_kg')==='hide' || fieldMode('ingredients','list_price_kg')==='hide'; }
 function renderUserSel(){ const box=$('userBox'); if(!box)return;
   if(isLive() && SUPA && SUPA.token){
     // real signed-in user: show name + role, no switcher
@@ -1219,8 +1228,39 @@ function smartTiles(model, rec, children){
   return [];
 }
 async function wfAction(to){ const m=MODELS[state.model]; const from=formRec[m.status.f]; formRec[m.status.f]=to;
-  if(!formIsNew){ try{ await db.update(state.model,m.pk,formRec[m.pk],{[m.status.f]:to}); sysLog(state.model,formRec[m.pk],`🔄 Status ${from} → ${to} by ${CURRENT_USER}`); toast('Status → '+to); }catch(e){ toast(e.message,true); } }
+  if(!formIsNew){ try{ await db.update(state.model,m.pk,formRec[m.pk],{[m.status.f]:to}); sysLog(state.model,formRec[m.pk],`🔄 Status ${from} → ${to} by ${CURRENT_USER}`); toast('Status → '+to);
+      if(state.model==='purchase_orders' && to==='received') await postReceipt(formRec);   // closes the inbound loop
+      if(state.model==='transfers'       && to==='received') await postTransfer(formRec);  // moves stock between sites
+    }catch(e){ toast(e.message,true); } }
   renderForm(); }
+// Recipe cost per product (₱/pack) from the BOM — used to value production & transfers.
+async function prodCostMap(){ const boms=await db.list('bom_lines',{}), ings=await db.list('ingredients',{}); const im={}; ings.forEach(i=>im[i.sku]=i);
+  const m={}; boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100; m[b.product_sku]=(m[b.product_sku]||0)+((+b.usable_g||0)/(y||1))/1000*(+it.list_price_kg||0); }); return m; }
+// Receiving a PO adds raw stock at Bulacan and updates moving-average cost.
+async function postReceipt(po){ try{
+  const lines=await db.children(MODELS.purchase_orders.o2m, po.po_ref);
+  const stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.ref_sku) stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
+  const ings=await db.list('ingredients',{}); const im={}; ings.forEach(i=>im[i.sku]=i); let n=0;
+  for(const l of lines){ const recvKg=(+l.available_kg||+l.ordered_kg||0); if(recvKg<=0) continue;
+    const g=recvKg*1000, priceKg=+l.price_kg||0;
+    await db.create('inventory_movements',{kind:'ingredient',ref_sku:l.ingredient_sku,location_code:'bulacan',qty:g,unit_cost:priceKg/1000,movement_type:'receipt',note:'PO '+po.po_ref});
+    const it=im[l.ingredient_sku]; if(it){ const ohG=stock[l.ingredient_sku]||0, oldAvg=+it.moving_avg_cost_kg||priceKg;
+      const newAvg=(ohG+g)>0?((ohG*oldAvg+g*priceKg)/(ohG+g)):priceKg;
+      try{ await db.update('ingredients','sku',l.ingredient_sku,{moving_avg_cost_kg:Math.round(newAvg*100)/100,last_price_kg:priceKg}); }catch(e){} }
+    n++; }
+  sysLog('purchase_orders',po.po_ref,'📦 Received — '+n+' ingredient(s) posted to Bulacan stock by '+CURRENT_USER); toast('Received · '+n+' item(s) added to stock');
+ }catch(e){ toast('Receive posting: '+e.message,true); } }
+// Confirming a transfer moves finished stock Bulacan → Pasig and flags any shortfall (Check 4).
+async function postTransfer(t){ try{
+  const lines=await db.children(MODELS.transfers.o2m, t.transfer_ref); const cm=await prodCostMap();
+  const from=t.from_code||'bulacan', to=t.to_code||'pasig'; let n=0,flags=0;
+  for(const l of lines){ const sent=+l.sent_packs||0, recv=+l.received_packs||0; if(sent<=0&&recv<=0) continue; const uc=cm[l.product_sku]||0;
+    if(sent>0) await db.create('inventory_movements',{kind:'product',ref_sku:l.product_sku,location_code:from,qty:-sent,unit_cost:uc,movement_type:'transfer_out',note:'Transfer '+t.transfer_ref});
+    if(recv>0) await db.create('inventory_movements',{kind:'product',ref_sku:l.product_sku,location_code:to,qty:recv,unit_cost:uc,movement_type:'transfer_in',note:'Transfer '+t.transfer_ref});
+    const gap=sent-recv; if(Math.abs(gap)>0.0001){ flags++; try{ await db.create('variance_log',{check_type:'4 · Transfer',source_ref:t.transfer_ref,expected:sent,actual:recv,gap_qty:-gap,gap_value:Math.round((cm[l.product_sku]||0)*gap*100)/100,location:'in-transit',responsible_user:CURRENT_USER,status:'open',note:l.product_sku+' sent '+sent+' vs received '+recv}); }catch(e){} }
+    n++; }
+  sysLog('transfers',t.transfer_ref,'🚚 Received — '+n+' line(s) posted; '+flags+' shortfall(s) flagged by '+CURRENT_USER); toast('Transfer posted · '+flags+' shortfall(s)');
+ }catch(e){ toast('Transfer posting: '+e.message,true); } }
 
 /* ---- Guided PO confirmation: review qty, confirm price, log adjustments ---- */
 function openPOConfirm(){
@@ -1301,23 +1341,25 @@ async function renderDashboard(){
   const fastBody = fast.length? fast.map(f=>bar(f.name,kgf(f.qty),f.qty/(fast[0].qty||1),GREEN)).join('') : '<div class="hint">No stock movements recorded yet — this fills in as you receive, produce and deliver.</div>';
   const varBody = varRows.length? varRows.map(v=>bar(v.name,money(v.v),v.v/(varRows[0].v||1),RED)).join('') : '<div class="hint">No open variances ✅</div>';
 
+  const mh=moneyHidden();   // hide money panels for roles whose field policy hides cost/price
+  const varBar=varRows.length? varRows.map(v=>bar(v.name, mh?String(Math.round(v.v)):money(v.v), v.v/(varRows[0].v||1), RED)).join('') : '<div class="hint">No open variances ✅</div>';
   $('content').innerHTML=`<div class="dash">
     <div class="kpirow">
-      ${kpi('Stock value',isLive()?money(stockVal):'—',isLive()?'live, both sites':'connect to see')}
-      ${kpi('Below PAR',below.length, below.length?'ingredients need reorder':'all stocked', below.length?EARTH:null)}
+      ${mh?kpi('Below PAR',below.length,below.length?'need reorder':'all stocked',below.length?EARTH:null):kpi('Stock value',isLive()?money(stockVal):'—',isLive()?'live, both sites':'connect to see')}
+      ${mh?kpi('Products',prod.filter(active).length,'active'):kpi('Below PAR',below.length, below.length?'ingredients need reorder':'all stocked', below.length?EARTH:null)}
       ${kpi('Open POs',openPo, po.length+' total')}
-      ${kpi('Open variances',openVars.length, varVal?money(varVal)+' at risk':'nothing open', openVars.length?RED:null)}
+      ${kpi('Open variances',openVars.length, (varVal&&!mh)?money(varVal)+' at risk':'to resolve', openVars.length?RED:null)}
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
       ${panel('🩺 Inventory health — below PAR', belowBody, "openModel('ingredients')")}
-      ${panel('💹 Top products by margin', topBody, "openModel('products')")}
+      ${mh?'':panel('💹 Top products by margin', topBody, "openModel('products')")}
       ${panel('⚡ Fast-moving', fastBody)}
-      ${panel('⚠ Open variances by check '+(varVal?'· '+money(varVal):''), varBody, "openModel('variance_log')")}
-      ${panel('🐢 Thin-margin watch', thinBody, "openModel('products')")}
+      ${panel('⚠ Open variances by check'+((varVal&&!mh)?' · '+money(varVal):''), varBar, "openModel('variance_log')")}
+      ${mh?'':panel('🐢 Thin-margin watch', thinBody, "openModel('products')")}
       ${panel('🔗 Jump to', `<div class="qcards" style="margin:0">
-        <div class="qcard" onclick="openModel('mrp')"><div class="ic">📈</div><div><div class="t">Demand / MRP</div><div class="d">Plan &amp; order</div></div></div>
-        <div class="qcard" onclick="openModel('purchase_orders')"><div class="ic">🧾</div><div><div class="t">Purchase Orders</div><div class="d">Create &amp; track</div></div></div>
         <div class="qcard" onclick="openModel('stock_balance')"><div class="ic">📦</div><div><div class="t">Live Stock</div><div class="d">On-hand &amp; value</div></div></div>
+        <div class="qcard" onclick="openModel('count_sessions')"><div class="ic">🧮</div><div><div class="t">Weekly Inventory</div><div class="d">Count &amp; approve</div></div></div>
+        <div class="qcard" onclick="openModel('variance_log')"><div class="ic">⚠</div><div><div class="t">Variances</div><div class="d">Resolve gaps</div></div></div>
       </div>`)}
     </div></div>`;
 }
@@ -1429,8 +1471,10 @@ async function prodSaveDraft(){ const r=await prodPersist('draft'); if(r){ sysLo
 async function prodConfirm(){
   if(!confirm('Confirm this production run? Good packs post to finished stock at Bulacan.'))return;
   const recs=await prodPersist('confirmed'); if(!recs)return;
-  let posted=0;
-  for(const r of recs){ if((+r.good_packs||0)>0){ try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:+r.good_packs,unit_cost:0,movement_type:'batch_output',note:'Production '+r.batch_ref}); posted++; }catch(e){} } }
+  const cm=await prodCostMap(); let posted=0;
+  for(const r of recs){ if((+r.good_packs||0)>0){ const cpp=Math.round((cm[r.product_sku]||0)*100)/100;
+    try{ await db.update('production_batches','batch_ref',r.batch_ref,{cost_per_pack:cpp}); }catch(e){}
+    try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:+r.good_packs,unit_cost:cpp,movement_type:'batch_output',note:'Production '+r.batch_ref}); posted++; }catch(e){} } }
   sysLog('production_batches',prodRunRef,'✅ Production confirmed ('+recs.length+' batches) by '+CURRENT_USER);
   toast('Confirmed · '+posted+' product(s) posted to stock'); prodRunRef=''; drawProdPlan();
 }
@@ -1508,6 +1552,7 @@ async function countApprove(){
   if(!countLines.length){ toast('Load & count items first',true); return; }
   if(!confirm('Approve this count? Counted quantities become the new book stock, and gaps post as shrinkage variances.')) return;
   countRec.status='approved'; await countSave();
+  let prodSkus=new Set(); try{ (await db.list('products',{})).forEach(p=>prodSkus.add(p.sku)); }catch(e){}   // live product list, not demo
   let flags=0;
   for(const l of countLines){ if(l.counted_qty===''||l.counted_qty==null) continue; const gap=(+l.counted_qty)-(+l.book_qty||0); if(Math.abs(gap)<0.0001) continue; flags++;
     const isStk = l.sticker || String(l.ref_sku).startsWith('STK-');
@@ -1517,7 +1562,7 @@ async function countApprove(){
       const field=l.sticker_field||('sticker_'+(countRec.location_code||'bulacan')+'_on_hand');
       try{ await db.update('products','sku',psku,{[field]:+l.counted_qty}); }catch(e){}
     } else {
-      const kind = (DEMO.products||[]).some(p=>p.sku===l.ref_sku)?'product':'ingredient';
+      const kind = prodSkus.has(l.ref_sku)?'product':'ingredient';
       try{ await db.create('inventory_movements',{kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:0,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){}
     }
     try{ await db.create('variance_log',{check_type:'3.5 · Shrinkage',source_ref:countRec.count_ref,expected:+l.book_qty||0,actual:+l.counted_qty,gap_qty:gap,gap_value:0,location:countRec.location_code,responsible_user:CURRENT_USER,status:'open',note:(l.name||l.ref_sku)+' book vs counted'}); }catch(e){}
@@ -1557,11 +1602,12 @@ async function renderReporting(){
   return renderCustomReports();
 }
 async function renderStdReports(){
-  let cards=STD_REPORTS.map(r=>`<div class="qcard" onclick="runStd('${r.id}')"><div class="ic">📊</div><div><div class="t">${r.name}</div><div class="d">${r.desc}</div></div></div>`).join('');
-  cards+=`<div class="qcard" onclick="runRecipeCost()"><div class="ic">🧮</div><div><div class="t">Recipe cost per product</div><div class="d">Computed ingredient cost & margin per product.</div></div></div>`;
+  const mh=moneyHidden(); const MONEY_RPT=['spend_sup','var_check','var_user','stock_loc'];
+  let cards=STD_REPORTS.filter(r=>!(mh&&MONEY_RPT.includes(r.id))).map(r=>`<div class="qcard" onclick="runStd('${r.id}')"><div class="ic">📊</div><div><div class="t">${r.name}</div><div class="d">${r.desc}</div></div></div>`).join('');
+  if(!mh) cards+=`<div class="qcard" onclick="runRecipeCost()"><div class="ic">🧮</div><div><div class="t">Recipe cost per product</div><div class="d">Computed ingredient cost & margin per product.</div></div></div>`;
   cards+=`<div class="qcard" onclick="runLabelsReorder()"><div class="ic">🏷️</div><div><div class="t">Labels to reorder</div><div class="d">Products whose sticker stock is below its PAR.</div></div></div>`;
   let result='';
-  if(repActive==='recipe'){ result=await recipeCostHtml(); }
+  if(repActive==='recipe'){ result= mh?'<div class="repcard"><div class="hint">Cost &amp; margin are hidden for your role.</div></div>' : await recipeCostHtml(); }
   else if(repActive==='labels'){ result=await labelsReorderHtml(); }
   else if(repActive){ const r=STD_REPORTS.find(x=>x.id===repActive); if(r){ const {data,rows,m}=await pivot(r.source,r.cfg); result=pivotTable(r.name,data,rows,r.cfg,m); } }
   $('content').innerHTML=`<div class="dash"><div class="qcards">${cards}</div><div style="margin-top:16px">${result}</div></div>`;
@@ -1585,6 +1631,7 @@ async function labelsReorderHtml(){
   return h;
 }
 async function recipeCostHtml(){
+  if(moneyHidden()) return '<div class="repcard"><div class="hint">Cost &amp; margin are hidden for your role.</div></div>';
   const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await db.list('ingredients',{});
   const cost=p=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=ings.find(i=>i.sku===b.ingredient_sku)||{}; const y=(+it.yield_pct||100)/100; const rawg=(+b.usable_g||0)/(y||1); c+=(rawg/1000)*(+it.list_price_kg||0); }); return c; };
   let h=`<div class="repcard"><h3 style="margin:0 0 8px">Recipe cost per product</h3><table><thead><tr><th>Product</th><th class="num">Pack (g)</th><th class="num">Ingredient cost/pack</th><th class="num">Sell</th><th class="num">Margin</th></tr></thead><tbody>`;
@@ -1596,7 +1643,7 @@ async function recipeCostHtml(){
 async function renderCustomReports(){
   reportCache=await reportsList();
   const sources=Object.keys(MODELS).filter(k=>!MODELS[k].special&&MODELS[k].fields);
-  const m=MODELS[repSource]; const dims=m.fields.filter(f=>['text','select','rel'].includes(f.t)); const meas=m.fields.filter(f=>['number','currency'].includes(f.t));
+  const m=MODELS[repSource]; const dims=m.fields.filter(f=>['text','select','rel'].includes(f.t)); const meas=m.fields.filter(f=>['number','currency'].includes(f.t) && fieldMode(repSource,f.n)!=='hide');
   if(!repCfg.dim||!dims.some(d=>d.n===repCfg.dim)) repCfg.dim=(dims[0]||{}).n||'';
   if(!repCfg.measure||!meas.some(d=>d.n===repCfg.measure)) repCfg.measure=(meas[0]||{}).n||'';
   const {data,rows}=await pivot(repSource,repCfg);
