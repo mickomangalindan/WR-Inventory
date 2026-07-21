@@ -184,6 +184,7 @@
   .b-draft{background:#eef0f6;color:#40506b} .b-approved{background:#dbeddb;color:#1e6b2e}
   .b-undefined{background:#eef0f6;color:#40506b}
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 <div class="topbar">
@@ -217,7 +218,7 @@ const MODULES = [
   {id:'ops',    label:'Operations',  items:['production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
   {id:'analytics', label:'Analytics', items:['reporting']},
-  {id:'admin',  label:'Administration', items:['connection','users','fieldacl','studio','automations','selftest']},
+  {id:'admin',  label:'Administration', items:['connection','users','fieldacl','refs','automations','notif','studio','selftest']},
 ];
 const MODELS = {
   suppliers:{ label:'Suppliers', icon:'🏢', name:'name', pk:'name', archivable:true,
@@ -261,10 +262,10 @@ const MODELS = {
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'usable_g',l:'Usable g',t:'number'},{n:'method_override',l:'Method',t:'text'}] } },
 
   purchase_orders:{ label:'Purchase Orders', icon:'🧾', name:'po_ref', pk:'po_ref',
-    status:{f:'status',stages:['open','received','invoiced','closed','cancelled']}, cancelable:true,
+    status:{f:'status',stages:['open','confirmed','received','invoiced','closed','cancelled']}, cancelable:true,
     fields:[
       {n:'po_ref',l:'PO Reference',t:'text'},{n:'supplier_name',l:'Vendor',t:'rel',rel:'suppliers'},
-      {n:'order_date',l:'Order date',t:'date'},{n:'status',l:'Status',t:'select',o:['open','received','invoiced','closed']},
+      {n:'order_date',l:'Order date',t:'date'},{n:'status',l:'Status',t:'select',o:['open','confirmed','received','invoiced','closed','cancelled']},
       {n:'created_by',l:'Created by',t:'text'}],
     list:['po_ref','supplier_name','order_date','status'],
     groups:[['po_ref','supplier_name'],['order_date','created_by']],
@@ -328,6 +329,8 @@ const MODELS = {
   studio:{ label:'Studio (beta)', icon:'🛠️', special:'studio' },
   connection:{ label:'Connection', icon:'🔌', special:'connection' },
   fieldacl:{ label:'Field Access', icon:'🔐', special:'fieldacl' },
+  refs:{ label:'Internal References', icon:'🔢', special:'refs' },
+  notif:{ label:'Notifications', icon:'🔔', special:'notif' },
   automations:{ label:'Automations', icon:'⚡', special:'automations' },
   selftest:{ label:'System Check', icon:'🩺', special:'selftest' },
 };
@@ -439,6 +442,8 @@ function route(){
     if(m.special==='automations') return renderAutomations();
     if(m.special==='connection') return renderConnection();
     if(m.special==='fieldacl') return renderFieldAcl();
+    if(m.special==='refs') return renderRefs();
+    if(m.special==='notif') return renderNotif();
     if(m.special==='selftest') return renderSelfTest();
   }
   setCrumb();
@@ -534,7 +539,11 @@ async function openForm(idEnc){
   formIsNew = !idEnc; formTab=0;
   if(idEnc){ const pkval=decodeURIComponent(idEnc);
     const rows=await db.list(state.model,{}); formRec={...(rows.find(r=>String(r[m.pk])===pkval)||{})};
-  } else { formRec={}; if(m.status) formRec[m.status.f]=m.status.stages[0]; if(m.fields.find(f=>f.n==='order_date')) formRec.order_date=new Date().toISOString().slice(0,10); }
+  } else { formRec={}; if(m.status) formRec[m.status.f]=m.status.stages[0]; if(m.fields.find(f=>f.n==='order_date')) formRec.order_date=new Date().toISOString().slice(0,10);
+    // auto internal reference for documents
+    if(state.model==='purchase_orders'){ const dd=_mmddyyyy(); formRec.po_ref='PO-'+dd+' V'+_p2(await nextSeq('PO-'+dd))+'.01'; }
+    else if(state.model==='transfers'){ formRec.transfer_ref=(await genRef('DR',{})).ref; }
+  }
   formChildren = m.o2m && idEnc ? await db.children(m.o2m, decodeURIComponent(idEnc)) : [];
   // preload rel options
   for(const f of m.fields) if(f.t==='rel') await relOptions(f.rel);
@@ -570,7 +579,7 @@ async function renderForm(){
   }
   const titleField = m.fields.find(f=>f.n===m.name)||m.fields[0];
   const cur=m.status?formRec[m.status.f]:null;
-  const wfbtns=(m.status&&FLOW[state.model])?FLOW[state.model].buttons.filter(b=>b.when===cur).map(b=>`<button class="wfbtn" onclick="wfAction('${b.to}')">${b.label}</button>`).join(''):'';
+  const wfbtns=(m.status&&FLOW[state.model])?FLOW[state.model].buttons.filter(b=>b.when===cur).map(b=>`<button class="wfbtn" onclick="${b.fn?b.fn:`wfAction('${b.to}')`}">${b.label}</button>`).join(''):'';
   const tiles=smartTiles(state.model,formRec,formChildren);
   const smart=tiles.length?`<div class="smart">${tiles.map(t=>`<div class="stile"><div class="v">${esc(t.v)}</div><div class="l">${esc(t.l)}</div></div>`).join('')}</div>`:'';
   const wfbar=(wfbtns||smart)?`<div class="wfbar">${wfbtns}${smart}</div>`:'';
@@ -750,6 +759,55 @@ function saveSettings(){
 function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={}; updateMode(); closeModal(); toast('Back to demo mode'); openModel(state.model); }
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';} }
 
+/* ===== Notification content (Administration → Notifications) ===== */
+const NOTIF_DEFAULTS = {
+  po_confirmed: {label:'PO confirmed alert', ph:'{po_ref} · {supplier} · {status}', text:'🐇 PO confirmed: {po_ref} — {supplier} ({status})'},
+  daily_digest: {label:'Daily variance digest header', ph:'{count} · {date}', text:'🐇 WR ERP — Open variances: {count} ({date})'},
+  low_stock:    {label:'Below-PAR alert', ph:'{count} · {items}', text:'⚠ Below PAR ({count} items): {items}'},
+  demand_ready: {label:'Demand plot ready', ph:'{ref} · {date} · {items}', text:'📋 Demand plot {ref} ready for {date} — {items} items to order'}
+};
+let NOTIF = JSON.parse(localStorage.getItem('wr_notif')||'null') || Object.fromEntries(Object.entries(NOTIF_DEFAULTS).map(([k,v])=>[k,v.text]));
+async function loadNotif(){ if(isLive()&&SUPA&&SUPA.token){ try{ const r=await sb("app_config?select=value&key=eq.notif_templates"); if(r&&r[0]&&r[0].value){ NOTIF=r[0].value; localStorage.setItem('wr_notif',JSON.stringify(NOTIF)); } }catch(e){} } }
+async function saveNotif(){ localStorage.setItem('wr_notif',JSON.stringify(NOTIF)); if(isLive()&&SUPA&&SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'notif_templates',value:NOTIF})}); }catch(e){ toast('Saved locally; DB sync failed: '+e.message,true); return; } } }
+async function renderNotif(){ await loadNotif();
+  $('cp').innerHTML=`<div class="title">Notifications</div><div class="sp"></div><span style="color:var(--muted)">edit the message content sent by n8n</span>`;
+  let h=`<div class="repcard"><div class="hint">These templates are saved to Supabase (<code>app_config → notif_templates</code>) so your n8n workflows can read them. Keep the <code>{placeholders}</code> — n8n fills them in at send time.</div>`;
+  Object.keys(NOTIF_DEFAULTS).forEach(k=>{ const d=NOTIF_DEFAULTS[k]; const v=NOTIF[k]!=null?NOTIF[k]:d.text;
+    h+=`<div style="margin-top:14px"><label style="font-weight:700">${esc(d.label)}</label><div class="mini" style="margin:2px 0 4px">placeholders: <code>${esc(d.ph)}</code></div>
+      <textarea id="nt_${k}" rows="2" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--line);border-radius:6px" oninput="NOTIF['${k}']=this.value">${esc(v)}</textarea></div>`; });
+  h+=`<div style="margin-top:16px;display:flex;gap:8px"><button class="btn" onclick="saveNotifBtn()">💾 Save templates</button><button class="btn sec" onclick="resetNotif()">↺ Reset to defaults</button></div></div>`;
+  $('content').innerHTML=h;
+}
+async function saveNotifBtn(){ await saveNotif(); toast('Notification templates saved'); }
+async function resetNotif(){ if(!confirm('Reset all notification templates to defaults?'))return; NOTIF=Object.fromEntries(Object.entries(NOTIF_DEFAULTS).map(([k,v])=>[k,v.text])); await saveNotif(); renderNotif(); toast('Reset to defaults'); }
+
+/* ===== Internal References (Administration → References) ===== */
+async function renderRefs(){
+  $('cp').innerHTML=`<div class="title">Internal References</div><button class="btn sec" onclick="renderRefs()">↻ Refresh</button><div class="sp"></div><span style="color:var(--muted)">numbering scheme &amp; live counters</span>`;
+  const dd=_mmddyyyy();
+  const scheme=[
+    ['Demand Plot — Raw',      'DP-'+dd+' [RAW] V01'],
+    ['Demand Plot — Stickers', 'DP-'+dd+' [STICKERS] V01'],
+    ['Demand Plot — Supplies', 'DP-'+dd+' [SUPPLIES] V01'],
+    ['Demand Plot — Others',   'DP-'+dd+' [OTHERS] V01'],
+    ['Purchase Order',         'PO-'+dd+' V01.01'],
+    ['Delivery Receipt',       'DR-'+dd+' V01'],
+    ['Receiving Report',       'RR-'+dd+' V01']];
+  const legend=[['V','version prefix'],['XX','iteration number (per date & type)'],['MMDDYYYY','the plan / document date'],['ZZ','sub-series of XX — one per supplier when a demand plot is split into POs']];
+  let counters=[];
+  if(isLive()&&SUPA&&SUPA.token){ try{ counters=await sb('ref_counters?select=key,n&order=key.asc'); }catch(e){} }
+  else { const c=JSON.parse(localStorage.getItem('wr_refseq')||'{}'); counters=Object.keys(c).sort().map(k=>({key:k,n:c[k]})); }
+  let h=`<div class="repcard"><h3 style="margin:0 0 8px">Format</h3>
+    <table><thead><tr><th>Document</th><th>Pattern (example, today)</th></tr></thead><tbody>
+    ${scheme.map(r=>`<tr><td><b>${esc(r[0])}</b></td><td><code>${esc(r[1])}</code></td></tr>`).join('')}</tbody></table>
+    <div class="hint" style="margin-top:10px">${legend.map(l=>`<b>${l[0]}</b> = ${l[1]}`).join(' &nbsp;·&nbsp; ')}</div></div>`;
+  h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Live counters ${isLive()&&SUPA&&SUPA.token?'· Supabase':'· this browser'}</h3>
+    <div class="hint">Each key tracks the last issued iteration. Numbering is atomic, so two users never collide.</div>
+    ${counters.length?`<table><thead><tr><th>Key</th><th class="num">Last iteration</th></tr></thead><tbody>${counters.map(c=>`<tr><td><code>${esc(c.key)}</code></td><td class="num"><b>${esc(_p2(c.n))}</b></td></tr>`).join('')}</tbody></table>`:'<div class="empty">No references issued yet — save a demand plot or create a PO to start the counters.</div>'}
+    <div class="hint" style="margin-top:8px">Counters live in Supabase (<code>ref_counters</code>) via the <code>next_ref()</code> function. Run <code>wr_references.sql</code> to enable database tracking.</div></div>`;
+  $('content').innerHTML=h;
+}
+
 /* ===== Connection page (Administration → Connection) ===== */
 function renderConnection(){
   $('cp').innerHTML=`<div class="title">Connection</div><div class="sp"></div><span style="color:var(--muted)">Supabase project &amp; sign-in</span>`;
@@ -836,11 +894,11 @@ async function saveFieldAcl(){ localStorage.setItem('wr_fieldacl',JSON.stringify
 function saveUsers(){ localStorage.setItem('wr_users',JSON.stringify(USERS)); }
 function setUser(u){ CURRENT_USER=u; localStorage.setItem('wr_cur',u); toast('Acting as '+u); }
 function curRole(){ if(SUPA&&SUPA.token&&SUPA.role) return SUPA.role; const u=USERS.find(x=>x.name===CURRENT_USER); return u?u.role:'Admin'; }
-function roleCan(role,mod){ if(role==='Admin')return true; if(['users','studio','connection','fieldacl'].includes(mod))return false; if(!ACCESS[role])return true; return ACCESS[role][mod]!==false; }
+function roleCan(role,mod){ if(role==='Admin')return true; if(['users','studio','connection','fieldacl','refs','notif'].includes(mod))return false; if(!ACCESS[role])return true; return ACCESS[role][mod]!==false; }
 function renderUserSel(){ const box=$('userBox'); if(!box)return;
   if(isLive() && SUPA && SUPA.token){
     // real signed-in user: show name + role, no switcher
-    box.innerHTML=`<span style="opacity:.85">👤</span> <b>${esc(CURRENT_USER||SUPA.email||'user')}</b><span style="opacity:.7">· ${esc(curRole())}</span>`;
+    box.innerHTML=`<span style="opacity:.85">👤</span> <b>${esc(CURRENT_USER||SUPA.email||'user')}</b><span style="opacity:.7">· ${esc(curRole())}</span> <button onclick="signOut()" title="Sign out" style="background:rgba(255,255,255,.16);color:#fff;border:none;border-radius:5px;padding:4px 9px;font-size:11px;cursor:pointer;margin-left:2px">Sign out</button>`;
   } else {
     // demo mode: keep the role switcher so you can preview each role
     box.innerHTML=`<span style="opacity:.85">👤</span><select id="userSel" onchange="setUser(this.value)" style="background:rgba(255,255,255,.16);color:#fff;border:none;border-radius:5px;padding:5px 8px;font-size:12px">${USERS.map(u=>`<option ${u.name===CURRENT_USER?'selected':''}>${esc(u.name)}</option>`).join('')}</select><span style="opacity:.6">demo</span>`;
@@ -896,9 +954,8 @@ async function renderMRP(){
   // demand card
   let dh=`<div class="repcard">
     <div class="repbar"><span>Plan (week of)</span><input type="date" value="${MRPDATE}" onchange="MRPDATE=this.value">
-      <button class="btn sm sec" onclick="mrpImport()">⬆ Import (SKU,qty)</button>
-      <input type="file" id="mrpFile" accept=".csv,.txt" style="display:none" onchange="mrpFileImport(event)">
-      <button class="btn sm sec" onclick="document.getElementById('mrpFile').click()">📄 Upload CSV</button>
+      <button class="btn sm sec" onclick="openMRPImport()">📥 Import (xlsx / csv)</button>
+      <button class="btn sm sec" onclick="mrpImport()">⬆ Paste</button>
       <button class="btn sm sec" onclick="mrpSheetSync()">☁ Sync from Google Sheets</button></div>
     <h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3><table><thead><tr><th>Product</th><th>SKU</th><th class="num">Demand</th></tr></thead><tbody>`;
   prods.forEach(p=>{ dh+=`<tr><td>${esc(p.name)}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpDemand['${p.sku}']=+this.value||0;renderMRP()"></td></tr>`; });
@@ -935,10 +992,33 @@ async function renderMRP(){
 }
 let mrpPlanCache=[];
 async function mrpPlans(){ if(isLive()){ try{ return await sb('mrp_plans?select=*&order=saved_at.desc&limit=30'); }catch(e){ return []; } } return JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); }
-function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return''; return `<div style="margin-top:12px"><h4 style="margin:0 0 6px;font-size:12px;text-transform:uppercase;color:var(--muted)">Saved plans ${isLive()?'· Supabase':''}</h4>${a.map((p,i)=>{ const date=p.plan_date||p.date; const lines=(p.data?p.data.lines:p.lines)||[]; const n=lines.filter(l=>l.final>0).length; return `<span class="attpill">${esc(date)} · ${n} items <span class="x" onclick="loadMRPPlan(${i})" title="load">↺</span> <span class="x" onclick="delMRPPlan(${i})">✕</span></span>`; }).join('')}</div>`; }
-async function saveMRPPlan(){ const data={demand:{...mrpDemand},manual:{...mrpManual},lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
-  try{ if(isLive()){ await sb('mrp_plans',{method:'POST',prefer:'return=minimal',body:JSON.stringify({plan_date:MRPDATE,created_by:CURRENT_USER,data})}); toast('Plan saved to Supabase'); }
-    else { const a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a.unshift({date:MRPDATE,by:CURRENT_USER,...data}); localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); toast('Plan saved for '+MRPDATE); } }
+function weekOf(dstr){ if(!dstr)return'—'; const d=new Date(dstr+'T00:00:00'); if(isNaN(d))return dstr; const on=new Date(d); const back=(d.getDay()+6)%7; on.setDate(d.getDate()-back); return 'Wk of '+on.toISOString().slice(0,10); }
+function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return'';
+  const rows=a.map((p,i)=>{ const date=p.plan_date||p.date||''; const ref=(p.data&&p.data.ref)||p.ref||''; const lines=(p.data?p.data.lines:p.lines)||[]; const items=lines.filter(l=>l.final>0);
+    const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); return {i,date,ref,items:items.length,val,wk:weekOf(date)}; });
+  return `<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Demand plot monitoring — by week ${isLive()?'· Supabase':''}</h3>
+    <div style="overflow-x:auto"><table><thead><tr><th>Week</th><th>Reference</th><th>Plan date</th><th class="num">Items to order</th><th class="num">Est ₱</th><th></th></tr></thead><tbody>
+    ${rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td style="white-space:nowrap"><span class="btn link" onclick="loadMRPPlan(${r.i})">Load</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
+    </tbody></table></div></div>`; }
+/* ============ Internal reference numbering (DP / PO / DR / RR) ============ */
+function _p2(n){ return String(n).padStart(2,'0'); }
+function _mmddyyyy(dstr){ const d=dstr||new Date().toISOString().slice(0,10); const t=d.split('-'); return (t[1]||'')+(t[2]||'')+(t[0]||''); }
+async function nextSeq(key){   // atomic per-key counter — Supabase RPC when live, localStorage otherwise
+  if(isLive()&&SUPA&&SUPA.token){ try{ const r=await sb('rpc/next_ref',{method:'POST',body:JSON.stringify({p_key:key})}); const v=Array.isArray(r)?r[0]:r; if(typeof v==='number') return v; if(v&&typeof v.next_ref==='number') return v.next_ref; }catch(e){} }
+  const c=JSON.parse(localStorage.getItem('wr_refseq')||'{}'); c[key]=(c[key]||0)+1; localStorage.setItem('wr_refseq',JSON.stringify(c)); return c[key];
+}
+async function genRef(type,opts){ opts=opts||{}; const dd=_mmddyyyy(opts.date);
+  if(type==='DP'){ const cat=(opts.category||'RAW').toUpperCase(); const it=await nextSeq('DP-'+dd+'-'+cat); return {ref:'DP-'+dd+' ['+cat+'] V'+_p2(it), it, dd}; }
+  if(type==='PO'){ return {ref:'PO-'+dd+' V'+_p2(opts.xx||1)+'.'+_p2(opts.zz||1), dd}; }
+  if(type==='DR'||type==='RR'){ const it=await nextSeq(type+'-'+dd); return {ref:type+'-'+dd+' V'+_p2(it), it, dd}; }
+  return {ref:''};
+}
+
+async function saveMRPPlan(){
+  const g=await genRef('DP',{category:'RAW',date:MRPDATE}); window._mrpDPit=g.it;
+  const data={ref:g.ref,demand:{...mrpDemand},manual:{...mrpManual},lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
+  try{ if(isLive()){ await sb('mrp_plans',{method:'POST',prefer:'return=minimal',body:JSON.stringify({plan_date:MRPDATE,ref:g.ref,created_by:CURRENT_USER,data})}); toast('Saved '+g.ref); }
+    else { const a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a.unshift({date:MRPDATE,ref:g.ref,by:CURRENT_USER,...data}); localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); toast('Saved '+g.ref); } }
   catch(e){ toast(e.message,true); } renderMRP(); }
 function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; renderMRP(); toast('Loaded plan'); }
 async function delMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; try{ if(isLive()&&p.id){ await sb('mrp_plans?id=eq.'+p.id,{method:'DELETE',prefer:'return=minimal'}); } else { const a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a.splice(i,1); localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); } }catch(e){ toast(e.message,true); } renderMRP(); }
@@ -946,15 +1026,17 @@ async function generatePOsFromMRP(){
   const lines=(window._mrpPlan||[]).filter(l=>l.final>0);
   if(!lines.length){ toast('Nothing to order — set demand first',true); return; }
   const bySup={}; lines.forEach(l=>{ const s=l.supplier||'(unassigned)'; (bySup[s]=bySup[s]||[]).push(l); });
-  const refs=[]; let n=0;
-  for(const sup of Object.keys(bySup)){
-    const ref='WR-PO-'+String(Date.now()).slice(-5)+(n?('-'+n):''); n++;
+  // XX = the demand plot's iteration; mint one now if the plan wasn't saved first
+  let xx=window._mrpDPit; if(!xx){ const g=await genRef('DP',{category:'RAW',date:MRPDATE}); xx=g.it; window._mrpDPit=xx; }
+  const refs=[]; let zz=0;
+  for(const sup of Object.keys(bySup)){ zz++;
+    const ref=(await genRef('PO',{date:MRPDATE,xx,zz})).ref;   // PO-MMDDYYYY VXX.ZZ
     const rec={po_ref:ref, supplier_name:(sup==='(unassigned)'?null:sup), order_date:MRPDATE, status:'open', created_by:'MRP'};
     try{
       await db.create('purchase_orders', rec);
       const pl=bySup[sup].map(l=>({po_ref:ref, ingredient_sku:l.sku, ordered_kg:Math.round(l.final/10)/100, price_kg:l.price, received_kg:0}));
       await db.replaceChildren({model:'po_lines',fk:'po_ref'}, ref, pl);
-      sysLog('purchase_orders',ref,'🤖 Auto-generated from MRP ('+MRPDATE+') by '+CURRENT_USER);
+      sysLog('purchase_orders',ref,'🤖 Auto-generated from Demand Plot V'+_p2(xx)+' ('+MRPDATE+') by '+CURRENT_USER);
       refs.push(ref+' · '+sup+' ('+bySup[sup].length+')');
     }catch(e){ toast(e.message,true); }
   }
@@ -964,7 +1046,7 @@ async function generatePOsFromMRP(){
 
 /* Users & Access */
 async function renderUsers(){
-  $('cp').innerHTML=`<div class="title">Users &amp; Access</div><button class="btn" onclick="addUser()">New user</button><div class="sp"></div>`;
+  $('cp').innerHTML=`<div class="title">Users &amp; Access</div><button class="btn" onclick="addUser()">New user</button>${(SUPA&&SUPA.token)?`<button class="btn sec" onclick="refreshMyRole()">↻ Refresh my role</button>`:''}<div class="sp"></div>`;
   const roles=['Admin','Purchasing','Warehouse','Pasig','Finance'];
   let h=`<div class="repcard"><h3 style="margin:0 0 8px">Users</h3><table><thead><tr><th>User</th><th>Role</th><th></th></tr></thead><tbody>`;
   USERS.forEach((u,i)=>{ h+=`<tr><td>${esc(u.name)}${u.name===CURRENT_USER?' <span class="badge b-true">you</span>':''}</td><td><select onchange="setRole(${i},this.value)">${roles.map(r=>`<option ${u.role===r?'selected':''}>${r}</option>`).join('')}</select></td><td>${USERS.length>1?`<span class="btn link" style="color:var(--danger)" onclick="delUser(${i})">Remove</span>`:''}</td></tr>`; });
@@ -991,7 +1073,15 @@ async function loadAuthUsers(){
     $('authUsers').innerHTML=t;
   }catch(e){ $('authUsers').innerHTML='<div class="empty">Could not load profiles: '+esc(e.message)+'</div>'; }
 }
-async function setProfileRole(id,role){ try{ await sb('profiles?id=eq.'+encodeURIComponent(id),{method:'PATCH',prefer:'return=minimal',body:JSON.stringify({role})}); toast('Role updated'); if(id===(SUPA&&SUPA.uid)){ SUPA.role=role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); renderSide(); } }catch(e){ toast(e.message,true); } }
+async function setProfileRole(id,role){ try{ await sb('profiles?id=eq.'+encodeURIComponent(id),{method:'PATCH',prefer:'return=minimal',body:JSON.stringify({role})});
+    // RLS lets only an Admin change roles; a blocked update returns no error but no change — verify.
+    const chk=await sb('profiles?select=role&id=eq.'+encodeURIComponent(id));
+    if(chk&&chk[0]&&chk[0].role!==role){ toast('Blocked by RLS — only an Admin can change roles. Set the first Admin via SQL.',true); loadAuthUsers(); return; }
+    toast('Role updated'); if(id===(SUPA&&SUPA.uid)){ SUPA.role=role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); updateMode(); renderUserSel(); renderSide(); } }
+  catch(e){ toast(e.message,true); } }
+async function refreshMyRole(){ if(!(SUPA&&SUPA.token&&SUPA.uid)){ toast('Sign in first',true); return; }
+  try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); updateMode(); renderUserSel(); renderSide(); toast('Your role is now: '+curRole()); } else toast('No profile row found for your user',true); }
+  catch(e){ toast(e.message,true); } }
 function addUser(){ const n=prompt('User name:'); if(!n)return; USERS.push({name:n,role:'Warehouse'}); saveUsers(); renderUsers(); renderUserSel(); }
 function delUser(i){ if(USERS.length<=1)return; USERS.splice(i,1); saveUsers(); renderUsers(); renderUserSel(); }
 function setRole(i,r){ USERS[i].role=r; saveUsers(); }
@@ -1057,7 +1147,8 @@ function applyStudio(){ Object.keys(STUDIO).forEach(mk=>{ const m=MODELS[mk]; if
 
 /* ============ Odoo-style extras (adapted from Odoo 18 & 19) ============ */
 const FLOW = { purchase_orders:{ buttons:[
-  {when:'open',label:'Confirm / Receive',to:'received'},
+  {when:'open',label:'✅ Confirm order',fn:'openPOConfirm()'},
+  {when:'confirmed',label:'Mark Received',to:'received'},
   {when:'received',label:'Register Invoice',to:'invoiced'},
   {when:'invoiced',label:'Close',to:'closed'} ]},
   variance_log:{ buttons:[
@@ -1076,23 +1167,103 @@ async function wfAction(to){ const m=MODELS[state.model]; const from=formRec[m.s
   if(!formIsNew){ try{ await db.update(state.model,m.pk,formRec[m.pk],{[m.status.f]:to}); sysLog(state.model,formRec[m.pk],`🔄 Status ${from} → ${to} by ${CURRENT_USER}`); toast('Status → '+to); }catch(e){ toast(e.message,true); } }
   renderForm(); }
 
+/* ---- Guided PO confirmation: review qty, confirm price, log adjustments ---- */
+function openPOConfirm(){
+  if(formIsNew){ toast('Save the PO first',true); return; }
+  const lines=formChildren||[];
+  if(!lines.length){ toast('Add & save order lines first, then confirm',true); return; }
+  $('modal').innerHTML=`<h3>Confirm order — ${esc(formRec.po_ref)}</h3>
+    <p>Review each line: update the <b>required qty</b> and <b>confirm the price</b> before the order goes out. Any change is written to the log.</p>
+    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Required kg</th><th class="num">Price ₱/kg</th></tr></thead><tbody>
+    ${lines.map((l,i)=>`<tr><td>${esc(l.ingredient_sku)}</td>
+      <td><input id="pc_q${i}" type="number" step="any" value="${+l.ordered_kg||0}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td><input id="pc_p${i}" type="number" step="any" value="${+l.price_kg||0}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td></tr>`).join('')}
+    </tbody></table></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="poConfirmApply()">✅ Confirm order</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
+  $('overlay').classList.add('on');
+}
+async function poConfirmApply(){
+  const lines=formChildren||[]; const changes=[];
+  const updated=lines.map((l,i)=>{ const nq=+($('pc_q'+i).value)||0, np=+($('pc_p'+i).value)||0; const oq=+l.ordered_kg||0, op=+l.price_kg||0;
+    if(Math.abs(nq-oq)>0.0001) changes.push(l.ingredient_sku+': qty '+oq+'→'+nq+'kg'); if(Math.abs(np-op)>0.0001) changes.push(l.ingredient_sku+': ₱'+op+'→₱'+np);
+    return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:nq, available_kg:l.available_kg, price_kg:np, received_kg:l.received_kg||0}; });
+  try{
+    await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
+    formChildren=updated; formRec.status='confirmed';
+    await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'confirmed'});
+    sysLog('purchase_orders',formRec.po_ref, (changes.length?('✅ Confirmed with adjustments — '+changes.join('; ')):'✅ Confirmed — qty & prices verified, no changes')+' by '+CURRENT_USER);
+    closeModal(); toast('Order confirmed'+(changes.length?' · '+changes.length+' change(s) logged':'')); renderForm();
+  }catch(e){ toast(e.message,true); }
+}
+
 async function renderDashboard(){
   $('crumb').innerHTML='<b>Dashboard</b>';
-  $('cp').innerHTML=`<div class="title">Dashboard</div><div class="sp"></div>
+  $('cp').innerHTML=`<div class="title">Operations Dashboard</div><div class="sp"></div>
     <div class="search" onclick="openCmd()" style="cursor:pointer">🔎<input placeholder="Search everything…  (⌘K)" readonly style="cursor:pointer"></div>`;
-  const ing=await db.list('ingredients',{}), prod=await db.list('products',{}), sup=await db.list('suppliers',{});
-  let po=[]; try{ po=await db.list('purchase_orders',{}); }catch(e){}
+  $('content').innerHTML='<div class="empty">Loading…</div>';
+  const ing=await db.list('ingredients',{}), prod=await db.list('products',{});
+  let po=[],boms=[],mov=[],vars=[],stockRows=[];
+  try{ po=await db.list('purchase_orders',{}); }catch(e){}
+  try{ boms=await db.list('bom_lines',{}); }catch(e){}
+  try{ mov=await db.list('inventory_movements',{}); }catch(e){}
+  try{ vars=await db.list('variance_log',{}); }catch(e){}
+  try{ stockRows=await db.list('stock_balance',{}); }catch(e){}
+  const active=r=>r.active!==false;
+  // stock map + value
+  const stock={}; let stockVal=0;
+  stockRows.forEach(s=>{ stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); stockVal+=(+s.stock_value||0); });
+  // inventory health — ingredients below PAR
+  const below=ing.filter(active).filter(i=>(+i.par_g||0)>0 && (stock[i.sku]||0) < (+i.par_g||0))
+    .map(i=>({name:i.name,need:(+i.par_g||0)-(stock[i.sku]||0),par:+i.par_g||0})).sort((a,b)=>b.need-a.need);
+  // product cost & margin
+  const costOf=p=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=ing.find(i=>i.sku===b.ingredient_sku)||{}; const y=(+it.yield_pct||100)/100; c+=((+b.usable_g||0)/(y||1))/1000*(+it.list_price_kg||0); }); return c; };
+  const withMargin=prod.filter(active).map(p=>{ const c=costOf(p), sell=+p.sell_price||0; return {name:p.name,cost:c,sell,margin:sell?((sell-c)/sell*100):null}; });
+  const topMargin=withMargin.filter(x=>x.margin!=null).sort((a,b)=>b.margin-a.margin).slice(0,6);
+  const thinMargin=withMargin.filter(x=>x.margin!=null).sort((a,b)=>a.margin-b.margin).slice(0,5);
+  // movement velocity (outbound = issues, sales, transfers, waste)
+  const OUT=['issue_to_batch','sale','transfer_out','waste','count_adjust'];
+  const outByRef={}; mov.forEach(m=>{ if(OUT.includes(m.movement_type)){ const q=Math.abs(+m.qty||0); outByRef[m.ref_sku]=(outByRef[m.ref_sku]||0)+q; } });
+  const nameOf=sku=>{ const p=prod.find(x=>x.sku===sku); if(p)return p.name; const i=ing.find(x=>x.sku===sku); return i?i.name:sku; };
+  const velocity=Object.keys(outByRef).map(k=>({name:nameOf(k),qty:outByRef[k]})).sort((a,b)=>b.qty-a.qty);
+  const fast=velocity.slice(0,5), slow=velocity.slice(-5).reverse();
+  // variances open by check
+  const openVars=vars.filter(v=>v.status==='open');
+  const varVal=openVars.reduce((s,v)=>s+Math.abs(+v.gap_value||0),0);
+  const byCheck={}; openVars.forEach(v=>{ byCheck[v.check_type]=(byCheck[v.check_type]||0)+Math.abs(+v.gap_value||0); });
+  const varRows=Object.keys(byCheck).map(k=>({name:k,v:byCheck[k]})).sort((a,b)=>b.v-a.v);
   const openPo=po.filter(p=>p.status==='open').length;
-  const kpi=(l,v,s)=>`<div class="kpi"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s||''}</div></div>`;
-  const q=(ic,t,d,mdl)=>`<div class="qcard" onclick="openModel('${mdl}')"><div class="ic">${ic}</div><div><div class="t">${t}</div><div class="d">${d}</div></div></div>`;
+  // ---- render ----
+  const GREEN='#4e7a3e', EARTH='#b5762a', RED='#b23b2e';
+  const kpi=(l,v,s,c)=>`<div class="kpi"><div class="l">${l}</div><div class="v" ${c?`style="color:${c}"`:''}>${v}</div><div class="s">${s||''}</div></div>`;
+  const money=n=>'₱'+Math.round(n).toLocaleString('en-PH');
+  const bar=(label,valTxt,frac,color)=>`<div style="margin:5px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${esc(label)}</span><b>${valTxt}</b></div><div style="height:7px;background:#eee;border-radius:4px;overflow:hidden;margin-top:2px"><div style="height:100%;width:${Math.max(3,Math.round(frac*100))}%;background:${color}"></div></div></div>`;
+  const panel=(title,body,onclick)=>`<div class="repcard" ${onclick?`style="cursor:pointer" onclick="${onclick}"`:''}><h3 style="margin:0 0 10px;font-size:15px">${title}</h3>${body}</div>`;
+  const list0='<div class="hint">No data yet.</div>';
+
+  const belowBody = below.length? below.slice(0,6).map(b=>bar(b.name,kgf(b.need)+' short',b.need/(below[0].need||1),EARTH)).join('') : '<div class="hint">All ingredients at or above PAR ✅</div>';
+  const topBody = topMargin.length? topMargin.map(t=>bar(t.name,Math.round(t.margin)+'%',t.margin/100,GREEN)).join('') : list0;
+  const thinBody = thinMargin.length? `<table style="width:100%;font-size:12.5px"><tbody>${thinMargin.map(t=>`<tr><td>${esc(t.name)}</td><td class="num" style="color:${t.margin<25?'var(--danger)':'var(--muted)'}">${Math.round(t.margin)}%</td></tr>`).join('')}</tbody></table>` : list0;
+  const fastBody = fast.length? fast.map(f=>bar(f.name,kgf(f.qty),f.qty/(fast[0].qty||1),GREEN)).join('') : '<div class="hint">No stock movements recorded yet — this fills in as you receive, produce and deliver.</div>';
+  const varBody = varRows.length? varRows.map(v=>bar(v.name,money(v.v),v.v/(varRows[0].v||1),RED)).join('') : '<div class="hint">No open variances ✅</div>';
+
   $('content').innerHTML=`<div class="dash">
-    <div class="kpirow">${kpi('Ingredients',ing.length,'raw · intermediate · live')}${kpi('Products',prod.length,'recipes / variants')}${kpi('Suppliers',sup.length,'active vendors')}${kpi('Open POs',openPo,po.length+' total')}</div>
-    <div class="qcards">
-      ${q('🥩','Ingredients','Prices, yields & suppliers','ingredients')}
-      ${q('📦','Products','Recipes & pack variants','products')}
-      ${q('🏢','Suppliers','Vendors & terms','suppliers')}
-      ${q('🧾','Purchase Orders','Create & track POs','purchase_orders')}
-      ${q('📈','Live Stock','On-hand & value','stock_balance')}
+    <div class="kpirow">
+      ${kpi('Stock value',isLive()?money(stockVal):'—',isLive()?'live, both sites':'connect to see')}
+      ${kpi('Below PAR',below.length, below.length?'ingredients need reorder':'all stocked', below.length?EARTH:null)}
+      ${kpi('Open POs',openPo, po.length+' total')}
+      ${kpi('Open variances',openVars.length, varVal?money(varVal)+' at risk':'nothing open', openVars.length?RED:null)}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
+      ${panel('🩺 Inventory health — below PAR', belowBody, "openModel('ingredients')")}
+      ${panel('💹 Top products by margin', topBody, "openModel('products')")}
+      ${panel('⚡ Fast-moving', fastBody)}
+      ${panel('⚠ Open variances by check '+(varVal?'· '+money(varVal):''), varBody, "openModel('variance_log')")}
+      ${panel('🐢 Thin-margin watch', thinBody, "openModel('products')")}
+      ${panel('🔗 Jump to', `<div class="qcards" style="margin:0">
+        <div class="qcard" onclick="openModel('mrp')"><div class="ic">📈</div><div><div class="t">Demand / MRP</div><div class="d">Plan &amp; order</div></div></div>
+        <div class="qcard" onclick="openModel('purchase_orders')"><div class="ic">🧾</div><div><div class="t">Purchase Orders</div><div class="d">Create &amp; track</div></div></div>
+        <div class="qcard" onclick="openModel('stock_balance')"><div class="ic">📦</div><div><div class="t">Live Stock</div><div class="d">On-hand &amp; value</div></div></div>
+      </div>`)}
     </div></div>`;
 }
 async function renderKanban(){
@@ -1196,13 +1367,17 @@ async function countLoad(){
   const sc=countRec.scope||['All'], all=sc.includes('All');
   const ings=await db.list('ingredients',{}), prods=await db.list('products',{});
   const wantIng=all||sc.includes('Ingredients'), wantSup=all||sc.includes('Supplies'), wantStk=all||sc.includes('Stickers'), wantProd=all||sc.includes('Sellable Products');
-  let items=[];
-  ings.forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement'); const isStk=c.includes('sticker');
-    if((wantIng&&!isSup&&!isStk)||(wantSup&&isSup)||(wantStk&&isStk)) items.push({ref_sku:i.sku,name:i.name}); });
-  if(wantProd) prods.forEach(p=>items.push({ref_sku:p.sku,name:p.name}));
+  const loc=(countRec.location_code||'bulacan');
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
-  countLines=items.map(it=>({ref_sku:it.ref_sku,name:it.name,book_qty:stock[it.ref_sku]||0,counted_qty:''}));
-  toast('Loaded '+countLines.length+' items'); drawCountForm();
+  let lines=[];
+  ings.forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
+    if((wantIng&&!isSup)||(wantSup&&isSup)) lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:''}); });
+  if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:''}));
+  // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
+  if(wantStk) prods.forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
+    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand'}); });
+  countLines=lines;
+  toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')); drawCountForm();
 }
 async function countSave(){
   try{
@@ -1223,8 +1398,16 @@ async function countApprove(){
   countRec.status='approved'; await countSave();
   let flags=0;
   for(const l of countLines){ if(l.counted_qty===''||l.counted_qty==null) continue; const gap=(+l.counted_qty)-(+l.book_qty||0); if(Math.abs(gap)<0.0001) continue; flags++;
-    const kind = DEMO.products.some(p=>p.sku===l.ref_sku)?'product':'ingredient';
-    try{ await db.create('inventory_movements',{kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:0,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){}
+    const isStk = l.sticker || String(l.ref_sku).startsWith('STK-');
+    if(isStk){
+      // stickers live on the product per site — write the counted value straight back
+      const psku=l.product_sku||String(l.ref_sku).slice(4);
+      const field=l.sticker_field||('sticker_'+(countRec.location_code||'bulacan')+'_on_hand');
+      try{ await db.update('products','sku',psku,{[field]:+l.counted_qty}); }catch(e){}
+    } else {
+      const kind = (DEMO.products||[]).some(p=>p.sku===l.ref_sku)?'product':'ingredient';
+      try{ await db.create('inventory_movements',{kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:0,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){}
+    }
     try{ await db.create('variance_log',{check_type:'3.5 · Shrinkage',source_ref:countRec.count_ref,expected:+l.book_qty||0,actual:+l.counted_qty,gap_qty:gap,gap_value:0,location:countRec.location_code,responsible_user:CURRENT_USER,status:'open',note:(l.name||l.ref_sku)+' book vs counted'}); }catch(e){}
   }
   sysLog('count_sessions',countRec.count_ref,'✔ Approved by '+CURRENT_USER+' — '+flags+' adjustment(s) posted to stock');
@@ -1353,6 +1536,58 @@ function parseDemandCSV(text){ const map={}; text.split(/\r?\n/).forEach(line=>{
 function applyDemandMap(map){ Object.keys(map).forEach(sku=>{ mrpDemand[sku]=+map[sku]||0; }); renderMRP(); }
 function mrpImport(){ const t=prompt('Paste demand lines — SKU,qty (one per line):'); if(!t)return; applyDemandMap(parseDemandCSV(t)); toast('Demand imported by SKU'); }
 function mrpFileImport(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader(); rd.onload=()=>{ applyDemandMap(parseDemandCSV(String(rd.result))); toast('Imported from '+f.name); }; rd.readAsText(f); }
+
+/* ---- Import pipeline: download template → test → import ---- */
+let _impRows=null, _impReport=null;
+function dlBlob(content,name,type){ const b=new Blob([content],{type}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u); }
+function openMRPImport(){ _impRows=null; _impReport=null;
+  $('modal').innerHTML=`<h3>Import weekly demand</h3>
+    <p>1) Download the template, fill the <b>QTY</b> column. &nbsp;2) Upload &amp; Test. &nbsp;3) Import the valid rows.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+      <button class="btn sec" onclick="mrpDownloadTemplate()">⬇ Download template (.${typeof XLSX!=='undefined'?'xlsx':'csv'})</button>
+      <input type="file" id="impFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="mrpStageFile(event)">
+      <button class="btn sec" onclick="document.getElementById('impFile').click()">📄 Choose file</button>
+    </div>
+    <div id="impArea" class="hint" style="margin-top:6px">No file chosen yet.</div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn sec" onclick="closeModal()">Close</button></div>`;
+  $('overlay').classList.add('on');
+}
+async function mrpDownloadTemplate(){
+  const prods=(await db.list('products',{})).filter(p=>p.active!==false);
+  const aoa=[['SKU','product_name','QTY','plan_date'],...prods.map(p=>[p.sku,p.name,0,MRPDATE])];
+  if(typeof XLSX!=='undefined'){ const ws=XLSX.utils.aoa_to_sheet(aoa); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Demand'); XLSX.writeFile(wb,'WR_demand_'+MRPDATE+'.xlsx'); }
+  else { dlBlob(aoa.map(r=>r.join(',')).join('\n'),'WR_demand_'+MRPDATE+'.csv','text/csv'); }
+  toast('Template downloaded ('+prods.length+' products)');
+}
+function parseImportData(name,data){
+  if(/\.csv$/i.test(name)){ const map=parseDemandCSV(String(data)); return Object.keys(map).map(sku=>({sku,qty:map[sku]})); }
+  if(typeof XLSX==='undefined') throw new Error('Spreadsheet support did not load — please use a .csv file');
+  const wb=XLSX.read(data,{type:'binary'}); const ws=wb.Sheets[wb.SheetNames[0]]; const arr=XLSX.utils.sheet_to_json(ws,{header:1});
+  const hdr=(arr[0]||[]).map(x=>String(x).trim().toLowerCase());
+  const si=hdr.indexOf('sku'), qi=[hdr.indexOf('qty'),hdr.indexOf('demand'),hdr.indexOf('quantity')].find(x=>x>=0), pi=hdr.indexOf('plan_date');
+  if(si<0) throw new Error('No "SKU" column found in the sheet header');
+  const rows=[]; for(let i=1;i<arr.length;i++){ const r=arr[i]; if(!r)continue; const sku=r[si]; if(sku==null||String(sku).trim()==='')continue; rows.push({sku:String(sku).trim(), qty:Number(r[qi]||0), plan_date:pi>=0?r[pi]:undefined}); }
+  return rows;
+}
+function mrpStageFile(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader();
+  rd.onload=()=>{ try{ _impRows=parseImportData(f.name,rd.result); _impReport=null;
+      $('impArea').innerHTML=`<b>${esc(f.name)}</b> — ${_impRows.length} row(s) read.<div style="margin-top:8px"><button class="btn sec" onclick="mrpTestImport()">🔍 Test Import</button></div>`; }
+    catch(err){ $('impArea').innerHTML='<span style="color:var(--danger)">Could not read file: '+esc(err.message)+'</span>'; } };
+  if(/\.csv$/i.test(f.name)) rd.readAsText(f); else rd.readAsBinaryString(f);
+}
+async function mrpTestImport(){
+  if(!_impRows){ return; }
+  const prods=await db.list('products',{}); const known=new Set(prods.map(p=>p.sku));
+  let ok=0,unknown=0,bad=0; _impReport=_impRows.map(r=>{ let st='ok'; if(!known.has(r.sku)){st='unknown SKU';unknown++;} else if(isNaN(r.qty)||r.qty<0){st='bad qty';bad++;} else ok++; return {...r,st}; });
+  const issues=_impReport.filter(d=>d.st!=='ok').slice(0,12);
+  $('impArea').innerHTML=`<div style="margin:6px 0"><b style="color:var(--ok)">${ok} valid</b> · <b style="color:var(--danger)">${unknown} unknown SKU</b> · <b style="color:var(--earth)">${bad} bad qty</b> &nbsp;of ${_impRows.length}</div>
+    ${issues.length?`<div style="max-height:180px;overflow:auto"><table style="width:100%;font-size:12px"><thead><tr><th>SKU</th><th class="num">Qty</th><th>Issue</th></tr></thead><tbody>${issues.map(d=>`<tr><td><code>${esc(d.sku)}</code></td><td class="num">${esc(d.qty)}</td><td style="color:var(--danger)">${d.st}</td></tr>`).join('')}</tbody></table></div><div class="hint">Showing first ${issues.length}. Invalid rows are skipped on import.</div>`:'<div class="hint">All rows valid ✅</div>'}
+    <div style="margin-top:12px"><button class="btn" onclick="mrpDoImport()" ${ok?'':'disabled'}>✓ Import ${ok} valid row(s)</button></div>`;
+}
+function mrpDoImport(){ if(!_impReport)return; const valid=_impReport.filter(d=>d.st==='ok');
+  const pd=valid.map(v=>v.plan_date).find(Boolean); if(pd){ const s=String(pd).slice(0,10); if(/^\d{4}-\d\d-\d\d$/.test(s)) MRPDATE=s; }
+  const map={}; valid.forEach(v=>{ map[v.sku]=(map[v.sku]||0)+(+v.qty||0); });
+  closeModal(); applyDemandMap(map); toast('Imported '+valid.length+' demand row(s)'); }
 async function mrpSheetSync(){ const a=AUTOS.sheets_demand;
   if(isLive()){ try{ const rows=await sb('demand?select=sku,qty&plan_date=eq.'+encodeURIComponent(MRPDATE)); if(!rows.length){ toast('No synced demand for '+MRPDATE+' yet — n8n writes it from your sheet',true); return; } const map={}; rows.forEach(r=>{ map[r.sku]=+r.qty||0; }); applyDemandMap(map); toast('Pulled '+rows.length+' demand rows for '+MRPDATE); }catch(e){ toast(e.message,true); } return; }
   if(!a||!a.on||!a.url){ toast('Enable Google Sheets sync in Automations first',true); return; }
