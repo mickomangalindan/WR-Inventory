@@ -183,6 +183,44 @@
   .b-explained{background:#fbe6cf;color:#8a5a12} .b-resolved{background:#dbeddb;color:#1e6b2e}
   .b-draft{background:#eef0f6;color:#40506b} .b-approved{background:#dbeddb;color:#1e6b2e}
   .b-undefined{background:#eef0f6;color:#40506b}
+
+
+/* --- Operations Dashboard (standalone design, scoped to .wrdash) --- */
+.wrdash{--wgrid:#e1e0d9;--wmuted:#898781;--wink:#0b0b0b;--wink2:#52514e;--wbrand:#4e7a3e;--wborder:rgba(11,11,11,.10);--wsurface:#fff;max-width:1180px;margin:0 auto}
+.wrdash .grid{display:grid;gap:14px}
+.wrdash .k6{grid-template-columns:repeat(6,1fr)}
+.wrdash .c2{grid-template-columns:1fr 1fr}
+.wrdash .card{background:var(--wsurface);border:1px solid var(--wborder);border-radius:14px;padding:16px 18px}
+.wrdash .card h2{font-size:13px;font-weight:600;margin:0 0 12px;color:var(--wink2);letter-spacing:.01em}
+.wrdash .kpi .l{font-size:11.5px;color:var(--wmuted);margin-bottom:6px}
+.wrdash .kpi .v{font-size:25px;font-weight:680;letter-spacing:-.01em;font-variant-numeric:tabular-nums;color:var(--wink)}
+.wrdash .kpi .v.accent{color:var(--wbrand)}
+.wrdash .kpi .s{font-size:11.5px;color:var(--wmuted);margin-top:3px}
+.wrdash table{width:100%;border-collapse:collapse;font-size:13px}
+.wrdash th,.wrdash td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--wgrid)}
+.wrdash th{color:var(--wmuted);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.03em}
+.wrdash td.n,.wrdash th.n{text-align:right;font-variant-numeric:tabular-nums}
+.wrdash tr:last-child td{border-bottom:none}
+.wrdash tfoot td{font-weight:700;border-top:2px solid var(--wgrid);border-bottom:none}
+.wrdash .pill{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;font-weight:600}
+.wrdash .pill.warn{background:rgba(208,59,59,.12);color:#d03b3b}
+.wrdash .legend{display:flex;flex-wrap:wrap;gap:9px 16px;margin-top:12px;font-size:12px}
+.wrdash .legend .it{display:flex;align-items:center;gap:6px;color:var(--wink2)}
+.wrdash .sw{width:11px;height:11px;border-radius:3px;flex:none}
+.wrdash .note{color:var(--wmuted);font-size:11.5px;margin-top:9px}
+.wrdash .bar-row{display:flex;align-items:center;gap:10px;margin:9px 0}
+.wrdash .bar-lab{width:150px;font-size:12.5px;color:var(--wink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wrdash .bar-track{flex:1;height:16px;background:var(--wgrid);border-radius:5px;overflow:hidden}
+.wrdash .bar-fill{display:block;height:100%;border-radius:5px}
+.wrdash .bar-val{width:96px;text-align:right;font-size:12.5px;font-variant-numeric:tabular-nums;font-weight:600;color:var(--wink)}
+.wrdash .qrow{display:flex;gap:11px;align-items:center;padding:9px 0;border-bottom:1px solid var(--wgrid);cursor:pointer}
+.wrdash .qrow:last-of-type{border-bottom:none}
+.wrdash .qmark{color:#b23b2e;font-weight:700}
+.wrdash .qq{flex:1;font-size:13px;color:var(--wink)}
+.wrdash .qa{font-size:13px;font-weight:700;white-space:nowrap;text-align:right}
+.wrdash .hint{color:var(--wmuted);font-size:12.5px}
+@media(max-width:900px){.wrdash .k6{grid-template-columns:repeat(2,1fr)}.wrdash .c2{grid-template-columns:1fr}.wrdash .bar-lab{width:110px}}
+
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
@@ -1291,6 +1329,44 @@ async function poConfirmApply(){
   }catch(e){ toast(e.message,true); }
 }
 
+
+// ---- Operations Dashboard helpers (standalone design, inline SVG) ----
+const WSER=['#2a78d6','#008300','#e87ba4','#eda100','#1baf7a','#eb6834','#4a3aa7','#e34948'];
+const WOTHER='#b8b6ad',WGOOD='#0ca30c',WCRIT='#d03b3b',WGRID='#e1e0d9',WMUTED='#898781',WINK='#0b0b0b',WBRAND='#4e7a3e';
+const WR_HISTORY={raw_trend:[{date:"02/06",kg:486.7},{date:"02/13",kg:450.9},{date:"02/20",kg:460.4},{date:"02/27",kg:417.6},{date:"03/06",kg:470.3},{date:"03/13",kg:370.2},{date:"03/19",kg:292.9},{date:"03/27",kg:454.3},{date:"03/30",kg:575.8},{date:"04/10",kg:471.4},{date:"04/17",kg:270.1},{date:"04/25",kg:453.7},{date:"04/30",kg:394.1},{date:"05/01",kg:394.1},{date:"05/08",kg:539.1},{date:"05/15",kg:381.6},{date:"05/22",kg:418.2},{date:"06/08",kg:492.6},{date:"06/19",kg:704.0},{date:"06/26",kg:635.2},{date:"06/30",kg:753.5},{date:"07/10",kg:468.9},{date:"07/17",kg:611.2}],
+  label_trend:[{date:"02/06",n:8972},{date:"02/13",n:8669},{date:"02/28",n:8197},{date:"03/06",n:9286},{date:"03/13",n:10654},{date:"03/19",n:516},{date:"03/30",n:10384},{date:"04/10",n:10653},{date:"04/18",n:9441},{date:"04/27",n:10359},{date:"05/02",n:10214},{date:"05/08",n:9317},{date:"05/15",n:10476},{date:"05/29",n:9930},{date:"06/10",n:9151},{date:"06/25",n:8336},{date:"06/30",n:7912},{date:"07/10",n:5967},{date:"07/18",n:7399}]};
+const wpeso=n=>'₱'+Math.round(n).toLocaleString('en-PH');
+const wkfmt=n=>n>=1000?(n/1000).toFixed(n>=10000?0:1)+'k':(''+Math.round(n));
+function wrDonut(rows){
+  let data=rows.slice(0,7); const restSum=rows.slice(7).reduce((s,r)=>s+r.value,0);
+  if(restSum>0){ const oi=data.findIndex(k=>k.label==='Other'); if(oi>=0) data=data.map((k,i)=>i===oi?{label:'Other',value:k.value+restSum}:k); else data=[...data,{label:'Other',value:restSum}]; }
+  const tot=data.reduce((s,d)=>s+d.value,0)||1; const R=78,r=50,cx=95,cy=95,gap=0.03; let a=-Math.PI/2,paths='';
+  data.forEach((d,i)=>{ const frac=d.value/tot,ang=frac*2*Math.PI,a2=a+ang-gap;
+    const x1=cx+R*Math.cos(a),y1=cy+R*Math.sin(a),x2=cx+R*Math.cos(a2),y2=cy+R*Math.sin(a2);
+    const xi2=cx+r*Math.cos(a2),yi2=cy+r*Math.sin(a2),xi1=cx+r*Math.cos(a),yi1=cy+r*Math.sin(a);
+    const lg=(ang-gap)>Math.PI?1:0; const col=d.label==='Other'?WOTHER:WSER[i%8];
+    paths+='<path d="M'+x1.toFixed(1)+' '+y1.toFixed(1)+' A'+R+' '+R+' 0 '+lg+' 1 '+x2.toFixed(1)+' '+y2.toFixed(1)+' L'+xi2.toFixed(1)+' '+yi2.toFixed(1)+' A'+r+' '+r+' 0 '+lg+' 0 '+xi1.toFixed(1)+' '+yi1.toFixed(1)+' Z" fill="'+col+'"><title>'+esc(d.label)+': '+wpeso(d.value)+'</title></path>'; a+=ang; });
+  const svg='<svg viewBox="0 0 190 190" width="190" height="190" style="display:block;margin:0 auto">'+paths+'<text x="95" y="90" text-anchor="middle" font-size="12" fill="'+WMUTED+'">Total</text><text x="95" y="108" text-anchor="middle" font-size="16" font-weight="700" fill="'+WINK+'">'+wpeso(tot)+'</text></svg>';
+  const leg='<div class="legend">'+data.map((d,i)=>{ const col=d.label==='Other'?WOTHER:WSER[i%8]; return '<span class="it"><span class="sw" style="background:'+col+'"></span>'+esc(d.label)+' · <b style="font-variant-numeric:tabular-nums">'+wpeso(d.value)+'</b></span>'; }).join('')+'</div>';
+  return svg+leg;
+}
+function wrHbars(rows,color,fmt){ const max=Math.max(1,...rows.map(r=>Math.abs(r.value)));
+  return rows.map((r,i)=>{ const c=color||WSER[i%8],w=Math.max(2,Math.abs(r.value)/max*100);
+    return '<div class="bar-row"><span class="bar-lab" title="'+esc(r.label)+'">'+esc(r.label)+'</span><span class="bar-track"><span class="bar-fill" style="width:'+w+'%;background:'+c+'"></span></span><span class="bar-val">'+fmt(r.value)+'</span></div>'; }).join(''); }
+function wrMargins(rows){ const max=Math.max(1,...rows.map(r=>Math.abs(r.margin)));
+  return rows.map(r=>{ const c=r.margin>=0?WGOOD:WCRIT,w=Math.max(2,Math.abs(r.margin)/max*100);
+    return '<div class="bar-row"><span class="bar-lab" title="'+esc(r.name)+'">'+esc(r.name)+'</span><span class="bar-track"><span class="bar-fill" style="width:'+w+'%;background:'+c+'"></span></span><span class="bar-val" style="color:'+c+'">'+(r.margin>0?'+':'')+(Math.round(r.margin*10)/10)+'%</span></div>'; }).join(''); }
+function wrLine(pts,xk,yk,color){ if(!pts||pts.length<2) return '<div class="hint">Not enough history yet.</div>';
+  const W=440,H=170,pl=44,pr=14,pt=12,pb=26; const ys=pts.map(p=>p[yk]); const mx=Math.max(...ys,1),mn=0;
+  const px=i=>pl+i/(pts.length-1)*(W-pl-pr), py=v=>H-pb-((v-mn)/((mx-mn)||1))*(H-pt-pb);
+  let grid=''; for(let g=0;g<=4;g++){ const v=mx*g/4,y=py(v); grid+='<line x1="'+pl+'" y1="'+y.toFixed(1)+'" x2="'+(W-pr)+'" y2="'+y.toFixed(1)+'" stroke="'+WGRID+'" stroke-width="1"/><text x="'+(pl-6)+'" y="'+(y+3).toFixed(1)+'" text-anchor="end" font-size="10" fill="'+WMUTED+'">'+wkfmt(v)+'</text>'; }
+  let d=''; pts.forEach((p,i)=>{ d+=(i?'L':'M')+px(i).toFixed(1)+' '+py(p[yk]).toFixed(1)+' '; });
+  const area='M'+px(0).toFixed(1)+' '+py(0).toFixed(1)+' '+pts.map((p,i)=>'L'+px(i).toFixed(1)+' '+py(p[yk]).toFixed(1)).join(' ')+' L'+px(pts.length-1).toFixed(1)+' '+py(0).toFixed(1)+' Z';
+  let xl=''; const step=Math.max(1,Math.ceil(pts.length/6)); pts.forEach((p,i)=>{ if(i%step===0||i===pts.length-1) xl+='<text x="'+px(i).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="9.5" fill="'+WMUTED+'">'+esc(p[xk])+'</text>'; });
+  const last=pts[pts.length-1];
+  return '<svg viewBox="0 0 '+W+' '+H+'" width="100%" height="'+H+'">'+grid+'<path d="'+area+'" fill="'+color+'" opacity=".08"/><path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="'+px(pts.length-1).toFixed(1)+'" cy="'+py(last[yk]).toFixed(1)+'" r="3.5" fill="'+color+'"/><text x="'+px(pts.length-1).toFixed(1)+'" y="'+(py(last[yk])-8).toFixed(1)+'" text-anchor="end" font-size="11" font-weight="700" fill="'+WINK+'">'+wkfmt(last[yk])+'</text>'+xl+'</svg>';
+}
+
 async function renderDashboard(){
   $('crumb').innerHTML='<b>Dashboard</b>';
   $('cp').innerHTML=`<div class="title">Operations Dashboard</div><div class="sp"></div>
@@ -1304,64 +1380,81 @@ async function renderDashboard(){
   try{ vars=await db.list('variance_log',{}); }catch(e){}
   try{ stockRows=await db.list('stock_balance',{}); }catch(e){}
   const active=r=>r.active!==false;
-  // stock map + value
-  const stock={}; let stockVal=0;
-  stockRows.forEach(s=>{ stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); stockVal+=(+s.stock_value||0); });
-  // inventory health — ingredients below PAR
-  const below=ing.filter(active).filter(i=>(+i.par_g||0)>0 && (stock[i.sku]||0) < (+i.par_g||0))
-    .map(i=>({name:i.name,need:(+i.par_g||0)-(stock[i.sku]||0),par:+i.par_g||0})).sort((a,b)=>b.need-a.need);
-  // product cost & margin
+  const prodBy={}; prod.forEach(p=>prodBy[p.sku]=p);
+  const LOCNAME={bulacan:'Bulacan',pasig:'Pasig'};
+  const stock={}; let stockVal=0; const siteVal={}; const famVal={};
+  stockRows.forEach(s=>{ stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);
+    const v=+s.stock_value||0; stockVal+=v; siteVal[s.location_code]=(siteVal[s.location_code]||0)+v;
+    if(s.kind==='product'){ const p=prodBy[s.ref_sku]; const fam=(p&&p.family)||'Other'; famVal[fam]=(famVal[fam]||0)+v; } });
+  const fgVal=stockRows.filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.stock_value||0),0);
+  const rawVal=stockRows.filter(s=>s.kind==='ingredient').reduce((a,s)=>a+(+s.stock_value||0),0);
+  const packs=stockRows.filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.on_hand||0),0);
+  const fgSkus=new Set(stockRows.filter(s=>s.kind==='product'&&(+s.on_hand||0)!==0).map(s=>s.ref_sku)).size;
+  const rawItems=new Set(stockRows.filter(s=>s.kind==='ingredient'&&(+s.on_hand||0)!==0).map(s=>s.ref_sku)).size;
+  const supItems=ing.filter(active).filter(i=>(''+(i.category||'')).toLowerCase()==='supplies').length;
   const costOf=p=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=ing.find(i=>i.sku===b.ingredient_sku)||{}; const y=(+it.yield_pct||100)/100; c+=((+b.usable_g||0)/(y||1))/1000*(+it.list_price_kg||0); }); return c; };
   const withMargin=prod.filter(active).map(p=>{ const c=costOf(p), sell=+p.sell_price||0; return {name:p.name,cost:c,sell,margin:sell?((sell-c)/sell*100):null}; });
-  const topMargin=withMargin.filter(x=>x.margin!=null).sort((a,b)=>b.margin-a.margin).slice(0,6);
-  const thinMargin=withMargin.filter(x=>x.margin!=null).sort((a,b)=>a.margin-b.margin).slice(0,5);
-  // movement velocity (outbound = issues, sales, transfers, waste)
-  const OUT=['issue_to_batch','sale','transfer_out','waste','count_adjust'];
-  const outByRef={}; mov.forEach(m=>{ if(OUT.includes(m.movement_type)){ const q=Math.abs(+m.qty||0); outByRef[m.ref_sku]=(outByRef[m.ref_sku]||0)+q; } });
-  const nameOf=sku=>{ const p=prod.find(x=>x.sku===sku); if(p)return p.name; const i=ing.find(x=>x.sku===sku); return i?i.name:sku; };
-  const velocity=Object.keys(outByRef).map(k=>({name:nameOf(k),qty:outByRef[k]})).sort((a,b)=>b.qty-a.qty);
-  const fast=velocity.slice(0,5), slow=velocity.slice(-5).reverse();
-  // variances open by check
+  const topMargin=withMargin.filter(x=>x.margin!=null&&x.cost>0).sort((a,b)=>b.margin-a.margin).slice(0,8);
+  const thinMargin=withMargin.filter(x=>x.margin!=null&&x.cost>0).sort((a,b)=>a.margin-b.margin).slice(0,8);
   const openVars=vars.filter(v=>v.status==='open');
   const varVal=openVars.reduce((s,v)=>s+Math.abs(+v.gap_value||0),0);
-  const byCheck={}; openVars.forEach(v=>{ byCheck[v.check_type]=(byCheck[v.check_type]||0)+Math.abs(+v.gap_value||0); });
-  const varRows=Object.keys(byCheck).map(k=>({name:k,v:byCheck[k]})).sort((a,b)=>b.v-a.v);
-  const openPo=po.filter(p=>p.status==='open').length;
-  // ---- render ----
-  const GREEN='#4e7a3e', EARTH='#b5762a', RED='#b23b2e';
-  const kpi=(l,v,s,c)=>`<div class="kpi"><div class="l">${l}</div><div class="v" ${c?`style="color:${c}"`:''}>${v}</div><div class="s">${s||''}</div></div>`;
-  const money=n=>'₱'+Math.round(n).toLocaleString('en-PH');
-  const bar=(label,valTxt,frac,color)=>`<div style="margin:5px 0"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${esc(label)}</span><b>${valTxt}</b></div><div style="height:7px;background:#eee;border-radius:4px;overflow:hidden;margin-top:2px"><div style="height:100%;width:${Math.max(3,Math.round(frac*100))}%;background:${color}"></div></div></div>`;
-  const panel=(title,body,onclick)=>`<div class="repcard" ${onclick?`style="cursor:pointer" onclick="${onclick}"`:''}><h3 style="margin:0 0 10px;font-size:15px">${title}</h3>${body}</div>`;
-  const list0='<div class="hint">No data yet.</div>';
+  const openPo=po.filter(p=>p.status==='open'||p.status==='confirmed').length;
+  // labels to reorder (per site, below par)
+  const reorder=[]; prod.forEach(p=>{ [['bulacan','Bulacan'],['pasig','Pasig']].forEach(sc=>{ const oh=+p['sticker_'+sc[0]+'_on_hand']||0, par=+p['sticker_'+sc[0]+'_par']||0; if(par>0 && oh<par) reorder.push({name:p.name+(oh||par?'':''),cur:oh,par,order:par-oh,site:sc[1]}); }); });
+  reorder.sort((a,b)=>b.order-a.order);
+  // family rollup
+  let famArr=Object.keys(famVal).map(k=>({label:k,value:famVal[k]})).sort((a,b)=>b.value-a.value);
+  const famTot=famArr.reduce((s,f)=>s+f.value,0);
+  const siteArr=Object.keys(siteVal).map(k=>({label:(LOCNAME[k]||k)+(k==='pasig'?' (finished goods)':k==='bulacan'?' (raw materials)':''),value:siteVal[k]})).sort((a,b)=>b.value-a.value);
+  const mh=moneyHidden();
+  // ---- owner 6 questions ----
+  let _tl=[],_pb=[],_bi=[],_pol=[],_dl=[];
+  try{_tl=await db.list('transfer_lines',{})}catch(e){}
+  try{_pb=await db.list('production_batches',{})}catch(e){}
+  try{_bi=await db.list('batch_issues',{})}catch(e){}
+  try{_pol=await db.list('po_lines',{})}catch(e){}
+  try{_dl=await db.list('delivery_lines',{})}catch(e){}
+  const _sum=(a,f)=>a.reduce((s,x)=>s+(+f(x)||0),0);
+  const q1o=_sum(_pol,l=>l.ordered_kg), q1r=_sum(_pol,l=>l.received_kg); const q1=q1o?Math.round(q1r/q1o*100):null;
+  const q2=_sum(_bi,z=>z.actual_raw_g)-_sum(_bi,z=>z.expected_raw_g);
+  const q3s=_sum(_tl,l=>l.sent_packs), q3r=_sum(_tl,l=>l.received_packs); const q3=q3s?Math.round(q3r/q3s*100):null;
+  const q4d=_sum(_dl,l=>l.dispatched_packs), q4c=_sum(_dl,l=>l.confirmed_packs); const q4=q4d?Math.round(q4c/q4d*100):null;
+  const _ic={}; ing.forEach(i=>_ic[i.sku]=+i.moving_avg_cost_kg||+i.list_price_kg||0);
+  const _openB=new Set(_pb.filter(b=>b.status!=='confirmed').map(b=>b.batch_ref)); let wipV=0;
+  _bi.forEach(z=>{ if(_openB.has(z.batch_ref)) wipV+=(+z.actual_raw_g||+z.expected_raw_g||0)/1000*(_ic[z.ingredient_sku]||0); });
+  const _lossLocs=new Set(openVars.map(v=>v.location||'—')); const _na='<span class="hint">no data yet</span>';
+  const qrow=(q,ans,tone)=>`<div class="qrow" onclick="openModel('reporting')"><span class="qmark">?</span><span class="qq">${q}</span><span class="qa"${tone?` style="color:${tone}"`:''}>${ans}</span></div>`;
+  const ownerCard=`<div class="card" style="margin-bottom:14px"><h2>The 6 questions — answered from live data</h2>
+    ${qrow('Was what we ordered actually received — and does it match what we paid?', q1==null?_na:(q1+'% received'+(q1<100?' · short':' ✅')), q1!=null&&q1<100?WBRAND:null)}
+    ${qrow('Were the ingredients fully used, or skimmed / wasted?', _bi.length?((q2>0?'+':'')+kgf(q2)+' vs expected'):_na, q2>0?'#b5762a':null)}
+    ${qrow('Did everything produced actually reach Pasig?', q3==null?_na:(q3+'% of sent arrived'+(q3<100?'':' ✅')), q3!=null&&q3<100?WCRIT:null)}
+    ${qrow('Did everything sent actually reach the customer?', q4==null?_na:(q4+'% delivered'+(q4<100?'':' ✅')), q4!=null&&q4<100?WCRIT:null)}
+    ${qrow('Where exactly are waste, loss, and theft happening?', openVars.length?(openVars.length+' open'+(mh?'':' · '+wpeso(varVal))+' · '+_lossLocs.size+' site'+(_lossLocs.size===1?'':'s')):'none open ✅', openVars.length?WCRIT:null)}
+    ${qrow('What is our stock really worth — raw, in production, finished?', mh?'<span class="hint">hidden for role</span>':(wpeso(rawVal)+' raw · '+wpeso(wipV)+' WIP · '+wpeso(fgVal)+' finished'))}
+    <div class="note">Tap any question to open its full report in Reports → Standard.</div></div>`;
+  // ---- render (standalone layout) ----
+  const card=(t,b)=>`<div class="card"><h2>${t}</h2>${b}</div>`;
+  const kpi=(l,v,s,accent)=>`<div class="card kpi"><div class="l">${l}</div><div class="v${accent?' accent':''}">${v}</div><div class="s">${s||''}</div></div>`;
+  const kpis = mh
+    ? [kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units',true),kpi('Finished SKUs',fgSkus,'with stock'),kpi('Ingredients',rawItems,'with stock'),kpi('Items to reorder',reorder.length,'labels below par'),kpi('Open POs',openPo,po.length+' total'),kpi('Supplies tracked',supItems,'consumables')].join('')
+    : [kpi('Total inventory value',wpeso(fgVal+rawVal),'finished + raw',true),kpi('Finished goods · Pasig',wpeso(fgVal),Math.round(packs).toLocaleString()+' packs · '+fgSkus+' SKUs'),kpi('Raw materials · Bulacan',wpeso(rawVal),rawItems+' ingredients'),kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units'),kpi('Items to reorder',reorder.length,'labels below par'),kpi('Supplies tracked',supItems,'consumables')].join('');
+  const donutBody = (!mh && famArr.length)? wrDonut(famArr) : (mh? '<div class="hint">Value hidden for your role. Packs on hand: <b>'+Math.round(packs).toLocaleString()+'</b></div>' : '<div class="hint">No finished-goods value yet — seed or receive stock to see this.</div>');
+  const siteBody = (!mh && siteArr.length)? wrHbars(siteArr,WBRAND,wpeso) : '<div class="hint">Value hidden for your role.</div>';
+  const rawlineBody = wrLine(WR_HISTORY.raw_trend,'date','kg',WSER[4])+'<p class="note">Weekly commissary counts, Feb–Jul 2026 (historical).</p>';
+  const lablineBody = wrLine(WR_HISTORY.label_trend,'date','n',WSER[0])+'<p class="note">Sticker inventory drawdown ≈ packing activity (historical).</p>';
+  const reorderBody = reorder.length? '<table><thead><tr><th>Item</th><th>Site</th><th class="n">On hand</th><th class="n">Par</th><th class="n">Order</th><th></th></tr></thead><tbody>'+reorder.slice(0,12).map(r=>'<tr><td>'+esc(r.name)+'</td><td>'+r.site+'</td><td class="n">'+r.cur+'</td><td class="n">'+r.par+'</td><td class="n"><b>'+r.order+'</b></td><td><span class="pill warn">reorder</span></td></tr>').join('')+'</tbody></table>' : '<div class="hint">All labels at or above PAR ✅. Set a Label PAR on products (Bulacan / Pasig) to track sticker reorders.</div>';
+  const famBody = (!mh && famArr.length)? '<table><thead><tr><th>Category</th><th class="n">Value</th><th class="n">Share</th></tr></thead><tbody>'+famArr.map(f=>'<tr><td>'+esc(f.label)+'</td><td class="n">'+wpeso(f.value)+'</td><td class="n">'+(famTot?Math.round(f.value/famTot*100):0)+'%</td></tr>').join('')+'</tbody><tfoot><tr><td>Total finished goods</td><td class="n">'+wpeso(famTot)+'</td><td class="n">100%</td></tr></tfoot></table>' : '';
 
-  const belowBody = below.length? below.slice(0,6).map(b=>bar(b.name,kgf(b.need)+' short',b.need/(below[0].need||1),EARTH)).join('') : '<div class="hint">All ingredients at or above PAR ✅</div>';
-  const topBody = topMargin.length? topMargin.map(t=>bar(t.name,Math.round(t.margin)+'%',t.margin/100,GREEN)).join('') : list0;
-  const thinBody = thinMargin.length? `<table style="width:100%;font-size:12.5px"><tbody>${thinMargin.map(t=>`<tr><td>${esc(t.name)}</td><td class="num" style="color:${t.margin<25?'var(--danger)':'var(--muted)'}">${Math.round(t.margin)}%</td></tr>`).join('')}</tbody></table>` : list0;
-  const fastBody = fast.length? fast.map(f=>bar(f.name,kgf(f.qty),f.qty/(fast[0].qty||1),GREEN)).join('') : '<div class="hint">No stock movements recorded yet — this fills in as you receive, produce and deliver.</div>';
-  const varBody = varRows.length? varRows.map(v=>bar(v.name,money(v.v),v.v/(varRows[0].v||1),RED)).join('') : '<div class="hint">No open variances ✅</div>';
-
-  const mh=moneyHidden();   // hide money panels for roles whose field policy hides cost/price
-  const varBar=varRows.length? varRows.map(v=>bar(v.name, mh?String(Math.round(v.v)):money(v.v), v.v/(varRows[0].v||1), RED)).join('') : '<div class="hint">No open variances ✅</div>';
-  $('content').innerHTML=`<div class="dash">
-    <div class="kpirow">
-      ${mh?kpi('Below PAR',below.length,below.length?'need reorder':'all stocked',below.length?EARTH:null):kpi('Stock value',isLive()?money(stockVal):'—',isLive()?'live, both sites':'connect to see')}
-      ${mh?kpi('Products',prod.filter(active).length,'active'):kpi('Below PAR',below.length, below.length?'ingredients need reorder':'all stocked', below.length?EARTH:null)}
-      ${kpi('Open POs',openPo, po.length+' total')}
-      ${kpi('Open variances',openVars.length, (varVal&&!mh)?money(varVal)+' at risk':'to resolve', openVars.length?RED:null)}
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
-      ${panel('🩺 Inventory health — below PAR', belowBody, "openModel('ingredients')")}
-      ${mh?'':panel('💹 Top products by margin', topBody, "openModel('products')")}
-      ${panel('⚡ Fast-moving', fastBody)}
-      ${panel('⚠ Open variances by check'+((varVal&&!mh)?' · '+money(varVal):''), varBar, "openModel('variance_log')")}
-      ${mh?'':panel('🐢 Thin-margin watch', thinBody, "openModel('products')")}
-      ${panel('🔗 Jump to', `<div class="qcards" style="margin:0">
-        <div class="qcard" onclick="openModel('stock_balance')"><div class="ic">📦</div><div><div class="t">Live Stock</div><div class="d">On-hand &amp; value</div></div></div>
-        <div class="qcard" onclick="openModel('count_sessions')"><div class="ic">🧮</div><div><div class="t">Weekly Inventory</div><div class="d">Count &amp; approve</div></div></div>
-        <div class="qcard" onclick="openModel('variance_log')"><div class="ic">⚠</div><div><div class="t">Variances</div><div class="d">Resolve gaps</div></div></div>
-      </div>`)}
-    </div></div>`;
+  $('content').innerHTML=`<div class="wrdash">
+    <div class="grid k6" style="margin-bottom:14px">${kpis}</div>
+    ${ownerCard}
+    <div class="grid c2" style="margin-bottom:14px">${card('Inventory value by category',donutBody)}${card('Where the value sits (by site)',siteBody)}</div>
+    <div class="grid c2" style="margin-bottom:14px">${card('Raw-material stock over time (kg)',rawlineBody)}${card('Label stock over time (pcs)',lablineBody)}</div>
+    ${mh?'':`<div class="grid c2" style="margin-bottom:14px">${card('Best margins',wrMargins(topMargin))}${card('Thin &amp; negative margins — review pricing',wrMargins(thinMargin))}</div>`}
+    ${mh
+      ? `<div class="grid" style="margin-bottom:14px">${card('To reorder now (labels below par)',reorderBody)}</div>`
+      : `<div class="grid c2" style="margin-bottom:14px">${card('To reorder now (labels below par)',reorderBody)}${card('Inventory value by category — full picture',famBody)}</div>`}
+  </div>`;
 }
 async function renderKanban(){
   controlPanel(); const m=MODELS[state.model]; if(!m.status) return renderList();
@@ -1601,14 +1694,141 @@ async function renderReporting(){
   if(repTab==='standard') return renderStdReports();
   return renderCustomReports();
 }
+
+async function _L(t){ try{ return await db.list(t,{}); }catch(e){ return []; } }
+function _mnum(v){ return moneyHidden()? '—' : fmt(v); }
+function _tfoot(cells){ return '<tbody style="border-top:2px solid var(--line,#ddd)"><tr>'+cells.map(c=>'<td'+(c.n?' class="num"':'')+'><b>'+c.v+'</b></td>').join('')+'</tr></tbody>'; }
+// Q1 — ordered vs received vs paid (3-way match, Check 1)
+async function rptReceiving(){
+  const po=await _L('purchase_orders'), pol=await _L('po_lines'), gr=await _L('goods_receipts'), grl=await _L('gr_lines'), inv=await _L('supplier_invoices');
+  const grefPo={}; gr.forEach(g=>grefPo[g.gr_ref]=g.po_ref);
+  const grVal={}; grl.forEach(l=>{ const p=grefPo[l.gr_ref]; if(p) grVal[p]=(grVal[p]||0)+((+l.received_kg||0)*(+l.price_kg||0)); });
+  const invVal={}; inv.forEach(i=>{ if(i.po_ref) invVal[i.po_ref]=(invVal[i.po_ref]||0)+(+i.amount||0); });
+  const rows=po.map(p=>{ const ls=pol.filter(l=>l.po_ref===p.po_ref);
+    const ordKg=ls.reduce((s,l)=>s+(+l.ordered_kg||0),0), ordV=ls.reduce((s,l)=>s+((+l.ordered_kg||0)*(+l.price_kg||0)),0);
+    const rcvKg=ls.reduce((s,l)=>s+(+l.received_kg||0),0); let rcvV=ls.reduce((s,l)=>s+((+l.received_kg||0)*(+l.price_kg||0)),0);
+    if(!rcvV && grVal[p.po_ref]) rcvV=grVal[p.po_ref];
+    return {ref:p.po_ref,sup:p.supplier_name||'',st:p.status,ordKg,ordV,rcvKg,rcvV,inv:invVal[p.po_ref]||0,gap:rcvV-ordV}; }).filter(r=>r.ordV>0||r.rcvV>0);
+  const flag=r=>{ if(r.rcvKg+0.001<r.ordKg) return '<span class="pill" style="background:rgba(178,59,46,.12);color:var(--danger)">short</span>';
+    if(r.inv>0 && Math.abs(r.inv-r.rcvV)>1) return '<span class="pill" style="background:rgba(181,118,42,.15);color:var(--earth,#b5762a)">price gap</span>';
+    return '<span class="pill" style="background:rgba(78,122,62,.14);color:var(--ok,#4e7a3e)">matched</span>'; };
+  const T={ordKg:0,rcvKg:0,ordV:0,rcvV:0,inv:0,gap:0}; rows.forEach(r=>{for(const k in T)T[k]+=r[k]||0;});
+  let h=`<div class="repcard"><h3 style="margin:0 0 4px">Ordered → received → paid (3-way match)</h3><div class="hint" style="margin-bottom:8px">Answers: “was what we ordered actually received, and does it match what we paid?” — every open/closed PO, line-rolled.</div>
+   <table><thead><tr><th>PO</th><th>Supplier</th><th>Status</th><th class="num">Ordered kg</th><th class="num">Recv kg</th><th class="num">Ordered ₱</th><th class="num">Received ₱</th><th class="num">Invoiced ₱</th><th class="num">Gap ₱</th><th></th></tr></thead><tbody>`;
+  rows.forEach(r=>{ h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.sup)}</td><td>${esc(r.st||'')}</td><td class="num">${num(r.ordKg)}</td><td class="num">${num(r.rcvKg)}</td><td class="num">${_mnum(r.ordV)}</td><td class="num">${_mnum(r.rcvV)}</td><td class="num">${r.inv?_mnum(r.inv):'<span style="color:var(--muted)">—</span>'}</td><td class="num" ${r.gap<0?'style="color:var(--danger)"':''}>${_mnum(r.gap)}</td><td>${flag(r)}</td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="10" class="empty">No purchase orders with lines yet.</td></tr>';
+  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' PO(s)'},{v:''},{v:''},{v:num(T.ordKg),n:1},{v:num(T.rcvKg),n:1},{v:_mnum(T.ordV),n:1},{v:_mnum(T.rcvV),n:1},{v:_mnum(T.inv),n:1},{v:_mnum(T.gap),n:1},{v:''}])+`</table><div class="pager">Invoiced column fills as supplier invoices are logged; “price gap” = invoice ≠ received value.</div></div>`;
+  return h;
+}
+// Q2 — ingredients fully used, or skimmed/wasted (Check 2/3)
+async function rptUsage(){
+  const b=await _L('production_batches'), iss=await _L('batch_issues'), prod=await _L('products'), ing=await _L('ingredients');
+  const pn={}; prod.forEach(p=>pn[p.sku]=p.name); const ic={}; ing.forEach(i=>ic[i.sku]=+i.moving_avg_cost_kg||+i.list_price_kg||0);
+  const rows=b.map(x=>{ const li=iss.filter(z=>z.batch_ref===x.batch_ref);
+    const exp=li.reduce((s,z)=>s+(+z.expected_raw_g||0),0), act=li.reduce((s,z)=>s+(+z.actual_raw_g||0),0);
+    const over=act-exp; let overCost=0; li.forEach(z=>{ overCost+=((+z.actual_raw_g||0)-(+z.expected_raw_g||0))/1000*(ic[z.ingredient_sku]||0); });
+    return {ref:x.batch_ref,prod:pn[x.product_sku]||x.product_sku,exp,act,over,pct:exp?over/exp*100:0,overCost,waste:+x.waste_g||0,good:+x.good_packs||0,rej:+x.reject_packs||0}; })
+    .filter(r=>r.exp||r.act||r.good);
+  const flag=r=>{ if(r.pct>3) return '<span class="pill" style="background:rgba(178,59,46,.12);color:var(--danger)">over-use</span>';
+    if(r.pct<-3) return '<span class="pill" style="background:rgba(78,122,62,.14);color:var(--ok,#4e7a3e)">under</span>'; return '<span class="pill" style="background:rgba(0,0,0,.06);color:var(--muted)">on target</span>'; };
+  const T={exp:0,act:0,over:0,overCost:0,waste:0,good:0,rej:0}; rows.forEach(r=>{for(const k in T)T[k]+=r[k]||0;});
+  let h=`<div class="repcard"><h3 style="margin:0 0 4px">Ingredient usage &amp; yield per batch</h3><div class="hint" style="margin-bottom:8px">Answers: “were the ingredients fully used, or skimmed / wasted?” — actual raw drawn vs the recipe, costed.</div>
+   <table><thead><tr><th>Batch</th><th>Product</th><th class="num">Expected raw</th><th class="num">Actual raw</th><th class="num">Δ over-use</th><th class="num">Δ %</th><th class="num">Over-use ₱</th><th class="num">Waste</th><th class="num">Good/Rej</th><th></th></tr></thead><tbody>`;
+  rows.forEach(r=>{ h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.prod)}</td><td class="num">${kgf(r.exp)}</td><td class="num">${kgf(r.act)}</td><td class="num" ${r.over>0?'style="color:var(--danger)"':''}>${(r.over>0?'+':'')+kgf(r.over)}</td><td class="num" ${r.pct>3?'style="color:var(--danger)"':''}>${(r.pct>0?'+':'')+Math.round(r.pct)}%</td><td class="num">${_mnum(r.overCost)}</td><td class="num">${kgf(r.waste)}</td><td class="num">${r.good}/${r.rej}</td><td>${flag(r)}</td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="10" class="empty">No production batches yet.</td></tr>';
+  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' batch(es)'},{v:''},{v:kgf(T.exp),n:1},{v:kgf(T.act),n:1},{v:(T.over>0?'+':'')+kgf(T.over),n:1},{v:'',n:1},{v:_mnum(T.overCost),n:1},{v:kgf(T.waste),n:1},{v:T.good+'/'+T.rej,n:1},{v:''}])+`</table><div class="pager">Over-use ₱ = the peso value of raw drawn beyond the recipe (skim / spillage / waste).</div></div>`;
+  return h;
+}
+// Q3 — did everything produced reach Pasig (Check 4)
+async function rptToPasig(){
+  const tl=await _L('transfer_lines'), mov=await _L('inventory_movements'), prod=await _L('products');
+  const pn={}; prod.forEach(p=>pn[p.sku]=p.name);
+  const produced={}; mov.forEach(m=>{ if(m.movement_type==='batch_output') produced[m.ref_sku]=(produced[m.ref_sku]||0)+(+m.qty||0); });
+  const rows=tl.map(l=>({ref:l.transfer_ref,prod:pn[l.product_sku]||l.product_sku,sent:+l.sent_packs||0,rcv:+l.received_packs||0,gap:(+l.received_packs||0)-(+l.sent_packs||0)}));
+  const tSent=rows.reduce((s,r)=>s+r.sent,0), tRcv=rows.reduce((s,r)=>s+r.rcv,0), tProd=Object.values(produced).reduce((s,v)=>s+v,0), tGap=tRcv-tSent;
+  const flag=r=>r.gap<0?'<span class="pill" style="background:rgba(178,59,46,.12);color:var(--danger)">short '+r.gap+'</span>':'<span class="pill" style="background:rgba(78,122,62,.14);color:var(--ok,#4e7a3e)">full</span>';
+  let h=`<div class="repcard"><h3 style="margin:0 0 4px">Produced → sent → received at Pasig</h3><div class="hint" style="margin-bottom:8px">Answers: “did everything produced actually reach Pasig?”</div>
+   <table><thead><tr><th>Transfer</th><th>Product</th><th class="num">Sent</th><th class="num">Received</th><th class="num">Gap</th><th class="num">Arrival %</th><th></th></tr></thead><tbody>`;
+  rows.forEach(r=>{ h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.prod)}</td><td class="num">${r.sent}</td><td class="num">${r.rcv}</td><td class="num" ${r.gap<0?'style="color:var(--danger)"':''}>${r.gap}</td><td class="num">${r.sent?Math.round(r.rcv/r.sent*100):0}%</td><td>${flag(r)}</td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="7" class="empty">No transfers yet.</td></tr>';
+  h+='</tbody>'+_tfoot([{v:'Total'},{v:'produced '+tProd},{v:tSent,n:1},{v:tRcv,n:1},{v:tGap,n:1},{v:(tSent?Math.round(tRcv/tSent*100):0)+'%',n:1},{v:''}])+`</table><div class="pager">Produced ${tProd} · sent ${tSent} · received ${tRcv} packs. A gap between produced and sent means finished stock still at Bulacan.</div></div>`;
+  return h;
+}
+// Q4 — did everything sent reach the customer (Check 5)
+async function rptDelivery(){
+  const d=await _L('deliveries'), dl=await _L('delivery_lines'), prod=await _L('products');
+  if(!dl.length) return `<div class="repcard"><h3 style="margin:0 0 4px">Dispatched → delivered</h3><div class="hint">No deliveries recorded yet. Once you log deliveries (or sync Shopify fulfillments), this reconciles dispatched vs customer-confirmed packs, per delivery and per customer, and flags shortfalls.</div></div>`;
+  const pn={}; prod.forEach(p=>pn[p.sku]=p.name); const dc={}; d.forEach(x=>dc[x.delivery_ref]=x.customer||'');
+  const rows=dl.map(l=>({ref:l.delivery_ref,cust:dc[l.delivery_ref]||'',prod:pn[l.product_sku]||l.product_sku,disp:+l.dispatched_packs||0,conf:+l.confirmed_packs||0,ret:+l.returned_packs||0}));
+  const T={disp:0,conf:0,ret:0}; rows.forEach(r=>{for(const k in T)T[k]+=r[k];});
+  let h=`<div class="repcard"><h3 style="margin:0 0 4px">Dispatched → delivered</h3><div class="hint" style="margin-bottom:8px">Answers: “did everything sent actually reach the customer?”</div>
+   <table><thead><tr><th>Delivery</th><th>Customer</th><th>Product</th><th class="num">Dispatched</th><th class="num">Confirmed</th><th class="num">Returned</th><th class="num">Short</th></tr></thead><tbody>`;
+  rows.forEach(r=>{ const sh=r.disp-r.conf-r.ret; h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.cust)}</td><td>${esc(r.prod)}</td><td class="num">${r.disp}</td><td class="num">${r.conf}</td><td class="num">${r.ret}</td><td class="num" ${sh>0?'style="color:var(--danger)"':''}>${sh>0?sh:'—'}</td></tr>`; });
+  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' line(s)'},{v:''},{v:''},{v:T.disp,n:1},{v:T.conf,n:1},{v:T.ret,n:1},{v:(T.disp-T.conf-T.ret)||'—',n:1}])+`</table><div class="pager">${T.disp} dispatched · ${T.conf} confirmed${T.disp?' ('+Math.round(T.conf/T.disp*100)+'% delivered)':''}.</div></div>`;
+  return h;
+}
+// Q5 — where waste, loss & theft are happening
+async function rptLossMap(){
+  const v=await _L('variance_log');
+  const roll=(key)=>{ const o={}; v.forEach(x=>{ const k=x[key]||'—'; const g=o[k]||(o[k]={n:0,open:0,val:0}); g.n++; if(x.status==='open')g.open++; g.val+=Math.abs(+x.gap_value||0); }); return Object.entries(o).sort((a,b)=>b[1].val-a[1].val); };
+  const tbl=(rows,lab)=>`<table><thead><tr><th>${lab}</th><th class="num">#</th><th class="num">Open</th><th class="num">₱ at risk</th></tr></thead><tbody>${rows.map(([k,o])=>`<tr><td>${esc(k)}</td><td class="num">${o.n}</td><td class="num">${o.open}</td><td class="num">${_mnum(o.val)}</td></tr>`).join('')||'<tr><td colspan="4" class="empty">No variances logged ✅</td></tr>'}</tbody></table>`;
+  const tot=v.reduce((s,x)=>s+Math.abs(+x.gap_value||0),0);
+  // full detail
+  const det=[...v].sort((a,b)=>Math.abs(+b.gap_value||0)-Math.abs(+a.gap_value||0));
+  const stpill=s=>{ const c=s==='resolved'?'rgba(78,122,62,.14);color:var(--ok,#4e7a3e)':s==='explained'?'rgba(181,118,42,.15);color:var(--earth,#b5762a)':'rgba(178,59,46,.12);color:var(--danger)'; return '<span class="pill" style="background:'+c+'">'+esc(s||'open')+'</span>'; };
+  let detail=`<table style="margin-top:12px"><thead><tr><th>Date</th><th>Check</th><th>Source</th><th>Location</th><th class="num">Gap qty</th><th class="num">₱</th><th>Owner</th><th></th></tr></thead><tbody>`+
+    det.map(x=>`<tr><td>${esc((''+(x.created_at||'')).slice(0,10))}</td><td>${esc(x.check_type||'')}</td><td><code>${esc(x.source_ref||'')}</code></td><td>${esc(x.location||'')}</td><td class="num">${num(+x.gap_qty||0)}</td><td class="num" style="color:var(--danger)">${_mnum(Math.abs(+x.gap_value||0))}</td><td>${esc(x.responsible_user||'')}</td><td>${stpill(x.status)}</td></tr>`).join('')||'<tr><td colspan="8" class="empty">Nothing logged ✅</td></tr>'+`</tbody></table>`;
+  detail+='</tbody></table>';
+  return `<div class="repcard"><h3 style="margin:0 0 4px">Where waste, loss &amp; theft are happening</h3><div class="hint" style="margin-bottom:8px">Answers: “where exactly are waste, loss, and theft happening?” — every gap, rolled up and line by line.</div>
+   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+     <div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">BY LOCATION</div>${tbl(roll('location'),'Location')}</div>
+     <div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">BY CHECK TYPE</div>${tbl(roll('check_type'),'Check')}</div>
+   </div>
+   <div style="font-size:12px;color:var(--muted);margin:14px 0 2px">EVERY VARIANCE (most costly first)</div>${detail}
+   <div class="pager">Total ${_mnum(tot)} at risk across ${v.length} logged variance(s).</div></div>`;
+}
+// Q6 — what is stock really worth, by stage
+async function rptStockStage(){
+  const sb=await _L('stock_balance'), b=await _L('production_batches'), iss=await _L('batch_issues'), ing=await _L('ingredients');
+  const ic={}; ing.forEach(i=>ic[i.sku]=+i.moving_avg_cost_kg||+i.list_price_kg||0);
+  let raw=0,fin=0; const finBy={}; sb.forEach(s=>{ const val=+s.stock_value||0; if(s.kind==='ingredient')raw+=val; else if(s.kind==='product'){ fin+=val; finBy[s.location_code]=(finBy[s.location_code]||0)+val; } });
+  const openB=new Set(b.filter(x=>x.status!=='confirmed').map(x=>x.batch_ref)); let wip=0;
+  iss.forEach(z=>{ if(openB.has(z.batch_ref)) wip+=(+z.actual_raw_g||+z.expected_raw_g||0)/1000*(ic[z.ingredient_sku]||0); });
+  const tot=raw+wip+fin;
+  const r=(l,v,w,ind)=>`<tr><td style="${ind?'padding-left:26px;color:var(--muted)':''}">${l}</td><td class="num">${_mnum(v)}</td><td class="num">${tot?Math.round(v/tot*100):0}%</td><td style="color:var(--muted)">${w||''}</td></tr>`;
+  const LN={bulacan:'Bulacan',pasig:'Pasig'};
+  const finRows=Object.entries(finBy).sort((a,b)=>b[1]-a[1]).map(([k,vv])=>r('· at '+(LN[k]||k),vv,'',1)).join('');
+  return `<div class="repcard"><h3 style="margin:0 0 4px">What our stock is really worth — by stage</h3><div class="hint" style="margin-bottom:8px">Answers: “what is our stock really worth — raw, in production, finished?”</div>
+   <table><thead><tr><th>Stage</th><th class="num">Value</th><th class="num">Share</th><th>Where</th></tr></thead><tbody>
+     ${r('Raw materials',raw,'Bulacan commissary')}
+     ${r('In production (WIP)',wip,'issued to open batches')}
+     ${r('Finished goods',fin,'Bulacan + Pasig')}
+     ${finRows}
+   </tbody><tbody style="border-top:2px solid var(--line,#ddd)"><tr><td><b>Total inventory</b></td><td class="num"><b>${_mnum(tot)}</b></td><td class="num">100%</td><td></td></tr></tbody></table>
+   <div class="pager">WIP = raw already issued to production runs not yet confirmed.</div></div>`;
+}
+
 async function renderStdReports(){
   const mh=moneyHidden(); const MONEY_RPT=['spend_sup','var_check','var_user','stock_loc'];
   let cards=STD_REPORTS.filter(r=>!(mh&&MONEY_RPT.includes(r.id))).map(r=>`<div class="qcard" onclick="runStd('${r.id}')"><div class="ic">📊</div><div><div class="t">${r.name}</div><div class="d">${r.desc}</div></div></div>`).join('');
   if(!mh) cards+=`<div class="qcard" onclick="runRecipeCost()"><div class="ic">🧮</div><div><div class="t">Recipe cost per product</div><div class="d">Computed ingredient cost & margin per product.</div></div></div>`;
   cards+=`<div class="qcard" onclick="runLabelsReorder()"><div class="ic">🏷️</div><div><div class="t">Labels to reorder</div><div class="d">Products whose sticker stock is below its PAR.</div></div></div>`;
+  const OWNER=[['q_recv','Ordered → received → paid','Was what we ordered received & does it match what we paid?',true],
+    ['q_usage','Ingredient usage & yield','Fully used, or skimmed / wasted?',false],
+    ['q_pasig','Produced → Pasig','Did everything produced reach Pasig?',false],
+    ['q_deliv','Dispatched → delivered','Did everything sent reach the customer?',false],
+    ['q_loss','Loss & shrinkage map','Where are waste, loss & theft happening?',true],
+    ['q_stock','Stock value by stage','Raw, in production, finished — what is it worth?',true]];
+  cards+=OWNER.filter(o=>!(mh&&o[3])).map(o=>`<div class="qcard" onclick="runStd('${o[0]}')"><div class="ic">🔍</div><div><div class="t">${o[1]}</div><div class="d">${o[2]}</div></div></div>`).join('');
   let result='';
   if(repActive==='recipe'){ result= mh?'<div class="repcard"><div class="hint">Cost &amp; margin are hidden for your role.</div></div>' : await recipeCostHtml(); }
   else if(repActive==='labels'){ result=await labelsReorderHtml(); }
+  else if(repActive==='q_recv'){ result=await rptReceiving(); }
+  else if(repActive==='q_usage'){ result=await rptUsage(); }
+  else if(repActive==='q_pasig'){ result=await rptToPasig(); }
+  else if(repActive==='q_deliv'){ result=await rptDelivery(); }
+  else if(repActive==='q_loss'){ result=await rptLossMap(); }
+  else if(repActive==='q_stock'){ result=await rptStockStage(); }
   else if(repActive){ const r=STD_REPORTS.find(x=>x.id===repActive); if(r){ const {data,rows,m}=await pivot(r.source,r.cfg); result=pivotTable(r.name,data,rows,r.cfg,m); } }
   $('content').innerHTML=`<div class="dash"><div class="qcards">${cards}</div><div style="margin-top:16px">${result}</div></div>`;
 }
