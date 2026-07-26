@@ -185,6 +185,25 @@
   .b-undefined{background:#eef0f6;color:#40506b}
 
 
+/* --- Message / Mention centre (#4) --- */
+  .mbell{position:relative}
+  .mbadge{position:absolute;top:-5px;right:-5px;background:#d03b3b;color:#fff;border-radius:10px;font-size:10px;font-weight:700;min-width:16px;height:16px;line-height:16px;text-align:center;padding:0 3px}
+  .sidecol{display:flex;flex-direction:column;gap:12px}
+  .notes{background:#fbfaf6;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+  .notes h4{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+  .ncompose textarea{width:100%;border:1px solid var(--line);border-radius:6px;padding:7px;font:inherit;font-size:13px;resize:vertical;box-sizing:border-box}
+  .mchips{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0}
+  .mchip{background:#eef2ec;border:1px solid #d8e4d2;color:#3d5f30;border-radius:12px;padding:2px 9px;font-size:11.5px;cursor:pointer}
+  .mchip:hover{background:#dfe9d9}
+  .nmsg{background:#fff;border:1px solid var(--line);border-radius:6px;padding:7px 9px;margin-top:7px}
+  .nmsg.done{opacity:.62}
+  .nmsg .nhd{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+  .nmsg .bd{font-size:13px;color:#222;margin-top:3px;white-space:pre-wrap}
+  .nmsg .tm{font-size:11.5px;color:var(--muted)}
+  .ment{background:#e6eff9;color:#1b5fa8;border-radius:4px;padding:0 3px;font-weight:600}
+  .btn.link.sm{font-size:11.5px}
+  .pill.ok{background:#dbeddb;color:#1e6b2e;border-radius:20px;padding:1px 8px;font-size:11px;font-weight:600}
+
 /* --- Operations Dashboard (standalone design, scoped to .wrdash) --- */
 .wrdash{--wgrid:#e1e0d9;--wmuted:#898781;--wink:#0b0b0b;--wink2:#52514e;--wbrand:#4e7a3e;--wborder:rgba(11,11,11,.10);--wsurface:#fff;max-width:1180px;margin:0 auto}
 .wrdash .grid{display:grid;gap:14px}
@@ -231,6 +250,7 @@
   <div class="sp"></div>
   <span id="userBox" style="display:flex;align-items:center;gap:6px;font-size:12px"></span>
   <span class="mode demo" id="modeTag">DEMO</span>
+  <button id="mbell" class="mbell" title="Mentions" onclick="openMentions()">🔔</button>
   <button onclick="openKB()">❔ Guide</button>
 </div>
 <div class="app">
@@ -261,43 +281,65 @@ const MODULES = [
 const MODELS = {
   suppliers:{ label:'Suppliers', icon:'🏢', name:'name', pk:'name', archivable:true,
     fields:[
-      {n:'name',l:'Supplier',t:'text'},{n:'contact',l:'Contact person',t:'text'},
-      {n:'mobile',l:'Mobile',t:'text'},{n:'payment_term',l:'Payment term',t:'select',o:['Dynamic','COD','CBD','Net 7','Net 15','Net 30','TBC']},
-      {n:'sells_by',l:'Sells by',t:'select',o:['loose','case','both','head']},{n:'notes',l:'Notes',t:'longtext'}],
-    list:['name','payment_term','sells_by','mobile'],
-    groups:[['name','contact','mobile'],['payment_term','sells_by']], full:['notes'] },
+      {n:'name',l:'Supplier',t:'text'},{n:'supplier_id',l:'Supplier ID',t:'text'},
+      {n:'contact',l:'Contact 1 — Name',t:'text'},{n:'mobile',l:'Contact 1 — Mobile',t:'text'},
+      {n:'c1_email',l:'Contact 1 — Email',t:'text'},{n:'c1_viber',l:'Contact 1 — Viber group',t:'text'},
+      {n:'c2_name',l:'Contact 2 — Name',t:'text'},{n:'c2_mobile',l:'Contact 2 — Mobile',t:'text'},{n:'c2_email',l:'Contact 2 — Email',t:'text'},
+      {n:'payment_term',l:'Payment term',t:'text'},{n:'delivery_days',l:'Lead time',t:'text'},
+      {n:'sells_by',l:'Sells by',t:'select',o:['loose','case','both','head']},
+      {n:'shopee',l:'Shopee',t:'text'},{n:'website',l:'Website',t:'text'},{n:'fb_page',l:'FB page',t:'text'},
+      {n:'notes',l:'Notes',t:'longtext'}],
+    list:['name','supplier_id','payment_term','delivery_days','mobile'],
+    groups:[['name','supplier_id','contact','mobile','c1_email','c1_viber'],['c2_name','c2_mobile','c2_email'],['payment_term','delivery_days','sells_by','shopee','website','fb_page']],
+    tabs:[{l:'🏢 Contacts', groups:[0,1]},{l:'🔗 Online & Terms', groups:[2]}],
+    full:['notes'] },
 
   ingredients:{ label:'Ingredients', icon:'🥩', name:'name', pk:'sku', archivable:true,
     fields:[
-      {n:'sku',l:'SKU',t:'text'},{n:'name',l:'Name',t:'text'},
-      {n:'source',l:'Source',t:'text'},{n:'category',l:'Category',t:'text'},
+      {n:'sku',l:'SKU',t:'text'},{n:'name',l:'Processed output (into mix)',t:'text'},
+      {n:'raw_input',l:'Raw input (what you buy)',t:'text'},{n:'processing_method',l:'Processing method',t:'text'},
+      {n:'source',l:'Source',t:'text'},{n:'category',l:'PMR category',t:'text'},
       {n:'storage',l:'Storage',t:'select',o:['Frozen','Refrigerated','Dry','Live']},
-      {n:'default_method',l:'Process method',t:'text'},{n:'yield_pct',l:'Yield %',t:'number'},
+      {n:'yield_pct',l:'Yield %',t:'number'},{n:'costing_override',l:'Costing source override',t:'text'},
+      {n:'approved_alt',l:'Approved alternative',t:'text'},
+      {n:'gently_cooked',l:'Gently cooked',t:'bool'},{n:'cookable',l:'Cookable',t:'bool'},{n:'raw_feeding',l:'Raw feeding',t:'bool'},
+      {n:'supplier1',l:'Supplier 1',t:'text'},{n:'supplier2',l:'Supplier 2',t:'text'},
       {n:'supplier',l:'Default supplier',t:'rel',rel:'suppliers'},
-      {n:'list_price_kg',l:'List ₱/kg',t:'currency'},{n:'moving_avg_cost_kg',l:'Moving avg ₱/kg',t:'currency'},
+      {n:'list_price_kg',l:'₱/kg (raw)',t:'currency'},{n:'price_kg_processed',l:'₱/kg (processed)',t:'currency'},
+      {n:'price_g_raw',l:'₱/g (raw)',t:'number'},{n:'price_g_processed',l:'₱/g (processed)',t:'number'},
+      {n:'moving_avg_cost_kg',l:'Moving avg ₱/kg',t:'currency'},
       {n:'shelf_life_days',l:'Shelf life (d)',t:'number'},{n:'lead_time_days',l:'Lead time (d)',t:'number'},
       {n:'par_g',l:'Par / week (g)',t:'number'},{n:'reorder_g',l:'Reorder (g)',t:'number'},{n:'min_order_kg',l:'Min order (kg)',t:'number'},
       {n:'is_live_animal',l:'Live animal',t:'bool'},{n:'is_intermediate',l:'Intermediate',t:'bool'},
       {n:'notes',l:'Notes',t:'longtext'}],
-    list:['name','source','category','supplier','list_price_kg'],
-    groups:[['sku','name','source','category','storage','default_method','yield_pct','supplier'],
-            ['list_price_kg','moving_avg_cost_kg','par_g','reorder_g','min_order_kg','lead_time_days','is_live_animal','is_intermediate']],
+    list:['name','category','raw_input','yield_pct','list_price_kg'],
+    groups:[['sku','name','raw_input','processing_method','category','source','storage','yield_pct','costing_override','approved_alt'],
+            ['list_price_kg','price_kg_processed','price_g_raw','price_g_processed','moving_avg_cost_kg','supplier1','supplier2','supplier'],
+            ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','lead_time_days','shelf_life_days','is_live_animal','is_intermediate']],
+    tabs:[{l:'🥩 Item & yield', groups:[0]},{l:'₱ Costing', groups:[1]},{l:'⚙ Flags & stock', groups:[2]}],
     full:['notes'] },
 
   products:{ label:'Products', icon:'📦', name:'name', pk:'sku', archivable:true,
+    status:{f:'status',stages:['No SKU Yet','No Recipe Yet','Active - Scaled','Active']},
     fields:[
-      {n:'sku',l:'SKU',t:'text'},{n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant',t:'text'},
+      {n:'sku',l:'SKU',t:'text'},{n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant / Product name',t:'text'},
       {n:'name',l:'Name',t:'text'},{n:'pack_g',l:'Pack (g)',t:'number'},
+      {n:'status',l:'Status',t:'select',o:['Active','Active - Scaled','No Recipe Yet','No SKU Yet']},
+      {n:'product_line',l:'Product line',t:'text'},{n:'feeding_format',l:'Feeding format',t:'text'},
+      {n:'mix_category',l:'Mix category',t:'text'},{n:'animal',l:'Animal',t:'select',o:['Dog','Cat']},
       {n:'sell_price',l:'Sell price',t:'currency'},{n:'par_packs',l:'Par (packs)',t:'number'},
+      {n:'tot_cost_ref',l:'COGS ref (₱/pack)',t:'currency'},
       {n:'feeding_style',l:'Feeding style',t:'select',o:['Raw Feeding','Gently Cooked','BARF','PMR','Mix']},
+      {n:'sticker_net',l:'Sticker — net weight',t:'text'},{n:'sticker_dimension',l:'Sticker — dimension',t:'text'},
+      {n:'sticker_art_url',l:'Sticker — artwork link',t:'text'},{n:'sticker_supplier',l:'Sticker — supplier',t:'text'},
       {n:'sticker_bulacan_on_hand',l:'Labels — Bulacan on hand',t:'number'},{n:'sticker_bulacan_par',l:'Labels — Bulacan PAR',t:'number'},
-      {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'},
-      {n:'sticker_supplier',l:'Label supplier',t:'text'},{n:'sticker_art_url',l:'Label artwork URL',t:'text'}],
-    list:['name','family','variant','pack_g','feeding_style','sell_price'],
-    groups:[['sku','family','variant','name'],['pack_g','sell_price','par_packs','feeding_style'],['sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par','sticker_supplier','sticker_art_url']],
-    tabs:[{l:'📦 Product', groups:[0,1], o2m:true},{l:'🏷️ Stickers', groups:[2]}],
+      {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'}],
+    list:['name','status','family','variant','pack_g','sell_price'],
+    groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status'],['pack_g','sell_price','par_packs','tot_cost_ref','feeding_style'],
+            ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par']],
+    tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'🏷️ Stickers', groups:[3]}],
     o2m:{ field:'bom', model:'bom_lines', fk:'product_sku', label:'Recipe (BOM)',
-          cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'usable_g',l:'Usable g',t:'number'},{n:'method_override',l:'Method',t:'text'}] } },
+          cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ingredient_category',l:'Category',t:'text'},{n:'usable_g',l:'Grams/pack',t:'number'},{n:'pct_of_pack',l:'% of pack',t:'number'},{n:'has_bones',l:'Bones',t:'text'},{n:'method_override',l:'Method',t:'text'}] } },
 
   purchase_orders:{ label:'Purchase Orders', icon:'🧾', name:'po_ref', pk:'po_ref',
     status:{f:'status',stages:['open','confirmed','received','invoiced','closed','cancelled']}, cancelable:true,
@@ -308,7 +350,7 @@ const MODELS = {
     list:['po_ref','supplier_name','order_date','status'],
     groups:[['po_ref','supplier_name'],['order_date','created_by']],
     o2m:{ field:'lines', model:'po_lines', fk:'po_ref', label:'Order Lines',
-          cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Ordered (kg)',t:'number'},{n:'available_kg',l:'Vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'}] } },
+          cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Ordered (kg)',t:'number'},{n:'available_kg',l:'Vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
 
   inventory_movements:{ label:'Inventory Moves', icon:'📊', name:'id', pk:'id', readonly:true,
     fields:[{n:'created_at',l:'When',t:'text'},{n:'kind',l:'Kind',t:'text'},{n:'ref_sku',l:'Item',t:'text'},
@@ -343,7 +385,7 @@ const MODELS = {
     groups:[['transfer_ref','from_code','to_code'],['transfer_date','created_by']],
     o2mLoader:{label:'⬇ Load Bulacan finished stock', fn:'loadBulacanStock'},
     o2m:{field:'lines',model:'transfer_lines',fk:'transfer_ref',label:'Products',
-      cols:[{n:'product_sku',l:'Product',t:'rel',rel:'products'},{n:'sent_packs',l:'Sent',t:'number'},{n:'received_packs',l:'Received',t:'number'}]} },
+      cols:[{n:'product_sku',l:'Product',t:'rel',rel:'products'},{n:'sent_packs',l:'Sent',t:'number'},{n:'received_packs',l:'Received',t:'number',ro:true}]} },
 
   count_sessions:{ label:'Weekly Inventory', icon:'🧮', name:'count_ref', pk:'count_ref', customForm:'count',
     status:{f:'status',stages:['draft','approved']},
@@ -451,7 +493,9 @@ const $=id=>document.getElementById(id);
 const fmt=n=>'₱'+(Math.round((+n||0)*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2});
 const num=n=>(+n||0).toLocaleString('en-PH');
 function toast(m,err){const t=$('toast');t.className='toast show'+(err?' err':'');t.textContent=m;setTimeout(()=>t.className='toast',3200);}
-function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+// safe href: only allow http(s)/mailto so a stored "javascript:" link can't run
+function safeUrl(u){ u=String(u==null?'':u).trim(); return /^(https?:|mailto:)/i.test(u)?u:'#'; }
 
 function renderSide(){
   let h=`<div class="mi ${state.model==='home'?'active':''}" onclick="openModel('home')" style="margin-top:6px"><span class="ic">🏠</span>Dashboard</div>`;
@@ -473,6 +517,7 @@ function openModel(model){
 }
 function route(){
   renderSide();
+  refreshMentionBell();
   if(state.model==='home'){ return renderDashboard(); }
   const m=MODELS[state.model];
   if(m.special){ setCrumb();
@@ -530,7 +575,12 @@ async function renderList(){
   const m=MODELS[state.model];
   $('content').innerHTML='<div class="empty">Loading…</div>';
   let rows;
-  try{ rows=await db.list(state.model,{search:state.search}); }
+  try{
+    if((state.model==='ingredients'||state.model==='products') && await useSecure()){
+      rows=await listForModel(state.model);   // masked source has no server search — filter client-side
+      if(state.search){ const q=state.search.toLowerCase(); rows=rows.filter(r=>String(r[m.name]||'').toLowerCase().includes(q)); }
+    } else { rows=await db.list(state.model,{search:state.search}); }
+  }
   catch(e){ $('content').innerHTML=`<div class="empty">⚠ ${esc(e.message)}<br><br>Check your Supabase connection / RLS.</div>`; return; }
   let archivedCount=0;
   if(m.archivable && !state.showArchived){ archivedCount=rows.filter(r=>r.active===false).length; rows=rows.filter(r=>r.active!==false); }
@@ -581,11 +631,10 @@ async function openForm(idEnc){
   if(m.customForm==='count') return renderCountForm(idEnc);
   formIsNew = !idEnc; formTab=0;
   if(idEnc){ const pkval=decodeURIComponent(idEnc);
-    const rows=await db.list(state.model,{}); formRec={...(rows.find(r=>String(r[m.pk])===pkval)||{})};
+    const rows=await listForModel(state.model); formRec={...(rows.find(r=>String(r[m.pk])===pkval)||{})};
   } else { formRec={}; if(m.status) formRec[m.status.f]=m.status.stages[0]; if(m.fields.find(f=>f.n==='order_date')) formRec.order_date=new Date().toISOString().slice(0,10);
-    // auto internal reference for documents
-    if(state.model==='purchase_orders'){ const dd=_mmddyyyy(); formRec.po_ref='PO-'+dd+' V'+_p2(await nextSeq('PO-'+dd))+'.01'; }
-    else if(state.model==='transfers'){ formRec.transfer_ref=(await genRef('DR',{})).ref; }
+    // NOTE: document reference numbers are now assigned at SAVE (see saveForm), not here —
+    // opening then discarding a new document no longer burns a sequence number.
   }
   formChildren = m.o2m && idEnc ? await db.children(m.o2m, decodeURIComponent(idEnc)) : [];
   // preload rel options
@@ -597,6 +646,7 @@ async function renderForm(){
   controlPanel();
   const m=MODELS[state.model]; const r=formRec;
   setCrumb(formIsNew?'New':(r[m.name]||r[m.pk]||'New'));
+  formNotes = formIsNew ? [] : await notesForRecord(state.model, formRec[m.pk]);
   const statusbar = m.status? `<div class="statusbar">${m.status.stages.map(s=>`<div class="stg ${r[m.status.f]===s?'on':''}">${s}</div>`).join('')}</div>`:'';
   const faMode=(f)=> fieldMode(state.model, f.n);
   const fieldInput=(f)=>{
@@ -659,7 +709,7 @@ async function renderForm(){
     ${fieldsArea}
     ${!formIsNew?`<div style="padding:4px 22px 14px">${attachHtml()}</div>`:''}</div>`;
   const left=sheet+formbar;
-  $('content').innerHTML=`<div class="formwrap">${ !formIsNew ? `<div class="formcols"><div>${left}</div>${chatterHtml()}</div>` : left }</div>`;
+  $('content').innerHTML=`<div class="formwrap">${ !formIsNew ? `<div class="formcols"><div>${left}</div><div class="sidecol">${notesPanelHtml()}${chatterHtml()}</div></div>` : left }</div>`;
   if(m.o2m) renderLines();
 }
 function fSet(n,v){ formRec[n]=v; }
@@ -669,20 +719,36 @@ function switchFormTab(i){ formTab=i; const m=MODELS[state.model];
 function renderLines(){
   const o=MODELS[state.model].o2m; const tb=$('lineBody'); if(!tb) return;
   tb.innerHTML=formChildren.map((ln,i)=>`<tr>${o.cols.map(c=>{
-    const v=ln[c.n]==null?'':ln[c.n];
-    if(c.t==='rel'){const opts=relCache[c.rel]||[];return `<td><select onchange="lSet(${i},'${c.n}',this.value)"><option value="">—</option>${opts.map(op=>`<option value="${esc(op.v)}" ${v===op.v?'selected':''}>${esc(op.t)}</option>`).join('')}</select></td>`;}
-    if(c.t==='number')return `<td><input type="number" step="any" value="${esc(v)}" oninput="lSet(${i},'${c.n}',this.value)"></td>`;
-    return `<td><input value="${esc(v)}" oninput="lSet(${i},'${c.n}',this.value)"></td>`;
+    let v=ln[c.n]==null?'':ln[c.n];
+    const ro=(typeof c.ro==='function'?c.ro(ln,formRec):c.ro)?'disabled':'';
+    if(ro&&(c.n==='received_packs'||c.n==='received_kg')&&(v===''||v==null)) v=0; // captured at receiving
+    if(c.t==='rel'){const opts=relCache[c.rel]||[];return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}><option value="">—</option>${opts.map(op=>`<option value="${esc(op.v)}" ${v===op.v?'selected':''}>${esc(op.t)}</option>`).join('')}</select></td>`;}
+    if(c.t==='number')return `<td><input type="number" step="any" value="${esc(v)}" oninput="lSet(${i},'${c.n}',this.value)" ${ro} ${ro?'title="Filled at receiving" style="background:#f4f5f8;color:#8a93a5"':''}></td>`;
+    return `<td><input value="${esc(v)}" oninput="lSet(${i},'${c.n}',this.value)" ${ro}></td>`;
   }).join('')}<td><span class="btn link" style="color:var(--danger)" onclick="delLine(${i})">✕</span></td></tr>`).join('');
 }
 function addLine(){ formChildren.push({}); renderLines(); }
 function delLine(i){ formChildren.splice(i,1); renderLines(); }
 function lSet(i,n,v){ formChildren[i][n]=v; }
 function discardForm(){ state.view='list'; route(); }
+const AUTO_REF={ purchase_orders:async()=>{ const dd=_mmddyyyy(); return 'PO-'+dd+' V'+_p2(await nextSeq('PO-'+dd))+'.01'; },
+                 transfers:async()=>(await genRef('DR',{})).ref };
 async function saveForm(){
-  const m=MODELS[state.model]; const pkval=formRec[m.pk];
+  const m=MODELS[state.model]; let pkval=formRec[m.pk];
+  // assign the document reference now (at save), not on form-open → no burned numbers on discard
+  if(formIsNew && !pkval && AUTO_REF[state.model]){ try{ pkval=await AUTO_REF[state.model](); formRec[m.pk]=pkval; }catch(e){ toast(e.message,true); return; } }
   if(!pkval){ toast('Enter '+ (m.fields.find(f=>f.n===m.pk)||{}).l, true); return; }
+  // optimistic lock: if someone else changed this record since it was opened, don't silently overwrite
+  if(!formIsNew && isLive() && formRec.updated_at){ try{
+      const cur=await sb(state.model+'?select=updated_at&'+m.pk+'=eq.'+encodeURIComponent(pkval)+'&limit=1');
+      if(cur&&cur[0]&&cur[0].updated_at&&cur[0].updated_at!==formRec.updated_at){ toast('This record was changed by someone else since you opened it. Reload and re-apply your edit.',true); return; }
+    }catch(e){} }
   try{
+    // validate numeric fields: no NaN, no negatives (quantities/prices/counts are never < 0)
+    const badNum=[];
+    m.fields.forEach(f=>{ if(f.t!=='number'&&f.t!=='currency')return; const v=formRec[f.n]; if(v===''||v==null)return;
+      const num=+v; if(!isFinite(num)){ badNum.push(f.l+' (not a number)'); } else if(num<0){ badNum.push(f.l+' (cannot be negative)'); } });
+    if(badNum.length){ toast('Fix these fields: '+badNum.join('; '),true); return; }
     const rec={}; m.fields.forEach(f=>{ if(f.t==='formula')return; let v=formRec[f.n]; if((f.t==='number'||f.t==='currency')&&v!==''&&v!=null)v=+v; if(v!==undefined)rec[f.n]=v; });
     const uf=['created_by','counted_by','operator'].find(x=>m.fields.some(f=>f.n===x));
     if(formIsNew && uf && !rec[uf]) rec[uf]=CURRENT_USER;
@@ -690,12 +756,23 @@ async function saveForm(){
     else await db.update(state.model, m.pk, pkval, rec);
     if(m.o2m){
       const clean=formChildren.filter(l=>Object.values(l).some(x=>x!=='' && x!=null)).map(l=>{
-        const row={...l, [m.o2m.fk]:pkval}; m.o2m.cols.forEach(c=>{if(c.t==='number'&&row[c.n]!=='')row[c.n]=+row[c.n];}); return row;});
+        const row={...l, [m.o2m.fk]:pkval}; delete row.id;   // id is a generated identity — never re-insert it (live save would 400)
+        m.o2m.cols.forEach(c=>{if(c.t==='number'&&row[c.n]!=='')row[c.n]=+row[c.n];}); return row;});
       await db.replaceChildren(m.o2m, pkval, clean);
     }
     sysLog(state.model, pkval, formIsNew?('📝 Created by '+CURRENT_USER):('✏️ Updated by '+CURRENT_USER));
     toast('Saved '+pkval); relCache={}; state.view='list'; route();
-  }catch(e){ toast(e.message,true); }
+  }catch(e){ toast(saveErrMsg(e), true); console.error('Save failed:', e); }
+}
+// Turn a raw PostgREST/Supabase error into something a non-technical user can act on.
+function saveErrMsg(e){ const s=String(e&&e.message||e||'');
+  if(/^401|JWT|not authenticated|Unauthorized/i.test(s)) return 'Save blocked — your sign-in expired. Sign in again and retry.';
+  if(/^40[03]|permission denied|row-level security|RLS|violates row-level/i.test(s)) return "Save blocked by access rules — your role can't write to this module. Ask an Admin to grant it.";
+  if(/duplicate key|already exists|23505/i.test(s)) return 'That reference already exists — use a new reference number.';
+  if(/foreign key|violates foreign key|23503/i.test(s)) return 'A linked record is missing — pick an existing value for the highlighted field.';
+  if(/null value|not-null|23502/i.test(s)) return 'A required field is empty — fill every required field and retry.';
+  if(/column .* does not exist|PGRST/i.test(s)) return 'Save error (schema): '+s.slice(0,140);
+  return 'Save failed: '+s.slice(0,160);
 }
 // Which tables reference each record (external usage that must block a hard delete).
 // A model's OWN o2m children (a product's recipe, a PO's lines) are excluded — those
@@ -706,13 +783,14 @@ const DEPENDENTS = {
   products:   [{model:'production_batches',fk:'product_sku'},{model:'transfer_lines',fk:'product_sku'},{model:'order_lines',fk:'product_sku'}]
 };
 async function countDependents(model, pkval){
-  const defs=DEPENDENTS[model]||[]; let total=0; const parts=[];
+  const defs=DEPENDENTS[model]||[]; let total=0; const parts=[]; let checkFailed=false;
   for(const d of defs){ let n=0;
-    if(isLive()){ try{ const rows=await sb(d.model+'?select='+d.fk+'&'+d.fk+'=eq.'+encodeURIComponent(pkval)+'&limit=500'); n=rows.length; }catch(e){} }
+    if(isLive()){ try{ const rows=await sb(d.model+'?select='+d.fk+'&'+d.fk+'=eq.'+encodeURIComponent(pkval)+'&limit=500'); n=rows.length; }catch(e){ checkFailed=true; } }
     else { n=(DEMO[d.model]||[]).filter(r=>String(r[d.fk])===String(pkval)).length; }
     if(n>0){ total+=n; parts.push(n+'× '+((MODELS[d.model]||{}).label||d.model)); }
   }
-  return {total, detail:parts.join(', ')};
+  // A failed dependency lookup must NOT read as "no dependents" — block the delete instead of orphaning children.
+  return {total, detail:parts.join(', '), checkFailed};
 }
 async function archiveForm(on){ const m=MODELS[state.model];
   try{ await db.update(state.model,m.pk,formRec[m.pk],{active:!on}); formRec.active=!on; relCache={};
@@ -725,6 +803,7 @@ async function cancelForm(){ const m=MODELS[state.model]; if(!confirm('Cancel '+
 async function deleteForm(){
   const m=MODELS[state.model]; const pkval=formRec[m.pk];
   const dep=await countDependents(state.model, pkval);
+  if(dep.checkFailed){ toast("Can't verify what this record is linked to right now — delete blocked to avoid orphaning data. Try again in a moment.",true); return; }
   if(dep.total>0){ const alt=m.archivable?'Archive it instead':(m.cancelable?'Cancel it instead':'Remove those first'); toast(`Can't delete — used by ${dep.total} record(s): ${dep.detail}. ${alt}.`,true); return; }
   if(!confirm('Permanently delete '+pkval+'? This cannot be undone — for master data or documents, prefer Archive/Cancel.')) return;
   try{ if(m.o2m) await db.replaceChildren(m.o2m, pkval, []); await db.del(state.model,m.pk,pkval); relCache={}; toast('Deleted'); state.view='list'; route(); }
@@ -790,7 +869,10 @@ async function signIn(){ const email=($('s_email').value||'').trim(), pw=$('s_pw
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
     await loadFieldAcl(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
   }catch(e){ toast(e.message,true); } }
-function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.email; delete SUPA.role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } updateMode(); renderSide();
+function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.email; delete SUPA.role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); }
+  // purge cached record data on sign-out so nothing sensitive is left on a shared machine
+  try{ Object.keys(localStorage).forEach(k=>{ if(/^chatter:/.test(k)||/^attach:/.test(k)||k==='wr_notes') localStorage.removeItem(k); }); }catch(e){}
+  updateMode(); renderSide();
   if(REQUIRE_AUTH && isLive()){ closeModal(); showGate('Signed out.'); } else { toast('Signed out (anon)'); openSettings(); } }
 function closeModal(){ $('overlay').classList.remove('on'); }
 function saveSettings(){
@@ -827,8 +909,23 @@ function renderCleanser(){
     </div>
     <div style="margin-top:16px"><label style="font-size:13px">Type <b>CLEANSE</b> to enable the button: &nbsp;<input id="clConfirm" oninput="cleanseGuard(this.value)" style="border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:140px"></label></div>
     <div style="margin-top:12px"><button class="btn" id="clBtn" disabled style="background:#b23b2e" onclick="runCleanse()">🧹 Wipe selected</button></div>
-    <div class="hint" style="margin-top:10px">Prefer a full database reset? Run <code>wr_cleanse.sql</code> in the Supabase SQL Editor.</div></div>`;
+    <div class="hint" style="margin-top:10px">Prefer a full database reset? Run <code>wr_cleanse.sql</code> in the Supabase SQL Editor.</div></div>
+    <div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 6px">💾 Backup / export</h3>
+      <div class="hint" style="margin-bottom:10px">Download a full snapshot of every table as a single JSON file — keep it before a cleanse, reset, or big change. There is no automatic backup on the free tier, so do this regularly (or schedule the n8n backup workflow).</div>
+      <button class="btn" onclick="exportBackup()">⬇ Download full backup (JSON)</button></div>`;
   $('content').innerHTML=h;
+}
+const BACKUP_TABLES=['suppliers','ingredients','products','bom_lines','purchase_orders','po_lines',
+  'goods_receipts','gr_lines','supplier_invoices','invoice_lines','production_batches','batch_issues',
+  'transfers','transfer_lines','count_sessions','count_lines','variance_log','inventory_movements',
+  'raw_material_pricing','record_notes','activity_log'];
+async function exportBackup(){
+  toast('Building backup…'); const dump={_meta:{app:'WR ERP',exported_by:CURRENT_USER,live:isLive()}};
+  for(const t of BACKUP_TABLES){ try{ dump[t]=isLive()? await sb(t+'?select=*') : (DEMO[t]||[]); }catch(e){ dump[t]={error:String(e.message||e)}; } }
+  const blob=new Blob([JSON.stringify(dump,null,1)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='wr-erp-backup-'+new Date().toISOString().slice(0,10)+'.json'; document.body.appendChild(a); a.click(); a.remove();
+  toast('Backup downloaded ('+BACKUP_TABLES.length+' tables)');
 }
 function cleanseAll(on){ CLEANSE_GROUPS.forEach(g=>cleanseSel[g.key]=on); renderCleanser(); }
 function cleanseGuard(v){ const b=$('clBtn'); if(b) b.disabled = (String(v).trim().toUpperCase()!=='CLEANSE'); }
@@ -984,7 +1081,7 @@ async function saveFieldAcl(){ localStorage.setItem('wr_fieldacl',JSON.stringify
   if(isLive() && SUPA && SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'field_acl',value:FIELDACL})}); }catch(e){ toast('Saved locally; DB sync failed: '+e.message,true); return; } }
 }
 function saveUsers(){ localStorage.setItem('wr_users',JSON.stringify(USERS)); }
-function setUser(u){ CURRENT_USER=u; localStorage.setItem('wr_cur',u); toast('Acting as '+u); }
+function setUser(u){ CURRENT_USER=u; localStorage.setItem('wr_cur',u); toast('Acting as '+u); refreshMentionBell(); if(state.view==='form'&&!formIsNew) refreshNotesPanel(); }
 function curRole(){ if(SUPA&&SUPA.token&&SUPA.role) return SUPA.role; const u=USERS.find(x=>x.name===CURRENT_USER); return u?u.role:'Admin'; }
 const ADMIN_ONLY=['users','studio','connection','fieldacl','refs','notif','cleanser'];
 // Sensible menu defaults per role (Admin can override in Users & Access). Floor roles
@@ -1009,14 +1106,16 @@ function evalF(expr,r){ try{ return Function('r','with(r){return ('+expr+')}')(r
 
 /* audit log → writes into the record's chatter */
 function sysLog(model,pk,text){ if(!pk)return; const key='chatter:'+model+':'+pk; let a=[]; try{a=JSON.parse(localStorage.getItem(key)||'[]')}catch(e){}
-  a.unshift({kind:'system',body:text,t:new Date().toLocaleString('en-PH',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}); localStorage.setItem(key,JSON.stringify(a)); }
+  a.unshift({kind:'system',body:text,t:new Date().toLocaleString('en-PH',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}); localStorage.setItem(key,JSON.stringify(a));
+  // Durable, shared audit trail: mirror to Supabase (append-only). Fire-and-forget so it never blocks the UI.
+  if(isLive()){ try{ sb('activity_log',{method:'POST',prefer:'return=minimal',body:JSON.stringify({actor:CURRENT_USER,model:model,record_pk:String(pk),event:text})}).catch(()=>{}); }catch(e){} } }
 
 /* attachments (link-based → Google Drive; live uploads flow through n8n) */
 function attachKey(){ const m=MODELS[state.model]; return 'attach:'+state.model+':'+(formRec[m.pk]||'new'); }
 function loadAttach(){ try{return JSON.parse(localStorage.getItem(attachKey())||'[]')}catch(e){return[]} }
 function attachHtml(){ const a=loadAttach(); const folder=(typeof AUTOS!=='undefined'&&AUTOS.drive_folder&&AUTOS.drive_folder.url)?AUTOS.drive_folder.url:'';
-  return `<div class="attachbox"><h4>📎 Attachments</h4><div>${a.map((x,i)=>`<span class="attpill"><a href="${esc(x.url)}" target="_blank">${esc(x.name)}</a> <span class="x" onclick="attDel(${i})">✕</span></span>`).join('')||'<span style="color:var(--muted)">No attachments</span>'}</div>
-    <div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="addrow" onclick="attAdd()">＋ Attach Drive link</span>${folder?`<a class="btn sm sec" href="${esc(folder)}" target="_blank">📁 Open Drive folder</a>`:'<span class="mini">Set a Drive folder in Automations to enable uploads</span>'}</div></div>`; }
+  return `<div class="attachbox"><h4>📎 Attachments</h4><div>${a.map((x,i)=>`<span class="attpill"><a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.name)}</a> <span class="x" onclick="attDel(${i})">✕</span></span>`).join('')||'<span style="color:var(--muted)">No attachments</span>'}</div>
+    <div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="addrow" onclick="attAdd()">＋ Attach Drive link</span>${folder?`<a class="btn sm sec" href="${esc(safeUrl(folder))}" target="_blank" rel="noopener noreferrer">📁 Open Drive folder</a>`:'<span class="mini">Set a Drive folder in Automations to enable uploads</span>'}</div></div>`; }
 function attAdd(){ const name=prompt('File name / label:'); if(!name)return; const url=prompt('Link (Google Drive URL):')||'#'; const a=loadAttach(); a.push({name,url}); localStorage.setItem(attachKey(),JSON.stringify(a)); renderForm(); }
 function attDel(i){ const a=loadAttach(); a.splice(i,1); localStorage.setItem(attachKey(),JSON.stringify(a)); renderForm(); }
 
@@ -1035,7 +1134,10 @@ function bulkBar(){ const b=$('bulkbar'); if(!b)return; const n=(state.sel||[]).
   if(!n){ b.style.display='none'; return; } b.style.display='flex';
   const m=MODELS[state.model]; const editable=m.fields.filter(f=>!f.ro&&f.t!=='formula'&&f.n!==m.pk);
   b.innerHTML=`<b>${n} selected</b> · Set <select id="bkf">${editable.map(f=>`<option value="${f.n}">${f.l}</option>`).join('')}</select> = <input id="bkv" style="width:120px"> <button class="btn sm" onclick="bulkApply()">Apply</button> <button class="btn sm sec" onclick="selAll(false)">Clear</button>`; }
-async function bulkApply(){ const m=MODELS[state.model]; const f=$('bkf').value, v=$('bkv').value;
+async function bulkApply(){ const m=MODELS[state.model]; const f=$('bkf').value; let v=$('bkv').value;
+  const fld=m.fields.find(x=>x.n===f)||{};
+  if(fld.t==='number'||fld.t==='currency'){ const num=+v; if(v===''||!isFinite(num)){ toast(fld.l+' must be a number',true); return; } if(num<0){ toast(fld.l+' cannot be negative',true); return; } v=num; }  // coerce & validate, don't store raw strings
+  if(!confirm('Set '+(fld.l||f)+' = "'+v+'" on '+state.sel.length+' record(s)? This applies immediately.')) return;
   try{ for(const pk of state.sel){ const rec={[f]:v}; await db.update(state.model,m.pk,pk,rec); sysLog(state.model,pk,`${f} set to "${v}" (bulk) by ${CURRENT_USER}`); }
     toast('Updated '+state.sel.length+' record(s)'); state.sel=[]; route(); }catch(e){ toast(e.message,true); } }
 
@@ -1049,7 +1151,7 @@ async function renderMRP(){
     <button class="btn sec" onclick="saveMRPPlan()">💾 Save plan</button>
     <button class="wfbtn" onclick="generatePOsFromMRP()">🧾 Generate Draft POs</button>
     <div class="sp"></div><span style="color:var(--muted)">demand + lead time + PAR → replenishment → PO</span>`;
-  const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await db.list('ingredients',{});
+  const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await listIngredients();
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
   mrpPlanCache=await mrpPlans();
   // demand card
@@ -1105,7 +1207,10 @@ function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return'';
 function _p2(n){ return String(n).padStart(2,'0'); }
 function _mmddyyyy(dstr){ const d=dstr||new Date().toISOString().slice(0,10); const t=d.split('-'); return (t[1]||'')+(t[2]||'')+(t[0]||''); }
 async function nextSeq(key){   // atomic per-key counter — Supabase RPC when live, localStorage otherwise
-  if(isLive()&&SUPA&&SUPA.token){ try{ const r=await sb('rpc/next_ref',{method:'POST',body:JSON.stringify({p_key:key})}); const v=Array.isArray(r)?r[0]:r; if(typeof v==='number') return v; if(v&&typeof v.next_ref==='number') return v.next_ref; }catch(e){} }
+  if(isLive()){   // live: the atomic DB counter is the ONLY safe source — never fall back to a per-browser
+    if(SUPA&&SUPA.token){ try{ const r=await sb('rpc/next_ref',{method:'POST',body:JSON.stringify({p_key:key})}); const v=Array.isArray(r)?r[0]:r; if(typeof v==='number') return v; if(v&&typeof v.next_ref==='number') return v.next_ref; }catch(e){} }
+    throw new Error('Could not reserve a reference number from the server. The next_ref() function may be missing — install it before creating documents. (Falling back to a local counter would collide across users.)');
+  }
   const c=JSON.parse(localStorage.getItem('wr_refseq')||'{}'); c[key]=(c[key]||0)+1; localStorage.setItem('wr_refseq',JSON.stringify(c)); return c[key];
 }
 async function genRef(type,opts){ opts=opts||{}; const dd=_mmddyyyy(opts.date);
@@ -1123,7 +1228,7 @@ async function saveMRPPlan(){
     else { const a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a.unshift({date:MRPDATE,ref:g.ref,by:CURRENT_USER,...data}); localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); toast('Saved '+g.ref); } }
   catch(e){ toast(e.message,true); } renderMRP(); }
 function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; renderMRP(); toast('Loaded plan'); }
-async function delMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; try{ if(isLive()&&p.id){ await sb('mrp_plans?id=eq.'+p.id,{method:'DELETE',prefer:'return=minimal'}); } else { const a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a.splice(i,1); localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); } }catch(e){ toast(e.message,true); } renderMRP(); }
+async function delMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; if(!confirm('Delete this saved demand plan? This cannot be undone.'))return; try{ if(isLive()&&p.id){ await sb('mrp_plans?id=eq.'+p.id,{method:'DELETE',prefer:'return=minimal'}); } else { const a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a.splice(i,1); localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); } }catch(e){ toast(e.message,true); } renderMRP(); }
 async function generatePOsFromMRP(){
   const lines=(window._mrpPlan||[]).filter(l=>l.final>0);
   if(!lines.length){ toast('Nothing to order — set demand first',true); return; }
@@ -1250,14 +1355,14 @@ function applyStudio(){ Object.keys(STUDIO).forEach(mk=>{ const m=MODELS[mk]; if
 /* ============ Odoo-style extras (adapted from Odoo 18 & 19) ============ */
 const FLOW = { purchase_orders:{ buttons:[
   {when:'open',label:'✅ Confirm order',fn:'openPOConfirm()'},
-  {when:'confirmed',label:'Mark Received',to:'received'},
+  {when:'confirmed',label:'📦 Receive order',fn:'openPOReceive()'},
   {when:'received',label:'Register Invoice',to:'invoiced'},
   {when:'invoiced',label:'Close',to:'closed'} ]},
   variance_log:{ buttons:[
   {when:'open',label:'Mark Explained',to:'explained'},
   {when:'explained',label:'Resolve',to:'resolved'} ]},
   production_batches:{ buttons:[ {when:'draft',label:'Confirm production',to:'confirmed'} ]},
-  transfers:{ buttons:[ {when:'sent',label:'Mark Received',to:'received'} ]}};
+  transfers:{ buttons:[ {when:'sent',label:'📥 Receive transfer',fn:'openTransferReceive()'} ]}};
 function smartTiles(model, rec, children){
   if(model==='purchase_orders'){ const tot=children.reduce((s,l)=>s+(+l.ordered_kg||0)*(+l.price_kg||0),0);
     return [{v:children.length,l:'Lines'},{v:'₱'+Math.round(tot).toLocaleString('en-PH'),l:'Est. total'}]; }
@@ -1267,38 +1372,58 @@ function smartTiles(model, rec, children){
 }
 async function wfAction(to){ const m=MODELS[state.model]; const from=formRec[m.status.f]; formRec[m.status.f]=to;
   if(!formIsNew){ try{ await db.update(state.model,m.pk,formRec[m.pk],{[m.status.f]:to}); sysLog(state.model,formRec[m.pk],`🔄 Status ${from} → ${to} by ${CURRENT_USER}`); toast('Status → '+to);
-      if(state.model==='purchase_orders' && to==='received') await postReceipt(formRec);   // closes the inbound loop
-      if(state.model==='transfers'       && to==='received') await postTransfer(formRec);  // moves stock between sites
+      // NOTE: receiving posts to the ledger via the dedicated modals (openPOReceive / openTransferReceive),
+      // never here — that kept a document from posting stock twice.
     }catch(e){ toast(e.message,true); } }
   renderForm(); }
 // Recipe cost per product (₱/pack) from the BOM — used to value production & transfers.
-async function prodCostMap(){ const boms=await db.list('bom_lines',{}), ings=await db.list('ingredients',{}); const im={}; ings.forEach(i=>im[i.sku]=i);
-  const m={}; boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100; m[b.product_sku]=(m[b.product_sku]||0)+((+b.usable_g||0)/(y||1))/1000*(+it.list_price_kg||0); }); return m; }
+async function prodCostMap(){
+  if(await useSecure()){ try{ const rows=await sb('rpc/wr_product_costs',{method:'POST',body:'{}'}); const m={}; (rows||[]).forEach(r=>m[r.product_sku]=+r.cost_per_pack||0); return m; }catch(e){} }  // server-side cost (masking-safe)
+  const boms=await db.list('bom_lines',{}), ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+  const m={}; boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100; m[b.product_sku]=(m[b.product_sku]||0)+((+b.usable_g||0)/(y||1))/1000*(+it.moving_avg_cost_kg||+it.list_price_kg||0); }); return m; }
+/* ---- Idempotency: never post the same document to the ledger twice ---- */
+let _postLock=false;                                  // blocks overlapping double-clicks (single user)
+async function movementExists(note){                  // has this source already posted? (re-entry / 2-user guard)
+  if(isLive()){ try{ const r=await sb('inventory_movements?select=id&note=eq.'+encodeURIComponent(note)+'&limit=1'); return r.length>0; }catch(e){ return false; } }
+  return (DEMO.inventory_movements||[]).some(m=>m.note===note);
+}
+/* ---- Column masking: use the role-gated *_secure views + definer RPCs when they exist ---- */
+let _secureViews;                                     // undefined = not yet probed
+async function useSecure(){ if(!isLive())return false; if(_secureViews===undefined){ try{ await sb('ingredients_secure?select=sku&limit=1'); _secureViews=true; }catch(e){ _secureViews=false; } } return _secureViews; }
+async function listIngredients(){ if(await useSecure()){ try{ return await sb('ingredients_secure?select=*&limit=2000'); }catch(e){} } return await db.list('ingredients',{}); }
+async function listForModel(model){ if(await useSecure()){ if(model==='ingredients'){ try{ return await sb('ingredients_secure?select=*&limit=2000'); }catch(e){} } if(model==='products'){ try{ return await sb('products_secure?select=*&limit=2000'); }catch(e){} } } return await db.list(model,{}); }
 // Receiving a PO adds raw stock at Bulacan and updates moving-average cost.
 async function postReceipt(po){ try{
+  if(await movementExists('PO '+po.po_ref)){ toast('This PO was already received — stock not posted again.',true); return; }
   const lines=await db.children(MODELS.purchase_orders.o2m, po.po_ref);
-  const stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.ref_sku) stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
-  const ings=await db.list('ingredients',{}); const im={}; ings.forEach(i=>im[i.sku]=i); let n=0;
-  for(const l of lines){ const recvKg=(+l.available_kg||+l.ordered_kg||0); if(recvKg<=0) continue;
-    const g=recvKg*1000, priceKg=+l.price_kg||0;
+  const secure=await useSecure();
+  const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i); let n=0, costErr=0;
+  // per-location on-hand snapshot (bulacan only — receipts land at bulacan)
+  const stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.ref_sku && s.location_code==='bulacan' && s.kind==='ingredient') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
+  for(const l of lines){ const recvKg=(l.received_kg!=null&&l.received_kg!=='')?(+l.received_kg||0):(+l.available_kg||+l.ordered_kg||0); if(!(recvKg>0)) continue;
+    const g=recvKg*1000, priceKg=Math.max(0,+l.price_kg||0);
     await db.create('inventory_movements',{kind:'ingredient',ref_sku:l.ingredient_sku,location_code:'bulacan',qty:g,unit_cost:priceKg/1000,movement_type:'receipt',note:'PO '+po.po_ref});
-    const it=im[l.ingredient_sku]; if(it){ const ohG=stock[l.ingredient_sku]||0, oldAvg=+it.moving_avg_cost_kg||priceKg;
+    // roll the moving-average cost — server-side RPC when masking is on (Warehouse can't touch cost columns), else client-side
+    if(secure){ try{ await sb('rpc/wr_roll_cost',{method:'POST',body:JSON.stringify({p_sku:l.ingredient_sku,p_recv_kg:recvKg,p_price_kg:priceKg})}); }catch(e){ costErr++; } }
+    else { const it=im[l.ingredient_sku]; if(it){ const ohG=Math.max(0,stock[l.ingredient_sku]||0), oldAvg=+it.moving_avg_cost_kg||priceKg;  // clamp negative on-hand
       const newAvg=(ohG+g)>0?((ohG*oldAvg+g*priceKg)/(ohG+g)):priceKg;
-      try{ await db.update('ingredients','sku',l.ingredient_sku,{moving_avg_cost_kg:Math.round(newAvg*100)/100,last_price_kg:priceKg}); }catch(e){} }
+      try{ await db.update('ingredients','sku',l.ingredient_sku,{moving_avg_cost_kg:Math.round(newAvg*100)/100,last_price_kg:priceKg}); stock[l.ingredient_sku]=ohG+g; }catch(e){ costErr++; } } }
     n++; }
-  sysLog('purchase_orders',po.po_ref,'📦 Received — '+n+' ingredient(s) posted to Bulacan stock by '+CURRENT_USER); toast('Received · '+n+' item(s) added to stock');
- }catch(e){ toast('Receive posting: '+e.message,true); } }
+  sysLog('purchase_orders',po.po_ref,'📦 Received — '+n+' ingredient(s) posted to Bulacan stock by '+CURRENT_USER);
+  toast('Received · '+n+' item(s) added to stock'+(costErr?(' · ⚠ '+costErr+' cost update(s) failed'):''), costErr>0);
+ }catch(e){ toast('Receive posting failed: '+e.message,true); } }
 // Confirming a transfer moves finished stock Bulacan → Pasig and flags any shortfall (Check 4).
 async function postTransfer(t){ try{
+  if(await movementExists('Transfer '+t.transfer_ref)){ toast('This transfer was already received — not posted again.',true); return; }
   const lines=await db.children(MODELS.transfers.o2m, t.transfer_ref); const cm=await prodCostMap();
   const from=t.from_code||'bulacan', to=t.to_code||'pasig'; let n=0,flags=0;
-  for(const l of lines){ const sent=+l.sent_packs||0, recv=+l.received_packs||0; if(sent<=0&&recv<=0) continue; const uc=cm[l.product_sku]||0;
+  for(const l of lines){ const sent=Math.max(0,+l.sent_packs||0), recv=Math.max(0,+l.received_packs||0); if(sent<=0&&recv<=0) continue; const uc=cm[l.product_sku]||0;
     if(sent>0) await db.create('inventory_movements',{kind:'product',ref_sku:l.product_sku,location_code:from,qty:-sent,unit_cost:uc,movement_type:'transfer_out',note:'Transfer '+t.transfer_ref});
     if(recv>0) await db.create('inventory_movements',{kind:'product',ref_sku:l.product_sku,location_code:to,qty:recv,unit_cost:uc,movement_type:'transfer_in',note:'Transfer '+t.transfer_ref});
     const gap=sent-recv; if(Math.abs(gap)>0.0001){ flags++; try{ await db.create('variance_log',{check_type:'4 · Transfer',source_ref:t.transfer_ref,expected:sent,actual:recv,gap_qty:-gap,gap_value:Math.round((cm[l.product_sku]||0)*gap*100)/100,location:'in-transit',responsible_user:CURRENT_USER,status:'open',note:l.product_sku+' sent '+sent+' vs received '+recv}); }catch(e){} }
     n++; }
   sysLog('transfers',t.transfer_ref,'🚚 Received — '+n+' line(s) posted; '+flags+' shortfall(s) flagged by '+CURRENT_USER); toast('Transfer posted · '+flags+' shortfall(s)');
- }catch(e){ toast('Transfer posting: '+e.message,true); } }
+ }catch(e){ toast('Transfer posting failed: '+e.message,true); } }
 
 /* ---- Guided PO confirmation: review qty, confirm price, log adjustments ---- */
 function openPOConfirm(){
@@ -1326,6 +1451,76 @@ async function poConfirmApply(){
     await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'confirmed'});
     sysLog('purchase_orders',formRec.po_ref, (changes.length?('✅ Confirmed with adjustments — '+changes.join('; ')):'✅ Confirmed — qty & prices verified, no changes')+' by '+CURRENT_USER);
     closeModal(); toast('Order confirmed'+(changes.length?' · '+changes.length+' change(s) logged':'')); renderForm();
+  }catch(e){ toast(e.message,true); }
+}
+
+/* ---- Guided PO receiving: capture the actual received qty per line (#2) ---- */
+async function openPOReceive(){
+  if(formIsNew){ toast('Save the PO first',true); return; }
+  let lines=formChildren||[];
+  if(!lines.length){ try{ lines=await db.children(MODELS.purchase_orders.o2m, formRec.po_ref); formChildren=lines; }catch(e){} }
+  if(!lines.length){ toast('No order lines to receive',true); return; }
+  $('modal').innerHTML=`<h3>Receive order — ${esc(formRec.po_ref)}</h3>
+    <p>Enter the <b>quantity actually received</b> for each line. Ordered qty is shown for reference and can't be changed here. Only what you enter is posted to Bulacan stock.</p>
+    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Ordered kg</th><th class="num">Received kg</th></tr></thead><tbody>
+    ${lines.map((l,i)=>`<tr><td>${esc(l.ingredient_sku)}</td>
+      <td class="num" style="color:var(--muted)">${(+l.ordered_kg||0)}</td>
+      <td><input id="rc_q${i}" type="number" step="any" value="${(+l.available_kg||+l.ordered_kg||0)}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td></tr>`).join('')}
+    </tbody></table></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="poReceiveApply()">📦 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
+  $('overlay').classList.add('on');
+}
+async function poReceiveApply(){
+  if(_postLock){ toast('Still posting — please wait…',true); return; } _postLock=true;
+  try{ await _poReceiveApply(); } finally{ _postLock=false; }
+}
+async function _poReceiveApply(){
+  const lines=formChildren||[]; const notes=[];
+  const updated=lines.map((l,i)=>{ const rq=+(($('rc_q'+i)||{}).value)||0; const oq=+l.ordered_kg||0;
+    if(Math.abs(rq-oq)>0.0001) notes.push(l.ingredient_sku+': ordered '+oq+' → received '+rq+'kg');
+    return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:l.available_kg, price_kg:l.price_kg, received_kg:rq}; });
+  try{
+    await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
+    formChildren=updated; formRec.status='received';
+    await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'received'});
+    sysLog('purchase_orders',formRec.po_ref, '📦 Received by '+CURRENT_USER+(notes.length?(' — '+notes.join('; ')):' — full quantities received'));
+    await postReceipt(formRec);
+    closeModal(); renderForm();
+  }catch(e){ toast(e.message,true); }
+}
+
+/* ---- Guided transfer receiving: receiver enters received qty; sent is locked (#3) ---- */
+async function openTransferReceive(){
+  if(formIsNew){ toast('Save the transfer first',true); return; }
+  let lines=formChildren||[];
+  if(!lines.length){ try{ lines=await db.children(MODELS.transfers.o2m, formRec.transfer_ref); formChildren=lines; }catch(e){} }
+  if(!lines.length){ toast('No products to receive',true); return; }
+  const creator=formRec.created_by||'—';
+  $('modal').innerHTML=`<h3>Receive transfer — ${esc(formRec.transfer_ref)}</h3>
+    <p>Sent by <b>${esc(creator)}</b> from <b>${esc(formRec.from_code||'bulacan')}</b>. Enter the <b>packs actually received</b> at <b>${esc(formRec.to_code||'pasig')}</b>. Sent qty is locked. Any shortfall is flagged as a Check 4 variance.</p>
+    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Product</th><th class="num">Sent</th><th class="num">Received</th></tr></thead><tbody>
+    ${lines.map((l,i)=>`<tr><td>${esc(l.product_sku)}</td>
+      <td class="num" style="color:var(--muted)">${(+l.sent_packs||0)}</td>
+      <td><input id="tr_r${i}" type="number" step="any" value="${(+l.sent_packs||0)}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td></tr>`).join('')}
+    </tbody></table></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="transferReceiveApply()">📥 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
+  $('overlay').classList.add('on');
+}
+async function transferReceiveApply(){
+  if(_postLock){ toast('Still posting — please wait…',true); return; } _postLock=true;
+  try{ await _transferReceiveApply(); } finally{ _postLock=false; }
+}
+async function _transferReceiveApply(){
+  const lines=formChildren||[]; let short=0;
+  const updated=lines.map((l,i)=>{ const rr=+(($('tr_r'+i)||{}).value)||0; if(rr<(+l.sent_packs||0)-0.0001) short++;
+    return {transfer_ref:formRec.transfer_ref, product_sku:l.product_sku, sent_packs:l.sent_packs, received_packs:rr}; });
+  try{
+    await db.replaceChildren(MODELS.transfers.o2m, formRec.transfer_ref, updated);
+    formChildren=updated; formRec.status='received';
+    await db.update('transfers','transfer_ref',formRec.transfer_ref,{status:'received'});
+    sysLog('transfers',formRec.transfer_ref, '📥 Received by '+CURRENT_USER+(short?(' — '+short+' line(s) short'):' — all lines complete'));
+    await postTransfer(formRec);
+    closeModal(); renderForm();
   }catch(e){ toast(e.message,true); }
 }
 
@@ -1483,6 +1678,76 @@ function cAdd(kind){
   localStorage.setItem(chatterKey(), JSON.stringify(a));
   const el=$('cmsgs'); if(el){ const tmp=document.createElement('div'); tmp.innerHTML=chatterHtml(); el.innerHTML=tmp.querySelector('#cmsgs').innerHTML; }
 }
+
+/* ============ Message / Mention centre (#4) ============
+   Users post messages on a record, @mention teammates, and mentioned users find
+   them via the 🔔 inbox. Each message carries a resolved flag.
+   Live → Supabase table `record_notes`; demo → localStorage `wr_notes`. */
+let formNotes=[];
+function userNames(){ return USERS.map(u=>u.name); }
+function parseMentions(body){ return userNames().filter(n=> body.indexOf('@'+n)>=0 ); }
+async function notesForRecord(model,pk){ if(!pk) return [];
+  if(isLive()){ try{ return await sb('record_notes?select=*&model=eq.'+encodeURIComponent(model)+'&record_pk=eq.'+encodeURIComponent(pk)+'&order=created_at.desc'); }catch(e){ return []; } }
+  let a=[]; try{a=JSON.parse(localStorage.getItem('wr_notes')||'[]')}catch(e){}
+  return a.filter(n=>n.model===model&&String(n.record_pk)===String(pk)).sort((x,y)=>String(y.created_at||'').localeCompare(String(x.created_at||'')));
+}
+async function allOpenNotes(){
+  if(isLive()){ try{ return await sb('record_notes?select=*&resolved=eq.false&order=created_at.desc&limit=200'); }catch(e){ return []; } }
+  let a=[]; try{a=JSON.parse(localStorage.getItem('wr_notes')||'[]')}catch(e){}
+  return a.filter(n=>!n.resolved).sort((x,y)=>String(y.created_at||'').localeCompare(String(x.created_at||'')));
+}
+function mentionChips(){ return userNames().filter(n=>n!==CURRENT_USER).map(n=>`<span class="mchip" onclick="mentionInsert('${esc(n).replace(/'/g,"\\'")}')">@${esc(n)}</span>`).join(''); }
+function mentionInsert(name){ const inp=$('noteInput'); if(inp){ const s=inp.value.replace(/\s+$/,''); inp.value=(s?s+' ':'')+'@'+name+' '; inp.focus(); } }
+function noteBodyHtml(body){ let h=esc(body); userNames().forEach(n=>{ const re=new RegExp('@'+n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'); h=h.replace(re,'<span class="ment">@'+esc(n)+'</span>'); }); return h; }
+function notesPanelHtml(){
+  const msgs=formNotes||[];
+  const list=msgs.map(n=>{ const res=!!n.resolved;
+    return `<div class="nmsg ${res?'done':''}"><div class="nhd"><b>${esc(n.author||'—')}</b>${(n.mentions&&n.mentions.length)?` <span class="tm">→ @${n.mentions.map(esc).join(', @')}</span>`:''}<span style="flex:1"></span>${res?'<span class="pill ok">resolved</span>':`<span class="btn link sm" onclick="noteResolve('${esc(String(n.id))}',true)">Mark resolved</span>`}</div>
+      <div class="bd">${noteBodyHtml(n.body||'')}</div></div>`; }).join('')||'<div class="nmsg" style="color:var(--muted)">No messages yet. @mention a teammate to notify them.</div>';
+  return `<div class="notes"><h4>💬 Messages &amp; Mentions</h4>
+    <div class="ncompose"><textarea id="noteInput" rows="2" placeholder="Write a message… use @name to mention a teammate"></textarea>
+      <div class="mchips">${mentionChips()}</div>
+      <button class="btn sm" onclick="notePost()">Post message</button></div>
+    <div id="noteList">${list}</div></div>`;
+}
+async function refreshNotesPanel(){ const m=MODELS[state.model]; const pk=formRec[m.pk]; formNotes=await notesForRecord(state.model,pk);
+  const el=$('noteList'); if(el){ const tmp=document.createElement('div'); tmp.innerHTML=notesPanelHtml(); el.innerHTML=tmp.querySelector('#noteList').innerHTML; } refreshMentionBell(); }
+async function notePost(){ const inp=$('noteInput'); if(!inp) return; const body=(inp.value||'').trim(); if(!body){ toast('Write a message first',true); return; }
+  const m=MODELS[state.model]; const pk=formRec[m.pk]; if(!pk||formIsNew){ toast('Save the record first, then post',true); return; }
+  const mentions=parseMentions(body);
+  try{
+    if(isLive()){ await sb('record_notes',{method:'POST',prefer:'return=minimal',body:JSON.stringify({model:state.model,record_pk:String(pk),body,author:CURRENT_USER,mentions,resolved:false})}); }
+    else { const a=JSON.parse(localStorage.getItem('wr_notes')||'[]'); a.push({id:'n'+Date.now()+Math.floor(Math.random()*999),model:state.model,record_pk:String(pk),body,author:CURRENT_USER,mentions,resolved:false,created_at:new Date().toISOString()}); localStorage.setItem('wr_notes',JSON.stringify(a)); }
+    sysLog(state.model,pk,'💬 '+CURRENT_USER+' posted a message'+(mentions.length?(' — mentioned @'+mentions.join(', @')):''));
+    inp.value=''; await refreshNotesPanel(); toast('Message posted'+(mentions.length?' · '+mentions.length+' mentioned':''));
+  }catch(e){ toast(e.message,true); }
+}
+async function noteResolve(id,val){
+  try{
+    if(isLive()){ await sb('record_notes?id=eq.'+encodeURIComponent(id),{method:'PATCH',prefer:'return=minimal',body:JSON.stringify({resolved:val})}); }
+    else { const a=JSON.parse(localStorage.getItem('wr_notes')||'[]'); const i=a.findIndex(n=>String(n.id)===String(id)); if(i>=0){ a[i].resolved=val; localStorage.setItem('wr_notes',JSON.stringify(a)); } }
+    if(!formIsNew) await refreshNotesPanel(); else refreshMentionBell();
+    const md=$('modal'); if(md && $('menuBody')) openMentions();
+  }catch(e){ toast(e.message,true); }
+}
+async function refreshMentionBell(){ const el=$('mbell'); if(!el) return;
+  let mine=[]; try{ mine=(await allOpenNotes()).filter(n=>(n.mentions||[]).includes(CURRENT_USER)); }catch(e){}
+  el.innerHTML='🔔'+(mine.length?`<span class="mbadge">${mine.length}</span>`:'');
+  el.title=mine.length?(mine.length+' unresolved mention(s)'):'No unresolved mentions';
+}
+async function openMentions(){
+  const mine=(await allOpenNotes()).filter(n=>(n.mentions||[]).includes(CURRENT_USER));
+  const rows=mine.map(n=>{ const lbl=(MODELS[n.model]||{}).label||n.model;
+    return `<div class="nmsg"><div class="nhd"><b>${esc(n.author||'—')}</b> <span class="tm">in ${esc(lbl)} · ${esc(String(n.record_pk))}</span><span style="flex:1"></span>
+      <span class="btn link sm" onclick="gotoRecord('${esc(n.model)}','${esc(String(n.record_pk)).replace(/'/g,"\\'")}')">Open</span>
+      <span class="btn link sm" onclick="noteResolve('${esc(String(n.id))}',true)">Resolve</span></div>
+      <div class="bd">${noteBodyHtml(n.body||'')}</div></div>`; }).join('')||'<div class="nmsg" style="color:var(--muted)">🎉 No unresolved mentions for you.</div>';
+  $('modal').innerHTML=`<h3>🔔 My mentions <span style="font-weight:400;color:var(--muted);font-size:13px">— ${esc(CURRENT_USER)}</span></h3>
+    <div id="menuBody" style="max-height:60vh;overflow:auto">${rows}</div>
+    <div style="margin-top:12px"><button class="btn sec" onclick="closeModal()">Close</button></div>`;
+  $('overlay').classList.add('on');
+}
+function gotoRecord(model,pk){ closeModal(); state.model=model; openForm(encodeURIComponent(pk)); }
 /* command palette ⌘K */
 let cmdSel=0, cmdItems=[];
 function ensureCmd(){ if($('cmdwrap')) return;
@@ -1562,14 +1827,31 @@ async function prodPersist(status){
 }
 async function prodSaveDraft(){ const r=await prodPersist('draft'); if(r){ sysLog('production_batches',prodRunRef,'📝 Draft production plan saved ('+r.length+' batches) by '+CURRENT_USER); toast('Draft saved · '+prodRunRef); drawProdPlan(); } }
 async function prodConfirm(){
+  if(_postLock){ toast('Still posting — please wait…',true); return; }
   if(!confirm('Confirm this production run? Good packs post to finished stock at Bulacan.'))return;
+  _postLock=true; try{ await _prodConfirm(); } finally{ _postLock=false; }
+}
+// Raw grams each product's recipe consumes per pack: usable_g ÷ yield (raw needed > usable).
+async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=await listIngredients();
+  const im={}; ings.forEach(i=>im[i.sku]=i); const m={};
+  boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100||1;
+    (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:b.ingredient_sku, raw_g:(+b.usable_g||0)/y, unit_cost_g:(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000}); });
+  return m; }
+async function _prodConfirm(){
   const recs=await prodPersist('confirmed'); if(!recs)return;
-  const cm=await prodCostMap(); let posted=0;
+  const cm=await prodCostMap(); const bm=await prodBOMMap(); let posted=0, failed=0, drawn=0;
   for(const r of recs){ if((+r.good_packs||0)>0){ const cpp=Math.round((cm[r.product_sku]||0)*100)/100;
+    if(await movementExists('Production '+r.batch_ref)) continue;   // already posted — skip (idempotent)
+    const packs=+r.good_packs||0;
     try{ await db.update('production_batches','batch_ref',r.batch_ref,{cost_per_pack:cpp}); }catch(e){}
-    try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:+r.good_packs,unit_cost:cpp,movement_type:'batch_output',note:'Production '+r.batch_ref}); posted++; }catch(e){} } }
-  sysLog('production_batches',prodRunRef,'✅ Production confirmed ('+recs.length+' batches) by '+CURRENT_USER);
-  toast('Confirmed · '+posted+' product(s) posted to stock'); prodRunRef=''; drawProdPlan();
+    try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:packs,unit_cost:cpp,movement_type:'batch_output',note:'Production '+r.batch_ref}); posted++; }catch(e){ failed++; }
+    // RAW DRAW-DOWN: deplete each recipe ingredient and record expected issues (feeds Checks 2 & 3).
+    for(const line of (bm[r.product_sku]||[])){ const rawG=Math.round(line.raw_g*packs*100)/100; if(!(rawG>0)) continue;
+      try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:line.ingredient_sku,location_code:'bulacan',qty:-rawG,unit_cost:line.unit_cost_g,movement_type:'issue_to_batch',note:'Production '+r.batch_ref}); drawn++; }catch(e){ failed++; }
+      try{ await db.create('batch_issues',{batch_ref:r.batch_ref,ingredient_sku:line.ingredient_sku,expected_raw_g:rawG,actual_raw_g:rawG}); }catch(e){}
+    } } }
+  sysLog('production_batches',prodRunRef,'✅ Production confirmed ('+recs.length+' batches, '+drawn+' ingredient issues) by '+CURRENT_USER);
+  toast('Confirmed · '+posted+' product(s) posted; '+drawn+' raw issue(s) drawn down'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0); prodRunRef=''; drawProdPlan();
 }
 
 /* ============ Weekly Inventory (scope + auto book qty + approval) ============ */
@@ -1643,25 +1925,35 @@ async function countSave(){
 }
 async function countApprove(){
   if(!countLines.length){ toast('Load & count items first',true); return; }
+  if(_postLock){ toast('Still posting — please wait…',true); return; }
   if(!confirm('Approve this count? Counted quantities become the new book stock, and gaps post as shrinkage variances.')) return;
+  if(await movementExists('Count '+countRec.count_ref)){ toast('This count was already approved — adjustments not re-posted.',true); return; }
+  _postLock=true; try{ await _countApprove(); } finally{ _postLock=false; }
+}
+async function _countApprove(){
   countRec.status='approved'; await countSave();
   let prodSkus=new Set(); try{ (await db.list('products',{})).forEach(p=>prodSkus.add(p.sku)); }catch(e){}   // live product list, not demo
-  let flags=0;
+  const cm=await prodCostMap(); let ings={}; try{ (await db.list('ingredients',{})).forEach(i=>ings[i.sku]=i); }catch(e){}
+  let flags=0, failed=0;
   for(const l of countLines){ if(l.counted_qty===''||l.counted_qty==null) continue; const gap=(+l.counted_qty)-(+l.book_qty||0); if(Math.abs(gap)<0.0001) continue; flags++;
     const isStk = l.sticker || String(l.ref_sku).startsWith('STK-');
     if(isStk){
       // stickers live on the product per site — write the counted value straight back
       const psku=l.product_sku||String(l.ref_sku).slice(4);
       const field=l.sticker_field||('sticker_'+(countRec.location_code||'bulacan')+'_on_hand');
-      try{ await db.update('products','sku',psku,{[field]:+l.counted_qty}); }catch(e){}
+      try{ await db.update('products','sku',psku,{[field]:+l.counted_qty}); }catch(e){ failed++; }
     } else {
       const kind = prodSkus.has(l.ref_sku)?'product':'ingredient';
-      try{ await db.create('inventory_movements',{kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:0,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){}
+      try{ await db.create('inventory_movements',{kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:0,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){ failed++; }
     }
-    try{ await db.create('variance_log',{check_type:'3.5 · Shrinkage',source_ref:countRec.count_ref,expected:+l.book_qty||0,actual:+l.counted_qty,gap_qty:gap,gap_value:0,location:countRec.location_code,responsible_user:CURRENT_USER,status:'open',note:(l.name||l.ref_sku)+' book vs counted'}); }catch(e){}
+    // value the shrinkage so "₱ at risk" reflects real loss (ingredient moving-avg per g, or product recipe cost)
+    const kind2 = (l.sticker||String(l.ref_sku).startsWith('STK-'))?'sticker':(prodSkus.has(l.ref_sku)?'product':'ingredient');
+    let uc=0; if(kind2==='ingredient'){ uc=(+(ings[l.ref_sku]||{}).moving_avg_cost_kg||0)/1000; } else if(kind2==='product'){ uc=cm[l.ref_sku]||0; }
+    const gval=Math.round(gap*uc*100)/100;
+    try{ await db.create('variance_log',{check_type:'3.5 · Shrinkage',source_ref:countRec.count_ref,expected:+l.book_qty||0,actual:+l.counted_qty,gap_qty:gap,gap_value:gval,location:countRec.location_code,responsible_user:CURRENT_USER,status:'open',note:(l.name||l.ref_sku)+' book vs counted'}); }catch(e){}
   }
   sysLog('count_sessions',countRec.count_ref,'✔ Approved by '+CURRENT_USER+' — '+flags+' adjustment(s) posted to stock');
-  toast('Approved · '+flags+' adjustment(s) posted'); state.view='list'; route();
+  toast('Approved · '+flags+' adjustment(s) posted'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0); state.view='list'; route();
 }
 
 /* ============ Reports (standalone builder) ============ */
@@ -1681,11 +1973,45 @@ async function pivot(source,cfg){ const m=MODELS[source]; let rows=[]; try{rows=
   const g={}; rows.forEach(r=>{const k=r[cfg.dim]==null?'—':r[cfg.dim]; g[k]=g[k]||{count:0,sum:0}; g[k].count++; g[k].sum+=(+r[cfg.measure]||0);});
   const data=Object.keys(g).map(k=>({k,v:cfg.agg==='count'?g[k].count:(cfg.agg==='sum'?g[k].sum:g[k].sum/g[k].count)})).sort((a,b)=>b.v-a.v);
   return {data,rows,m}; }
-function pivotTable(title,data,rows,cfg,m){ const max=Math.max(1,...data.map(d=>d.v)); const isMoney=(m.fields.find(f=>f.n===cfg.measure)||{}).t==='currency'&&cfg.agg!=='count';
-  return `<div class="repcard">${title?`<h3 style="margin:0 0 8px">${esc(title)}</h3>`:''}
-    <table><thead><tr><th>${(m.fields.find(f=>f.n===cfg.dim)||{}).l||''}</th><th class="num" style="width:130px">${cfg.agg}</th><th style="width:42%"></th></tr></thead>
-    <tbody>${data.map(d=>`<tr style="cursor:default"><td>${esc(d.k)}</td><td class="num">${isMoney?fmt(d.v):num(Math.round(d.v*100)/100)}</td><td><div class="measure-bar" style="width:${Math.max(3,d.v/max*100)}%"></div></td></tr>`).join('')||'<tr><td colspan="3" class="empty">No data</td></tr>'}</tbody></table>
-    <div class="pager">${data.length} groups · ${rows.length} records</div></div>`; }
+function pivotTable(title,data,rows,cfg,m){
+  const dimL=(m.fields.find(f=>f.n===cfg.dim)||{}).l||'Group';
+  const measL=cfg.agg==='count'?'Records':((m.fields.find(f=>f.n===cfg.measure)||{}).l||'Value');
+  const isMoney=(m.fields.find(f=>f.n===cfg.measure)||{}).t==='currency'&&cfg.agg!=='count';
+  const vfmt=v=>isMoney?fmt(v):num(Math.round(v*100)/100);
+  if(!data.length) return `<div class="repcard">${title?`<h3 style="margin:0 0 8px">${esc(title)}</h3>`:''}<div class="empty">No data yet.</div></div>`;
+  const sorted=[...data].sort((a,b)=>Math.abs(b.v)-Math.abs(a.v));
+  const total=sorted.reduce((s,d)=>s+d.v,0);
+  const absTot=sorted.reduce((s,d)=>s+Math.abs(d.v),0)||1;
+  const top=sorted[0], top3=sorted.slice(0,3).reduce((s,d)=>s+Math.abs(d.v),0);
+  const avg=total/sorted.length;
+  const aggWord=cfg.agg==='count'?'Total records':(cfg.agg==='avg'?'Overall average':'Grand total');
+  // KPI strip
+  const kpis=[
+    {l:aggWord,v:cfg.agg==='avg'?vfmt(avg):vfmt(total)},
+    {l:'Groups',v:num(sorted.length)},
+    {l:'Largest — '+String(top.k),v:vfmt(top.v)+' · '+Math.round(Math.abs(top.v)/absTot*100)+'%'},
+    {l:'Top 3 concentration',v:Math.round(top3/absTot*100)+'%'}
+  ];
+  const kpiHtml=kpis.map(k=>`<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+  const donut=wrDonut(sorted.map(d=>({label:String(d.k),value:Math.abs(d.v)})));
+  const bars=wrHbars(sorted.map(d=>({label:String(d.k),value:d.v})),null,vfmt);
+  // Pareto table: value, share %, cumulative %
+  let cum=0;
+  const tbody=sorted.map((d)=>{ const sh=Math.abs(d.v)/absTot*100; cum+=sh;
+    return `<tr><td>${esc(String(d.k))}</td><td class="n">${vfmt(d.v)}</td><td class="n">${sh.toFixed(1)}%</td><td class="n" style="color:var(--wmuted)">${cum.toFixed(1)}%</td></tr>`; }).join('');
+  const tfoot=`<tfoot><tr><td>Total</td><td class="n">${vfmt(total)}</td><td class="n">100%</td><td></td></tr></tfoot>`;
+  return `<div class="wrdash">
+    ${title?`<h3 style="margin:0 0 4px;color:var(--wink)">${esc(title)}</h3>`:''}
+    <div class="hint" style="margin:0 0 14px">${esc(measL)} by ${esc(dimL)} · ${rows.length} source record(s)</div>
+    <div class="grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">${kpiHtml}</div>
+    <div class="grid c2">
+      <div class="card"><h2>Share of ${esc(measL.toLowerCase())}</h2>${donut}</div>
+      <div class="card"><h2>${esc(dimL)} ranked</h2>${bars}</div>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>Detail &amp; Pareto (cumulative share)</h2>
+      <table><thead><tr><th>${esc(dimL)}</th><th class="n">${esc(measL)}</th><th class="n">Share</th><th class="n">Cumulative</th></tr></thead>
+      <tbody>${tbody}</tbody>${tfoot}</table></div>
+  </div>`; }
 async function renderReporting(){
   $('crumb').innerHTML='<b>Reports</b>';
   $('cp').innerHTML=`<div class="title">Reports <span onclick="openKB('reporting')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
@@ -1812,7 +2138,10 @@ async function renderStdReports(){
   const mh=moneyHidden(); const MONEY_RPT=['spend_sup','var_check','var_user','stock_loc'];
   let cards=STD_REPORTS.filter(r=>!(mh&&MONEY_RPT.includes(r.id))).map(r=>`<div class="qcard" onclick="runStd('${r.id}')"><div class="ic">📊</div><div><div class="t">${r.name}</div><div class="d">${r.desc}</div></div></div>`).join('');
   if(!mh) cards+=`<div class="qcard" onclick="runRecipeCost()"><div class="ic">🧮</div><div><div class="t">Recipe cost per product</div><div class="d">Computed ingredient cost & margin per product.</div></div></div>`;
+  if(!mh) cards+=`<div class="qcard" onclick="repActive='cogsrecon';renderStdReports()"><div class="ic">📐</div><div><div class="t">COGS: standard vs actual</div><div class="d">Planned worst-case cost vs real moving-average — the drift is yield loss or price creep.</div></div></div>`;
+  cards+=`<div class="qcard" onclick="repActive='lowstock';renderStdReports()"><div class="ic">📉</div><div><div class="t">Low stock / reorder</div><div class="d">Ingredients below reorder point and finished goods below PAR.</div></div></div>`;
   cards+=`<div class="qcard" onclick="runLabelsReorder()"><div class="ic">🏷️</div><div><div class="t">Labels to reorder</div><div class="d">Products whose sticker stock is below its PAR.</div></div></div>`;
+  cards+=`<div class="qcard" onclick="repActive='dupbom';renderStdReports()"><div class="ic">🔁</div><div><div class="t">Repeated recipe ingredients</div><div class="d">Products listing an ingredient on more than one line — intentional substitution, or an accidental copy?</div></div></div>`;
   const OWNER=[['q_recv','Ordered → received → paid','Was what we ordered received & does it match what we paid?',true],
     ['q_usage','Ingredient usage & yield','Fully used, or skimmed / wasted?',false],
     ['q_pasig','Produced → Pasig','Did everything produced reach Pasig?',false],
@@ -1822,6 +2151,9 @@ async function renderStdReports(){
   cards+=OWNER.filter(o=>!(mh&&o[3])).map(o=>`<div class="qcard" onclick="runStd('${o[0]}')"><div class="ic">🔍</div><div><div class="t">${o[1]}</div><div class="d">${o[2]}</div></div></div>`).join('');
   let result='';
   if(repActive==='recipe'){ result= mh?'<div class="repcard"><div class="hint">Cost &amp; margin are hidden for your role.</div></div>' : await recipeCostHtml(); }
+  else if(repActive==='cogsrecon'){ result= mh?'<div class="repcard"><div class="hint">Cost is hidden for your role.</div></div>' : await cogsReconHtml(); }
+  else if(repActive==='lowstock'){ result=await lowStockHtml(); }
+  else if(repActive==='dupbom'){ result=await dupBomHtml(); }
   else if(repActive==='labels'){ result=await labelsReorderHtml(); }
   else if(repActive==='q_recv'){ result=await rptReceiving(); }
   else if(repActive==='q_usage'){ result=await rptUsage(); }
@@ -1852,13 +2184,58 @@ async function labelsReorderHtml(){
 }
 async function recipeCostHtml(){
   if(moneyHidden()) return '<div class="repcard"><div class="hint">Cost &amp; margin are hidden for your role.</div></div>';
-  const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await db.list('ingredients',{});
+  const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await listIngredients();
   const cost=p=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=ings.find(i=>i.sku===b.ingredient_sku)||{}; const y=(+it.yield_pct||100)/100; const rawg=(+b.usable_g||0)/(y||1); c+=(rawg/1000)*(+it.list_price_kg||0); }); return c; };
   let h=`<div class="repcard"><h3 style="margin:0 0 8px">Recipe cost per product</h3><table><thead><tr><th>Product</th><th class="num">Pack (g)</th><th class="num">Ingredient cost/pack</th><th class="num">Sell</th><th class="num">Margin</th></tr></thead><tbody>`;
   prods.forEach(p=>{ const c=cost(p), sell=+p.sell_price||0, mg=sell?((sell-c)/sell*100):0;
     h+=`<tr><td>${esc(p.name)}</td><td class="num">${p.pack_g}</td><td class="num">${fmt(c)}</td><td class="num">${fmt(sell)}</td><td class="num" style="color:${mg<0?'var(--danger)':'var(--ok)'}">${sell?mg.toFixed(0)+'%':'—'}</td></tr>`; });
   h+='</tbody></table><div class="hint" style="margin-top:8px">Ingredient cost only (raw ÷ yield × list price). Add labour + packaging in Production for full cost/pack.</div></div>';
   return h;
+}
+// Standard (planned worst-case) vs actual (moving-average) recipe cost per product — the drift is yield loss / price creep.
+async function cogsReconHtml(){
+  if(moneyHidden()) return '<div class="repcard"><div class="hint">Cost is hidden for your role.</div></div>';
+  const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await listIngredients();
+  const im={}; ings.forEach(i=>im[i.sku]=i);
+  const cost=(p,useAvg)=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100||1; const rawKg=((+b.usable_g||0)/y)/1000; const price=useAvg?(+it.moving_avg_cost_kg||+it.list_price_kg||0):(+it.list_price_kg||0); c+=rawKg*price; }); return c; };
+  const rows=prods.filter(p=>boms.some(b=>b.product_sku===p.sku)).map(p=>{ const std=cost(p,false), act=cost(p,true); const drift=act-std, pct=std?drift/std*100:0; return {p,std,act,drift,pct}; })
+    .sort((a,b)=>Math.abs(b.drift)-Math.abs(a.drift));
+  let h=`<div class="repcard"><h3 style="margin:0 0 4px">COGS — standard vs actual</h3>
+    <div class="hint" style="margin-bottom:8px">Standard = list (worst-case) price ÷ yield. Actual = moving-average price from real receipts. A positive drift means the real cost is running above plan.</div>
+    <table><thead><tr><th>Product</th><th class="num">Standard/pack</th><th class="num">Actual/pack</th><th class="num">Drift ₱</th><th class="num">Drift %</th></tr></thead><tbody>`;
+  rows.forEach(r=>{ const col=r.drift>0.009?'var(--danger)':(r.drift<-0.009?'var(--ok)':'var(--muted)');
+    h+=`<tr><td>${esc(r.p.name)}</td><td class="num">${fmt(r.std)}</td><td class="num">${fmt(r.act)}</td><td class="num" style="color:${col}">${r.drift>0?'+':''}${fmt(r.drift)}</td><td class="num" style="color:${col}">${r.std?((r.pct>0?'+':'')+r.pct.toFixed(1)+'%'):'—'}</td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="5" class="empty">No costed recipes yet.</td></tr>';
+  h+='</tbody></table></div>'; return h;
+}
+// Ingredients below their reorder point and finished goods below PAR (live stock vs thresholds).
+async function lowStockHtml(){
+  const ings=await db.list('ingredients',{}), prods=await db.list('products',{});
+  let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ const k=(s.kind||'')+':'+s.ref_sku; stock[k]=(stock[k]||0)+(+s.on_hand||0); }); }catch(e){} }
+  const ig=ings.map(i=>{ const oh=stock['ingredient:'+i.sku]||0; const thr=+i.reorder_g||+i.par_g||0; return {name:i.name,sku:i.sku,oh,thr,short:thr-oh,unit:'g'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
+  const pg=prods.map(p=>{ const oh=stock['product:'+p.sku]||0; const thr=+p.par_packs||0; return {name:p.name,sku:p.sku,oh,thr,short:thr-oh,unit:'packs'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
+  const tbl=(title,rows)=>`<div class="repcard" style="margin-bottom:14px"><h3 style="margin:0 0 8px">${title}</h3>
+    <table><thead><tr><th>Item</th><th>SKU</th><th class="num">On hand</th><th class="num">Threshold</th><th class="num">Short by</th></tr></thead>
+    <tbody>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(Math.round(r.oh))}</td><td class="num">${num(r.thr)}</td><td class="num"><b style="color:var(--danger)">${num(Math.round(r.short))} ${r.unit}</b></td></tr>`).join('')||`<tr><td colspan="5" class="empty">All at or above threshold ✅</td></tr>`}</tbody></table>
+    <div class="pager">${rows.length} item(s) below threshold</div></div>`;
+  return tbl('🥩 Ingredients below reorder point', ig)+tbl('📦 Finished goods below PAR', pg)+
+    (isLive()?'':'<div class="hint">Live stock needed for accurate on-hand — this uses demo data.</div>');
+}
+// Soft check (not a hard block): products whose recipe lists an ingredient on >1 line.
+// A repeat is fine for substitutions; this just makes accidental exact copies visible.
+async function dupBomHtml(){
+  const boms=await db.list('bom_lines',{}), prods=await db.list('products',{}), ings=await listIngredients();
+  const pn={}; prods.forEach(p=>pn[p.sku]=p.name); const inm={}; ings.forEach(i=>inm[i.sku]=i.name);
+  const g={}; boms.forEach(b=>{ const k=b.product_sku+'|'+b.ingredient_sku+'|'+(b.bom_version||1); (g[k]=g[k]||[]).push(+b.usable_g||0); });
+  const rows=Object.keys(g).filter(k=>g[k].length>1).map(k=>{ const [ps,is]=k.split('|'); const grams=g[k].slice().sort((a,b)=>b-a);
+    const exact=new Set(grams).size===1; return {ps,is,lines:grams.length,grams,total:grams.reduce((s,x)=>s+x,0),exact}; })
+    .sort((a,b)=>(a.exact===b.exact?0:(a.exact?-1:1))||b.lines-a.lines);
+  let h=`<div class="repcard"><h3 style="margin:0 0 4px">Repeated recipe ingredients</h3>
+    <div class="hint" style="margin-bottom:10px">A repeated ingredient is <b>fine</b> — costing sums every line (e.g. a substitution). Rows flagged <span style="color:var(--danger)">⚠ identical grams</span> are worth a look, in case a line was copied by accident.</div>
+    <table><thead><tr><th>Product</th><th>Ingredient</th><th class="num">Lines</th><th class="num">Grams/line</th><th class="num">Total g</th><th></th></tr></thead><tbody>`;
+  rows.forEach(r=>{ h+=`<tr><td>${esc(pn[r.ps]||r.ps)}</td><td>${esc(inm[r.is]||r.is)}</td><td class="num">${r.lines}</td><td class="num">${r.grams.join(' + ')}</td><td class="num">${num(r.total)}</td><td>${r.exact?'<span style="color:var(--danger)">⚠ identical grams</span>':'<span style="color:var(--muted)">substitution?</span>'}</td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="6" class="empty">No product repeats an ingredient. ✅</td></tr>';
+  h+='</tbody></table></div>'; return h;
 }
 async function renderCustomReports(){
   reportCache=await reportsList();
@@ -1867,7 +2244,7 @@ async function renderCustomReports(){
   if(!repCfg.dim||!dims.some(d=>d.n===repCfg.dim)) repCfg.dim=(dims[0]||{}).n||'';
   if(!repCfg.measure||!meas.some(d=>d.n===repCfg.measure)) repCfg.measure=(meas[0]||{}).n||'';
   const {data,rows}=await pivot(repSource,repCfg);
-  const max=Math.max(1,...data.map(d=>d.v)); const isMoney=(m.fields.find(f=>f.n===repCfg.measure)||{}).t==='currency'&&repCfg.agg!=='count';
+  const rich=pivotTable('',data,rows,repCfg,m);
   $('content').innerHTML=`<div class="repcard">
     <div class="repbar">
       <span>Source</span><select onchange="repSource=this.value;renderCustomReports()">${sources.map(k=>`<option value="${k}" ${k===repSource?'selected':''}>${MODELS[k].label}</option>`).join('')}</select>
@@ -1876,9 +2253,8 @@ async function renderCustomReports(){
       <span>Group by</span><select onchange="repCfg.dim=this.value;renderCustomReports()">${dims.map(f=>`<option value="${f.n}" ${repCfg.dim===f.n?'selected':''}>${f.l}</option>`).join('')}</select>
       <button class="btn sm sec" onclick="saveReport()">★ Save report</button>
     </div>
-    <table><thead><tr><th>${(m.fields.find(f=>f.n===repCfg.dim)||{}).l||''}</th><th class="num" style="width:130px">${repCfg.agg}</th><th style="width:42%"></th></tr></thead>
-    <tbody>${data.map(d=>`<tr style="cursor:default"><td>${esc(d.k)}</td><td class="num">${isMoney?fmt(d.v):num(Math.round(d.v*100)/100)}</td><td><div class="measure-bar" style="width:${Math.max(3,d.v/max*100)}%"></div></td></tr>`).join('')||'<tr><td colspan="3" class="empty">No data</td></tr>'}</tbody></table>
-    <div class="pager">${data.length} groups · ${rows.length} records${savedReportsHtml()}</div></div>`;
+    <div style="margin-top:14px">${rich}</div>
+    <div class="pager">${savedReportsHtml()}</div></div>`;
 }
 let reportCache=[];
 async function reportsList(){ if(isLive()){ try{ return await sb('saved_reports?select=*&order=saved_at.desc&limit=50'); }catch(e){ return []; } } return JSON.parse(localStorage.getItem('wr_reports')||'[]'); }
@@ -1976,7 +2352,7 @@ async function mrpSheetSync(){ const a=AUTOS.sheets_demand;
 async function loadBulacanStock(){
   const prods=await db.list('products',{});
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.location_code==='bulacan'&&s.kind==='product') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} }
-  const rows = prods.filter(p=> isLive()? (stock[p.sku]>0) : true ).map(p=>({product_sku:p.sku, sent_packs: isLive()?(stock[p.sku]||0):'', received_packs: isLive()?(stock[p.sku]||0):'' }));
+  const rows = prods.filter(p=> isLive()? (stock[p.sku]>0) : true ).map(p=>({product_sku:p.sku, sent_packs: isLive()?(stock[p.sku]||0):'', received_packs: 0 }));
   if(!rows.length){ toast('No finished stock at Bulacan yet',true); return; }
   formChildren=rows; renderLines(); toast('Loaded '+rows.length+' product(s) manufactured at Bulacan');
 }
