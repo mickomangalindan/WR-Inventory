@@ -1176,7 +1176,9 @@ async function renderMRP(){
     const manualKg=+mrpManual[it.sku]||0; const subtotal=base + manualKg*1000;
     const moq=(+it.min_order_kg||0)*1000;
     const final=subtotal<=0?0:(moq>0?Math.ceil(subtotal/moq)*moq:subtotal);
-    plan.push({sku:it.sku,name:it.name,rawNeed,par,leadBuf,lead,oh,base,manualKg,moq,final,supplier:it.supplier||'',price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
+    // default supplier: the ingredient's own default, else fall back to Supplier 1 from the master (ignore "to be determined")
+    const _s1=(it.supplier1||'').trim(); const defSup=(it.supplier||'').trim() || (/to be determined/i.test(_s1)?'':_s1);
+    plan.push({sku:it.sku,name:it.name,rawNeed,par,leadBuf,lead,oh,base,manualKg,moq,final,supplier:defSup,price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
   });
   plan.sort((a,b)=>b.final-a.final);
   window._mrpPlan=plan;
