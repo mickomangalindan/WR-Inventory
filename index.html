@@ -203,6 +203,35 @@
   .ment{background:#e6eff9;color:#1b5fa8;border-radius:4px;padding:0 3px;font-weight:600}
   .btn.link.sm{font-size:11.5px}
   .pill.ok{background:#dbeddb;color:#1e6b2e;border-radius:20px;padding:1px 8px;font-size:11px;font-weight:600}
+  /* activities + notification center (ClickUp-style) */
+  .nhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .nhead h4{margin:0}
+  .actwrap{margin:8px 0}
+  .act{display:flex;align-items:flex-start;gap:9px;background:#fff;border:1px solid var(--line);border-left:3px solid #4e7a3e;border-radius:7px;padding:8px 10px;margin-top:7px}
+  .act.done{opacity:.55;border-left-color:#bbb}
+  .actic{font-size:16px;line-height:1.3}
+  .actbody{flex:1;min-width:0}
+  .acttop{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;color:#222}
+  .duechip{display:inline-flex;align-items:center;gap:3px;background:#eef2ec;color:#3d5f30;border-radius:11px;padding:1px 8px;font-size:11px;font-weight:600}
+  .duechip.over{background:#f7dcd6;color:#b23b2e}
+  /* schedule-activity form */
+  .actform{display:flex;flex-direction:column;gap:5px}
+  .actform label{font-size:11.5px;color:var(--muted);font-weight:600;margin-top:6px}
+  .actform input,.actform select,.actform textarea{border:1px solid var(--line);border-radius:7px;padding:8px;font:inherit;font-size:13px;box-sizing:border-box;width:100%}
+  .actform .row2{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+  .segbtns{display:flex;gap:6px;flex-wrap:wrap}
+  .segbtns button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 11px;font-size:12.5px;cursor:pointer}
+  .segbtns button.on{background:#4e7a3e;color:#fff;border-color:#4e7a3e}
+  /* notification center */
+  .inbox{min-width:min(560px,86vw)}
+  .ibhead{display:flex;align-items:baseline;gap:10px}
+  .ibhead h3{margin:0}
+  .ibtabs{display:flex;gap:8px;margin:12px 0;border-bottom:1px solid var(--line)}
+  .ibtab{background:none;border:none;border-bottom:2px solid transparent;padding:8px 4px;margin-bottom:-1px;font:inherit;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer}
+  .ibtab.on{color:#4e7a3e;border-bottom-color:#4e7a3e}
+  .ibcount{background:#eef0f6;color:#40506b;border-radius:10px;padding:0 7px;font-size:11px}
+  .ibcount.crit{background:#f7dcd6;color:#b23b2e}
+  .ibbody{max-height:60vh;overflow:auto}
 
 /* --- Operations Dashboard (standalone design, scoped to .wrdash) --- */
 .wrdash{--wgrid:#e1e0d9;--wmuted:#898781;--wink:#0b0b0b;--wink2:#52514e;--wbrand:#4e7a3e;--wborder:rgba(11,11,11,.10);--wsurface:#fff;max-width:1180px;margin:0 auto}
@@ -1116,16 +1145,58 @@ function loadAttach(){ try{return JSON.parse(localStorage.getItem(attachKey())||
 function attachHtml(){ const a=loadAttach(); const folder=(typeof AUTOS!=='undefined'&&AUTOS.drive_folder&&AUTOS.drive_folder.url)?AUTOS.drive_folder.url:'';
   return `<div class="attachbox"><h4>📎 Attachments</h4><div>${a.map((x,i)=>`<span class="attpill"><a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.name)}</a> <span class="x" onclick="attDel(${i})">✕</span></span>`).join('')||'<span style="color:var(--muted)">No attachments</span>'}</div>
     <div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="addrow" onclick="attAdd()">＋ Attach Drive link</span>${folder?`<a class="btn sm sec" href="${esc(safeUrl(folder))}" target="_blank" rel="noopener noreferrer">📁 Open Drive folder</a>`:'<span class="mini">Set a Drive folder in Automations to enable uploads</span>'}</div></div>`; }
-function attAdd(){ const name=prompt('File name / label:'); if(!name)return; const url=prompt('Link (Google Drive URL):')||'#'; const a=loadAttach(); a.push({name,url}); localStorage.setItem(attachKey(),JSON.stringify(a)); renderForm(); }
+function attAdd(){   // opens a real file picker; routes the file to Drive via n8n if configured
+  const inp=document.createElement('input'); inp.type='file'; inp.style.display='none';
+  inp.onchange=()=>{ const f=inp.files&&inp.files[0]; if(f) uploadAttach(f); inp.remove(); };
+  document.body.appendChild(inp); inp.click();
+}
+async function uploadAttach(f){
+  if(f.size>15*1024*1024){ toast('File is over 15MB — upload it to Drive directly and paste the link.',true); return attLink(f.name); }
+  const a=autoCfg('file_upload'); const m=MODELS[state.model]; const ref=formRec[m.pk];
+  if(!a||!a.on||!a.url){ return attLink(f.name); }   // no automation set → fall back to pasting a link
+  const reader=new FileReader();
+  reader.onload=async()=>{ const b64=String(reader.result).split(',')[1]||'';
+    await postWebhook(a.url,{ model:state.model, module:state.model, ref:String(ref),
+       filename:f.name, mimetype:f.type||'application/octet-stream', data:b64, by:CURRENT_USER });
+    const at=loadAttach(); at.push({name:f.name,url:(autoCfg('drive_folder')||{}).url||'#',pending:true});
+    localStorage.setItem(attachKey(),JSON.stringify(at));
+    sysLog(state.model, ref, '📎 '+CURRENT_USER+' uploaded '+f.name+' → Drive');
+    toast('Uploading '+f.name+' to Drive…'); renderForm();
+  };
+  reader.readAsDataURL(f);
+}
+function attLink(name){ const url=prompt('Paste a Drive link for '+(name||'this file')+':')||''; if(!url) return;
+  const a=loadAttach(); a.push({name:name||url,url}); localStorage.setItem(attachKey(),JSON.stringify(a)); renderForm(); }
 function attDel(i){ const a=loadAttach(); a.splice(i,1); localStorage.setItem(attachKey(),JSON.stringify(a)); renderForm(); }
 
 /* print */
-function printForm(){ const m=MODELS[state.model], r=formRec;
+// Build the printable/PDF HTML for a record (shared by Print and the PDF automation).
+function recordPrintHtml(m, r, children){
   const rowsF=m.fields.map(f=>`<tr><td style="color:#666;width:170px">${esc(f.l)}</td><td>${esc(f.t==='formula'?evalF(f.expr,r):(r[f.n]==null?'':r[f.n]))}</td></tr>`).join('');
-  let lines=''; if(m.o2m){ lines=`<h3 style="color:#4e7a3e">${m.o2m.label}</h3><table border=1 cellpadding=6 style="border-collapse:collapse;width:100%"><tr>${m.o2m.cols.map(c=>`<th>${c.l}</th>`).join('')}</tr>${formChildren.map(l=>`<tr>${m.o2m.cols.map(c=>`<td>${esc(l[c.n]==null?'':l[c.n])}</td>`).join('')}</tr>`).join('')}</table>`; }
+  let lines=''; if(m.o2m){ lines=`<h3 style="color:#4e7a3e">${m.o2m.label}</h3><table border=1 cellpadding=6 style="border-collapse:collapse;width:100%"><tr>${m.o2m.cols.map(c=>`<th>${c.l}</th>`).join('')}</tr>${(children||[]).map(l=>`<tr>${m.o2m.cols.map(c=>`<td>${esc(l[c.n]==null?'':l[c.n])}</td>`).join('')}</tr>`).join('')}</table>`; }
+  return `<html><head><title>${esc(r[m.pk]||m.label)}</title><style>body{font-family:Arial;padding:28px;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:4px 0 16px}table{width:100%;border-collapse:collapse}td{padding:5px 8px;border-bottom:1px solid #eee}</style></head><body><h1>🐇 Wholesome Rabbit</h1><h2>${esc(m.label)} — ${esc(r[m.pk]||'')}</h2><table>${rowsF}</table>${lines}<p style="margin-top:22px;color:#888;font-size:12px">Generated ${new Date().toLocaleString()} · ${esc(CURRENT_USER)}</p></body></html>`;
+}
+function printForm(){ const m=MODELS[state.model], r=formRec;
   const w=window.open('','_pr','width=840,height=920'); if(!w){toast('Allow pop-ups to print',true);return;}
-  w.document.write(`<html><head><title>${esc(r[m.pk]||m.label)}</title><style>body{font-family:Arial;padding:28px;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:4px 0 16px}table{width:100%;border-collapse:collapse}td{padding:5px 8px;border-bottom:1px solid #eee}</style></head><body><h1>🐇 Wholesome Rabbit</h1><h2>${esc(m.label)} — ${esc(r[m.pk]||'')}</h2><table>${rowsF}</table>${lines}<p style="margin-top:22px;color:#888;font-size:12px">Printed ${new Date().toLocaleString()} · ${esc(CURRENT_USER)}</p></body></html>`);
-  w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+  w.document.write(recordPrintHtml(m,r,formChildren)); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+
+// Fire-and-forget POST to an n8n webhook. no-cors so a static app can reach n8n
+// without CORS setup; n8n does the work and writes results back to Supabase.
+async function postWebhook(url, payload){ if(!url) return false;
+  try{ await fetch(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify(payload)}); return true; }
+  catch(e){ console.warn('webhook post failed', e); return false; } }
+function autoCfg(k){ return (typeof AUTOS!=='undefined'&&AUTOS[k])?AUTOS[k]:null; }
+// On completion: send the record to n8n → PDF → Drive folder → link back + notify (with Internal Ref).
+async function notifyRecordDone(model, ref, recOverride, childrenOverride){
+  const a=autoCfg('record_pdf'); if(!a||!a.on||!a.url) return;
+  const m=MODELS[model]; const r=recOverride||formRec;
+  let children=childrenOverride;
+  if(children===undefined){ children=[]; if(m.o2m){ try{ children=(r[m.pk]===ref)?formChildren:await db.children(m.o2m, ref); }catch(e){} } }
+  const html=recordPrintHtml(m, {...r,[m.pk]:ref}, children);
+  await postWebhook(a.url, { model, module:model, ref:String(ref), kind:m.label,
+     html, email:(SUPA&&SUPA.email)||'', telegram_chat_id:'' });
+  sysLog(model, ref, '📄 Sent to the PDF/Drive automation ('+ref+')');
+}
 
 /* bulk update */
 function toggleSel(pk,on){ pk=decodeURIComponent(pk); state.sel=state.sel||[]; if(on){ if(!state.sel.includes(pk))state.sel.push(pk);} else state.sel=state.sel.filter(x=>x!==pk); bulkBar(); }
@@ -1376,6 +1447,7 @@ async function wfAction(to){ const m=MODELS[state.model]; const from=formRec[m.s
   if(!formIsNew){ try{ await db.update(state.model,m.pk,formRec[m.pk],{[m.status.f]:to}); sysLog(state.model,formRec[m.pk],`🔄 Status ${from} → ${to} by ${CURRENT_USER}`); toast('Status → '+to);
       // NOTE: receiving posts to the ledger via the dedicated modals (openPOReceive / openTransferReceive),
       // never here — that kept a document from posting stock twice.
+      if(['received','closed','invoiced','confirmed','approved','resolved'].includes(to)) notifyRecordDone(state.model, formRec[m.pk]);  // record done → PDF/Drive/notify
     }catch(e){ toast(e.message,true); } }
   renderForm(); }
 // Recipe cost per product (₱/pack) from the BOM — used to value production & transfers.
@@ -1487,6 +1559,7 @@ async function _poReceiveApply(){
     await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'received'});
     sysLog('purchase_orders',formRec.po_ref, '📦 Received by '+CURRENT_USER+(notes.length?(' — '+notes.join('; ')):' — full quantities received'));
     await postReceipt(formRec);
+    notifyRecordDone('purchase_orders', formRec.po_ref);   // PDF → Drive → notify
     closeModal(); renderForm();
   }catch(e){ toast(e.message,true); }
 }
@@ -1522,6 +1595,7 @@ async function _transferReceiveApply(){
     await db.update('transfers','transfer_ref',formRec.transfer_ref,{status:'received'});
     sysLog('transfers',formRec.transfer_ref, '📥 Received by '+CURRENT_USER+(short?(' — '+short+' line(s) short'):' — all lines complete'));
     await postTransfer(formRec);
+    notifyRecordDone('transfers', formRec.transfer_ref);   // PDF → Drive → notify
     closeModal(); renderForm();
   }catch(e){ toast(e.message,true); }
 }
@@ -1669,8 +1743,8 @@ function chatterKey(){ const m=MODELS[state.model]; return 'chatter:'+state.mode
 function loadChatter(){ try{ return JSON.parse(localStorage.getItem(chatterKey())||'[]'); }catch(e){ return []; } }
 function chatterHtml(){
   const msgs=loadChatter();
-  return `<div class="chatter"><h4>💬 Log &amp; Activity</h4>
-    <div class="cbtns"><button class="btn sm sec" onclick="cAdd('note')">Log note</button><button class="btn sm sec" onclick="cAdd('activity')">Schedule activity</button></div>
+  return `<div class="chatter"><h4>⚙ Activity log</h4>
+    <div class="cbtns"><button class="btn sm sec" onclick="cAdd('note')">＋ Log note</button></div>
     <div id="cmsgs">${msgs.map(mm=>`<div class="msg ${mm.kind==='activity'?'act':(mm.kind==='system'?'sys':'')}"><span class="who">${mm.kind==='activity'?'⏰ Activity':(mm.kind==='system'?'⚙ System':'📝 Note')}</span> <span class="tm">${mm.t}</span><div class="bd">${esc(mm.body)}${mm.due?' · due '+esc(mm.due):''}</div></div>`).join('')||'<div class="msg" style="color:var(--muted)">No messages yet.</div>'}</div></div>`;
 }
 function cAdd(kind){
@@ -1701,19 +1775,76 @@ async function allOpenNotes(){
 function mentionChips(){ return userNames().filter(n=>n!==CURRENT_USER).map(n=>`<span class="mchip" onclick="mentionInsert('${esc(n).replace(/'/g,"\\'")}')">@${esc(n)}</span>`).join(''); }
 function mentionInsert(name){ const inp=$('noteInput'); if(inp){ const s=inp.value.replace(/\s+$/,''); inp.value=(s?s+' ':'')+'@'+name+' '; inp.focus(); } }
 function noteBodyHtml(body){ let h=esc(body); userNames().forEach(n=>{ const re=new RegExp('@'+n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'); h=h.replace(re,'<span class="ment">@'+esc(n)+'</span>'); }); return h; }
+/* ---- Activities (scheduled call/to-do/email/meeting) live in record_notes ---- */
+const ACT_TYPES=[['todo','✅','To-do'],['call','📞','Call'],['email','✉️','Email'],['meeting','👥','Meeting']];
+function actMeta(t){ return ACT_TYPES.find(x=>x[0]===t)||['todo','✅','To-do']; }
+function fmtDue(due){ if(!due) return null; const d=new Date(due); if(isNaN(d)) return {label:String(due),over:false};
+  const now=new Date(); const over=d<now; const today=d.toDateString()===now.toDateString();
+  const lbl=d.toLocaleDateString('en-PH',{month:'short',day:'numeric'})+(due.length>10?(' '+d.toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit'})):'');
+  return {label:(today?'Today ':'')+lbl, over}; }
+function dueChip(due){ const f=fmtDue(due); if(!f) return ''; return `<span class="duechip${f.over?' over':''}">⏱ ${esc(f.label)}</span>`; }
+function openActivity(){
+  const m=MODELS[state.model]; const pk=formRec[m.pk];
+  if(!pk||formIsNew){ toast('Save the record first, then schedule',true); return; }
+  const today=new Date().toISOString().slice(0,10);
+  window._actType='todo';
+  $('modal').innerHTML=`<h3>Schedule activity</h3>
+    <div class="actform">
+      <label>Type</label>
+      <div class="segbtns" id="actType">${ACT_TYPES.map((t,i)=>`<button type="button" class="${i===0?'on':''}" data-v="${t[0]}" onclick="actPickType(this)">${t[1]} ${t[2]}</button>`).join('')}</div>
+      <label>Summary</label><input id="actSummary" placeholder="e.g. Call EDL to confirm Friday delivery">
+      <div class="row2"><div><label>Assigned to</label><select id="actAssignee">${userNames().map(n=>`<option ${n===CURRENT_USER?'selected':''}>${esc(n)}</option>`).join('')}</select></div>
+        <div><label>Due date</label><input type="date" id="actDate" value="${today}"></div>
+        <div><label>Time</label><input type="time" id="actTime" value="09:00"></div></div>
+      <label>Notes (optional)</label><textarea id="actNotes" rows="2" placeholder="Any details…"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="saveActivity()">📅 Schedule</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
+  $('overlay').classList.add('on');
+}
+function actPickType(b){ document.querySelectorAll('#actType button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); window._actType=b.getAttribute('data-v'); }
+async function saveActivity(){
+  const m=MODELS[state.model]; const pk=formRec[m.pk];
+  const summary=(($('actSummary')||{}).value||'').trim(); if(!summary){ toast('Add a summary',true); return; }
+  const type=window._actType||'todo', assignee=$('actAssignee').value, date=$('actDate').value, time=$('actTime').value||'09:00';
+  const due_at=date?(date+'T'+time+':00'):null;
+  const notes=(($('actNotes')||{}).value||'').trim();
+  const body=summary+(notes?(' — '+notes):'');
+  const rec={model:state.model,record_pk:String(pk),kind:'activity',activity_type:type,assignee,due_at,body,author:CURRENT_USER,mentions:[assignee],resolved:false};
+  try{
+    if(isLive()){ await sb('record_notes',{method:'POST',prefer:'return=minimal',body:JSON.stringify(rec)}); }
+    else { const a=JSON.parse(localStorage.getItem('wr_notes')||'[]'); a.push({...rec,id:'a'+Date.now()+Math.floor(Math.random()*999),created_at:new Date().toISOString()}); localStorage.setItem('wr_notes',JSON.stringify(a)); }
+    sysLog(state.model,pk,'⏰ '+CURRENT_USER+' scheduled a '+type+' for '+assignee+(date?(' · due '+date):''));
+    closeModal(); await refreshNotesPanel(); toast('Activity scheduled for '+assignee);
+  }catch(e){ toast(saveErrMsg(e),true); }
+}
+function activityRow(n, showRecord){
+  const [t,ic,lbl]=actMeta(n.activity_type); const done=!!n.resolved;
+  const recTag=showRecord?` <span class="tm">· ${esc((MODELS[n.model]||{}).label||n.model)} ${esc(String(n.record_pk))}</span>`:'';
+  return `<div class="act ${done?'done':''}">
+    <span class="actic">${ic}</span>
+    <div class="actbody"><div class="acttop"><b>${esc(n.body||'')}</b>${dueChip(n.due_at)}</div>
+      <div class="tm">${lbl} · for ${esc(n.assignee||'—')} · by ${esc(n.author||'—')}${recTag}</div></div>
+    ${showRecord?`<span class="btn link sm" onclick="gotoRecord('${esc(n.model)}','${esc(String(n.record_pk)).replace(/'/g,"\\'")}')">Open</span>`:''}
+    ${done?'<span class="pill ok">done</span>':`<span class="btn link sm" onclick="noteResolve('${esc(String(n.id))}',true)">✓ Done</span>`}</div>`;
+}
 function notesPanelHtml(){
-  const msgs=formNotes||[];
-  const list=msgs.map(n=>{ const res=!!n.resolved;
+  const all=formNotes||[];
+  const acts=all.filter(n=>n.kind==='activity').sort((a,b)=>String(a.due_at||'').localeCompare(String(b.due_at||'')));
+  const msgs=all.filter(n=>n.kind!=='activity');
+  const openActs=acts.filter(n=>!n.resolved);
+  const msgList=msgs.map(n=>{ const res=!!n.resolved;
     return `<div class="nmsg ${res?'done':''}"><div class="nhd"><b>${esc(n.author||'—')}</b>${(n.mentions&&n.mentions.length)?` <span class="tm">→ @${n.mentions.map(esc).join(', @')}</span>`:''}<span style="flex:1"></span>${res?'<span class="pill ok">resolved</span>':`<span class="btn link sm" onclick="noteResolve('${esc(String(n.id))}',true)">Mark resolved</span>`}</div>
       <div class="bd">${noteBodyHtml(n.body||'')}</div></div>`; }).join('')||'<div class="nmsg" style="color:var(--muted)">No messages yet. @mention a teammate to notify them.</div>';
-  return `<div class="notes"><h4>💬 Messages &amp; Mentions</h4>
+  const actList=openActs.map(n=>activityRow(n,false)).join('')||'<div class="nmsg" style="color:var(--muted)">No open activities.</div>';
+  return `<div class="notes" id="notesPanel"><div class="nhead"><h4>💬 Messages &amp; Activities</h4><button class="btn sm sec" onclick="openActivity()">📅 Schedule activity</button></div>
     <div class="ncompose"><textarea id="noteInput" rows="2" placeholder="Write a message… use @name to mention a teammate"></textarea>
       <div class="mchips">${mentionChips()}</div>
       <button class="btn sm" onclick="notePost()">Post message</button></div>
-    <div id="noteList">${list}</div></div>`;
+    ${openActs.length?`<div class="actwrap">${actList}</div>`:''}
+    <div id="noteList">${msgList}</div></div>`;
 }
 async function refreshNotesPanel(){ const m=MODELS[state.model]; const pk=formRec[m.pk]; formNotes=await notesForRecord(state.model,pk);
-  const el=$('noteList'); if(el){ const tmp=document.createElement('div'); tmp.innerHTML=notesPanelHtml(); el.innerHTML=tmp.querySelector('#noteList').innerHTML; } refreshMentionBell(); }
+  const el=$('notesPanel'); if(el){ const tmp=document.createElement('div'); tmp.innerHTML=notesPanelHtml(); el.replaceWith(tmp.firstElementChild); } refreshMentionBell(); }
 async function notePost(){ const inp=$('noteInput'); if(!inp) return; const body=(inp.value||'').trim(); if(!body){ toast('Write a message first',true); return; }
   const m=MODELS[state.model]; const pk=formRec[m.pk]; if(!pk||formIsNew){ toast('Save the record first, then post',true); return; }
   const mentions=parseMentions(body);
@@ -1728,26 +1859,42 @@ async function noteResolve(id,val){
   try{
     if(isLive()){ await sb('record_notes?id=eq.'+encodeURIComponent(id),{method:'PATCH',prefer:'return=minimal',body:JSON.stringify({resolved:val})}); }
     else { const a=JSON.parse(localStorage.getItem('wr_notes')||'[]'); const i=a.findIndex(n=>String(n.id)===String(id)); if(i>=0){ a[i].resolved=val; localStorage.setItem('wr_notes',JSON.stringify(a)); } }
-    if(!formIsNew) await refreshNotesPanel(); else refreshMentionBell();
-    const md=$('modal'); if(md && $('menuBody')) openMentions();
+    if(!formIsNew && $('notesPanel')) await refreshNotesPanel(); else refreshMentionBell();
+    if($('menuBody')) await drawInbox();   // refresh the open notification center in place
   }catch(e){ toast(e.message,true); }
 }
+// Split open notes into what belongs to ME: mentions (messages) + my activities.
+async function myInbox(){ const all=await allOpenNotes();
+  const mentions=all.filter(n=>n.kind!=='activity' && (n.mentions||[]).includes(CURRENT_USER));
+  const activities=all.filter(n=>n.kind==='activity' && (n.assignee===CURRENT_USER))
+    .sort((a,b)=>String(a.due_at||'~').localeCompare(String(b.due_at||'~')));
+  return {mentions, activities}; }
 async function refreshMentionBell(){ const el=$('mbell'); if(!el) return;
-  let mine=[]; try{ mine=(await allOpenNotes()).filter(n=>(n.mentions||[]).includes(CURRENT_USER)); }catch(e){}
-  el.innerHTML='🔔'+(mine.length?`<span class="mbadge">${mine.length}</span>`:'');
-  el.title=mine.length?(mine.length+' unresolved mention(s)'):'No unresolved mentions';
+  let n=0; try{ const x=await myInbox(); n=x.mentions.length+x.activities.length; }catch(e){}
+  el.innerHTML='🔔'+(n?`<span class="mbadge">${n}</span>`:'');
+  el.title=n?(n+' item(s) need your attention'):'Nothing pending';
 }
-async function openMentions(){
-  const mine=(await allOpenNotes()).filter(n=>(n.mentions||[]).includes(CURRENT_USER));
-  const rows=mine.map(n=>{ const lbl=(MODELS[n.model]||{}).label||n.model;
-    return `<div class="nmsg"><div class="nhd"><b>${esc(n.author||'—')}</b> <span class="tm">in ${esc(lbl)} · ${esc(String(n.record_pk))}</span><span style="flex:1"></span>
-      <span class="btn link sm" onclick="gotoRecord('${esc(n.model)}','${esc(String(n.record_pk)).replace(/'/g,"\\'")}')">Open</span>
-      <span class="btn link sm" onclick="noteResolve('${esc(String(n.id))}',true)">Resolve</span></div>
-      <div class="bd">${noteBodyHtml(n.body||'')}</div></div>`; }).join('')||'<div class="nmsg" style="color:var(--muted)">🎉 No unresolved mentions for you.</div>';
-  $('modal').innerHTML=`<h3>🔔 My mentions <span style="font-weight:400;color:var(--muted);font-size:13px">— ${esc(CURRENT_USER)}</span></h3>
-    <div id="menuBody" style="max-height:60vh;overflow:auto">${rows}</div>
-    <div style="margin-top:12px"><button class="btn sec" onclick="closeModal()">Close</button></div>`;
-  $('overlay').classList.add('on');
+let _inboxTab='activities';
+async function openMentions(){ _inboxTab='activities'; await drawInbox(); $('overlay').classList.add('on'); }
+async function drawInbox(){
+  const {mentions,activities}=await myInbox();
+  const overdue=activities.filter(a=>{const f=fmtDue(a.due_at);return f&&f.over;}).length;
+  const tab=(id,label,n,extra)=>`<button class="ibtab ${_inboxTab===id?'on':''}" onclick="_inboxTab='${id}';drawInbox()">${label}${n?` <span class="ibcount ${extra||''}">${n}</span>`:''}</button>`;
+  let body;
+  if(_inboxTab==='activities'){
+    body = activities.length ? activities.map(a=>activityRow(a,true)).join('')
+         : '<div class="nmsg" style="color:var(--muted)">🎉 No activities assigned to you.</div>';
+  } else {
+    body = mentions.length ? mentions.map(n=>`<div class="nmsg"><div class="nhd"><b>${esc(n.author||'—')}</b> <span class="tm">in ${esc((MODELS[n.model]||{}).label||n.model)} · ${esc(String(n.record_pk))}</span><span style="flex:1"></span>
+        <span class="btn link sm" onclick="gotoRecord('${esc(n.model)}','${esc(String(n.record_pk)).replace(/'/g,"\\'")}')">Open</span>
+        <span class="btn link sm" onclick="noteResolve('${esc(String(n.id))}',true)">Resolve</span></div>
+        <div class="bd">${noteBodyHtml(n.body||'')}</div></div>`).join('')
+      : '<div class="nmsg" style="color:var(--muted)">🎉 No unresolved mentions for you.</div>';
+  }
+  $('modal').innerHTML=`<div class="inbox"><div class="ibhead"><h3>🔔 Notifications</h3><span class="tm">${esc(CURRENT_USER)}</span></div>
+    <div class="ibtabs">${tab('activities','📅 My Activities',activities.length,overdue?'crit':'')}${tab('mentions','💬 Mentions',mentions.length)}</div>
+    <div id="menuBody" class="ibbody">${body}</div>
+    <div style="margin-top:12px;text-align:right"><button class="btn sec" onclick="closeModal()">Close</button></div></div>`;
 }
 function gotoRecord(model,pk){ closeModal(); state.model=model; openForm(encodeURIComponent(pk)); }
 /* command palette ⌘K */
@@ -1853,6 +2000,7 @@ async function _prodConfirm(){
       try{ await db.create('batch_issues',{batch_ref:r.batch_ref,ingredient_sku:line.ingredient_sku,expected_raw_g:rawG,actual_raw_g:rawG}); }catch(e){}
     } } }
   sysLog('production_batches',prodRunRef,'✅ Production confirmed ('+recs.length+' batches, '+drawn+' ingredient issues) by '+CURRENT_USER);
+  notifyRecordDone('production_batches', prodRunRef, {batch_ref:prodRunRef,status:'confirmed',operator:CURRENT_USER,production_date:prodPlanDate}, recs);   // PDF → Drive → notify
   toast('Confirmed · '+posted+' product(s) posted; '+drawn+' raw issue(s) drawn down'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0); prodRunRef=''; drawProdPlan();
 }
 
@@ -1955,6 +2103,7 @@ async function _countApprove(){
     try{ await db.create('variance_log',{check_type:'3.5 · Shrinkage',source_ref:countRec.count_ref,expected:+l.book_qty||0,actual:+l.counted_qty,gap_qty:gap,gap_value:gval,location:countRec.location_code,responsible_user:CURRENT_USER,status:'open',note:(l.name||l.ref_sku)+' book vs counted'}); }catch(e){}
   }
   sysLog('count_sessions',countRec.count_ref,'✔ Approved by '+CURRENT_USER+' — '+flags+' adjustment(s) posted to stock');
+  notifyRecordDone('count_sessions', countRec.count_ref, countRec, countLines);   // PDF → Drive → notify
   toast('Approved · '+flags+' adjustment(s) posted'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0); state.view='list'; route();
 }
 
@@ -2272,6 +2421,8 @@ async function delReport(i){ const x=reportCache[i]; if(!x)return; try{ if(isLiv
 let AUTOS = JSON.parse(localStorage.getItem('wr_autos')||'null') || {
   sheets_demand:{on:false,url:'',label:'Google Sheets — Demand sync (by SKU)',hint:'n8n reads your Shopify→Sheets sheet and updates MRP demand, keyed by SKU.'},
   drive_folder:{on:false,url:'',label:'Google Drive — Attachments folder',hint:'Record attachments live here; uploads route via n8n, links saved on the record.'},
+  record_pdf:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-record-done',label:'n8n — Record → PDF → Drive → notify',hint:'When a document is completed, it is sent here: n8n builds a PDF, saves it to the module Drive folder, writes the link back on the record, and notifies Telegram/Email with the Internal Reference.'},
+  file_upload:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-file-upload',label:'n8n — File upload to Drive',hint:'Files you attach on a record are sent here and uploaded to the module Drive folder.'},
   shopify:{on:false,url:'',label:'Shopify — Orders sync',hint:'Orders flow in through your existing Apps Script sheet.'},
   telegram:{on:false,url:'',label:'Telegram / Email — PO & report alerts',hint:'n8n sends on confirmed PO + daily/weekly digests.'},
   mrp_schedule:{on:false,url:'',label:'MRP — scheduled draft POs',hint:'n8n runs the Supabase MRP function on a schedule.'},
