@@ -537,7 +537,9 @@ function renderSide(){
 }
 function setCrumb(extra){
   const m=MODELS[state.model];
-  $('crumb').innerHTML = `<b>${m.label}</b>`+(extra?` / ${esc(extra)}`:'');
+  const back = `<span onclick="history.back()" title="Back" style="cursor:pointer;margin-right:10px;color:var(--muted);font-weight:700;font-size:16px">←</span>`;
+  const link = (state.view==='form'&&!formIsNew) ? ` <span onclick="copyRecordLink()" title="Copy link to this record" style="cursor:pointer;color:var(--muted)">🔗</span>` : '';
+  $('crumb').innerHTML = back+`<b>${m.label}</b>`+(extra?` / ${esc(extra)}`:'')+link;
 }
 function openModel(model){
   if(model==='home'){ state={model:'home',view:'home',search:'',groupBy:'',recId:null}; renderSide(); renderDashboard(); return; }
@@ -564,11 +566,32 @@ function route(){
     if(m.special==='selftest') return renderSelfTest();
   }
   setCrumb();
+  syncHash();
   if(state.view==='kanban') return renderKanban();
   if(state.view==='list') return renderList();
   if(state.view==='form') return renderForm();
   if(state.view==='report') return renderReport();
 }
+
+/* ---- URL hash routing: deep links to any module/record + browser back/forward ---- */
+let _hashLock=false;
+function setHash(h){ if(location.hash===h) return; _hashLock=true; location.hash=h; setTimeout(()=>{_hashLock=false;},0); }
+function syncHash(){ let h='#/'+(state.model||'home');
+  if(state.view==='form'){ const m=MODELS[state.model];
+    if(formIsNew) h+='/new';
+    else if(m){ const pk=formRec&&formRec[m.pk]; if(pk!=null&&pk!=='') h+='/'+encodeURIComponent(pk); } }
+  setHash(h); }
+async function onHashRoute(){ if(_hashLock) return;
+  const raw=(location.hash||'').replace(/^#\/?/,'');
+  if(!raw){ if(state.model!=='home') openModel('home'); return; }
+  const slash=raw.indexOf('/'); const model=slash<0?raw:raw.slice(0,slash); const seg=slash<0?'':raw.slice(slash+1);
+  if(model==='home'){ if(state.model!=='home'||state.view!=='home') openModel('home'); return; }
+  if(!MODELS[model]) return;
+  if(seg){ if(state.model!==model){ state.model=model; renderSide(); } if(seg==='new') openForm(null); else openForm(seg); }
+  else { if(state.model!==model||state.view==='form') openModel(model); }
+}
+function bootRoute(){ if((location.hash||'').replace(/^#\/?/,'')) onHashRoute(); else openModel('home'); }
+function copyRecordLink(){ const u=location.href; (navigator.clipboard&&navigator.clipboard.writeText(u)||Promise.reject()).then(()=>toast('Link copied')).catch(()=>{ prompt('Copy this link:',u); }); }
 
 /* -------- control panel -------- */
 function controlPanel(){
@@ -669,13 +692,14 @@ async function openForm(idEnc){
   // preload rel options
   for(const f of m.fields) if(f.t==='rel') await relOptions(f.rel);
   if(m.o2m) for(const c of m.o2m.cols) if(c.t==='rel') await relOptions(c.rel);
-  renderForm();
+  renderForm(); syncHash();
 }
 async function renderForm(){
   controlPanel();
   const m=MODELS[state.model]; const r=formRec;
   setCrumb(formIsNew?'New':(r[m.name]||r[m.pk]||'New'));
   formNotes = formIsNew ? [] : await notesForRecord(state.model, formRec[m.pk]);
+  formAtts  = formIsNew ? [] : await attsForRecord(state.model, formRec[m.pk]);
   const statusbar = m.status? `<div class="statusbar">${m.status.stages.map(s=>`<div class="stg ${r[m.status.f]===s?'on':''}">${s}</div>`).join('')}</div>`:'';
   const faMode=(f)=> fieldMode(state.model, f.n);
   const fieldInput=(f)=>{
@@ -720,6 +744,7 @@ async function renderForm(){
      <button class="btn" onclick="saveForm()">💾 Save</button>
      <button class="btn sec" onclick="discardForm()">Discard</button>
      ${!formIsNew?`<button class="btn sec" onclick="printForm()">🖨 Print</button>`:''}
+     ${(state.model==='purchase_orders'&&!formIsNew)?`<button class="btn sec" onclick="sendPODraft()">✉ Send PO</button>`:''}
      ${safeActions}
      <span style="flex:1"></span><span style="color:var(--muted)">${isLive()?'Live · Supabase':'Demo (local only)'}</span>
    </div>`:`<div class="formbar"><button class="btn sec" onclick="printForm()">🖨 Print</button><span style="flex:1"></span><span style="color:var(--muted)">Read-only view</span></div>`;
@@ -896,7 +921,7 @@ function openSettings(){
 async function signIn(){ const email=($('s_email').value||'').trim(), pw=$('s_pw').value; if(!email||!pw){ toast('Enter email & password',true); return; }
   try{ const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    await loadFieldAcl(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
+    await loadFieldAcl(); await loadAutos(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
   }catch(e){ toast(e.message,true); } }
 function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.email; delete SUPA.role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); }
   // purge cached record data on sign-out so nothing sensitive is left on a shared machine
@@ -908,7 +933,7 @@ function saveSettings(){
   const url=$('s_url').value.trim(), key=$('s_key').value.trim();
   if(!url||!key){ toast('Enter URL and key',true); return; }
   SUPA={url,key}; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); relCache={};
-  updateMode(); closeModal(); toast('Connected — loading live data'); openModel(state.model);
+  updateMode(); closeModal(); toast('Connected — loading live data'); loadAutos(); openModel(state.model);
 }
 function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={}; updateMode(); closeModal(); toast('Back to demo mode'); openModel(state.model); }
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';} }
@@ -1076,7 +1101,7 @@ async function gateSignIn(){
   try{
     const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    await loadFieldAcl(); hideGate(); updateMode(); renderUserSel(); renderSide(); openModel('home');
+    await loadFieldAcl(); await loadAutos(); hideGate(); updateMode(); renderUserSel(); renderSide(); bootRoute();
   }catch(e){ $('g_err').textContent=e.message; }
 }
 
@@ -1142,9 +1167,32 @@ function sysLog(model,pk,text){ if(!pk)return; const key='chatter:'+model+':'+pk
 /* attachments (link-based → Google Drive; live uploads flow through n8n) */
 function attachKey(){ const m=MODELS[state.model]; return 'attach:'+state.model+':'+(formRec[m.pk]||'new'); }
 function loadAttach(){ try{return JSON.parse(localStorage.getItem(attachKey())||'[]')}catch(e){return[]} }
-function attachHtml(){ const a=loadAttach(); const folder=(typeof AUTOS!=='undefined'&&AUTOS.drive_folder&&AUTOS.drive_folder.url)?AUTOS.drive_folder.url:'';
-  return `<div class="attachbox"><h4>📎 Attachments</h4><div>${a.map((x,i)=>`<span class="attpill"><a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.name)}</a> <span class="x" onclick="attDel(${i})">✕</span></span>`).join('')||'<span style="color:var(--muted)">No attachments</span>'}</div>
-    <div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="addrow" onclick="attAdd()">＋ Attach Drive link</span>${folder?`<a class="btn sm sec" href="${esc(safeUrl(folder))}" target="_blank" rel="noopener noreferrer">📁 Open Drive folder</a>`:'<span class="mini">Set a Drive folder in Automations to enable uploads</span>'}</div></div>`; }
+let formAtts=[];   // attachments from Supabase (record_attachments) — carry the shareable drive_url
+async function attsForRecord(model,ref){ if(!ref||!isLive()) return [];
+  try{ return await sb('record_attachments?select=id,filename,drive_url&model=eq.'+encodeURIComponent(model)+'&ref=eq.'+encodeURIComponent(ref)+'&order=created_at.desc'); }catch(e){ return []; } }
+async function refreshAtts(){ const m=MODELS[state.model]; formAtts=await attsForRecord(state.model,formRec[m.pk]);
+  // drop local pending rows that have now landed in Supabase (matched by filename)
+  try{ const names=(formAtts||[]).map(a=>a.filename); const loc=loadAttach().filter(x=>!(x.pending&&names.includes(x.name))); localStorage.setItem(attachKey(),JSON.stringify(loc)); }catch(e){}
+  renderForm(); }
+async function attDelDb(id){ try{ await sb('record_attachments?id=eq.'+id,{method:'DELETE',prefer:'return=minimal'}); }catch(e){ toast(e.message,true); return; }
+  formAtts=(formAtts||[]).filter(a=>a.id!==id); toast('Attachment removed'); renderForm(); }
+function attachHtml(){
+  const folder=(typeof AUTOS!=='undefined'&&AUTOS.drive_folder&&AUTOS.drive_folder.url)?AUTOS.drive_folder.url:'';
+  // Supabase attachments (with clickable shareable links) first, then any local pending / manual ones not yet in the DB
+  const dbA=(formAtts||[]).map(x=>({name:x.filename,url:x.drive_url,id:x.id,src:'db'}));
+  const loc=loadAttach().filter(x=>!dbA.some(d=>d.name===x.name)).map((x,i)=>({name:x.name,url:x.url,pending:x.pending,idx:i,src:'loc'}));
+  const all=dbA.concat(loc);
+  const pill=x=>{ const del=x.src==='db'?`onclick="attDelDb(${x.id})"`:`onclick="attDel(${x.idx})"`;
+    const body=(x.url&&safeUrl(x.url)!=='#'&&!x.pending)
+      ? `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.name)}</a>`
+      : `${esc(x.name)}${x.pending?' <span class="mini">uploading…</span>':''}`;
+    return `<span class="attpill">${body} <span class="x" ${del}>✕</span></span>`; };
+  return `<div class="attachbox"><h4>📎 Attachments</h4><div>${all.map(pill).join('')||'<span style="color:var(--muted)">No attachments</span>'}</div>
+    <div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span class="addrow" onclick="attAdd()">＋ Upload file</span>
+      <span class="addrow" onclick="attLink()">🔗 Paste link</span>
+      <span class="btn sm sec" onclick="refreshAtts()">↻ Refresh</span>
+      ${folder?`<a class="btn sm sec" href="${esc(safeUrl(folder))}" target="_blank" rel="noopener noreferrer">📁 Drive folder</a>`:''}</div></div>`; }
 function attAdd(){   // opens a real file picker; routes the file to Drive via n8n if configured
   const inp=document.createElement('input'); inp.type='file'; inp.style.display='none';
   inp.onchange=()=>{ const f=inp.files&&inp.files[0]; if(f) uploadAttach(f); inp.remove(); };
@@ -1158,10 +1206,13 @@ async function uploadAttach(f){
   reader.onload=async()=>{ const b64=String(reader.result).split(',')[1]||'';
     await postWebhook(a.url,{ model:state.model, module:state.model, ref:String(ref),
        filename:f.name, mimetype:f.type||'application/octet-stream', data:b64, by:CURRENT_USER });
-    const at=loadAttach(); at.push({name:f.name,url:(autoCfg('drive_folder')||{}).url||'#',pending:true});
+    const at=loadAttach(); at.push({name:f.name,pending:true});
     localStorage.setItem(attachKey(),JSON.stringify(at));
     sysLog(state.model, ref, '📎 '+CURRENT_USER+' uploaded '+f.name+' → Drive');
-    toast('Uploading '+f.name+' to Drive…'); renderForm();
+    toast('Uploading '+f.name+' to Drive… the link will appear shortly'); renderForm();
+    // n8n uploads to Drive, makes a shareable link, and writes it into record_attachments;
+    // pull it back so the file shows as a clickable link (no manual paste needed).
+    setTimeout(()=>{ if(state.view==='form'&&formRec[m.pk]===ref) refreshAtts(); }, 9000);
   };
   reader.readAsDataURL(f);
 }
@@ -1172,13 +1223,75 @@ function attDel(i){ const a=loadAttach(); a.splice(i,1); localStorage.setItem(at
 /* print */
 // Build the printable/PDF HTML for a record (shared by Print and the PDF automation).
 function recordPrintHtml(m, r, children){
-  const rowsF=m.fields.map(f=>`<tr><td style="color:#666;width:170px">${esc(f.l)}</td><td>${esc(f.t==='formula'?evalF(f.expr,r):(r[f.n]==null?'':r[f.n]))}</td></tr>`).join('');
-  let lines=''; if(m.o2m){ lines=`<h3 style="color:#4e7a3e">${m.o2m.label}</h3><table border=1 cellpadding=6 style="border-collapse:collapse;width:100%"><tr>${m.o2m.cols.map(c=>`<th>${c.l}</th>`).join('')}</tr>${(children||[]).map(l=>`<tr>${m.o2m.cols.map(c=>`<td>${esc(l[c.n]==null?'':l[c.n])}</td>`).join('')}</tr>`).join('')}</table>`; }
-  return `<html><head><title>${esc(r[m.pk]||m.label)}</title><style>body{font-family:Arial;padding:28px;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:4px 0 16px}table{width:100%;border-collapse:collapse}td{padding:5px 8px;border-bottom:1px solid #eee}</style></head><body><h1>🐇 Wholesome Rabbit</h1><h2>${esc(m.label)} — ${esc(r[m.pk]||'')}</h2><table>${rowsF}</table>${lines}<p style="margin-top:22px;color:#888;font-size:12px">Generated ${new Date().toLocaleString()} · ${esc(CURRENT_USER)}</p></body></html>`;
+  const val=f=>esc(f.t==='formula'?evalF(f.expr,r):(r[f.n]==null?'':r[f.n]));
+  // header meta as a two-column grid (skip empties + the ref itself, which is the title)
+  const meta=m.fields.filter(f=>f.n!==m.pk && (r[f.n]!=null&&r[f.n]!=='')||f.t==='formula')
+    .map(f=>`<div class="mrow"><span class="ml">${esc(f.l)}</span><span class="mv">${val(f)}</span></div>`).join('');
+  let lines='';
+  if(m.o2m){
+    const cols=m.o2m.cols; const kids=children||[];
+    const isNum=c=>['number','currency'].includes(c.t);
+    // amount per line when both a qty-ish and a price-ish column exist
+    const qCol=cols.find(c=>/qty|ordered_kg|received_kg/.test(c.n)); const pCol=cols.find(c=>/price/.test(c.n));
+    const showAmt=qCol&&pCol; let total=0;
+    const head=cols.map(c=>`<th style="text-align:${isNum(c)?'right':'left'}">${esc(c.l)}</th>`).join('')+(showAmt?'<th style="text-align:right">Amount</th>':'');
+    const body=kids.map(l=>{ let amt=0; if(showAmt){ amt=(+l[qCol.n]||0)*(+l[pCol.n]||0); total+=amt; }
+      return '<tr>'+cols.map(c=>`<td style="text-align:${isNum(c)?'right':'left'}">${esc(l[c.n]==null?'':l[c.n])}</td>`).join('')+(showAmt?`<td style="text-align:right">${amt.toLocaleString('en-PH',{minimumFractionDigits:2})}</td>`:'')+'</tr>'; }).join('');
+    const foot=showAmt?`<tr class="tot"><td colspan="${cols.length}" style="text-align:right">Total</td><td style="text-align:right">₱${total.toLocaleString('en-PH',{minimumFractionDigits:2})}</td></tr>`:'';
+    lines=`<h3>${esc(m.o2m.label)}</h3><table class="lines"><thead><tr>${head}</tr></thead><tbody>${body}${foot}</tbody></table>`;
+  }
+  return `<html><head><meta charset="utf-8"><title>${esc(r[m.pk]||m.label)}</title><style>
+    @page{margin:16mm}
+    *{box-sizing:border-box} body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0}
+    .hd{border-bottom:3px solid #4e7a3e;padding-bottom:10px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:flex-end}
+    .hd h1{color:#4e7a3e;margin:0;font-size:22px} .hd .doc{text-align:right} .hd .doc .t{font-size:13px;color:#666} .hd .doc .r{font-size:18px;font-weight:700}
+    .meta{display:grid;grid-template-columns:1fr 1fr;gap:4px 28px;margin-bottom:18px}
+    .mrow{display:flex;justify-content:space-between;border-bottom:1px solid #eee;padding:4px 0;font-size:13px}
+    .ml{color:#666} .mv{font-weight:600;text-align:right}
+    h3{color:#4e7a3e;font-size:14px;margin:18px 0 6px}
+    table.lines{width:100%;border-collapse:collapse;font-size:12px}
+    table.lines th{background:#4e7a3e;color:#fff;padding:6px 8px;font-weight:600}
+    table.lines td{padding:5px 8px;border-bottom:1px solid #eee}
+    table.lines tr.tot td{font-weight:700;border-top:2px solid #4e7a3e;background:#f6f8f4}
+    .ft{margin-top:26px;color:#888;font-size:11px;border-top:1px solid #eee;padding-top:8px}
+  </style></head><body>
+    <div class="hd"><h1>🐇 Wholesome Rabbit</h1><div class="doc"><div class="t">${esc(m.label)}</div><div class="r">${esc(r[m.pk]||'')}</div></div></div>
+    <div class="meta">${meta}</div>${lines}
+    <p class="ft">Generated ${new Date().toLocaleString()} · ${esc(CURRENT_USER)}</p>
+  </body></html>`;
 }
 function printForm(){ const m=MODELS[state.model], r=formRec;
   const w=window.open('','_pr','width=840,height=920'); if(!w){toast('Allow pop-ups to print',true);return;}
   w.document.write(recordPrintHtml(m,r,formChildren)); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+
+/* ✉ Send Purchase Order — build a copyable draft (summary + PDF link) for email / Viber / Messenger. */
+function sendPODraft(){
+  const m=MODELS['purchase_orders']; const r=formRec; const lines=formChildren||[];
+  const vendor=r.supplier_name||'Supplier'; const ref=r[m.pk]||'';
+  let total=0;
+  const rows=lines.map(l=>{ const qty=+l.ordered_kg||0, price=+l.price_kg||0, amt=qty*price; total+=amt;
+    return `  • ${l.ingredient_sku||''} — ${qty} kg @ ₱${price.toLocaleString('en-PH',{minimumFractionDigits:2})} = ₱${amt.toLocaleString('en-PH',{minimumFractionDigits:2})}`; }).join('\n');
+  const pdfLine=r.drive_url?('\nPO document (PDF): '+r.drive_url):'';
+  const draft=`Hi ${vendor},\n\nPlease find our purchase order below.\n\n`+
+    `PO Reference: ${ref}\nOrder date: ${r.order_date||''}\n\n`+
+    `Items:\n${rows||'  (no lines)'}\n\n`+
+    `Estimated total: ₱${total.toLocaleString('en-PH',{minimumFractionDigits:2})}${pdfLine}\n\n`+
+    `Kindly confirm availability and the delivery schedule.\n\nThank you,\nWholesome Rabbit — Purchasing`;
+  const subject='Purchase Order '+ref+' — Wholesome Rabbit';
+  window._poDraftText=draft;
+  $('modal').innerHTML=`<h3>✉ Send Purchase Order — ${esc(ref)}</h3>
+    <p class="mini">Copy this and send it to your supplier by email, Viber, or Messenger.${r.drive_url?'':' <b>Tip:</b> mark the PO received/closed first so the PDF link is included.'}</p>
+    <textarea id="poDraft" style="width:100%;height:280px;font-family:inherit;font-size:13px;padding:10px;border:1px solid var(--line);border-radius:6px">${esc(draft)}</textarea>
+    <div style="display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
+      <button class="btn" onclick="copyPODraft()">📋 Copy draft</button>
+      <a class="btn sec" href="mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(draft)}">Open in email app</a>
+      <span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
+  $('overlay').classList.add('on');
+}
+function copyPODraft(){ const t=$('poDraft'); const txt=t?t.value:(window._poDraftText||'');
+  const done=()=>toast('Draft copied — paste it to your supplier');
+  if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(done).catch(()=>{ if(t){t.select();document.execCommand('copy');done();} }); }
+  else if(t){ t.select(); document.execCommand('copy'); done(); } }
 
 // Fire-and-forget POST to an n8n webhook. no-cors so a static app can reach n8n
 // without CORS setup; n8n does the work and writes results back to Supabase.
@@ -1189,12 +1302,20 @@ function autoCfg(k){ return (typeof AUTOS!=='undefined'&&AUTOS[k])?AUTOS[k]:null
 // On completion: send the record to n8n → PDF → Drive folder → link back + notify (with Internal Ref).
 async function notifyRecordDone(model, ref, recOverride, childrenOverride){
   const a=autoCfg('record_pdf'); if(!a||!a.on||!a.url) return;
+  // Fire ONCE per record — a document that moves received → invoiced → closed must not
+  // generate three PDFs. Guard on a local sent-set (same browser) AND on drive_url (cross-browser:
+  // once n8n has written the link back, the PDF already exists).
+  const sentKey=model+':'+ref; let sent={};
+  try{ sent=JSON.parse(localStorage.getItem('wr_pdf_sent')||'{}'); }catch(e){}
+  const rGuard=recOverride||formRec;
+  if(sent[sentKey] || (rGuard && rGuard.drive_url)) return;
   const m=MODELS[model]; const r=recOverride||formRec;
   let children=childrenOverride;
   if(children===undefined){ children=[]; if(m.o2m){ try{ children=(r[m.pk]===ref)?formChildren:await db.children(m.o2m, ref); }catch(e){} } }
   const html=recordPrintHtml(m, {...r,[m.pk]:ref}, children);
   await postWebhook(a.url, { model, module:model, ref:String(ref), kind:m.label,
      html, email:(SUPA&&SUPA.email)||'', telegram_chat_id:'' });
+  sent[sentKey]=Date.now(); localStorage.setItem('wr_pdf_sent',JSON.stringify(sent));
   sysLog(model, ref, '📄 Sent to the PDF/Drive automation ('+ref+')');
 }
 
@@ -1274,7 +1395,7 @@ function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return'';
     const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); return {i,date,ref,items:items.length,val,wk:weekOf(date)}; });
   return `<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Demand plot monitoring — by week ${isLive()?'· Supabase':''}</h3>
     <div style="overflow-x:auto"><table><thead><tr><th>Week</th><th>Reference</th><th>Plan date</th><th class="num">Items to order</th><th class="num">Est ₱</th><th></th></tr></thead><tbody>
-    ${rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td style="white-space:nowrap"><span class="btn link" onclick="loadMRPPlan(${r.i})">Load</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
+    ${rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span> · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
     </tbody></table></div></div>`; }
 /* ============ Internal reference numbering (DP / PO / DR / RR) ============ */
 function _p2(n){ return String(n).padStart(2,'0'); }
@@ -1294,13 +1415,83 @@ async function genRef(type,opts){ opts=opts||{}; const dd=_mmddyyyy(opts.date);
   return {ref:''};
 }
 
+// STEP 1 — confirmation pop-out. Summarises the plot, checks for an existing plot on the
+// same date, and (if found) requires an explicit override tick before saving.
 async function saveMRPPlan(){
+  const plan=(window._mrpPlan||[]); const toBuy=plan.filter(l=>l.final>0);
+  const demCount=Object.keys(mrpDemand).filter(k=>+mrpDemand[k]>0).length;
+  if(!demCount){ toast('Enter demand first before saving',true); return; }
+  const totVal=toBuy.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
+  const existing=(mrpPlanCache||[]).filter(p=>(p.plan_date||p.date)===MRPDATE);
+  const warn = existing.length ? `<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:10px;margin:12px 0;color:var(--danger);font-size:13px">
+     ⚠ A demand plot already exists for <b>${esc(MRPDATE)}</b> (${existing.map(e=>esc((e.data&&e.data.ref)||e.ref||'?')).join(', ')}).<br>
+     Saving will <b>override</b> it — the previous plot for this date is replaced and cannot be recovered.
+     <label style="display:flex;gap:6px;margin-top:8px;color:#222"><input type="checkbox" id="ovConfirm"> I understand this overrides the existing demand plot for ${esc(MRPDATE)}.</label></div>` : '';
+  $('modal').innerHTML=`<h3>💾 Save demand plot — ${esc(MRPDATE)}</h3>
+    <p class="mini">Once saved, a demand plot is <b>locked</b> — you can view, print, and download it, but it can no longer be edited.</p>
+    <ul style="margin:10px 0 0;padding-left:18px;font-size:13px;line-height:1.7">
+      <li>Plan date: <b>${esc(MRPDATE)}</b> · ${esc(weekOf(MRPDATE))}</li>
+      <li>Products with demand: <b>${demCount}</b></li>
+      <li>Ingredients to order: <b>${toBuy.length}</b></li>
+      <li>Estimated order value: <b>₱${Math.round(totVal).toLocaleString('en-PH')}</b></li>
+    </ul>${warn}
+    <div style="display:flex;gap:8px;margin-top:16px"><button class="btn" onclick="confirmSaveMRPPlan(${existing.length})">✅ Confirm &amp; save</button><span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
+  $('overlay').classList.add('on');
+}
+// STEP 2 — actually save (mint the DP ref here so cancelling never burns a sequence number).
+async function confirmSaveMRPPlan(hasExisting){
+  if(hasExisting){ const c=document.getElementById('ovConfirm'); if(!c||!c.checked){ toast('Tick the override confirmation to proceed',true); return; } }
+  closeModal();
   const g=await genRef('DP',{category:'RAW',date:MRPDATE}); window._mrpDPit=g.it;
-  const data={ref:g.ref,demand:{...mrpDemand},manual:{...mrpManual},lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
-  try{ if(isLive()){ await sb('mrp_plans',{method:'POST',prefer:'return=minimal',body:JSON.stringify({plan_date:MRPDATE,ref:g.ref,created_by:CURRENT_USER,data})}); toast('Saved '+g.ref); }
-    else { const a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a.unshift({date:MRPDATE,ref:g.ref,by:CURRENT_USER,...data}); localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); toast('Saved '+g.ref); } }
-  catch(e){ toast(e.message,true); } renderMRP(); }
-function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; renderMRP(); toast('Loaded plan'); }
+  const data={ref:g.ref,demand:{...mrpDemand},manual:{...mrpManual},by:CURRENT_USER,saved_at:new Date().toISOString(),
+    lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
+  try{
+    if(isLive()){
+      // override = replace any existing plot(s) for this exact date
+      for(const e of (mrpPlanCache||[]).filter(p=>p.plan_date===MRPDATE && p.id)){ try{ await sb('mrp_plans?id=eq.'+e.id,{method:'DELETE',prefer:'return=minimal'}); }catch(_){} }
+      await sb('mrp_plans',{method:'POST',prefer:'return=minimal',body:JSON.stringify({plan_date:MRPDATE,ref:g.ref,created_by:CURRENT_USER,data})});
+    } else {
+      let a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a=a.filter(p=>(p.plan_date||p.date)!==MRPDATE);
+      a.unshift({plan_date:MRPDATE,date:MRPDATE,ref:g.ref,by:CURRENT_USER,data}); localStorage.setItem('wr_mrp_plans',JSON.stringify(a));
+    }
+    toast('Saved & locked '+g.ref);
+  }catch(e){ toast(e.message,true); }
+  renderMRP();
+}
+function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
+// A saved demand plot is immutable — VIEW it read-only, then print or download.
+function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p;
+  const date=p.plan_date||p.date||''; const ref=d.ref||p.ref||''; window._viewPlan={date,ref,d};
+  const lines=(d.lines||[]).filter(l=>l.final>0);
+  const dem=d.demand||{}; const demKeys=Object.keys(dem).filter(k=>+dem[k]>0);
+  const totVal=lines.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
+  const demRows=demKeys.map(k=>`<tr><td><code>${esc(k)}</code></td><td class="num">${esc(dem[k])}</td></tr>`).join('')||'<tr><td colspan="2" class="empty">—</td></tr>';
+  const lineRows=lines.map(l=>`<tr><td>${esc(l.name)}</td><td><code>${esc(l.sku)}</code></td><td class="num">${kgf(l.final)}</td><td>${esc(l.supplier||'')}</td><td class="num">₱${((l.final/1000)*(+l.price||0)).toLocaleString('en-PH',{minimumFractionDigits:2})}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">—</td></tr>';
+  $('modal').innerHTML=`<h3>📋 Demand plot ${esc(ref)} <span class="badge b-approved" style="margin-left:6px">locked</span></h3>
+    <div class="mini">Plan date ${esc(date)} · ${esc(weekOf(date))} · saved by ${esc(d.by||p.created_by||'—')} — read-only snapshot</div>
+    <div style="max-height:50vh;overflow:auto;margin-top:10px">
+      <h4 style="margin:6px 0">Demand (packs)</h4>
+      <table><thead><tr><th>SKU</th><th class="num">Packs</th></tr></thead><tbody>${demRows}</tbody></table>
+      <h4 style="margin:14px 0 6px">Replenishment (${lines.length} item(s) · est. ₱${Math.round(totVal).toLocaleString('en-PH')})</h4>
+      <table><thead><tr><th>Ingredient</th><th>SKU</th><th class="num">Order (kg)</th><th>Supplier</th><th class="num">Est ₱</th></tr></thead><tbody>${lineRows}</tbody></table>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="printMRPPlan()">🖨 Print</button><button class="btn sec" onclick="downloadMRPPlan()">⬇ Download CSV</button><span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
+  $('overlay').classList.add('on');
+}
+function _viewPlanRows(){ const v=window._viewPlan; if(!v)return[]; return (v.d.lines||[]).filter(l=>l.final>0); }
+function printMRPPlan(){ const v=window._viewPlan; if(!v)return; const lines=_viewPlanRows();
+  const total=lines.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
+  const body=lines.map(l=>`<tr><td>${esc(l.name)}</td><td>${esc(l.sku)}</td><td style="text-align:right">${kgf(l.final)}</td><td>${esc(l.supplier||'')}</td><td style="text-align:right">${((l.final/1000)*(+l.price||0)).toLocaleString('en-PH',{minimumFractionDigits:2})}</td></tr>`).join('');
+  const html=`<html><head><meta charset="utf-8"><title>${esc(v.ref)}</title><style>@page{margin:16mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #eee}tr.tot td{font-weight:700;border-top:2px solid #4e7a3e}</style></head><body>
+    <h1>🐇 Wholesome Rabbit — Demand Plot</h1><h2>${esc(v.ref)} · ${esc(v.date)} (${esc(weekOf(v.date))})</h2>
+    <table><thead><tr><th>Ingredient</th><th>SKU</th><th style="text-align:right">Order (kg)</th><th>Supplier</th><th style="text-align:right">Est ₱</th></tr></thead><tbody>${body}
+    <tr class="tot"><td colspan="4" style="text-align:right">Total</td><td style="text-align:right">₱${Math.round(total).toLocaleString('en-PH')}</td></tr></tbody></table>
+    <p style="margin-top:22px;color:#888;font-size:11px">Locked snapshot · printed ${new Date().toLocaleString()}</p></body></html>`;
+  const w=window.open('','_pr','width=840,height=920'); if(!w){toast('Allow pop-ups to print',true);return;} w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+function downloadMRPPlan(){ const v=window._viewPlan; if(!v)return; const lines=_viewPlanRows();
+  const aoa=[['Ingredient','SKU','Order (kg)','Supplier','Est ₱']].concat(lines.map(l=>[l.name,l.sku,kgf(l.final),l.supplier||'',Math.round((l.final/1000)*(+l.price||0))]));
+  const csv=aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n');
+  dlBlob(csv,'WR_demand_'+(v.date||'plot')+'_'+(v.ref||'').replace(/[^\w.-]+/g,'_')+'.csv','text/csv'); toast('Downloaded'); }
 async function delMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; if(!confirm('Delete this saved demand plan? This cannot be undone.'))return; try{ if(isLive()&&p.id){ await sb('mrp_plans?id=eq.'+p.id,{method:'DELETE',prefer:'return=minimal'}); } else { const a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a.splice(i,1); localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); } }catch(e){ toast(e.message,true); } renderMRP(); }
 async function generatePOsFromMRP(){
   const lines=(window._mrpPlan||[]).filter(l=>l.final>0);
@@ -1524,9 +1715,16 @@ async function poConfirmApply(){
     formChildren=updated; formRec.status='confirmed';
     await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'confirmed'});
     sysLog('purchase_orders',formRec.po_ref, (changes.length?('✅ Confirmed with adjustments — '+changes.join('; ')):'✅ Confirmed — qty & prices verified, no changes')+' by '+CURRENT_USER);
-    closeModal(); toast('Order confirmed'+(changes.length?' · '+changes.length+' change(s) logged':'')); renderForm();
+    notifyRecordDone('purchase_orders', formRec.po_ref);   // confirmed → generate PDF → Drive → notify
+    closeModal(); toast('Order confirmed — preparing the Send PO draft with the PDF link…'+(changes.length?' · '+changes.length+' change(s) logged':''));
+    renderForm();
+    // give n8n a few seconds to build the PDF + write the drive_url back, then open the Send PO draft with the link
+    setTimeout(async()=>{ if(state.model==='purchase_orders'&&state.view==='form'&&formRec.po_ref===updated[0].po_ref){ await reloadFormRec(); if(state.model==='purchase_orders'&&state.view==='form') sendPODraft(); } }, 9000);
   }catch(e){ toast(e.message,true); }
 }
+// pull the current record fresh from the DB (e.g. to pick up drive_url written back by n8n)
+async function reloadFormRec(){ const m=MODELS[state.model]; if(!m||formIsNew) return;
+  try{ const rows=await db.list(state.model,{}); const fresh=rows.find(r=>String(r[m.pk])===String(formRec[m.pk])); if(fresh) formRec={...formRec,...fresh}; }catch(e){} }
 
 /* ---- Guided PO receiving: capture the actual received qty per line (#2) ---- */
 async function openPOReceive(){
@@ -2428,7 +2626,11 @@ let AUTOS = JSON.parse(localStorage.getItem('wr_autos')||'null') || {
   mrp_schedule:{on:false,url:'',label:'MRP — scheduled draft POs',hint:'n8n runs the Supabase MRP function on a schedule.'},
   keepwarm:{on:false,url:'',label:'Supabase keep-warm ping',hint:'Nightly no-op so the free project never pauses.'}
 };
-function saveAutos(){ localStorage.setItem('wr_autos',JSON.stringify(AUTOS)); }
+function saveAutos(){ localStorage.setItem('wr_autos',JSON.stringify(AUTOS));
+  // persist to Supabase so the config is shared across browsers/devices (not just this browser)
+  if(isLive()){ sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'autos',value:AUTOS})}).catch(()=>{}); } }
+async function loadAutos(){ if(!isLive()) return;
+  try{ const r=await sb('app_settings?select=value&key=eq.autos'); if(r&&r[0]&&r[0].value){ AUTOS={...AUTOS,...r[0].value}; localStorage.setItem('wr_autos',JSON.stringify(AUTOS)); if(state.model==='automations'&&state.view==='special') renderAutomations(); } }catch(e){} }
 function renderAutomations(){
   $('crumb').innerHTML='<b>Automations</b>';
   $('cp').innerHTML=`<div class="title">Automation Configuration</div><div class="sp"></div><span style="color:var(--muted)">one-stop hub for integrations</span>`;
@@ -2576,8 +2778,9 @@ if(!DEMO.variance_log.length) DEMO.variance_log=[
   {id:1,check_type:'4 · Transfer',source_ref:'WR-TR-DEMO',expected:6,actual:5,gap_qty:-1,gap_value:130,location:'in-transit',responsible_user:'Warehouse',status:'open',note:''},
   {id:2,check_type:'1 · 3-way match',source_ref:'WR-PO-0012',expected:5,actual:4.2,gap_qty:-0.8,gap_value:224,location:'bulacan',responsible_user:'Purchasing',status:'open',note:''}];
 applyStudio(); updateMode(); renderUserSel(); renderSide();
-if(isLive() && SUPA && SUPA.token) loadFieldAcl();
-if(needAuth()) showGate(); else openModel('home');
+if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadAutos(); }
+window.addEventListener('hashchange', onHashRoute);
+if(needAuth()) showGate(); else bootRoute();
 </script>
 </body>
 </html>
