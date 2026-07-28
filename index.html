@@ -1456,6 +1456,11 @@ async function confirmSaveMRPPlan(hasExisting){
     }
     toast('Saved & locked '+g.ref);
   }catch(e){ toast(e.message,true); }
+  // route the saved plot through the single record-done automation → PDF to Drive → Telegram/Email
+  const ap=autoCfg('record_pdf');
+  if(ap&&ap.on&&ap.url){ postWebhook(ap.url,{ model:'mrp_plans', module:'mrp_plans', ref:g.ref, kind:'Demand Plot',
+     html:demandPlotHtml(MRPDATE,g.ref,data), email:(SUPA&&SUPA.email)||'', telegram_chat_id:'' });
+     toast('Demand plot sent to PDF / Drive / notify'); }
   renderMRP();
 }
 function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
@@ -1475,19 +1480,27 @@ function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||
       <h4 style="margin:14px 0 6px">Replenishment (${lines.length} item(s) · est. ₱${Math.round(totVal).toLocaleString('en-PH')})</h4>
       <table><thead><tr><th>Ingredient</th><th>SKU</th><th class="num">Order (kg)</th><th>Supplier</th><th class="num">Est ₱</th></tr></thead><tbody>${lineRows}</tbody></table>
     </div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="printMRPPlan()">🖨 Print</button><button class="btn sec" onclick="downloadMRPPlan()">⬇ Download CSV</button><span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
+    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="printMRPPlan()">🖨 Print</button><button class="btn sec" onclick="downloadMRPPlan()">⬇ Download CSV</button>${p.drive_url?`<a class="btn sec" href="${esc(safeUrl(p.drive_url))}" target="_blank" rel="noopener noreferrer">📄 Open PDF</a>`:''}<span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
   $('overlay').classList.add('on');
 }
 function _viewPlanRows(){ const v=window._viewPlan; if(!v)return[]; return (v.d.lines||[]).filter(l=>l.final>0); }
-function printMRPPlan(){ const v=window._viewPlan; if(!v)return; const lines=_viewPlanRows();
+// Shared printable/PDF HTML for a demand plot (used by Print AND the PDF/notify automation).
+function demandPlotHtml(date, ref, d){
+  const lines=(d.lines||[]).filter(l=>l.final>0);
   const total=lines.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
-  const body=lines.map(l=>`<tr><td>${esc(l.name)}</td><td>${esc(l.sku)}</td><td style="text-align:right">${kgf(l.final)}</td><td>${esc(l.supplier||'')}</td><td style="text-align:right">${((l.final/1000)*(+l.price||0)).toLocaleString('en-PH',{minimumFractionDigits:2})}</td></tr>`).join('');
-  const html=`<html><head><meta charset="utf-8"><title>${esc(v.ref)}</title><style>@page{margin:16mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #eee}tr.tot td{font-weight:700;border-top:2px solid #4e7a3e}</style></head><body>
-    <h1>🐇 Wholesome Rabbit — Demand Plot</h1><h2>${esc(v.ref)} · ${esc(v.date)} (${esc(weekOf(v.date))})</h2>
-    <table><thead><tr><th>Ingredient</th><th>SKU</th><th style="text-align:right">Order (kg)</th><th>Supplier</th><th style="text-align:right">Est ₱</th></tr></thead><tbody>${body}
+  const dem=d.demand||{}; const demKeys=Object.keys(dem).filter(k=>+dem[k]>0);
+  const demRows=demKeys.map(k=>`<tr><td>${esc(k)}</td><td style="text-align:right">${esc(dem[k])}</td></tr>`).join('')||'<tr><td colspan="2">—</td></tr>';
+  const body=lines.map(l=>`<tr><td>${esc(l.name)}</td><td>${esc(l.sku)}</td><td style="text-align:right">${kgf(l.final)}</td><td>${esc(l.supplier||'')}</td><td style="text-align:right">${((l.final/1000)*(+l.price||0)).toLocaleString('en-PH',{minimumFractionDigits:2})}</td></tr>`).join('')||'<tr><td colspan="5">—</td></tr>';
+  return `<html><head><meta charset="utf-8"><title>${esc(ref)}</title><style>@page{margin:16mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:4px 0 14px}h3{color:#4e7a3e;font-size:13px;margin:16px 0 6px}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #eee}tr.tot td{font-weight:700;border-top:2px solid #4e7a3e}</style></head><body>
+    <h1>🐇 Wholesome Rabbit — Demand Plot</h1><h2>${esc(ref)} · ${esc(date)} (${esc(weekOf(date))})</h2>
+    <h3>Demand (packs)</h3><table><thead><tr><th>SKU</th><th style="text-align:right">Packs</th></tr></thead><tbody>${demRows}</tbody></table>
+    <h3>Replenishment</h3><table><thead><tr><th>Ingredient</th><th>SKU</th><th style="text-align:right">Order (kg)</th><th>Supplier</th><th style="text-align:right">Est ₱</th></tr></thead><tbody>${body}
     <tr class="tot"><td colspan="4" style="text-align:right">Total</td><td style="text-align:right">₱${Math.round(total).toLocaleString('en-PH')}</td></tr></tbody></table>
-    <p style="margin-top:22px;color:#888;font-size:11px">Locked snapshot · printed ${new Date().toLocaleString()}</p></body></html>`;
-  const w=window.open('','_pr','width=840,height=920'); if(!w){toast('Allow pop-ups to print',true);return;} w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+    <p style="margin-top:22px;color:#888;font-size:11px">Locked snapshot · ${new Date().toLocaleString()}</p></body></html>`;
+}
+function printMRPPlan(){ const v=window._viewPlan; if(!v)return;
+  const w=window.open('','_pr','width=840,height=920'); if(!w){toast('Allow pop-ups to print',true);return;}
+  w.document.write(demandPlotHtml(v.date,v.ref,v.d)); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
 function downloadMRPPlan(){ const v=window._viewPlan; if(!v)return; const lines=_viewPlanRows();
   const aoa=[['Ingredient','SKU','Order (kg)','Supplier','Est ₱']].concat(lines.map(l=>[l.name,l.sku,kgf(l.final),l.supplier||'',Math.round((l.final/1000)*(+l.price||0))]));
   const csv=aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n');
