@@ -316,10 +316,11 @@ const MODELS = {
       {n:'c2_name',l:'Contact 2 — Name',t:'text'},{n:'c2_mobile',l:'Contact 2 — Mobile',t:'text'},{n:'c2_email',l:'Contact 2 — Email',t:'text'},
       {n:'payment_term',l:'Payment term',t:'text'},{n:'delivery_days',l:'Lead time',t:'text'},
       {n:'sells_by',l:'Sells by',t:'select',o:['loose','case','both','head']},
+      {n:'min_order_kg',l:'Min order / delivery (kg)',t:'number'},
       {n:'shopee',l:'Shopee',t:'text'},{n:'website',l:'Website',t:'text'},{n:'fb_page',l:'FB page',t:'text'},
       {n:'notes',l:'Notes',t:'longtext'}],
-    list:['name','supplier_id','payment_term','delivery_days','mobile'],
-    groups:[['name','supplier_id','contact','mobile','c1_email','c1_viber'],['c2_name','c2_mobile','c2_email'],['payment_term','delivery_days','sells_by','shopee','website','fb_page']],
+    list:['name','supplier_id','payment_term','delivery_days','min_order_kg','mobile'],
+    groups:[['name','supplier_id','contact','mobile','c1_email','c1_viber'],['c2_name','c2_mobile','c2_email'],['payment_term','delivery_days','sells_by','min_order_kg','shopee','website','fb_page']],
     tabs:[{l:'🏢 Contacts', groups:[0,1]},{l:'🔗 Online & Terms', groups:[2]}],
     full:['notes'] },
 
@@ -1026,7 +1027,7 @@ async function runCleanse(){
   for(const g of groups){ for(const [t,pk] of g.tables){
     try{ if(isLive()){ await sb(t+'?'+pk+'=not.is.null',{method:'DELETE',prefer:'return=minimal'}); } else { DEMO[t]=[]; } done++; }
     catch(e){ errs.push(t); } } }
-  if(cleanseSel.demand){ localStorage.removeItem('wr_mrp_plans'); mrpDemand={}; mrpManual={}; window._mrpPlan=null; mrpPlanCache=[]; }
+  if(cleanseSel.demand){ localStorage.removeItem('wr_mrp_plans'); mrpDemand={}; mrpManual={}; mrpRemarks={}; window._mrpPlan=null; mrpPlanCache=[]; }
   if(cleanseSel.refs){ localStorage.removeItem('wr_refseq'); }
   if(cleanseSel.prod){ prodPlanLines=[]; prodRunRef=''; }
   sysLog('cleanser','wipe','🧹 Cleansed '+done+' table(s): '+groups.map(g=>g.key).join(', ')+' by '+CURRENT_USER);
@@ -1368,7 +1369,7 @@ async function bulkApply(){ const m=MODELS[state.model]; const f=$('bkf').value;
     toast('Updated '+state.sel.length+' record(s)'); state.sel=[]; route(); }catch(e){ toast(e.message,true); } }
 
 /* MRP / Demand planning */
-let mrpDemand={}, mrpManual={};
+let mrpDemand={}, mrpManual={}, mrpRemarks={};
 function kgf(g){ return (g/1000).toFixed(2); }
 function dateMinus(d,n){ try{ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()-(n||0)); return x.toISOString().slice(0,10);}catch(e){return d;} }
 async function renderMRP(){
@@ -1378,6 +1379,8 @@ async function renderMRP(){
     <button class="wfbtn" onclick="generatePOsFromMRP()">🧾 Generate Draft POs</button>
     <div class="sp"></div><span style="color:var(--muted)">demand + lead time + PAR → replenishment → PO</span>`;
   const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await listIngredients();
+  const sups=await db.list('suppliers',{});
+  const supMin={}; sups.forEach(s=>{ const nm=(s.name||'').trim(); if(nm) supMin[nm]=(+s.min_order_kg||0)*1000; });   // supplier min order → grams
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
   mrpPlanCache=await mrpPlans();
   // demand card
@@ -1414,43 +1417,101 @@ async function renderMRP(){
     need[rootSku]=(need[rootSku]||0)+asPurch;
   });
   window._mrpUnmapped=Object.keys(_unmapped);
-  // build plan lines: demand-driven, or par top-up
+  // build plan lines. Raw-ingredient reorder RULE (per WR):
+  //   Reorder a raw when demand outstrips stock (projected ending inv < 0)
+  //   OR when remaining stock is low (~1–5 kg). Custom PAR stocking is for the
+  //   SELLABLE PRODUCTS, not raws — so raws use this low-stock reorder point,
+  //   never par_g. When reordering, top up to cover demand + lead-time use and
+  //   restore the small reorder buffer.
+  const RAW_REORDER_G = 5000;   // reorder point for raw ingredients: 5 kg
   const plan=[];
   ings.forEach(it=>{ if(it.is_intermediate) return;   // only the purchasable (WD / raw) ingredients get ordered
     const rawNeed=need[it.sku]||0;   // already as-purchased — processed forms have been rolled up into this one
-    const par=+it.par_g||0, lead=+it.lead_time_days||0, oh=stock[it.sku]||0;
-    if(rawNeed<=0 && !(par>0)) return;
+    const lead=+it.lead_time_days||0, oh=stock[it.sku]||0;
+    const endInv=oh-rawNeed;                                 // projected ending inventory after this week's demand
+    // trigger: demand exceeds stock, or ending stock sits at/below the low reorder point (and the item is actually in play)
+    const lowStock = (endInv < 0) || (endInv <= RAW_REORDER_G && (rawNeed>0 || oh>0));
+    const manualKg=+mrpManual[it.sku]||0;
+    if(!lowStock && manualKg<=0) return;                     // healthy stock and no manual add → nothing to order
     const leadBuf=rawNeed*(lead/7);                          // consumption during lead time
-    const base=rawNeed + par + leadBuf - oh;                 // target − on hand
-    const manualKg=+mrpManual[it.sku]||0; const subtotal=base + manualKg*1000;
+    const buf = lowStock ? RAW_REORDER_G : 0;                // restore the reorder buffer when we do reorder
+    const base = lowStock ? (rawNeed + buf + leadBuf - oh) : 0;   // target − on hand
+    const subtotal=base + manualKg*1000;
     const moq=(+it.min_order_kg||0)*1000;
     const final=subtotal<=0?0:(moq>0?Math.ceil(subtotal/moq)*moq:subtotal);
     // default supplier: the ingredient's own default, else fall back to Supplier 1 from the master (ignore "to be determined")
     const _s1=(it.supplier1||'').trim(); const defSup=(it.supplier||'').trim() || (/to be determined/i.test(_s1)?'':_s1);
-    plan.push({sku:it.sku,name:it.name,rawNeed,par,leadBuf,lead,oh,base,manualKg,moq,final,supplier:defSup,price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
+    plan.push({sku:it.sku,name:it.name,rawNeed,par:buf,leadBuf,lead,oh,base,endInv,lowStock,manualKg,moq,final,remark:(mrpRemarks[it.sku]||''),supplier:defSup,price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
   });
   plan.sort((a,b)=>b.final-a.final);
   window._mrpPlan=plan;
   let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">2 · Replenishment plan</h3>
-    <div class="hint" style="margin:0 0 8px">Order qty = weekly need + PAR + lead-time buffer − on hand, then ± your manual adjustment, rounded up to the min order. Processed forms (deboned, ground, liver…) are rolled up into the whole-dressed / raw ingredient you actually buy. Supplier = each item's default.</div>
+    <div class="hint" style="margin:0 0 8px">Raws reorder when demand outstrips stock, or ending stock is low (≤ 5 kg). Order qty = weekly need + 5 kg buffer + lead-time buffer − on hand, then ± your manual adjustment, rounded up to the min order. (Custom PAR stocking is for the sellable products.) Processed forms (deboned, ground, liver…) are rolled up into the whole-dressed / raw ingredient you actually buy. Supplier = each item's default.</div>
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
-    <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num">+PAR</th><th class="num">+Lead</th><th class="num">−OnHand</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
-  const _rowHtml=(l)=>`<tr><td>${esc(l.name)}<div class="mini">yield ${(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)}%</div></td>
-    <td class="num">${kgf(l.rawNeed)}</td><td class="num">${kgf(l.par)}</td><td class="num">${kgf(l.leadBuf)}</td><td class="num">${kgf(l.oh)}</td><td class="num">${kgf(Math.max(0,l.base))}</td>
+    <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num">On hand</th><th class="num">End inv</th><th class="num">+Buffer</th><th class="num">+Lead</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
+  const _rowHtml=(l)=>`<tr><td>${esc(l.name)}<div class="mini">yield ${(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)}%</div>${l.remark?`<div class="mini" style="color:var(--berry)">📝 ${esc(l.remark)}</div>`:''}</td>
+    <td class="num">${kgf(l.rawNeed)}</td><td class="num">${kgf(l.oh)}</td><td class="num" style="${(+l.endInv||0)<RAW_REORDER_G?'color:var(--danger);font-weight:600':''}">${kgf(l.endInv)}</td><td class="num">${kgf(l.par)}</td><td class="num">${kgf(l.leadBuf)}</td><td class="num">${kgf(Math.max(0,l.base))}</td>
     <td class="num"><input type="number" step="any" style="width:74px;text-align:right" value="${l.manualKg||''}" onchange="mrpManual['${l.sku}']=+this.value||0;renderMRP()"></td>
     <td class="num">${l.moq?kgf(l.moq):'—'}</td><td class="num"><b style="color:var(--berry)">${l.final>0?kgf(l.final):'—'}</b></td>
     <td>${l.lead?l.orderBy:'—'}</td><td>${esc(l.supplier)||'<span class="mini">set default</span>'}</td></tr>`;
-  // group the plan per supplier (matches how POs are generated), with a per-supplier subtotal
+  // group the plan per supplier (matches how POs are generated), with a per-supplier subtotal + total kg
   const _bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no default supplier — set one)'; (_bySup[s]=_bySup[s]||[]).push(l); });
+  const _supKg=(arr)=>arr.reduce((s,l)=>s+(+l.final||0),0);                 // total order grams for a supplier
   Object.keys(_bySup).sort((a,b)=>{ const av=_bySup[a].reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0), bv=_bySup[b].reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); return bv-av; }).forEach(sup=>{
-    const arr=_bySup[sup]; const sItems=arr.filter(l=>l.final>0); const sVal=sItems.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
-    rh+=`<tr><td colspan="11" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">🏭 ${esc(sup)} <span style="opacity:.6;font-weight:400">— ${sItems.length} item(s) to order · est. ₱${Math.round(sVal).toLocaleString('en-PH')}</span></td></tr>`;
+    const arr=_bySup[sup]; const sItems=arr.filter(l=>l.final>0); const sVal=sItems.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); const sKg=_supKg(arr);
+    const minG=supMin[sup]||0; const shortG=minG>0?(minG-sKg):0;
+    const minTag = minG>0 ? (shortG>0 ? ` · <span style="color:var(--danger)">min ${kgf(minG)} — short ${kgf(shortG)}</span>` : ` · <span style="color:#4e7a3e">✓ meets min ${kgf(minG)}</span>`) : '';
+    rh+=`<tr><td colspan="12" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">🏭 ${esc(sup)} <span style="opacity:.6;font-weight:400">— ${sItems.length} item(s) · <b>${kgf(sKg)} kg</b> · est. ₱${Math.round(sVal).toLocaleString('en-PH')}${minTag}</span></td></tr>`;
     arr.sort((a,b)=>b.final-a.final).forEach(l=>{ rh+=_rowHtml(l); });
   });
-  if(!plan.length) rh+=`<tr><td colspan="11" class="empty">Enter demand above (and set PAR on ingredients) to build the plan.</td></tr>`;
-  const toBuy=plan.filter(l=>l.final>0); const totVal=toBuy.reduce((s,l)=>s+(l.final/1000)*l.price,0);
-  rh+=`</tbody></table></div><div class="pager">${toBuy.length} item(s) to order · est. ₱${Math.round(totVal).toLocaleString('en-PH')}</div>${savedPlansHtml()}</div>`;
+  if(!plan.length) rh+=`<tr><td colspan="12" class="empty">Enter demand above — raws reorder when demand outstrips stock or ending stock drops to ~5 kg.</td></tr>`;
+  const toBuy=plan.filter(l=>l.final>0); const totVal=toBuy.reduce((s,l)=>s+(l.final/1000)*l.price,0); const totKg=_supKg(plan);
+  rh+=`</tbody></table></div><div class="pager">${toBuy.length} item(s) · ${kgf(totKg)} kg total · est. ₱${Math.round(totVal).toLocaleString('en-PH')}</div></div>`;
+  // ---- 3 · Minimum order qty analysis -------------------------------------
+  rh+=mrpMinOrderCard(_bySup,supMin,_supKg);
+  rh+=savedPlansHtml();
   $('content').innerHTML=dh+rh;
+}
+// 3 · Per-supplier minimum order qty analysis for the current plan.
+// Minimum order is a SUPPLIER-level constraint (suppliers.min_order_kg). When a
+// supplier's total order falls short, "Top up to qualify" adds the shortfall to
+// that supplier's largest line as a MANUAL adjustment and tags it with a remark.
+function mrpMinOrderCard(bySup, supMin, supKgFn){
+  const sups=Object.keys(bySup).filter(s=>!/no default supplier/.test(s));
+  if(!sups.length) return '';
+  const rows=sups.map(sup=>{
+    const arr=bySup[sup]; const sKg=supKgFn(arr); const minG=supMin[sup]||0;
+    const short=minG>0?Math.max(0,minG-sKg):0;
+    return {sup,arr,sKg,minG,short,items:arr.filter(l=>+l.final>0).length};
+  }).sort((a,b)=> ((b.short>0?1:0)-(a.short>0?1:0)) || (b.short-a.short) || a.sup.localeCompare(b.sup));
+  const anyMin=rows.some(r=>r.minG>0);
+  let t=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">3 · Minimum order qty analysis</h3>
+    <div class="hint" style="margin:0 0 8px">Minimum order is <b>per supplier</b>. If an order is below a supplier's minimum, use “Top up to qualify” — the extra kg is added to that supplier's largest line as a <b>manual adjustment</b> and tagged with a remark. Note: suppliers are sometimes <b>combined into one delivery</b> to share the delivery fee, so treat these minimums as a guide, not a hard block.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Supplier</th><th class="num">Items</th><th class="num">Order kg</th><th class="num">Min order</th><th class="num">Short by</th><th>Status</th><th>Action</th></tr></thead><tbody>`;
+  rows.forEach(r=>{
+    let status='<span class="mini">no min set</span>', action='';
+    if(r.minG>0 && r.short<=0){ status='<span style="color:#4e7a3e;font-weight:600">✓ qualifies</span>'; }
+    else if(r.minG>0){
+      status=`<span style="color:var(--danger);font-weight:600">short ${kgf(r.short)} kg</span>`;
+      const cand=r.arr.slice().sort((a,b)=> ((+b.final||0)-(+a.final||0)) || ((+b.base||0)-(+a.base||0)))[0];
+      if(cand){
+        const OT=r.sKg-(+cand.final||0); const target=r.minG-OT;
+        // round the top-up UP to 0.01 kg so MOQ/precision never leaves us a sub-gram short
+        const newManualKg=Math.max(0,Math.ceil((target-(+cand.base||0))/10)/100);
+        const addedKg=Math.max(0,Math.round((newManualKg-(+cand.manualKg||0))*100)/100);
+        if(addedKg>0) action=`<button class="btn sm" onclick="mrpQualifySet('${cand.sku}',${newManualKg.toFixed(2)},${addedKg.toFixed(2)})">➕ Top up ${addedKg.toFixed(2)} kg on ${esc(cand.name)}</button>`;
+      }
+    }
+    t+=`<tr><td>${esc(r.sup)}</td><td class="num">${r.items}</td><td class="num">${kgf(r.sKg)}</td><td class="num">${r.minG>0?kgf(r.minG):'—'}</td><td class="num">${r.short>0?kgf(r.short):'—'}</td><td>${status}</td><td>${action}</td></tr>`;
+  });
+  t+=`</tbody></table></div>${anyMin?'':'<div class="hint" style="margin-top:6px">No supplier minimums set yet — set a <b>Min order / delivery (kg)</b> on each supplier (Master Data → Suppliers) to activate this analysis.</div>'}</div>`;
+  return t;
+}
+// Top up a supplier to its minimum: land the extra qty in the line's MANUAL field and record the remark.
+function mrpQualifySet(sku,newManualKg,addedKg){
+  mrpManual[sku]=+newManualKg||0;
+  mrpRemarks[sku]='Added '+(+addedKg).toFixed(2)+' to qualify to minimum order qty';
+  renderMRP();
 }
 let mrpPlanCache=[];
 async function mrpPlans(){ if(isLive()){ try{ return await sb('mrp_plans?select=*&order=saved_at.desc&limit=30'); }catch(e){ return []; } } return JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); }
@@ -1510,7 +1571,7 @@ async function confirmSaveMRPPlan(hasExisting){
   if(hasExisting){ const c=document.getElementById('ovConfirm'); if(!c||!c.checked){ toast('Tick the override confirmation to proceed',true); return; } }
   closeModal();
   const g=await genRef('DP',{category:'RAW',date:MRPDATE}); window._mrpDPit=g.it;
-  const data={ref:g.ref,demand:{...mrpDemand},manual:{...mrpManual},by:CURRENT_USER,saved_at:new Date().toISOString(),
+  const data={ref:g.ref,demand:{...mrpDemand},manual:{...mrpManual},remarks:{...mrpRemarks},by:CURRENT_USER,saved_at:new Date().toISOString(),
     lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
   try{
     if(isLive()){
@@ -1530,7 +1591,7 @@ async function confirmSaveMRPPlan(hasExisting){
      toast('Demand plot sent to PDF / Drive / notify'); }
   renderMRP();
 }
-function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
+function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; mrpRemarks={...(d.remarks||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
 // A saved demand plot is immutable — VIEW it read-only, then print or download.
 function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p;
   const date=p.plan_date||p.date||''; const ref=d.ref||p.ref||''; window._viewPlan={date,ref,d};
@@ -1592,7 +1653,8 @@ async function generatePOsFromMRP(){
         await db.create('purchase_orders', rec);
         const pl=bySup[sup].map(l=>({po_ref:ref, ingredient_sku:l.sku, ordered_kg:Math.round(l.final/10)/100, price_kg:l.price, received_kg:0}));
         await db.replaceChildren({model:'po_lines',fk:'po_ref'}, ref, pl);
-        sysLog('purchase_orders',ref,'🤖 Auto-generated from Demand Plot V'+_p2(xx)+' ('+MRPDATE+') by '+CURRENT_USER);
+        const _rem=bySup[sup].filter(l=>l.remark).map(l=>l.name+' — '+l.remark);
+        sysLog('purchase_orders',ref,'🤖 Auto-generated from Demand Plot V'+_p2(xx)+' ('+MRPDATE+') by '+CURRENT_USER+(_rem.length?('\n• '+_rem.join('\n• ')):''));
         refs.push(ref+' · '+sup+' ('+bySup[sup].length+')');
       }catch(e){ toast(e.message,true); }
     }
