@@ -375,9 +375,10 @@ const MODELS = {
     fields:[
       {n:'po_ref',l:'PO Reference',t:'text'},{n:'supplier_name',l:'Vendor',t:'rel',rel:'suppliers'},
       {n:'order_date',l:'Order date',t:'date'},{n:'status',l:'Status',t:'select',o:['open','confirmed','received','invoiced','closed','cancelled']},
-      {n:'created_by',l:'Created by',t:'text'}],
+      {n:'created_by',l:'Created by',t:'text'},
+      {n:'discount',l:'Discount ₱',t:'currency'},{n:'delivery_fee',l:'Delivery fee ₱',t:'currency'}],
     list:['po_ref','supplier_name','order_date','status'],
-    groups:[['po_ref','order_date'],['created_by']], full:['supplier_name'],
+    groups:[['po_ref','order_date'],['created_by','discount','delivery_fee']], full:['supplier_name'],
     o2m:{ field:'lines', model:'po_lines', fk:'po_ref', label:'Order Lines',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Ordered (kg)',t:'number'},{n:'available_kg',l:'Vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
 
@@ -1434,11 +1435,18 @@ async function renderMRP(){
     <div class="hint" style="margin:0 0 8px">Order qty = weekly need + PAR + lead-time buffer − on hand, then ± your manual adjustment, rounded up to the min order. Processed forms (deboned, ground, liver…) are rolled up into the whole-dressed / raw ingredient you actually buy. Supplier = each item's default.</div>
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
     <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num">+PAR</th><th class="num">+Lead</th><th class="num">−OnHand</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
-  plan.forEach((l,i)=>{ rh+=`<tr><td>${esc(l.name)}<div class="mini">yield ${(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)}%</div></td>
+  const _rowHtml=(l)=>`<tr><td>${esc(l.name)}<div class="mini">yield ${(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)}%</div></td>
     <td class="num">${kgf(l.rawNeed)}</td><td class="num">${kgf(l.par)}</td><td class="num">${kgf(l.leadBuf)}</td><td class="num">${kgf(l.oh)}</td><td class="num">${kgf(Math.max(0,l.base))}</td>
     <td class="num"><input type="number" step="any" style="width:74px;text-align:right" value="${l.manualKg||''}" onchange="mrpManual['${l.sku}']=+this.value||0;renderMRP()"></td>
     <td class="num">${l.moq?kgf(l.moq):'—'}</td><td class="num"><b style="color:var(--berry)">${l.final>0?kgf(l.final):'—'}</b></td>
-    <td>${l.lead?l.orderBy:'—'}</td><td>${esc(l.supplier)||'<span class="mini">set default</span>'}</td></tr>`; });
+    <td>${l.lead?l.orderBy:'—'}</td><td>${esc(l.supplier)||'<span class="mini">set default</span>'}</td></tr>`;
+  // group the plan per supplier (matches how POs are generated), with a per-supplier subtotal
+  const _bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no default supplier — set one)'; (_bySup[s]=_bySup[s]||[]).push(l); });
+  Object.keys(_bySup).sort((a,b)=>{ const av=_bySup[a].reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0), bv=_bySup[b].reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); return bv-av; }).forEach(sup=>{
+    const arr=_bySup[sup]; const sItems=arr.filter(l=>l.final>0); const sVal=sItems.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
+    rh+=`<tr><td colspan="11" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">🏭 ${esc(sup)} <span style="opacity:.6;font-weight:400">— ${sItems.length} item(s) to order · est. ₱${Math.round(sVal).toLocaleString('en-PH')}</span></td></tr>`;
+    arr.sort((a,b)=>b.final-a.final).forEach(l=>{ rh+=_rowHtml(l); });
+  });
   if(!plan.length) rh+=`<tr><td colspan="11" class="empty">Enter demand above (and set PAR on ingredients) to build the plan.</td></tr>`;
   const toBuy=plan.filter(l=>l.final>0); const totVal=toBuy.reduce((s,l)=>s+(l.final/1000)*l.price,0);
   rh+=`</tbody></table></div><div class="pager">${toBuy.length} item(s) to order · est. ₱${Math.round(totVal).toLocaleString('en-PH')}</div>${savedPlansHtml()}</div>`;
@@ -1706,8 +1714,19 @@ const FLOW = { purchase_orders:{ buttons:[
   production_batches:{ buttons:[ {when:'draft',label:'Confirm production',to:'confirmed'} ]},
   transfers:{ buttons:[ {when:'sent',label:'📥 Receive transfer',fn:'openTransferReceive()'} ]}};
 function smartTiles(model, rec, children){
-  if(model==='purchase_orders'){ const tot=children.reduce((s,l)=>s+(+l.ordered_kg||0)*(+l.price_kg||0),0);
-    return [{v:children.length,l:'Lines'},{v:'₱'+Math.round(tot).toLocaleString('en-PH'),l:'Est. total'}]; }
+  if(model==='purchase_orders'){
+    const ordTot=children.reduce((s,l)=>s+(+l.ordered_kg||0)*(+l.price_kg||0),0);
+    const recvTot=children.reduce((s,l)=>s+(+l.received_kg||0)*(+l.price_kg||0),0);
+    const anyRecv=children.some(l=>+l.received_kg>0);
+    const disc=+rec.discount||0, fee=+rec.delivery_fee||0;
+    const billable=(anyRecv?recvTot:ordTot) - disc + fee;    // invoice follows RECEIVED qty once receiving starts
+    const P=n=>'₱'+Math.round(n).toLocaleString('en-PH');
+    const tiles=[{v:children.length,l:'Lines'},{v:P(ordTot),l:'Ordered'}];
+    if(anyRecv) tiles.push({v:P(recvTot),l:'Received'});
+    if(disc) tiles.push({v:'−'+P(disc),l:'Discount'});
+    if(fee)  tiles.push({v:'+'+P(fee),l:'Delivery'});
+    tiles.push({v:P(billable),l:anyRecv?'Invoice (billable)':'Est. total'});
+    return tiles; }
   if(model==='products') return [{v:children.length,l:'Recipe items'},{v:(rec.pack_g||0)+'g',l:'Pack'}];
   if(model==='ingredients') return [{v:'₱'+(rec.list_price_kg||0),l:'₱/kg'},{v:(rec.default_method||'—'),l:'Method'}];
   return [];
@@ -2217,37 +2236,65 @@ document.addEventListener('keydown',e=>{
 /* ============ Production Plan (bulk load from demand → draft → confirm) ============ */
 let prodPlanDate=new Date().toISOString().slice(0,10);
 let prodPlanLines=[]; let prodRunRef='';
+let prodTargetMap={}, prodProducedMap={};
 async function renderProdPlan(){
   $('cp').innerHTML=`<div class="title">Production Plan <span onclick="openKB('production_batches')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="prodLoadDemand()">⬇ Load from demand</button>
     <button class="btn sec" onclick="prodSaveDraft()">💾 Save draft</button>
     <button class="wfbtn" onclick="prodConfirm()">✅ Confirm production</button>
-    <div class="sp"></div><span style="color:var(--muted)">plan the week’s batches from demand, then encode & confirm</span>`;
+    <div class="sp"></div><span style="color:var(--muted)">daily production · target from demand plot · remaining to make</span>`;
+  try{ window._prodAllProducts=(await db.list('products',{})).filter(p=>p.active!==false); }catch(e){ window._prodAllProducts=[]; }
+  await prodLoadTargets();
   drawProdPlan();
 }
+async function prodLoadTargets(){
+  let dm={...mrpDemand}, planDate=prodPlanDate;
+  if(!Object.keys(dm).some(k=>+dm[k]>0)){ try{ mrpPlanCache=await mrpPlans(); const last=mrpPlanCache[0]; if(last){ const d=last.data||last; dm={...(d.demand||{})}; planDate=last.plan_date||last.date||planDate; } }catch(e){} }
+  prodTargetMap=dm; window._prodTargetDate=planDate;
+  prodProducedMap={};
+  try{ let rows;
+    if(isLive()){ rows=await sb('production_batches?select=product_sku,good_packs,status,production_date&status=eq.confirmed&production_date=gte.'+encodeURIComponent(planDate)); }
+    else { rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed' && String(b.production_date||'')>=String(planDate)); }
+    (rows||[]).forEach(b=>{ prodProducedMap[b.product_sku]=(prodProducedMap[b.product_sku]||0)+(+b.good_packs||0); });
+  }catch(e){}
+}
+function _prodRemain(sku,thisGood){ const t=+prodTargetMap[sku]||0, p=+prodProducedMap[sku]||0; return Math.max(0, t-p-(+thisGood||0)); }
 function drawProdPlan(){
-  const tot=prodPlanLines.reduce((s,l)=>s+(+l.good_packs||0),0);
+  const totTarget=prodPlanLines.reduce((s,l)=>s+(+prodTargetMap[l.product_sku]||0),0);
+  const totGood=prodPlanLines.reduce((s,l)=>s+(+l.good_packs||0),0);
+  const totRemain=prodPlanLines.reduce((s,l)=>s+_prodRemain(l.product_sku,l.good_packs),0);
+  const inLines=new Set(prodPlanLines.map(l=>l.product_sku));
+  const pickOpts=(window._prodAllProducts||[]).filter(p=>!inLines.has(p.sku)).map(p=>`<option value="${esc(p.sku)}">${esc(p.name)}${prodTargetMap[p.sku]?' · target '+prodTargetMap[p.sku]:''}</option>`).join('');
   let h=`<div class="repcard"><div class="repbar"><span>Production date</span>
-    <input type="date" value="${prodPlanDate}" onchange="prodPlanDate=this.value">
+    <input type="date" value="${prodPlanDate}" onchange="prodPlanDate=this.value;renderProdPlan()">
     ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
-    <span style="color:var(--muted);font-size:12px">Planned = product demand. Edit good packs, rejects, waste & lot, then Confirm.</span></div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>SKU</th><th class="num">Planned</th><th class="num">Good packs</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th></tr></thead><tbody>
-    ${prodPlanLines.map((l,i)=>`<tr><td>${esc(l.name)}</td><td><code>${esc(l.product_sku)}</code></td>
-      <td class="num"><input type="number" style="width:70px;text-align:right" value="${l.planned_packs||''}" onchange="prodPlanLines[${i}].planned_packs=+this.value||0"></td>
-      <td class="num"><input type="number" style="width:74px;text-align:right" value="${l.good_packs||''}" onchange="prodPlanLines[${i}].good_packs=+this.value||0"></td>
-      <td class="num"><input type="number" style="width:60px;text-align:right" value="${l.reject_packs||''}" onchange="prodPlanLines[${i}].reject_packs=+this.value||0"></td>
-      <td class="num"><input type="number" style="width:70px;text-align:right" value="${l.waste_g||''}" onchange="prodPlanLines[${i}].waste_g=+this.value||0"></td>
-      <td><input style="width:120px" value="${esc(l.output_lot||'')}" onchange="prodPlanLines[${i}].output_lot=this.value"></td></tr>`).join('')||'<tr><td colspan="7" class="empty">Click “Load from demand” to pull the week’s products, or start blank for a rush run.</td></tr>'}
-    </tbody></table></div><div class="pager">${prodPlanLines.length} product(s) · ${tot} good packs planned</div></div>`;
+    <span style="color:var(--muted);font-size:12px">Target = weekly demand${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''}. Remaining = target − produced this week − this run.</span></div>
+    <div class="smart" style="margin:8px 0"><div class="stile"><div class="v">${totTarget}</div><div class="l">Target packs</div></div><div class="stile"><div class="v">${totGood}</div><div class="l">This run (good)</div></div><div class="stile"><div class="v" style="color:${totRemain>0?'var(--berry)':'#4e7a3e'}">${totRemain}</div><div class="l">Remaining to make</div></div></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th class="num">Target</th><th class="num">Produced (wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
+    ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodProducedMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
+      return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div></td>
+      <td class="num">${t||'—'}</td><td class="num" style="color:var(--muted)">${p||'—'}</td>
+      <td class="num"><input type="number" style="width:74px;text-align:right" value="${l.good_packs||''}" oninput="prodPlanLines[${i}].good_packs=+this.value||0;prodRemainCell(${i})"></td>
+      <td class="num" id="prem${i}"><b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b></td>
+      <td class="num"><input type="number" style="width:60px;text-align:right" value="${l.reject_packs||''}" oninput="prodPlanLines[${i}].reject_packs=+this.value||0"></td>
+      <td class="num"><input type="number" style="width:70px;text-align:right" value="${l.waste_g||''}" oninput="prodPlanLines[${i}].waste_g=+this.value||0"></td>
+      <td><input style="width:110px" value="${esc(l.output_lot||'')}" oninput="prodPlanLines[${i}].output_lot=this.value"></td>
+      <td><span style="cursor:pointer;color:var(--danger)" title="Remove line" onclick="prodDelLine(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="9" class="empty">Add a product below, or Load from demand.</td></tr>'}
+    </tbody></table></div>
+    <div style="margin-top:8px;display:flex;align-items:center;gap:8px"><span class="addrow">＋ Add product</span>
+      <select id="prodAdd" onchange="prodAddLine(this.value)"><option value="">— pick a product —</option>${pickOpts}</select></div>
+    <div class="pager">${prodPlanLines.length} product(s) · ${totGood} good packs this run · ${totRemain} remaining to make</div></div>`;
   $('content').innerHTML=h;
 }
+function prodRemainCell(i){ const l=prodPlanLines[i]; const el=$('prem'+i); if(!el)return; const rem=_prodRemain(l.product_sku,l.good_packs); el.innerHTML=`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`; }
+function prodAddLine(sku){ if(!sku)return; if(prodPlanLines.some(l=>l.product_sku===sku)){ drawProdPlan(); return; } const p=(window._prodAllProducts||[]).find(x=>x.sku===sku)||{}; prodPlanLines.push({product_sku:sku,name:p.name||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:0,reject_packs:0,waste_g:0,output_lot:''}); drawProdPlan(); }
+function prodDelLine(i){ prodPlanLines.splice(i,1); drawProdPlan(); }
 async function prodLoadDemand(){
-  const prods=(await db.list('products',{})).filter(p=>p.active!==false);
-  let dm={...mrpDemand};
-  if(!Object.keys(dm).some(k=>+dm[k]>0)){ try{ mrpPlanCache=await mrpPlans(); const last=mrpPlanCache[0]; if(last){ const d=last.data||last; dm={...(d.demand||{})}; } }catch(e){} }
-  let lines=prods.map(p=>{ const pk=+dm[p.sku]||0; return {product_sku:p.sku,name:p.name,planned_packs:pk,good_packs:pk,reject_packs:0,waste_g:0,output_lot:''}; }).filter(l=>l.planned_packs>0);
-  if(!lines.length){ lines=prods.map(p=>({product_sku:p.sku,name:p.name,planned_packs:0,good_packs:0,reject_packs:0,waste_g:0,output_lot:''})); toast('No demand found — loaded all products at 0 (encode rush orders)',true); }
-  else toast('Loaded '+lines.length+' product(s) from demand');
+  if(!(window._prodAllProducts||[]).length){ try{ window._prodAllProducts=(await db.list('products',{})).filter(p=>p.active!==false); }catch(e){} }
+  await prodLoadTargets();
+  let lines=(window._prodAllProducts||[]).map(p=>{ const t=+prodTargetMap[p.sku]||0; return {product_sku:p.sku,name:p.name,planned_packs:t,good_packs:0,reject_packs:0,waste_g:0,output_lot:''}; }).filter(l=>l.planned_packs>0);
+  if(!lines.length){ toast('No demand found in the latest plot — add products manually',true); }
+  else toast('Loaded '+lines.length+' product(s) from the demand plot');
   prodPlanLines=lines; drawProdPlan();
 }
 async function prodPersist(status){
@@ -2297,7 +2344,12 @@ async function renderCountForm(idEnc){
   const m=MODELS.count_sessions; formIsNew=!idEnc;
   if(idEnc){ const rows=await db.list('count_sessions',{}); countRec={...(rows.find(r=>String(r[m.pk])===decodeURIComponent(idEnc))||{})};
     countLines=(DEMO.count_lines||[]).filter(r=>r.count_ref===countRec.count_ref).map(r=>({...r}));
-    if(isLive()){ try{ countLines=await db.children({model:'count_lines',fk:'count_ref'}, countRec.count_ref); }catch(e){} } }
+    if(isLive()){ try{ countLines=await db.children({model:'count_lines',fk:'count_ref'}, countRec.count_ref); }catch(e){} }
+    // enrich saved lines with their category (count_lines doesn't store it) for grouping/print
+    try{ const im={}; (await db.list('ingredients',{})).forEach(i=>im[i.sku]={n:i.name,c:(/(supply|supplement)/i.test(i.category||'')?'Supplies':(i.category||'Ingredients'))});
+      (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,c:'Sellable Products'});
+      countLines.forEach(l=>{ if(String(l.ref_sku).startsWith('STK-')){ l.cat='Stickers'; l.name=l.name||l.ref_sku; } else { const h=im[l.ref_sku]; if(h){ l.cat=l.cat||h.c; l.name=l.name||h.n; } else l.cat=l.cat||'Uncategorized'; } });
+    }catch(e){} }
   else { countRec={count_ref:'WR-SC-'+String(Date.now()).slice(-5),location_code:'bulacan',count_date:new Date().toISOString().slice(0,10),status:'draft',scope:['All']}; countLines=[]; }
   drawCountForm();
 }
@@ -2307,8 +2359,12 @@ function drawCountForm(){
   $('cp').innerHTML=`<div class="title">Weekly Inventory</div><div class="sp"></div><span style="color:var(--muted)">book qty auto · needs approval</span>`;
   const scopes=['All','Ingredients','Supplies','Stickers','Sellable Products']; const sc=countRec.scope||['All'];
   const scopeHtml=scopes.map(s=>`<label class="sck"><input type="checkbox" ${sc.includes(s)?'checked':''} ${approved?'disabled':''} onchange="countScope('${s}',this.checked)"> ${s}</label>`).join('');
-  const lineRows=countLines.map((l,i)=>{ const varc=(l.counted_qty!==''&&l.counted_qty!=null)?((+l.counted_qty)-(+l.book_qty||0)):null;
-    return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td class="num">${l.book_qty!=null?num(l.book_qty):'—'}</td><td class="num"><input type="number" step="any" value="${l.counted_qty==null?'':l.counted_qty}" ${approved?'disabled':''} oninput="countLines[${i}].counted_qty=this.value;countVar(${i})"></td><td class="num" id="cv${i}" style="color:${varc&&Math.abs(varc)>0.001?'var(--danger)':'var(--muted)'}">${varc==null?'':num(Math.round(varc*100)/100)}</td></tr>`; }).join('');
+  // group by category, sort by name within group (easier physical counting)
+  const _byCat={}; countLines.forEach((l,i)=>{ const c=l.cat||'Uncategorized'; (_byCat[c]=_byCat[c]||[]).push(i); });
+  Object.values(_byCat).forEach(arr=>arr.sort((a,b)=>String(countLines[a].name||countLines[a].ref_sku).localeCompare(String(countLines[b].name||countLines[b].ref_sku))));
+  const rowFor=(i)=>{ const l=countLines[i]; const varc=(l.counted_qty!==''&&l.counted_qty!=null)?((+l.counted_qty)-(+l.book_qty||0)):null;
+    return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td class="num">${l.book_qty!=null?num(l.book_qty):'—'}</td><td class="num"><input type="number" step="any" value="${l.counted_qty==null?'':l.counted_qty}" ${approved?'disabled':''} oninput="countLines[${i}].counted_qty=this.value;countVar(${i})"></td><td class="num" id="cv${i}" style="color:${varc&&Math.abs(varc)>0.001?'var(--danger)':'var(--muted)'}">${varc==null?'':num(Math.round(varc*100)/100)}</td></tr>`; };
+  const lineRows=Object.keys(_byCat).sort().map(cat=>`<tr><td colspan="5" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">${esc(cat)} <span style="opacity:.6;font-weight:400">(${_byCat[cat].length})</span></td></tr>`+_byCat[cat].map(rowFor).join('')).join('');
   $('content').innerHTML=`<div class="formwrap"><div class="sheet">
     <div class="statusbar">${MODELS.count_sessions.status.stages.map(s=>`<div class="stg ${countRec.status===s?'on':''}">${s}</div>`).join('')}</div>
     <div class="hd"><input class="ttl" value="${esc(countRec.count_ref||'')}" ${approved?'disabled':''} oninput="countRec.count_ref=this.value"><div class="sub">Physical count · book qty is auto-generated &amp; locked</div></div>
@@ -2325,9 +2381,26 @@ function drawCountForm(){
   <div class="formbar">
     ${!approved?`<button class="btn" onclick="countSave()">💾 Save draft</button>`:''}
     ${!approved?`<button class="wfbtn" onclick="countApprove()">✔ Approve &amp; post</button>`:'<span class="badge b-received">Approved — posted to stock</span>'}
+    <button class="btn sec" onclick="countPrintSheet()">🖨 Print count sheet</button>
     <button class="btn sec" onclick="state.view=\'list\';route()">Back</button>
     <span style="flex:1"></span><span style="color:var(--muted)">${isLive()?'Live':'Demo'}</span>
   </div></div>`;
+}
+// Printable physical-count sheet: grouped by category, sorted, with a blank column to write counts.
+function countPrintSheet(){
+  if(!countLines.length){ toast('Load items first',true); return; }
+  const byCat={}; countLines.forEach(l=>{ const c=l.cat||'Uncategorized'; (byCat[c]=byCat[c]||[]).push(l); });
+  let body='';
+  Object.keys(byCat).sort().forEach(cat=>{
+    const arr=byCat[cat].slice().sort((a,b)=>String(a.name||a.ref_sku).localeCompare(String(b.name||b.ref_sku)));
+    body+=`<tr class="cat"><td colspan="4">${esc(cat)} (${arr.length})</td></tr>`+arr.map(l=>`<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td class="bk">${l.book_qty!=null?num(l.book_qty):''}</td><td class="ct"></td></tr>`).join('');
+  });
+  const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.cat td{background:#eef3ea;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:130px;border-bottom:1px solid #333}</style></head><body>
+    <h1>🐇 Wholesome Rabbit — Weekly Count Sheet</h1>
+    <h2>${esc(countRec.count_ref||'')} · ${esc((countRec.location_code||'').toUpperCase())} · ${esc(countRec.count_date||'')} · counted by: ____________________</h2>
+    <table><thead><tr><th>Item</th><th>SKU</th><th style="text-align:right">Book qty</th><th>Counted</th></tr></thead><tbody>${body}</tbody></table>
+    <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · write the physical count in the right column, then enter it in the app.</p></body></html>`;
+  const w=window.open('','_pr','width=840,height=980'); if(!w){toast('Allow pop-ups to print',true);return;} w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
 }
 function countVar(i){ const l=countLines[i]; const el=$('cv'+i); if(!el)return; const v=(l.counted_qty!==''&&l.counted_qty!=null)?((+l.counted_qty)-(+l.book_qty||0)):null; el.textContent=v==null?'':num(Math.round(v*100)/100); el.style.color=v&&Math.abs(v)>0.001?'var(--danger)':'var(--muted)'; }
 function countScope(s,on){ let sc=countRec.scope||[]; if(s==='All'){ sc=on?['All']:[]; } else { sc=sc.filter(x=>x!=='All'); if(on)sc.push(s); else sc=sc.filter(x=>x!==s); } countRec.scope=sc; drawCountForm(); }
@@ -2339,11 +2412,11 @@ async function countLoad(){
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
   let lines=[];
   ings.forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
-    if((wantIng&&!isSup)||(wantSup&&isSup)) lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:''}); });
-  if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:''}));
+    if((wantIng&&!isSup)||(wantSup&&isSup)) lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:isSup?'Supplies':(i.category||'Ingredients')}); });
+  if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:'Sellable Products'}));
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
   if(wantStk) prods.forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
-    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand'}); });
+    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:'Stickers'}); });
   countLines=lines;
   toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')); drawCountForm();
 }
