@@ -943,7 +943,7 @@ function openSettings(){
 async function signIn(){ const email=($('s_email').value||'').trim(), pw=$('s_pw').value; if(!email||!pw){ toast('Enter email & password',true); return; }
   try{ const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    await loadFieldAcl(); await loadAutos(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
+    await loadFieldAcl(); await loadAutos(); await loadProfiles(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
   }catch(e){ toast(e.message,true); } }
 function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.email; delete SUPA.role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); }
   // purge cached record data on sign-out so nothing sensitive is left on a shared machine
@@ -965,7 +965,7 @@ function saveSettings(){
   const url=$('s_url').value.trim(), key=$('s_key').value.trim();
   if(!url||!key){ toast('Enter URL and key',true); return; }
   SUPA={url,key}; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); relCache={};
-  updateMode(); closeModal(); toast('Connected — loading live data'); loadAutos(); openModel(state.model);
+  updateMode(); closeModal(); toast('Connected — loading live data'); loadAutos(); loadProfiles(); openModel(state.model);
 }
 function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={}; updateMode(); closeModal(); toast('Back to demo mode'); openModel(state.model); }
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';} }
@@ -1133,7 +1133,7 @@ async function gateSignIn(){
   try{
     const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    await loadFieldAcl(); await loadAutos(); hideGate(); updateMode(); renderUserSel(); renderSide(); bootRoute();
+    await loadFieldAcl(); await loadAutos(); await loadProfiles(); hideGate(); updateMode(); renderUserSel(); renderSide(); bootRoute();
   }catch(e){ $('g_err').textContent=e.message; }
 }
 
@@ -2066,7 +2066,13 @@ function cAdd(kind){
    them via the 🔔 inbox. Each message carries a resolved flag.
    Live → Supabase table `record_notes`; demo → localStorage `wr_notes`. */
 let formNotes=[];
-function userNames(){ return USERS.map(u=>u.name); }
+// Mention / assignee list. When live, pull the REAL Supabase users (profiles) so @mentions
+// target actual accounts and notifications resolve; fall back to the local team list offline.
+let PROFILE_USERS=[];
+async function loadProfiles(){ if(!isLive()){ PROFILE_USERS=[]; return; }
+  try{ const rows=await sb('profiles?select=name,role&order=name.asc'); PROFILE_USERS=(rows||[]).filter(r=>r.name&&String(r.name).trim()); }catch(e){ PROFILE_USERS=[]; }
+  if(state && state.view==='form' && !formIsNew) refreshNotesPanel(); }
+function userNames(){ return (isLive()&&PROFILE_USERS.length? PROFILE_USERS : USERS).map(u=>u.name); }
 function parseMentions(body){ return userNames().filter(n=> body.indexOf('@'+n)>=0 ); }
 async function notesForRecord(model,pk){ if(!pk) return [];
   if(isLive()){ try{ return await sb('record_notes?select=*&model=eq.'+encodeURIComponent(model)+'&record_pk=eq.'+encodeURIComponent(pk)+'&order=created_at.desc'); }catch(e){ return []; } }
@@ -2120,6 +2126,7 @@ async function saveActivity(){
     if(isLive()){ await sb('record_notes',{method:'POST',prefer:'return=minimal',body:JSON.stringify(rec)}); }
     else { const a=JSON.parse(localStorage.getItem('wr_notes')||'[]'); a.push({...rec,id:'a'+Date.now()+Math.floor(Math.random()*999),created_at:new Date().toISOString()}); localStorage.setItem('wr_notes',JSON.stringify(a)); }
     sysLog(state.model,pk,'⏰ '+CURRENT_USER+' scheduled a '+type+' for '+assignee+(date?(' · due '+date):''));
+    notifyMention('activity', [assignee], body, due_at);   // notify the assignee (email/Telegram via n8n)
     closeModal(); await refreshNotesPanel(); toast('Activity scheduled for '+assignee);
   }catch(e){ toast(saveErrMsg(e),true); }
 }
@@ -2151,6 +2158,15 @@ function notesPanelHtml(){
 }
 async function refreshNotesPanel(){ const m=MODELS[state.model]; const pk=formRec[m.pk]; formNotes=await notesForRecord(state.model,pk);
   const el=$('notesPanel'); if(el){ const tmp=document.createElement('div'); tmp.innerHTML=notesPanelHtml(); el.replaceWith(tmp.firstElementChild); } refreshMentionBell(); }
+// Deep link straight to this record in the app (used in mention/activity notifications).
+function recordLink(model, ref){ return location.origin+location.pathname+'#/'+model+'/'+encodeURIComponent(ref); }
+// Fire the mention/activity notification webhook → n8n resolves each name to a real user (profiles) and emails/Telegrams them.
+async function notifyMention(kind, to, body, due_at){
+  const a=autoCfg('mention_notify'); if(!a||!a.on||!a.url) return;
+  to=(to||[]).filter(Boolean); if(!to.length) return;
+  const m=MODELS[state.model]; const ref=formRec[m.pk]; if(ref==null) return;
+  try{ await postWebhook(a.url,{ kind, model:state.model, module:m.label, ref:String(ref), to, author:CURRENT_USER, body:body||'', due_at:due_at||'', link:recordLink(state.model, ref) }); }catch(e){}
+}
 async function notePost(){ const inp=$('noteInput'); if(!inp) return; const body=(inp.value||'').trim(); if(!body){ toast('Write a message first',true); return; }
   const m=MODELS[state.model]; const pk=formRec[m.pk]; if(!pk||formIsNew){ toast('Save the record first, then post',true); return; }
   const mentions=parseMentions(body);
@@ -2158,6 +2174,7 @@ async function notePost(){ const inp=$('noteInput'); if(!inp) return; const body
     if(isLive()){ await sb('record_notes',{method:'POST',prefer:'return=minimal',body:JSON.stringify({model:state.model,record_pk:String(pk),body,author:CURRENT_USER,mentions,resolved:false})}); }
     else { const a=JSON.parse(localStorage.getItem('wr_notes')||'[]'); a.push({id:'n'+Date.now()+Math.floor(Math.random()*999),model:state.model,record_pk:String(pk),body,author:CURRENT_USER,mentions,resolved:false,created_at:new Date().toISOString()}); localStorage.setItem('wr_notes',JSON.stringify(a)); }
     sysLog(state.model,pk,'💬 '+CURRENT_USER+' posted a message'+(mentions.length?(' — mentioned @'+mentions.join(', @')):''));
+    if(mentions.length) notifyMention('mention', mentions, body);   // notify each mentioned person (email/Telegram via n8n)
     inp.value=''; await refreshNotesPanel(); toast('Message posted'+(mentions.length?' · '+mentions.length+' mentioned':''));
   }catch(e){ toast(e.message,true); }
 }
@@ -2779,7 +2796,8 @@ async function delReport(i){ const x=reportCache[i]; if(!x)return; try{ if(isLiv
 
 /* ============ Automations (one-stop config hub) ============ */
 let AUTOS = JSON.parse(localStorage.getItem('wr_autos')||'null') || {
-  sheets_demand:{on:false,url:'',label:'Google Sheets — Demand sync (by SKU)',hint:'n8n reads your Shopify→Sheets sheet and updates MRP demand, keyed by SKU.'},
+  sheets_demand:{on:false,url:'',label:'Google Sheets — Demand sync (by SKU)',hint:'Clicking “Sync from Google Sheets” triggers this n8n webhook — n8n reads your sheet, upserts the demand table for the plan date, then the app pulls it. Paste the wr-demand-sync webhook URL.'},
+  mention_notify:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-mention-notify',label:'n8n — Mention / activity notify',hint:'When someone is @mentioned or assigned an activity, the app sends the person + a link here; n8n looks up their email/Telegram in profiles and notifies them.'},
   drive_folder:{on:false,url:'',label:'Google Drive — Attachments folder',hint:'Record attachments live here; uploads route via n8n, links saved on the record.'},
   record_pdf:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-record-done',label:'n8n — Record → PDF → Drive → notify',hint:'When a document is completed, it is sent here: n8n builds a PDF, saves it to the module Drive folder, writes the link back on the record, and notifies Telegram/Email with the Internal Reference.'},
   file_upload:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-file-upload',label:'n8n — File upload to Drive',hint:'Files you attach on a record are sent here and uploaded to the module Drive folder.'},
@@ -2861,9 +2879,19 @@ function mrpDoImport(){ if(!_impReport)return; const valid=_impReport.filter(d=>
   const map={}; valid.forEach(v=>{ map[v.sku]=(map[v.sku]||0)+(+v.qty||0); });
   closeModal(); applyDemandMap(map); toast('Imported '+valid.length+' demand row(s)'); }
 async function mrpSheetSync(){ const a=AUTOS.sheets_demand;
-  if(isLive()){ try{ const rows=await sb('demand?select=sku,qty&plan_date=eq.'+encodeURIComponent(MRPDATE)); if(!rows.length){ toast('No synced demand for '+MRPDATE+' yet — n8n writes it from your sheet',true); return; } const map={}; rows.forEach(r=>{ map[r.sku]=+r.qty||0; }); applyDemandMap(map); toast('Pulled '+rows.length+' demand rows for '+MRPDATE); }catch(e){ toast(e.message,true); } return; }
-  if(!a||!a.on||!a.url){ toast('Enable Google Sheets sync in Automations first',true); return; }
-  toast('Connect Supabase to pull demand synced by n8n. In demo, use Import / Upload.'); }
+  if(!isLive()){ toast('Connect Supabase to sync demand from your sheet. In demo, use Import / Paste.',true); return; }
+  // If the webhook is configured, TRIGGER n8n (reads your Google Sheet → upserts the demand table for this plan date), then pull.
+  if(a&&a.on&&a.url){
+    showBusy('Syncing demand from Google Sheets…');
+    await postWebhook(a.url,{ action:'sync_demand', plan_date:MRPDATE, by:CURRENT_USER });
+    await new Promise(r=>setTimeout(r,8000));   // give n8n time to read the sheet + upsert
+    hideBusy();
+  }
+  try{ const rows=await sb('demand?select=sku,qty&plan_date=eq.'+encodeURIComponent(MRPDATE));
+    if(!rows.length){ toast(a&&a.on&&a.url?('Synced, but no demand rows for '+MRPDATE+' — check the sheet & the n8n workflow'):'No synced demand for '+MRPDATE+' — enable the Google Sheets webhook in Automations first',true); return; }
+    const map={}; rows.forEach(r=>{ map[r.sku]=+r.qty||0; }); applyDemandMap(map);
+    toast('Synced '+rows.length+' demand row(s) for '+MRPDATE);
+  }catch(e){ toast(e.message,true); } }
 
 /* ============ Internal Transfer — load Bulacan finished stock ============ */
 async function loadBulacanStock(){
@@ -2940,7 +2968,7 @@ if(!DEMO.variance_log.length) DEMO.variance_log=[
   {id:1,check_type:'4 · Transfer',source_ref:'WR-TR-DEMO',expected:6,actual:5,gap_qty:-1,gap_value:130,location:'in-transit',responsible_user:'Warehouse',status:'open',note:''},
   {id:2,check_type:'1 · 3-way match',source_ref:'WR-PO-0012',expected:5,actual:4.2,gap_qty:-0.8,gap_value:224,location:'bulacan',responsible_user:'Purchasing',status:'open',note:''}];
 applyStudio(); updateMode(); renderUserSel(); renderSide();
-if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadAutos(); }
+if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadAutos(); loadProfiles(); }
 window.addEventListener('hashchange', onHashRoute);
 if(needAuth()) showGate(); else bootRoute();
 </script>
