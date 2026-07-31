@@ -341,9 +341,10 @@ const MODELS = {
       {n:'shelf_life_days',l:'Shelf life (d)',t:'number'},{n:'lead_time_days',l:'Lead time (d)',t:'number'},
       {n:'par_g',l:'Par / week (g)',t:'number'},{n:'reorder_g',l:'Reorder (g)',t:'number'},{n:'min_order_kg',l:'Min order (kg)',t:'number'},
       {n:'is_live_animal',l:'Live animal',t:'bool'},{n:'is_intermediate',l:'Intermediate',t:'bool'},
+      {n:'uom',l:'Unit / pack',t:'text'},
       {n:'notes',l:'Notes',t:'longtext'}],
     list:['name','category','raw_input','yield_pct','list_price_kg'],
-    groups:[['sku','name','raw_input','processing_method','category','source','storage','yield_pct','costing_override','approved_alt'],
+    groups:[['sku','name','raw_input','processing_method','category','uom','source','storage','yield_pct','costing_override','approved_alt'],
             ['list_price_kg','price_kg_processed','price_g_raw','price_g_processed','moving_avg_cost_kg','supplier1','supplier2','supplier'],
             ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','lead_time_days','shelf_life_days','is_live_animal','is_intermediate']],
     tabs:[{l:'🥩 Item & yield', groups:[0]},{l:'₱ Costing', groups:[1]},{l:'⚙ Flags & stock', groups:[2]}],
@@ -2555,10 +2556,21 @@ async function prodConfirm(){
 }
 // Raw grams each product's recipe consumes per pack: usable_g ÷ yield (raw needed > usable).
 async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=await listIngredients();
-  const im={}; ings.forEach(i=>im[i.sku]=i); const m={};
-  boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100||1;
-    (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:b.ingredient_sku, raw_g:(+b.usable_g||0)/y, processed_g:(+b.usable_g||0), unit_cost_g:(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000}); });
-  return m; }
+  const bySku={}, byName={}; ings.forEach(it=>{ bySku[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm) byName[nm]=it; });
+  // A recipe line names the PROCESSED output; we buy & stock the RAW. Roll each output up to the
+  // raw purchasable it is made from (source_sku, else raw_input name) so the draw-down hits real
+  // raw stock — not the never-stocked intermediate (which is what caused negative on-hand).
+  const rootOf=(sku)=>{ const it=bySku[sku]; if(!it) return {sku,it:{}}; if(!it.is_intermediate) return {sku,it};
+    const bySrc=it.source_sku&&bySku[it.source_sku]?bySku[it.source_sku]:null;
+    const ri=(it.raw_input||'').trim().toLowerCase(); const byRi=(ri&&byName[ri]&&byName[ri].sku!==it.sku)?byName[ri]:null;
+    const parent=bySrc||byRi; return parent?{sku:parent.sku,it:parent}:{sku,it}; };
+  const agg={};   // product -> { rootSku -> {ingredient_sku, raw_g, processed_g, unit_cost_g} }
+  boms.forEach(b=>{ const it=bySku[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100||1;
+    const rawG=(+b.usable_g||0)/y, procG=(+b.usable_g||0); const r=rootOf(b.ingredient_sku); const rt=r.it||{};
+    const pm=agg[b.product_sku]=agg[b.product_sku]||{};
+    const cur=pm[r.sku]=pm[r.sku]||{ingredient_sku:r.sku, raw_g:0, processed_g:0, unit_cost_g:(+rt.moving_avg_cost_kg||+rt.list_price_kg||0)/1000};
+    cur.raw_g+=rawG; cur.processed_g+=procG; });
+  const m={}; Object.keys(agg).forEach(p=>{ m[p]=Object.values(agg[p]); }); return m; }
 async function _prodConfirm(){
   const recs=await prodPersist('confirmed'); if(!recs)return;
   const cm=await prodCostMap(); const bm=await prodBOMMap(); let posted=0, failed=0, drawn=0;
@@ -2588,9 +2600,14 @@ async function renderCountForm(idEnc){
     countLines=(DEMO.count_lines||[]).filter(r=>r.count_ref===countRec.count_ref).map(r=>({...r}));
     if(isLive()){ try{ countLines=await db.children({model:'count_lines',fk:'count_ref'}, countRec.count_ref); }catch(e){} }
     // enrich saved lines with their category (count_lines doesn't store it) for grouping/print
-    try{ const im={}; (await db.list('ingredients',{})).forEach(i=>im[i.sku]={n:i.name,c:(/(supply|supplement)/i.test(i.category||'')?'Supplies':(i.category||'Ingredients'))});
-      (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,c:'Sellable Products'});
-      countLines.forEach(l=>{ if(String(l.ref_sku).startsWith('STK-')){ l.cat='Stickers'; l.name=l.name||l.ref_sku; } else { const h=im[l.ref_sku]; if(h){ l.cat=l.cat||h.c; l.name=l.name||h.n; } else l.cat=l.cat||'Uncategorized'; } const u=countUnitFor(l.cat); l.uom=u.uom; l.scale=u.scale; });
+    try{ const im={}; (await db.list('ingredients',{})).forEach(i=>im[i.sku]={n:i.name,c:(/(supply|supplement)/i.test(i.category||'')?'Supplies':(i.category||'Ingredients')),kind:'ingredient',uom:i.uom});
+      (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,fam:(p.family||'Other'),kind:'product'});
+      countLines.forEach(l=>{
+        if(String(l.ref_sku).startsWith('STK-')){ const h=im[String(l.ref_sku).slice(4)]; l.cat=((h&&h.fam)||'Other')+' — Stickers'; l.name=l.name||l.ref_sku; l.uom='pcs'; l.scale=1; }
+        else { const h=im[l.ref_sku];
+          if(h&&h.kind==='product'){ l.cat=h.fam||'Other'; l.name=l.name||h.n; l.uom='packs'; l.scale=1; }
+          else if(h){ l.cat=l.cat||h.c; l.name=l.name||h.n; if(l.cat==='Supplies'){ l.uom=h.uom||'pcs'; l.scale=1; } else { const u=countUnitFor(l.cat); l.uom=u.uom; l.scale=u.scale; } }
+          else { l.cat=l.cat||'Uncategorized'; l.uom='kg'; l.scale=1000; } } });
     }catch(e){} }
   else { countRec={count_ref:'WR-SC-'+String(Date.now()).slice(-5),location_code:'bulacan',count_date:new Date().toISOString().slice(0,10),status:'draft',scope:['All']}; countLines=[]; }
   drawCountForm();
@@ -2665,20 +2682,22 @@ async function countLoad(){
   const loc=(countRec.location_code||'bulacan');
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
   let lines=[];
-  ings.forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
-    if((wantIng&&!isSup)||(wantSup&&isSup)){ const cat=isSup?'Supplies':(i.category||'Ingredients'); const u=countUnitFor(cat); lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat,uom:u.uom,scale:u.scale}); } });
-  if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:'Sellable Products',uom:'packs',scale:1}));
+  ings.forEach(i=>{ if(i.is_intermediate) return;   // only purchasable raws are physically stocked/counted (outputs are never held)
+    const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
+    if((wantIng&&!isSup)||(wantSup&&isSup)){ const cat=isSup?'Supplies':(i.category||'Ingredients'); const u=isSup?{uom:(i.uom||'pcs'),scale:1}:countUnitFor(cat); lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat,uom:u.uom,scale:u.scale}); } });
+  if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),uom:'packs',scale:1}));
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
   if(wantStk) prods.forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
-    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:'Stickers',uom:'pcs',scale:1}); });
+    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',uom:'pcs',scale:1}); });
   countLines=lines;
   toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')); drawCountForm();
 }
 async function countSave(){
   try{
     if(isLive()){
-      try{ await db.update('count_sessions','count_ref',countRec.count_ref,{location_code:countRec.location_code,count_date:countRec.count_date,status:countRec.status||'draft',counted_by:CURRENT_USER}); }
-      catch(e){ await db.create('count_sessions',{count_ref:countRec.count_ref,location_code:countRec.location_code,count_date:countRec.count_date,status:countRec.status||'draft',counted_by:CURRENT_USER}); }
+      // UPSERT the parent session first (a PATCH to a missing row succeeds with 0 rows and never
+      // throws, so the old try-update/catch-create left no session → count_lines FK 23503).
+      await sb('count_sessions?on_conflict=count_ref',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({count_ref:countRec.count_ref,location_code:countRec.location_code,count_date:countRec.count_date,status:countRec.status||'draft',counted_by:CURRENT_USER})});
       await db.replaceChildren({model:'count_lines',fk:'count_ref'},countRec.count_ref, countLines.map(l=>({count_ref:countRec.count_ref,ref_sku:l.ref_sku,book_qty:+l.book_qty||0,counted_qty:l.counted_qty===''?null:+l.counted_qty})));
     } else {
       DEMO.count_sessions=(DEMO.count_sessions||[]).filter(r=>r.count_ref!==countRec.count_ref); DEMO.count_sessions.push({...countRec,counted_by:CURRENT_USER});
