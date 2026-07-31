@@ -406,7 +406,9 @@ const MODELS = {
     list:['batch_ref','product_sku','status','planned_packs','good_packs','production_date'],
     groups:[['batch_ref','product_sku','production_date'],['good_packs','reject_packs','waste_g','output_lot','cost_per_pack']],
     o2m:{field:'issues',model:'batch_issues',fk:'batch_ref',label:'Ingredients Issued',
-      cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'expected_raw_g',l:'Expected g',t:'number'},{n:'actual_raw_g',l:'Actual g',t:'number'}]} },
+      cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'uom',l:'UoM',t:'select',o:['kg','g','pcs','mL']},
+        {n:'expected_raw_g',l:'Exp raw (kg)',t:'number',scale:1000,ro:true},{n:'actual_raw_g',l:'Act raw (kg)',t:'number',scale:1000},
+        {n:'expected_processed_g',l:'Exp proc (kg)',t:'number',scale:1000,ro:true},{n:'actual_processed_g',l:'Act proc (kg)',t:'number',scale:1000}]} },
 
   transfers:{ label:'Internal Transfer', icon:'🚚', name:'transfer_ref', pk:'transfer_ref',
     status:{f:'status',stages:['sent','received','cancelled']}, cancelable:true,
@@ -803,13 +805,17 @@ function renderLines(){
     const ro=(typeof c.ro==='function'?c.ro(ln,formRec):c.ro)?'disabled':'';
     if(ro&&(c.n==='received_packs'||c.n==='received_kg')&&(v===''||v==null)) v=0; // captured at receiving
     if(c.t==='rel'){const opts=relCache[c.rel]||[];return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}><option value="">—</option>${opts.map(op=>`<option value="${esc(op.v)}" ${v===op.v?'selected':''}>${esc(op.t)}</option>`).join('')}</select></td>`;}
-    if(c.t==='number')return `<td><input type="number" step="any" value="${esc(v)}" oninput="lSet(${i},'${c.n}',this.value)" ${ro} ${ro?'title="Filled at receiving" style="background:#f4f5f8;color:#8a93a5"':''}></td>`;
+    if(c.t==='select')return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}>${(c.o||[]).map(op=>`<option ${v===op?'selected':''}>${op}</option>`).join('')}</select></td>`;
+    if(c.t==='number'){ const sc=+c.scale||1; const disp=(v===''||v==null)?'':(sc!==1?(Math.round((+v/sc)*1e6)/1e6):v);
+      return `<td><input type="number" step="any" value="${esc(disp)}" oninput="lSetNum(${i},'${c.n}',this.value,${sc})" ${ro} ${ro?'title="From the recipe" style="background:#f4f5f8;color:#8a93a5"':''}></td>`; }
     return `<td><input value="${esc(v)}" oninput="lSet(${i},'${c.n}',this.value)" ${ro}></td>`;
   }).join('')}<td><span class="btn link" style="color:var(--danger)" onclick="delLine(${i})">✕</span></td></tr>`).join('');
 }
 function addLine(){ formChildren.push({}); renderLines(); }
 function delLine(i){ formChildren.splice(i,1); renderLines(); }
 function lSet(i,n,v){ formChildren[i][n]=v; }
+// number line-setter with an optional display scale (e.g. show kg, store grams)
+function lSetNum(i,n,v,sc){ sc=+sc||1; formChildren[i][n]=(v===''||v==null)?'':(sc!==1?(+v*sc):+v); }
 function discardForm(){ state.view='list'; route(); }
 const AUTO_REF={ purchase_orders:async()=>{ const dd=_mmddyyyy(); return 'PO-'+dd+' V'+_p2(await nextSeq('PO-'+dd))+'.01'; },
                  transfers:async()=>(await genRef('DR',{})).ref };
@@ -1397,6 +1403,7 @@ async function renderMRP(){
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderMRP()">↻ Compute</button>
     <button class="btn sec" onclick="saveMRPPlan()">💾 Save plan</button>
+    <button class="btn sec" onclick="renderDemandHistory()">📚 History</button>
     <button class="wfbtn" onclick="generatePOsFromMRP()">🧾 Generate Draft POs</button>
     <div class="sp"></div><span style="color:var(--muted)">demand + lead time + PAR → replenishment → PO</span>`;
   const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await listIngredients();
@@ -1546,6 +1553,24 @@ function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return'';
     <div style="overflow-x:auto"><table><thead><tr><th>Week</th><th>Reference</th><th>Plan date</th><th class="num">Items to order</th><th class="num">Est ₱</th><th></th></tr></thead><tbody>
     ${rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span> · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
     </tbody></table></div></div>`; }
+// Dedicated, VIEW-ONLY history of every saved demand plot (no reuse / no delete).
+async function renderDemandHistory(){
+  $('cp').innerHTML=`<div class="title">Demand History</div>
+    <button class="btn sec" onclick="renderMRP()">← Back to MRP</button>
+    <div class="sp"></div><span style="color:var(--muted)">past demand plots · view only</span>`;
+  let plans=[]; try{ plans=await mrpPlans(); }catch(e){}
+  mrpPlanCache=plans;
+  const rows=plans.map((p,i)=>{ const date=p.plan_date||p.date||''; const d=p.data||p; const ref=(d&&d.ref)||p.ref||'';
+    const lines=(d&&d.lines)||p.lines||[]; const items=lines.filter(l=>l.final>0); const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
+    const by=(d&&d.by)||p.by||''; return {i,date,ref,items:items.length,val,by,wk:weekOf(date)}; });
+  const body = rows.length
+    ? rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td class="mini">${esc(r.by||'')}</td><td><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span></td></tr>`).join('')
+    : '<tr><td colspan="7" class="empty">No saved demand plots yet.</td></tr>';
+  $('content').innerHTML=`<div class="repcard"><h3 style="margin:0 0 6px">Saved demand plots ${isLive()?'· Supabase':''}</h3>
+    <div class="hint" style="margin:0 0 10px">A read-only record of every demand plot you've saved. Open one to view its full replenishment plan — nothing here can be edited or deleted.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Week</th><th>Reference</th><th>Plan date</th><th class="num">Items to order</th><th class="num">Est ₱</th><th>Saved by</th><th></th></tr></thead>
+    <tbody>${body}</tbody></table></div></div>`;
+}
 /* ============ Internal reference numbering (DP / PO / DR / RR) ============ */
 function _p2(n){ return String(n).padStart(2,'0'); }
 function _mmddyyyy(dstr){ const d=dstr||new Date().toISOString().slice(0,10); const t=d.split('-'); return (t[1]||'')+(t[2]||'')+(t[0]||''); }
@@ -2462,7 +2487,6 @@ let prodPlanLines=[]; let prodRunRef='';
 let prodTargetMap={}, prodProducedMap={};
 async function renderProdPlan(){
   $('cp').innerHTML=`<div class="title">Production Plan <span onclick="openKB('production_batches')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
-    <button class="btn" onclick="prodLoadDemand()">⬇ Load from demand</button>
     <button class="btn sec" onclick="prodSaveDraft()">💾 Save draft</button>
     <button class="wfbtn" onclick="prodConfirm()">✅ Confirm production</button>
     <div class="sp"></div><span style="color:var(--muted)">daily production · target from demand plot · remaining to make</span>`;
@@ -2502,7 +2526,7 @@ function drawProdPlan(){
       <td class="num"><input type="number" style="width:60px;text-align:right" value="${l.reject_packs||''}" oninput="prodPlanLines[${i}].reject_packs=+this.value||0"></td>
       <td class="num"><input type="number" style="width:70px;text-align:right" value="${l.waste_g||''}" oninput="prodPlanLines[${i}].waste_g=+this.value||0"></td>
       <td><input style="width:110px" value="${esc(l.output_lot||'')}" oninput="prodPlanLines[${i}].output_lot=this.value"></td>
-      <td><span style="cursor:pointer;color:var(--danger)" title="Remove line" onclick="prodDelLine(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="9" class="empty">Add a product below, or Load from demand.</td></tr>'}
+      <td><span style="cursor:pointer;color:var(--danger)" title="Remove line" onclick="prodDelLine(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="9" class="empty">Add a product below to start the run.</td></tr>'}
     </tbody></table></div>
     <div style="margin-top:8px;display:flex;align-items:center;gap:8px"><span class="addrow">＋ Add product</span>
       <select id="prodAdd" onchange="prodAddLine(this.value)"><option value="">— pick a product —</option>${pickOpts}</select></div>
@@ -2512,14 +2536,6 @@ function drawProdPlan(){
 function prodRemainCell(i){ const l=prodPlanLines[i]; const el=$('prem'+i); if(!el)return; const rem=_prodRemain(l.product_sku,l.good_packs); el.innerHTML=`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`; }
 function prodAddLine(sku){ if(!sku)return; if(prodPlanLines.some(l=>l.product_sku===sku)){ drawProdPlan(); return; } const p=(window._prodAllProducts||[]).find(x=>x.sku===sku)||{}; prodPlanLines.push({product_sku:sku,name:p.name||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:0,reject_packs:0,waste_g:0,output_lot:''}); drawProdPlan(); }
 function prodDelLine(i){ prodPlanLines.splice(i,1); drawProdPlan(); }
-async function prodLoadDemand(){
-  if(!(window._prodAllProducts||[]).length){ try{ window._prodAllProducts=(await db.list('products',{})).filter(p=>p.active!==false); }catch(e){} }
-  await prodLoadTargets();
-  let lines=(window._prodAllProducts||[]).map(p=>{ const t=+prodTargetMap[p.sku]||0; return {product_sku:p.sku,name:p.name,planned_packs:t,good_packs:0,reject_packs:0,waste_g:0,output_lot:''}; }).filter(l=>l.planned_packs>0);
-  if(!lines.length){ toast('No demand found in the latest plot — add products manually',true); }
-  else toast('Loaded '+lines.length+' product(s) from the demand plot');
-  prodPlanLines=lines; drawProdPlan();
-}
 async function prodPersist(status){
   const active=prodPlanLines.filter(l=>(+l.planned_packs||0)>0||(+l.good_packs||0)>0);
   if(!active.length){ toast('Nothing to save — load demand or enter packs',true); return null; }
@@ -2541,7 +2557,7 @@ async function prodConfirm(){
 async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=await listIngredients();
   const im={}; ings.forEach(i=>im[i.sku]=i); const m={};
   boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100||1;
-    (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:b.ingredient_sku, raw_g:(+b.usable_g||0)/y, unit_cost_g:(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000}); });
+    (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:b.ingredient_sku, raw_g:(+b.usable_g||0)/y, processed_g:(+b.usable_g||0), unit_cost_g:(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000}); });
   return m; }
 async function _prodConfirm(){
   const recs=await prodPersist('confirmed'); if(!recs)return;
@@ -2553,12 +2569,15 @@ async function _prodConfirm(){
     try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:packs,unit_cost:cpp,movement_type:'batch_output',note:'Production '+r.batch_ref}); posted++; }catch(e){ failed++; }
     // RAW DRAW-DOWN: deplete each recipe ingredient and record expected issues (feeds Checks 2 & 3).
     for(const line of (bm[r.product_sku]||[])){ const rawG=Math.round(line.raw_g*packs*100)/100; if(!(rawG>0)) continue;
+      const procG=Math.round((+line.processed_g||0)*packs*100)/100;   // usable (processed) qty that goes into the mix
       try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:line.ingredient_sku,location_code:'bulacan',qty:-rawG,unit_cost:line.unit_cost_g,movement_type:'issue_to_batch',note:'Production '+r.batch_ref}); drawn++; }catch(e){ failed++; }
-      try{ await db.create('batch_issues',{batch_ref:r.batch_ref,ingredient_sku:line.ingredient_sku,expected_raw_g:rawG,actual_raw_g:rawG}); }catch(e){}
+      try{ await db.create('batch_issues',{batch_ref:r.batch_ref,ingredient_sku:line.ingredient_sku,expected_raw_g:rawG,actual_raw_g:rawG,expected_processed_g:procG,actual_processed_g:procG,uom:'kg'}); }catch(e){}
     } } }
   sysLog('production_batches',prodRunRef,'✅ Production confirmed ('+recs.length+' batches, '+drawn+' ingredient issues) by '+CURRENT_USER);
   notifyRecordDone('production_batches', prodRunRef, {batch_ref:prodRunRef,status:'confirmed',operator:CURRENT_USER,production_date:prodPlanDate}, recs);   // PDF → Drive → notify
-  toast('Confirmed · '+posted+' product(s) posted; '+drawn+' raw issue(s) drawn down'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0); prodRunRef=''; drawProdPlan();
+  toast('Confirmed · '+posted+' product(s) posted; '+drawn+' raw issue(s) drawn down'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0);
+  // clear the run so the next batch starts clean (no redundant re-save of confirmed lines)
+  prodRunRef=''; prodPlanLines=[]; drawProdPlan();
 }
 
 /* ============ Weekly Inventory (scope + auto book qty + approval) ============ */
@@ -2571,7 +2590,7 @@ async function renderCountForm(idEnc){
     // enrich saved lines with their category (count_lines doesn't store it) for grouping/print
     try{ const im={}; (await db.list('ingredients',{})).forEach(i=>im[i.sku]={n:i.name,c:(/(supply|supplement)/i.test(i.category||'')?'Supplies':(i.category||'Ingredients'))});
       (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,c:'Sellable Products'});
-      countLines.forEach(l=>{ if(String(l.ref_sku).startsWith('STK-')){ l.cat='Stickers'; l.name=l.name||l.ref_sku; } else { const h=im[l.ref_sku]; if(h){ l.cat=l.cat||h.c; l.name=l.name||h.n; } else l.cat=l.cat||'Uncategorized'; } });
+      countLines.forEach(l=>{ if(String(l.ref_sku).startsWith('STK-')){ l.cat='Stickers'; l.name=l.name||l.ref_sku; } else { const h=im[l.ref_sku]; if(h){ l.cat=l.cat||h.c; l.name=l.name||h.n; } else l.cat=l.cat||'Uncategorized'; } const u=countUnitFor(l.cat); l.uom=u.uom; l.scale=u.scale; });
     }catch(e){} }
   else { countRec={count_ref:'WR-SC-'+String(Date.now()).slice(-5),location_code:'bulacan',count_date:new Date().toISOString().slice(0,10),status:'draft',scope:['All']}; countLines=[]; }
   drawCountForm();
@@ -2585,8 +2604,11 @@ function drawCountForm(){
   // group by category, sort by name within group (easier physical counting)
   const _byCat={}; countLines.forEach((l,i)=>{ const c=l.cat||'Uncategorized'; (_byCat[c]=_byCat[c]||[]).push(i); });
   Object.values(_byCat).forEach(arr=>arr.sort((a,b)=>String(countLines[a].name||countLines[a].ref_sku).localeCompare(String(countLines[b].name||countLines[b].ref_sku))));
-  const rowFor=(i)=>{ const l=countLines[i]; const varc=(l.counted_qty!==''&&l.counted_qty!=null)?((+l.counted_qty)-(+l.book_qty||0)):null;
-    return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td class="num">${l.book_qty!=null?num(l.book_qty):'—'}</td><td class="num"><input type="number" step="any" value="${l.counted_qty==null?'':l.counted_qty}" ${approved?'disabled':''} oninput="countLines[${i}].counted_qty=this.value;countVar(${i})"></td><td class="num" id="cv${i}" style="color:${varc&&Math.abs(varc)>0.001?'var(--danger)':'var(--muted)'}">${varc==null?'':num(Math.round(varc*100)/100)}</td></tr>`; };
+  const rowFor=(i)=>{ const l=countLines[i]; const s=+l.scale||1;
+    const bookD=l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):'—';
+    const cntD=(l.counted_qty==null||l.counted_qty==='')?'':(Math.round((+l.counted_qty/s)*1e6)/1e6);
+    const varc=(l.counted_qty!==''&&l.counted_qty!=null)?(((+l.counted_qty)-(+l.book_qty||0))/s):null;
+    return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td><td class="num" id="cv${i}" style="color:${varc&&Math.abs(varc)>0.001?'var(--danger)':'var(--muted)'}">${varc==null?'':num(Math.round(varc*100)/100)}</td></tr>`; };
   const lineRows=Object.keys(_byCat).sort().map(cat=>`<tr><td colspan="5" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">${esc(cat)} <span style="opacity:.6;font-weight:400">(${_byCat[cat].length})</span></td></tr>`+_byCat[cat].map(rowFor).join('')).join('');
   $('content').innerHTML=`<div class="formwrap"><div class="sheet">
     <div class="statusbar">${MODELS.count_sessions.status.stages.map(s=>`<div class="stg ${countRec.status===s?'on':''}">${s}</div>`).join('')}</div>
@@ -2604,6 +2626,7 @@ function drawCountForm(){
   <div class="formbar">
     ${!approved?`<button class="btn" onclick="countSave()">💾 Save draft</button>`:''}
     ${!approved?`<button class="wfbtn" onclick="countApprove()">✔ Approve &amp; post</button>`:'<span class="badge b-received">Approved — posted to stock</span>'}
+    ${!approved?`<button class="btn sec" onclick="countFillBook()">＝ Fill counted with book qty</button>`:''}
     <button class="btn sec" onclick="countPrintSheet()">🖨 Print count sheet</button>
     <button class="btn sec" onclick="state.view=\'list\';route()">Back</button>
     <span style="flex:1"></span><span style="color:var(--muted)">${isLive()?'Live':'Demo'}</span>
@@ -2616,7 +2639,7 @@ function countPrintSheet(){
   let body='';
   Object.keys(byCat).sort().forEach(cat=>{
     const arr=byCat[cat].slice().sort((a,b)=>String(a.name||a.ref_sku).localeCompare(String(b.name||b.ref_sku)));
-    body+=`<tr class="cat"><td colspan="4">${esc(cat)} (${arr.length})</td></tr>`+arr.map(l=>`<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td class="bk">${l.book_qty!=null?num(l.book_qty):''}</td><td class="ct"></td></tr>`).join('');
+    body+=`<tr class="cat"><td colspan="4">${esc(cat)} (${arr.length})</td></tr>`+arr.map(l=>{ const s=+l.scale||1; return `<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`; }).join('');
   });
   const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.cat td{background:#eef3ea;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:130px;border-bottom:1px solid #333}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Weekly Count Sheet</h1>
@@ -2625,8 +2648,16 @@ function countPrintSheet(){
     <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · write the physical count in the right column, then enter it in the app.</p></body></html>`;
   const w=window.open('','_pr','width=840,height=980'); if(!w){toast('Allow pop-ups to print',true);return;} w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
 }
-function countVar(i){ const l=countLines[i]; const el=$('cv'+i); if(!el)return; const v=(l.counted_qty!==''&&l.counted_qty!=null)?((+l.counted_qty)-(+l.book_qty||0)):null; el.textContent=v==null?'':num(Math.round(v*100)/100); el.style.color=v&&Math.abs(v)>0.001?'var(--danger)':'var(--muted)'; }
+// Counted input is in the line's display unit — store back in the canonical (grams) value.
+function countSetCnt(i,v){ const s=+countLines[i].scale||1; countLines[i].counted_qty=(v===''||v==null)?'':(s!==1?(+v*s):+v); countVar(i); }
+function countVar(i){ const l=countLines[i]; const el=$('cv'+i); if(!el)return; const s=+l.scale||1; const v=(l.counted_qty!==''&&l.counted_qty!=null)?(((+l.counted_qty)-(+l.book_qty||0))/s):null; el.textContent=v==null?'':num(Math.round(v*100)/100); el.style.color=v&&Math.abs(v)>0.001?'var(--danger)':'var(--muted)'; }
+// Prefill every counted cell with the theoretical (book) qty — a starting point the counter adjusts.
+function countFillBook(){ if(countRec.status==='approved')return; if(!countLines.length){ toast('Load items first',true); return; }
+  countLines.forEach(l=>{ l.counted_qty=+l.book_qty||0; }); drawCountForm(); toast('Counted prefilled with book qty — adjust where the physical count differs'); }
 function countScope(s,on){ let sc=countRec.scope||[]; if(s==='All'){ sc=on?['All']:[]; } else { sc=sc.filter(x=>x!=='All'); if(on)sc.push(s); else sc=sc.filter(x=>x!==s); } countRec.scope=sc; drawCountForm(); }
+// Unit of measure + display scale per count category. Ingredients are stored in
+// grams but weighed in kg (scale 1000); products in packs, stickers/supplies in pcs.
+function countUnitFor(cat){ if(cat==='Sellable Products') return {uom:'packs',scale:1}; if(cat==='Stickers') return {uom:'pcs',scale:1}; if(cat==='Supplies') return {uom:'pcs',scale:1}; return {uom:'kg',scale:1000}; }
 async function countLoad(){
   const sc=countRec.scope||['All'], all=sc.includes('All');
   const ings=await db.list('ingredients',{}), prods=await db.list('products',{});
@@ -2635,11 +2666,11 @@ async function countLoad(){
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
   let lines=[];
   ings.forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
-    if((wantIng&&!isSup)||(wantSup&&isSup)) lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:isSup?'Supplies':(i.category||'Ingredients')}); });
-  if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:'Sellable Products'}));
+    if((wantIng&&!isSup)||(wantSup&&isSup)){ const cat=isSup?'Supplies':(i.category||'Ingredients'); const u=countUnitFor(cat); lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat,uom:u.uom,scale:u.scale}); } });
+  if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:'Sellable Products',uom:'packs',scale:1}));
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
   if(wantStk) prods.forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
-    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:'Stickers'}); });
+    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:'Stickers',uom:'pcs',scale:1}); });
   countLines=lines;
   toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')); drawCountForm();
 }
