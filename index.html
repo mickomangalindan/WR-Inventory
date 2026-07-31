@@ -372,13 +372,14 @@ const MODELS = {
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ingredient_category',l:'Category',t:'text'},{n:'usable_g',l:'Grams/pack',t:'number'},{n:'pct_of_pack',l:'% of pack',t:'number'},{n:'has_bones',l:'Bones',t:'text'},{n:'method_override',l:'Method',t:'text'}] } },
 
   purchase_orders:{ label:'Purchase Orders', icon:'🧾', name:'po_ref', pk:'po_ref',
-    status:{f:'status',stages:['open','confirmed','received','invoiced','closed','cancelled']}, cancelable:true,
+    status:{f:'status',stages:['open','rfq','quoted','confirmed','received','cancelled']}, cancelable:true,
     fields:[
       {n:'po_ref',l:'PO Reference',t:'text'},{n:'supplier_name',l:'Vendor',t:'rel',rel:'suppliers'},
-      {n:'order_date',l:'Order date',t:'date'},{n:'status',l:'Status',t:'select',o:['open','confirmed','received','invoiced','closed','cancelled']},
+      {n:'order_date',l:'Order date',t:'date'},{n:'status',l:'Status',t:'select',o:['open','rfq','quoted','confirmed','received','cancelled']},
       {n:'created_by',l:'Created by',t:'text'},
-      {n:'discount',l:'Discount ₱',t:'currency'},{n:'delivery_fee',l:'Delivery fee ₱',t:'currency'}],
-    list:['po_ref','supplier_name','order_date','status'],
+      {n:'discount',l:'Discount ₱',t:'currency'},{n:'delivery_fee',l:'Delivery fee ₱',t:'currency'},
+      {n:'payment_status',l:'Payment',t:'text',ro:true}],
+    list:['po_ref','supplier_name','order_date','status','payment_status'],
     groups:[['po_ref','order_date'],['created_by','discount','delivery_fee']], full:['supplier_name'],
     o2m:{ field:'lines', model:'po_lines', fk:'po_ref', label:'Order Lines',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Ordered (kg)',t:'number'},{n:'available_kg',l:'Vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
@@ -460,7 +461,7 @@ let SUPA = JSON.parse(localStorage.getItem('wr_supa')||'null');
 if((!SUPA || !SUPA.url) && HAS_DEFAULT) SUPA = { url:SUPA_DEFAULT.url, key:SUPA_DEFAULT.key };
 function needAuth(){ return REQUIRE_AUTH && isLive() && !(SUPA && SUPA.token); }
 let DEMO = window.__DEMO__ || {suppliers:[],ingredients:[],products:[],bom_lines:[],purchase_orders:[],po_lines:[],inventory_movements:[],stock_balance:[]};
-['suppliers','ingredients','products','bom_lines','purchase_orders','po_lines','inventory_movements','stock_balance'].forEach(k=>DEMO[k]=DEMO[k]||[]);
+['suppliers','ingredients','products','bom_lines','purchase_orders','po_lines','po_payments','inventory_movements','stock_balance'].forEach(k=>DEMO[k]=DEMO[k]||[]);
 const isLive = ()=> !!(SUPA && SUPA.url && SUPA.key);
 
 async function sb(path, opts={}){
@@ -723,6 +724,7 @@ async function renderForm(){
   setCrumb(formIsNew?'New':(r[m.name]||r[m.pk]||'New'));
   formNotes = formIsNew ? [] : await notesForRecord(state.model, formRec[m.pk]);
   formAtts  = formIsNew ? [] : await attsForRecord(state.model, formRec[m.pk]);
+  window._poPay = (state.model==='purchase_orders' && !formIsNew) ? await poPayments(formRec[m.pk]) : [];
   const statusbar = m.status? `<div class="statusbar">${m.status.stages.map(s=>`<div class="stg ${r[m.status.f]===s?'on':''}">${s}</div>`).join('')}</div>`:'';
   const faMode=(f)=> fieldMode(state.model, f.n);
   const fieldInput=(f)=>{
@@ -784,6 +786,7 @@ async function renderForm(){
     <div class="hd"><input class="ttl" placeholder="${titleField.l}" value="${esc(r[titleField.n]||'')}" oninput="fSet('${titleField.n}',this.value)" ${m.readonly?'disabled':''}>
       <div class="sub">${esc(m.label)} ${formIsNew?'· new record':''}${stateBadge}</div></div>
     ${fieldsArea}
+    ${(state.model==='purchase_orders'&&!formIsNew)?poPaymentsPanel(formRec,formChildren):''}
     ${!formIsNew?`<div style="padding:4px 22px 14px">${attachHtml()}</div>`:''}</div>`;
   const left=sheet+formbar;
   $('content').innerHTML=`<div class="formwrap">${ !formIsNew ? `<div class="formcols"><div>${left}</div><div class="sidecol">${notesPanelHtml()}${chatterHtml()}</div></div>` : left }</div>`;
@@ -1303,6 +1306,24 @@ function ingName(sku){ const o=(relCache['ingredients']||[]).find(x=>x.v===sku);
 function sendPODraft(){
   const m=MODELS['purchase_orders']; const r=formRec; const lines=formChildren||[];
   const vendor=r.supplier_name||'Supplier'; const ref=r[m.pk]||'';
+  // RFQ mode — reuse the PO sheet layout but ask the vendor to quote availability + price.
+  if(r.status==='rfq'){
+    const qrows=lines.map(l=>`  • ${ingName(l.ingredient_sku)} — requesting ${(+l.ordered_kg||0)} kg`).join('\n');
+    const rdraft=`Hi ${vendor},\n\nWe'd like to request a quotation for the items below.\n\n`+
+      `RFQ Reference: ${ref}\nDate: ${r.order_date||''}\n\n`+
+      `Items (please confirm the quantity you can supply and your unit price):\n${qrows||'  (no lines)'}\n\n`+
+      `Kindly reply with the available quantity and ₱/kg for each item, plus your earliest delivery date.\n\nThank you,\nWholesome Rabbit — Purchasing`;
+    const rsubj='Request for Quotation '+ref+' — Wholesome Rabbit';
+    window._poDraftText=rdraft;
+    $('modal').innerHTML=`<h3>✉ Send Request for Quotation — ${esc(ref)}</h3>
+      <p class="mini">Copy this and send it to your supplier. When they reply, use <b>📝 Enter quotation</b> to record their available qty and unit price.</p>
+      <textarea id="poDraft" style="width:100%;height:280px;font-family:inherit;font-size:13px;padding:10px;border:1px solid var(--line);border-radius:6px">${esc(rdraft)}</textarea>
+      <div style="display:flex;gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
+        <button class="btn" onclick="copyPODraft()">📋 Copy draft</button>
+        <a class="btn sec" href="mailto:?subject=${encodeURIComponent(rsubj)}&body=${encodeURIComponent(rdraft)}">Open in email app</a>
+        <span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
+    $('overlay').classList.add('on'); return;
+  }
   let total=0;
   const rows=lines.map(l=>{ const qty=+l.ordered_kg||0, price=+l.price_kg||0, amt=qty*price; total+=amt;
     return `  • ${ingName(l.ingredient_sku)} — ${qty} kg @ ₱${price.toLocaleString('en-PH',{minimumFractionDigits:2})} = ₱${amt.toLocaleString('en-PH',{minimumFractionDigits:2})}`; }).join('\n');
@@ -1766,10 +1787,12 @@ function applyStudio(){ Object.keys(STUDIO).forEach(mk=>{ const m=MODELS[mk]; if
 
 /* ============ Odoo-style extras (adapted from Odoo 18 & 19) ============ */
 const FLOW = { purchase_orders:{ buttons:[
-  {when:'open',label:'✅ Confirm order',fn:'openPOConfirm()'},
+  {when:'open',label:'📤 Send RFQ',fn:'sendRFQ()'},
+  {when:'rfq',label:'📝 Enter quotation',fn:'openPOQuote()'},
+  {when:'quoted',label:'🧾 Issue PO',fn:'openPOConfirm()'},
   {when:'confirmed',label:'📦 Receive order',fn:'openPOReceive()'},
-  {when:'received',label:'Register Invoice',to:'invoiced'},
-  {when:'invoiced',label:'Close',to:'closed'} ]},
+  {when:'confirmed',label:'💵 Register payment',fn:'openPayment()'},
+  {when:'received',label:'💵 Register payment',fn:'openPayment()'} ]},
   variance_log:{ buttons:[
   {when:'open',label:'Mark Explained',to:'explained'},
   {when:'explained',label:'Resolve',to:'resolved'} ]},
@@ -1783,11 +1806,14 @@ function smartTiles(model, rec, children){
     const disc=+rec.discount||0, fee=+rec.delivery_fee||0;
     const billable=(anyRecv?recvTot:ordTot) - disc + fee;    // invoice follows RECEIVED qty once receiving starts
     const P=n=>'₱'+Math.round(n).toLocaleString('en-PH');
+    const paid=(window._poPay||[]).reduce((s,p)=>s+(+p.amount||0),0);
+    const bal=billable-paid;
     const tiles=[{v:children.length,l:'Lines'},{v:P(ordTot),l:'Ordered'}];
     if(anyRecv) tiles.push({v:P(recvTot),l:'Received'});
     if(disc) tiles.push({v:'−'+P(disc),l:'Discount'});
     if(fee)  tiles.push({v:'+'+P(fee),l:'Delivery'});
-    tiles.push({v:P(billable),l:anyRecv?'Invoice (billable)':'Est. total'});
+    tiles.push({v:P(billable),l:anyRecv?'Billable (received)':'Est. total'});
+    if(paid>0){ tiles.push({v:P(paid),l:'Paid'}); tiles.push({v:P(bal),l:bal>0.5?'Balance':'✓ Settled'}); }
     return tiles; }
   if(model==='products') return [{v:children.length,l:'Recipe items'},{v:(rec.pack_g||0)+'g',l:'Pack'}];
   if(model==='ingredients') return [{v:'₱'+(rec.list_price_kg||0),l:'₱/kg'},{v:(rec.default_method||'—'),l:'Method'}];
@@ -1850,43 +1876,90 @@ async function postTransfer(t){ try{
  }catch(e){ toast('Transfer posting failed: '+e.message,true); } }
 
 /* ---- Guided PO confirmation: review qty, confirm price, log adjustments ---- */
+// STEP 1 — send a Request for Quotation to the vendor (open → rfq).
+async function sendRFQ(){
+  if(formIsNew){ toast('Save the PO first',true); return; }
+  const lines=formChildren||[];
+  if(!lines.length){ toast('Add & save order lines first',true); return; }
+  try{
+    formRec.status='rfq';
+    await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'rfq'});
+    sysLog('purchase_orders',formRec.po_ref,'📤 RFQ sent to '+(formRec.supplier_name||'vendor')+' — requesting availability + pricing, by '+CURRENT_USER);
+    renderForm();
+    sendPODraft();   // status is now 'rfq' → renders the RFQ draft
+    toast('RFQ ready — copy & send it to the vendor to request availability + pricing');
+  }catch(e){ toast(e.message,true); }
+}
+// STEP 2 — record the vendor's quotation: available qty + unit price per line (rfq → quoted).
+function openPOQuote(){
+  if(formIsNew){ toast('Save the PO first',true); return; }
+  const lines=formChildren||[];
+  if(!lines.length){ toast('No lines to quote',true); return; }
+  $('modal').innerHTML=`<div><h3>Enter vendor quotation — ${esc(formRec.po_ref)}</h3>
+    <p class="mini">Key in what the vendor said they can <b>supply</b> and the <b>unit price</b> they quoted, per item. Your requested qty is shown for reference. This does <b>not</b> send the order — you'll issue the final PO next, based on availability.</p>
+    <div style="max-height:360px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Requested kg</th><th class="num">Vendor available kg</th><th class="num">Unit price ₱/kg</th></tr></thead><tbody>
+    ${lines.map((l,i)=>{ const req=+l.ordered_kg||0; const avail=(l.available_kg==null||l.available_kg==='')?req:(+l.available_kg||0);
+      return `<tr><td>${esc(ingName(l.ingredient_sku))}</td>
+      <td class="num" style="color:var(--muted)">${req}</td>
+      <td><input id="pq_a${i}" type="number" step="any" value="${avail}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td><input id="pq_p${i}" type="number" step="any" value="${+l.price_kg||0}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }).join('')}
+    </tbody></table></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="poQuoteApply()">💾 Save quotation</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+async function poQuoteApply(){
+  const lines=formChildren||[]; const notes=[];
+  const updated=lines.map((l,i)=>{ const na=+($('pq_a'+i).value)||0, np=+($('pq_p'+i).value)||0; const req=+l.ordered_kg||0;
+    if(na<req-0.0001) notes.push(ingName(l.ingredient_sku)+' avail '+na+' of '+req+'kg');
+    return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:na, price_kg:np, received_kg:l.received_kg||0}; });
+  try{
+    await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
+    formChildren=updated; formRec.status='quoted';
+    await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'quoted'});
+    sysLog('purchase_orders',formRec.po_ref,'📝 Vendor quotation recorded'+(notes.length?(' — short: '+notes.join('; ')):' — full availability')+' by '+CURRENT_USER);
+    closeModal(); toast('Quotation saved — review, then Issue PO (qty defaults to what the vendor can supply)'); renderForm();
+  }catch(e){ toast(e.message,true); }
+}
+// STEP 3 — issue the final PO, with order qty based on the quoted availability (quoted → confirmed).
 function openPOConfirm(){
   if(formIsNew){ toast('Save the PO first',true); return; }
   const lines=formChildren||[];
-  if(!lines.length){ toast('Add & save order lines first, then confirm',true); return; }
-  $('modal').innerHTML=`<div><h3>Confirm order — ${esc(formRec.po_ref)}</h3>
-    <p class="mini">Verify <b>ordered vs. what the vendor actually has available</b>, and confirm the price. Vendor available is pre-filled with the ordered qty — adjust any line the supplier can't fully supply. Lines short of the order are flagged. Every change is logged.</p>
-    <div style="max-height:360px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Ordered kg</th><th class="num">Vendor avail kg</th><th class="num">Price ₱/kg</th><th></th></tr></thead><tbody>
-    ${lines.map((l,i)=>{ const ord=+l.ordered_kg||0; const avail=(l.available_kg==null||l.available_kg==='')?ord:(+l.available_kg||0);
+  if(!lines.length){ toast('Add & save order lines first',true); return; }
+  window._poAvail=lines.map(l=>{ const req=+l.ordered_kg||0; return (l.available_kg==null||l.available_kg==='')?req:(+l.available_kg||0); });
+  $('modal').innerHTML=`<div><h3>Issue purchase order — ${esc(formRec.po_ref)}</h3>
+    <p class="mini">Order qty is set from what the vendor said they can <b>supply</b> (capped at what you requested) — trim any line if you want less. Issuing sends the final PO and generates its PDF. Every change is logged.</p>
+    <div style="max-height:360px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Requested kg</th><th class="num">Vendor avail kg</th><th class="num">Order qty kg</th><th class="num">₱/kg</th><th></th></tr></thead><tbody>
+    ${lines.map((l,i)=>{ const req=+l.ordered_kg||0; const avail=window._poAvail[i]; const fin=Math.min(req,avail);
       return `<tr><td>${esc(ingName(l.ingredient_sku))}</td>
-      <td><input id="pc_q${i}" type="number" step="any" value="${ord}" oninput="poConfirmFlag(${i})" style="width:92px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
-      <td><input id="pc_a${i}" type="number" step="any" value="${avail}" oninput="poConfirmFlag(${i})" style="width:92px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
-      <td><input id="pc_p${i}" type="number" step="any" value="${+l.price_kg||0}" style="width:92px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td class="num" style="color:var(--muted)">${req}</td>
+      <td class="num" style="color:var(--muted)">${avail}</td>
+      <td><input id="pc_q${i}" type="number" step="any" value="${fin}" oninput="poConfirmFlag(${i})" style="width:90px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td><input id="pc_p${i}" type="number" step="any" value="${+l.price_kg||0}" style="width:86px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
       <td id="pc_flag${i}" style="font-size:12px;white-space:nowrap"></td></tr>`; }).join('')}
     </tbody></table></div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="poConfirmApply()">✅ Confirm order</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="poConfirmApply()">🧾 Issue PO</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   $('overlay').classList.add('on');
   lines.forEach((l,i)=>poConfirmFlag(i));
 }
-// Live ordered-vs-available check per line.
-function poConfirmFlag(i){ const q=+($('pc_q'+i)||{}).value||0, a=+($('pc_a'+i)||{}).value||0; const e=$('pc_flag'+i); if(!e)return;
-  if(a<q-0.0001){ e.innerHTML='<span style="color:var(--danger)">⚠ short '+(Math.round((q-a)*100)/100)+' kg</span>'; }
-  else if(a>q+0.0001){ e.innerHTML='<span style="color:var(--muted)">+'+(Math.round((a-q)*100)/100)+' kg spare</span>'; }
-  else { e.innerHTML='<span style="color:#4e7a3e">✓ full</span>'; } }
+// Live order-qty-vs-available check per line.
+function poConfirmFlag(i){ const q=+($('pc_q'+i)||{}).value||0; const a=(window._poAvail&&window._poAvail[i])||0; const e=$('pc_flag'+i); if(!e)return;
+  if(q>a+0.0001){ e.innerHTML='<span style="color:var(--danger)">⚠ over avail by '+(Math.round((q-a)*100)/100)+' kg</span>'; }
+  else if(q<a-0.0001){ e.innerHTML='<span style="color:var(--muted)">'+(Math.round((a-q)*100)/100)+' kg below avail</span>'; }
+  else { e.innerHTML='<span style="color:#4e7a3e">✓ full avail</span>'; } }
 async function poConfirmApply(){
-  const lines=formChildren||[]; const changes=[]; const shorts=[];
-  const updated=lines.map((l,i)=>{ const nq=+($('pc_q'+i).value)||0, na=+($('pc_a'+i).value)||0, np=+($('pc_p'+i).value)||0; const oq=+l.ordered_kg||0, op=+l.price_kg||0;
-    if(Math.abs(nq-oq)>0.0001) changes.push(ingName(l.ingredient_sku)+': qty '+oq+'→'+nq+'kg'); if(Math.abs(np-op)>0.0001) changes.push(ingName(l.ingredient_sku)+': ₱'+op+'→₱'+np);
-    if(na<nq-0.0001) shorts.push(ingName(l.ingredient_sku)+' (avail '+na+' of '+nq+'kg)');
-    return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:nq, available_kg:na, price_kg:np, received_kg:l.received_kg||0}; });
-  if(shorts.length) changes.push('⚠ vendor short on: '+shorts.join('; '));
+  const lines=formChildren||[]; const changes=[]; const overs=[];
+  const updated=lines.map((l,i)=>{ const nq=+($('pc_q'+i).value)||0, np=+($('pc_p'+i).value)||0; const req=+l.ordered_kg||0, av=(window._poAvail&&window._poAvail[i])||0, op=+l.price_kg||0;
+    if(Math.abs(nq-req)>0.0001) changes.push(ingName(l.ingredient_sku)+': req '+req+' → order '+nq+'kg'); if(Math.abs(np-op)>0.0001) changes.push(ingName(l.ingredient_sku)+': ₱'+op+'→₱'+np);
+    if(nq>av+0.0001) overs.push(ingName(l.ingredient_sku)+' (order '+nq+' > avail '+av+'kg)');
+    return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:nq, available_kg:av, price_kg:np, received_kg:l.received_kg||0}; });
+  if(overs.length) changes.push('⚠ order exceeds availability: '+overs.join('; '));
   try{
     await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
     formChildren=updated; formRec.status='confirmed';
     await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'confirmed'});
-    sysLog('purchase_orders',formRec.po_ref, (changes.length?('✅ Confirmed with adjustments — '+changes.join('; ')):'✅ Confirmed — qty & prices verified, no changes')+' by '+CURRENT_USER);
-    notifyRecordDone('purchase_orders', formRec.po_ref);   // confirmed → generate PDF → Drive → notify
-    closeModal(); toast('Order confirmed — preparing the Send PO draft with the PDF link…'+(changes.length?' · '+changes.length+' change(s) logged':''));
+    sysLog('purchase_orders',formRec.po_ref, (changes.length?('🧾 PO issued with adjustments — '+changes.join('; ')):'🧾 PO issued from quotation — qty = vendor availability')+' by '+CURRENT_USER);
+    notifyRecordDone('purchase_orders', formRec.po_ref);   // issued → generate PDF → Drive → notify
+    closeModal(); toast('PO issued — preparing the Send PO draft with the PDF link…'+(changes.length?' · '+changes.length+' change(s) logged':''));
     renderForm();
     // give n8n a few seconds to build the PDF + write the drive_url back, then open the Send PO draft with the link
     setTimeout(async()=>{ if(state.model==='purchase_orders'&&state.view==='form'&&formRec.po_ref===updated[0].po_ref){ await reloadFormRec(); if(state.model==='purchase_orders'&&state.view==='form') sendPODraft(); } }, 9000);
@@ -1896,31 +1969,102 @@ async function poConfirmApply(){
 async function reloadFormRec(){ const m=MODELS[state.model]; if(!m||formIsNew) return;
   try{ const rows=await db.list(state.model,{}); const fresh=rows.find(r=>String(r[m.pk])===String(formRec[m.pk])); if(fresh) formRec={...formRec,...fresh}; }catch(e){} }
 
+/* ============ PO payments (partial / full) ============ */
+const PO_PAY_METHODS=['Bank transfer','GCash','Cash'];
+async function poPayments(ref){ if(!ref) return [];
+  if(isLive()){ try{ return await sb('po_payments?po_ref=eq.'+encodeURIComponent(ref)+'&order=paid_at.asc,id.asc'); }catch(e){ return []; } }
+  return (DEMO.po_payments||[]).filter(p=>p.po_ref===ref); }
+// Billable = received qty × price (falls back to ordered until anything is received) − discount + delivery fee.
+function poBillable(rec, lines){ lines=lines||[];
+  const ordTot=lines.reduce((s,l)=>s+(+l.ordered_kg||0)*(+l.price_kg||0),0);
+  const recvTot=lines.reduce((s,l)=>s+(+l.received_kg||0)*(+l.price_kg||0),0);
+  const anyRecv=lines.some(l=>+l.received_kg>0);
+  const disc=+rec.discount||0, fee=+rec.delivery_fee||0;
+  return Math.max(0,(anyRecv?recvTot:ordTot) - disc + fee); }
+function poPaymentsPanel(rec, lines){
+  const pays=window._poPay||[];
+  const billable=poBillable(rec,lines); const paid=pays.reduce((s,p)=>s+(+p.amount||0),0); const bal=billable-paid;
+  const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
+  const st = paid<=0.005 ? {t:'unpaid',c:'var(--danger)'} : (bal>0.5 ? {t:'partial',c:'var(--earth,#b5762a)'} : {t:'paid',c:'#4e7a3e'});
+  const canPay = ['confirmed','received'].includes(rec.status);
+  const rows = pays.length ? pays.map(p=>`<tr><td>${esc(p.paid_at||'')}</td><td>${esc(p.method||'—')}</td><td class="num">${P(+p.amount||0)}</td><td>${esc(p.paid_by||'')}</td><td class="mini">${esc(p.note||'')}</td></tr>`).join('')
+    : `<tr><td colspan="5" class="empty" style="padding:8px">No payments yet.</td></tr>`;
+  return `<div style="padding:6px 22px 14px"><div class="repcard" style="margin:0">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <h3 style="margin:0">💵 Payments</h3>
+      <span class="badge" style="background:rgba(0,0,0,.05);color:${st.c};font-weight:700">${st.t.toUpperCase()}</span>
+      <span style="flex:1"></span>
+      <span class="mini">Billable <b>${P(billable)}</b> · Paid <b>${P(paid)}</b> · Balance <b style="color:${bal>0.5?'var(--danger)':'#4e7a3e'}">${P(bal)}</b></span>
+      ${canPay?`<button class="btn sm" onclick="openPayment()">➕ Register payment</button>`:''}
+    </div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Method</th><th class="num">Amount</th><th>By</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>
+  </div></div>`;
+}
+function openPayment(){
+  if(formIsNew){ toast('Save the PO first',true); return; }
+  const lines=formChildren||[]; const billable=poBillable(formRec,lines);
+  const paid=(window._poPay||[]).reduce((s,p)=>s+(+p.amount||0),0); const bal=Math.max(0,billable-paid);
+  const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
+  const today=new Date().toISOString().slice(0,10);
+  $('modal').innerHTML=`<div><h3>Register payment — ${esc(formRec.po_ref)}</h3>
+    <p class="mini">Billable <b>${P(billable)}</b> · already paid <b>${P(paid)}</b> · <b>balance ${P(bal)}</b>. Record a partial or full payment.</p>
+    <div class="fld"><label>Amount ₱</label><div class="val"><input id="pay_amt" type="number" step="any" value="${Math.round(bal*100)/100}" style="width:160px"></div></div>
+    <div class="fld"><label>Method</label><div class="val"><select id="pay_method" style="width:180px">${PO_PAY_METHODS.map(x=>`<option>${x}</option>`).join('')}</select></div></div>
+    <div class="fld"><label>Date</label><div class="val"><input id="pay_date" type="date" value="${today}" style="width:180px"></div></div>
+    <div class="fld"><label>Note</label><div class="val"><input id="pay_note" placeholder="reference / remarks (optional)" style="width:100%"></div></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="paymentApply()">💾 Save payment</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+async function paymentApply(){
+  const amt=+($('pay_amt')||{}).value||0; if(!(amt>0)){ toast('Enter a payment amount',true); return; }
+  const method=($('pay_method')||{}).value||''; const paid_at=($('pay_date')||{}).value||new Date().toISOString().slice(0,10); const note=($('pay_note')||{}).value||'';
+  try{
+    await db.create('po_payments',{po_ref:formRec.po_ref, amount:Math.round(amt*100)/100, method, paid_at, note, paid_by:CURRENT_USER});
+    window._poPay = await poPayments(formRec.po_ref);
+    const billable=poBillable(formRec,formChildren); const paid=(window._poPay||[]).reduce((s,p)=>s+(+p.amount||0),0);
+    const ps = paid<=0.005?'unpaid':((billable-paid)>0.5?'partial':'paid');
+    formRec.payment_status=ps;
+    await db.update('purchase_orders','po_ref',formRec.po_ref,{payment_status:ps});
+    sysLog('purchase_orders',formRec.po_ref,'💵 Payment ₱'+(Math.round(amt*100)/100).toLocaleString('en-PH')+' ('+method+') by '+CURRENT_USER+' — now '+ps+' (paid ₱'+Math.round(paid).toLocaleString('en-PH')+' of ₱'+Math.round(billable).toLocaleString('en-PH')+')');
+    closeModal(); toast('Payment recorded — '+ps); renderForm();
+  }catch(e){ toast(e.message,true); }
+}
+
 /* ---- Guided PO receiving: capture the actual received qty per line (#2) ---- */
 async function openPOReceive(){
   if(formIsNew){ toast('Save the PO first',true); return; }
   let lines=formChildren||[];
   if(!lines.length){ try{ lines=await db.children(MODELS.purchase_orders.o2m, formRec.po_ref); formChildren=lines; }catch(e){} }
   if(!lines.length){ toast('No order lines to receive',true); return; }
+  window._poOrd=lines.map(l=>+l.ordered_kg||0);
   $('modal').innerHTML=`<h3>Receive order — ${esc(formRec.po_ref)}</h3>
-    <p>Enter the <b>quantity actually received</b> for each line. Ordered qty is shown for reference and can't be changed here. Only what you enter is posted to Bulacan stock.</p>
-    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Ordered kg</th><th class="num">Received kg</th></tr></thead><tbody>
+    <p>Enter the <b>quantity actually received</b> for each line. Only what you enter is posted to Bulacan stock. If a delivery is <b>short</b>, the PO is received at what actually arrived and the shortfall is flagged and logged.</p>
+    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Ordered kg</th><th class="num">Received kg</th><th></th></tr></thead><tbody>
     ${lines.map((l,i)=>`<tr><td>${esc(ingName(l.ingredient_sku))}</td>
       <td class="num" style="color:var(--muted)">${(+l.ordered_kg||0)}</td>
-      <td><input id="rc_q${i}" type="number" step="any" value="${(+l.available_kg||+l.ordered_kg||0)}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td></tr>`).join('')}
+      <td><input id="rc_q${i}" type="number" step="any" value="${(+l.ordered_kg||+l.available_kg||0)}" oninput="rcFlag(${i})" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td id="rc_flag${i}" style="font-size:12px;white-space:nowrap"></td></tr>`).join('')}
     </tbody></table></div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="poReceiveApply()">📦 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
   $('overlay').classList.add('on');
+  lines.forEach((l,i)=>rcFlag(i));
 }
+// Live received-vs-ordered check per line (short deliveries close at what arrived).
+function rcFlag(i){ const r=+($('rc_q'+i)||{}).value||0; const o=(window._poOrd&&window._poOrd[i])||0; const e=$('rc_flag'+i); if(!e)return;
+  if(r<o-0.0001){ e.innerHTML='<span style="color:var(--danger)">⚠ short '+(Math.round((o-r)*100)/100)+' kg</span>'; }
+  else if(r>o+0.0001){ e.innerHTML='<span style="color:var(--muted)">+'+(Math.round((r-o)*100)/100)+' kg over</span>'; }
+  else { e.innerHTML='<span style="color:#4e7a3e">✓ full</span>'; } }
 async function poReceiveApply(){
   if(_postLock){ toast('Still posting — please wait…',true); return; } _postLock=true;
   try{ await _poReceiveApply(); } finally{ _postLock=false; }
 }
 async function _poReceiveApply(){
-  const lines=formChildren||[]; const notes=[];
+  const lines=formChildren||[]; const notes=[]; let shortG=0;
   const updated=lines.map((l,i)=>{ const rq=+(($('rc_q'+i)||{}).value)||0; const oq=+l.ordered_kg||0;
-    if(Math.abs(rq-oq)>0.0001) notes.push(l.ingredient_sku+': ordered '+oq+' → received '+rq+'kg');
+    if(rq<oq-0.0001){ notes.push(ingName(l.ingredient_sku)+': ordered '+oq+' → received '+rq+'kg (short '+(Math.round((oq-rq)*100)/100)+')'); shortG+=(oq-rq); }
+    else if(rq>oq+0.0001){ notes.push(ingName(l.ingredient_sku)+': ordered '+oq+' → received '+rq+'kg (over '+(Math.round((rq-oq)*100)/100)+')'); }
     return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:l.available_kg, price_kg:l.price_kg, received_kg:rq}; });
+  if(shortG>0.0001) notes.push('⚠ short delivery — '+(Math.round(shortG*100)/100)+' kg not delivered (raise a new PO to fulfil the balance)');
   try{
     await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
     formChildren=updated; formRec.status='received';
@@ -2037,7 +2181,7 @@ async function renderDashboard(){
   const thinMargin=withMargin.filter(x=>x.margin!=null&&x.cost>0).sort((a,b)=>a.margin-b.margin).slice(0,8);
   const openVars=vars.filter(v=>v.status==='open');
   const varVal=openVars.reduce((s,v)=>s+Math.abs(+v.gap_value||0),0);
-  const openPo=po.filter(p=>p.status==='open'||p.status==='confirmed').length;
+  const openPo=po.filter(p=>['open','rfq','quoted','confirmed'].includes(p.status)).length;
   // labels to reorder (per site, below par)
   const reorder=[]; prod.forEach(p=>{ [['bulacan','Bulacan'],['pasig','Pasig']].forEach(sc=>{ const oh=+p['sticker_'+sc[0]+'_on_hand']||0, par=+p['sticker_'+sc[0]+'_par']||0; if(par>0 && oh<par) reorder.push({name:p.name+(oh||par?'':''),cur:oh,par,order:par-oh,site:sc[1]}); }); });
   reorder.sort((a,b)=>b.order-a.order);
@@ -3003,7 +3147,7 @@ const KB = {
   ingredients:{d:'Master list of everything you buy or make into product: raw meats, organs, veg, fruit, seeds, supplies, plus live animals and internal intermediates.',h:['Open a row to edit price, category, storage, par, lead time','Set the processing method + yield so costing is accurate','Mark live-animal / intermediate items with their flags'],l:['₱/kg usable = raw price ÷ processing yield — the true cost in a pack','moving_avg_cost auto-updates from goods receipts (perpetual costing)','Intermediates (e.g. Rabbit Ground Meat) derive cost from their source × dress-out yield']},
   products:{d:'Sellable finished goods, grouped into families with size variants, each with its own SKU, price and recipe (BOM).',h:['Open a product to edit price, pack size, feeding style','Edit the Recipe (BOM) lines — usable grams per pack','Add variants as separate products under the same family'],l:['BOM grams are USABLE grams in the pack','Raw needed for production = usable ÷ ingredient yield','Cost/pack is computed from actual ingredients issued at production']},
   suppliers:{d:'Your vendors with contacts, payment terms and how they sell (loose / case / head).',h:['Add or edit a vendor','Record payment term + delivery notes','Link vendors to ingredients via the ingredient record'],l:['Conservative costing uses the most-expensive supplier price','Backup suppliers are shown for sourcing decisions']},
-  purchase_orders:{d:'Orders to vendors — the start of the 3-way match (ordered = received = billed).',h:['New → pick vendor → add ingredient lines → Save','Use the status buttons: Confirm/Receive → Register Invoice → Close','Log notes & schedule activities in the chatter'],l:['Status flow: open → received → invoiced → closed','Receiving compares received vs ordered; the invoice compares billed vs both','Every status change is auto-logged with who + when']},
+  purchase_orders:{d:'Orders to vendors — request a quote, issue the PO, receive the goods.',h:['New → pick vendor → add ingredient lines → Save','Send RFQ → Enter quotation (vendor avail + price) → Issue PO','Receive order (posts to stock)','Log notes & schedule activities in the chatter'],l:['Status flow: open → RFQ → quoted → confirmed → received','Send RFQ asks the vendor what they can supply; Enter quotation records their available qty + unit price','Issue PO sets the order qty from vendor availability (capped at what you requested) and sends the final PO','The billable amount = received qty × unit price − discount + delivery fee','Every status change is auto-logged with who + when']},
   production_batches:{d:'Records a production run: which product, ingredients issued, packs out, rejects and waste.',h:['New → pick product → enter ingredients issued + packs produced','Set the output lot & date','Save to post to finished stock'],l:['Check 2 (usage) = actual issued vs recipe expected','Check 3 (yield/mass-balance) = usable produced vs packed + waste','Cost/pack = ingredient cost + labour + packaging ÷ good packs']},
   transfers:{d:'Move finished packs from Bulacan to Pasig. Sent vs received is Check 4.',h:['New → click "Load Bulacan finished stock" to pull available products','Enter sent and received packs','Save — any shortfall is flagged'],l:['sent − received = loss in transit → a Check 4 variance','Posts a transfer_out at Bulacan and transfer_in at Pasig']},
   count_sessions:{d:'Weekly physical inventory with approval. Counted qty becomes the new book stock after approval.',h:['New → choose scope (All / Ingredients / Supplies / Stickers / Products)','Click "Load items" — book qty auto-fills (read-only)','Enter counted qty → Save draft → Approve & post'],l:['Book qty is computed from the ledger — you cannot edit it','On approval, counted−book posts as a count_adjust + a Check 3.5 shrinkage variance','Only approved counts change stock']},
