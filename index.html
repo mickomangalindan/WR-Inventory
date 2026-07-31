@@ -2488,6 +2488,7 @@ let prodPlanLines=[]; let prodRunRef='';
 let prodTargetMap={}, prodProducedMap={};
 async function renderProdPlan(){
   $('cp').innerHTML=`<div class="title">Production Plan <span onclick="openKB('production_batches')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <button class="btn sec" onclick="openProcessing()">🔪 Log processing</button>
     <button class="btn sec" onclick="prodSaveDraft()">💾 Save draft</button>
     <button class="wfbtn" onclick="prodConfirm()">✅ Confirm production</button>
     <div class="sp"></div><span style="color:var(--muted)">daily production · target from demand plot · remaining to make</span>`;
@@ -2551,45 +2552,139 @@ async function prodPersist(status){
 async function prodSaveDraft(){ const r=await prodPersist('draft'); if(r){ sysLog('production_batches',prodRunRef,'📝 Draft production plan saved ('+r.length+' batches) by '+CURRENT_USER); toast('Draft saved · '+prodRunRef); drawProdPlan(); } }
 async function prodConfirm(){
   if(_postLock){ toast('Still posting — please wait…',true); return; }
-  if(!confirm('Confirm this production run? Good packs post to finished stock at Bulacan.'))return;
-  _postLock=true; try{ await _prodConfirm(); } finally{ _postLock=false; }
+  await openProdActuals();   // capture actual raw + processed (real yield) then post in one step
 }
-// Raw grams each product's recipe consumes per pack: usable_g ÷ yield (raw needed > usable).
+// SHORTCUT: process + produce in one confirm, capturing ACTUAL raw used and ACTUAL processed made
+// per output so real yield is recorded. Auto-posts raw→processed (processing) then processed→mix.
+async function openProdActuals(){
+  if(!prodPlanLines.some(l=>(+l.good_packs||0)>0)){ toast('Enter good packs on at least one product first',true); return; }
+  const bm=await prodBOMMap(); const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+  const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
+  const agg={};
+  prodPlanLines.forEach(l=>{ const packs=+l.good_packs||0; if(packs<=0)return; (bm[l.product_sku]||[]).forEach(line=>{ const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{procUsed:0,rawTheo:0,costG:line.unit_cost_g}; a.procUsed+=line.processed_g*packs; a.rawTheo+=line.raw_g*packs; }); });
+  let oh={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.kind==='ingredient'&&s.location_code==='bulacan') oh[s.ref_sku]=(oh[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} }
+  window._prodAct=Object.keys(agg).map(sku=>{ const it=im[sku]||{}; const p=_procParent(it,bySku,byName);
+    return {sku, name:it.name||sku, parent:(p&&p.sku)||'', parentCostG:(+(p||{}).moving_avg_cost_kg||+(p||{}).list_price_kg||0)/1000, outCostG:agg[sku].costG||0,
+      procUsed:agg[sku].procUsed, rawTheo:agg[sku].rawTheo, rawOh:(p?(oh[p.sku]||0):0),
+      actualRawKg:Math.round(agg[sku].rawTheo/10)/100, actualMadeKg:Math.round(agg[sku].procUsed/10)/100 }; });
+  drawProdActuals();
+}
+function drawProdActuals(){
+  const a=window._prodAct||[];
+  const rows=a.map((x,i)=>{ const usedKg=Math.round(x.procUsed/10)/100; const yld=(+x.actualRawKg>0)?Math.round((+x.actualMadeKg/+x.actualRawKg)*1000)/10:0;
+    const leftover=Math.round(((+x.actualMadeKg||0)-usedKg)*100)/100;
+    return `<tr><td>${esc(x.name)}${x.parent?'':' <span class="mini" style="color:var(--danger)">no raw parent</span>'}</td>
+      <td class="num" style="color:var(--muted)">${usedKg}</td>
+      <td><input type="number" step="any" value="${x.actualRawKg}" oninput="window._prodAct[${i}].actualRawKg=this.value;drawProdActuals()" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+      <td><input type="number" step="any" value="${x.actualMadeKg}" oninput="window._prodAct[${i}].actualMadeKg=this.value;drawProdActuals()" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+      <td class="num"><b style="color:${yld>0&&yld<70?'var(--danger)':'#4e7a3e'}">${yld?yld+'%':'—'}</b></td>
+      <td class="num mini" style="color:var(--muted)">${leftover?(leftover>0?'+':'')+leftover:'0'}</td></tr>`; }).join('');
+  $('modal').innerHTML=`<div><h3>Confirm production — record actuals</h3>
+    <p class="mini">Enter the <b>actual raw used</b> and <b>actual processed made</b> per ingredient. The app processes raw→processed and runs the mix in one step; <b>actual yield = made ÷ raw</b>. Leftover processed (made − used) stays in the processed bin. Defaults are the recipe theory — adjust what differed.</p>
+    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Used (kg)</th><th class="num">Raw used</th><th class="num">Processed made</th><th class="num">Yield</th><th class="num">Left</th></tr></thead><tbody>
+    ${rows||'<tr><td colspan="6" class="empty">No recipe ingredients.</td></tr>'}
+    </tbody></table></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="prodActualsApply()">✅ Confirm &amp; post</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+async function prodActualsApply(){
+  if(_postLock){ toast('Still posting…',true); return; }
+  const acts=window._prodAct||[]; const actBy={}; acts.forEach(x=>actBy[x.sku]=x);
+  // guard: raw availability (aggregate per raw parent)
+  if(isLive()){ let oh={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.kind==='ingredient'&&s.location_code==='bulacan') oh[s.ref_sku]=(oh[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
+    const needRaw={}; acts.forEach(x=>{ if(x.parent) needRaw[x.parent]=(needRaw[x.parent]||0)+(+x.actualRawKg||0)*1000; });
+    const shortRaw=Object.keys(needRaw).filter(sku=>(needRaw[sku]-(oh[sku]||0))>0.5).map(sku=>'• '+ingName(sku)+' — need '+(Math.round(needRaw[sku]/10)/100)+' kg raw, have '+(Math.round((oh[sku]||0)/10)/100)+' kg');
+    if(shortRaw.length){ if(!confirm('⚠ Not enough RAW stock for:\n\n'+shortRaw.join('\n')+'\n\nProceed anyway (raw will go negative)?')) return; }
+  }
+  _postLock=true;
+  try{
+    const recs=await prodPersist('confirmed'); if(!recs){ _postLock=false; return; }
+    const cm=await prodCostMap(); const bm=await prodBOMMap();
+    const totProc={}; recs.forEach(r=>{ const packs=+r.good_packs||0; (bm[r.product_sku]||[]).forEach(line=>{ totProc[line.ingredient_sku]=(totProc[line.ingredient_sku]||0)+line.processed_g*packs; }); });
+    const procRef='Production '+prodRunRef;
+    // 1) processing per output (aggregate): consume raw (actual), produce processed (actual made)
+    for(const x of acts){ const rawG=Math.round((+x.actualRawKg||0)*1000*100)/100; const madeG=Math.round((+x.actualMadeKg||0)*1000*100)/100;
+      if(x.parent && rawG>0){ try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:x.parent,location_code:'bulacan',qty:-rawG,unit_cost:x.parentCostG,movement_type:'processing_out',note:procRef}); }catch(e){} }
+      if(madeG>0){ const y=(rawG>0?madeG/rawG:1); try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:x.sku,location_code:'bulacan',qty:madeG,unit_cost:(y>0?x.parentCostG/y:x.outCostG),movement_type:'processing_in',note:procRef}); }catch(e){} }
+    }
+    // 2) per batch: finished output + mix draw-down + batch issues (actuals allocated by share)
+    let posted=0,failed=0,drawn=0;
+    for(const r of recs){ const packs=+r.good_packs||0; if(packs<=0) continue;
+      if(await movementExists('Production '+r.batch_ref)) continue;
+      const cpp=Math.round((cm[r.product_sku]||0)*100)/100;
+      try{ await db.update('production_batches','batch_ref',r.batch_ref,{cost_per_pack:cpp}); }catch(e){}
+      try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:packs,unit_cost:cpp,movement_type:'batch_output',note:'Production '+r.batch_ref}); posted++; }catch(e){ failed++; }
+      for(const line of (bm[r.product_sku]||[])){ const procG=Math.round(line.processed_g*packs*100)/100; if(!(procG>0)) continue;
+        const x=actBy[line.ingredient_sku]||{}; const tot=totProc[line.ingredient_sku]||procG; const share=tot>0?(line.processed_g*packs)/tot:1;
+        const actRawB=Math.round((+x.actualRawKg||0)*1000*share*100)/100; const madeB=Math.round((+x.actualMadeKg||0)*1000*share*100)/100;
+        try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:line.ingredient_sku,location_code:'bulacan',qty:-procG,unit_cost:line.unit_cost_g,movement_type:'issue_to_batch',note:'Production '+r.batch_ref}); drawn++; }catch(e){ failed++; }
+        try{ await db.create('batch_issues',{batch_ref:r.batch_ref,ingredient_sku:line.ingredient_sku,expected_raw_g:Math.round(line.raw_g*packs*100)/100,actual_raw_g:actRawB,expected_processed_g:procG,actual_processed_g:(madeB||procG),uom:'kg'}); }catch(e){}
+      }
+    }
+    sysLog('production_batches',prodRunRef,'✅ Production confirmed with actuals ('+recs.length+' batches) — processed+produced by '+CURRENT_USER);
+    notifyRecordDone('production_batches', prodRunRef, {batch_ref:prodRunRef,status:'confirmed',operator:CURRENT_USER,production_date:prodPlanDate}, recs);
+    toast('Confirmed · '+posted+' product(s), '+drawn+' issue(s), yield captured'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0);
+    prodRunRef=''; prodPlanLines=[]; window._prodAct=null; closeModal(); drawProdPlan();
+  }catch(e){ toast(e.message,true); } finally{ _postLock=false; }
+}
+// Two-bin: production consumes the PROCESSED (output) bin — each recipe line uses its usable
+// grams of that output. The RAW was already depleted earlier, at the Processing step.
 async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=await listIngredients();
-  const bySku={}, byName={}; ings.forEach(it=>{ bySku[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm) byName[nm]=it; });
-  // A recipe line names the PROCESSED output; we buy & stock the RAW. Roll each output up to the
-  // raw purchasable it is made from (source_sku, else raw_input name) so the draw-down hits real
-  // raw stock — not the never-stocked intermediate (which is what caused negative on-hand).
-  const rootOf=(sku)=>{ const it=bySku[sku]; if(!it) return {sku,it:{}}; if(!it.is_intermediate) return {sku,it};
-    const bySrc=it.source_sku&&bySku[it.source_sku]?bySku[it.source_sku]:null;
-    const ri=(it.raw_input||'').trim().toLowerCase(); const byRi=(ri&&byName[ri]&&byName[ri].sku!==it.sku)?byName[ri]:null;
-    const parent=bySrc||byRi; return parent?{sku:parent.sku,it:parent}:{sku,it}; };
-  const agg={};   // product -> { rootSku -> {ingredient_sku, raw_g, processed_g, unit_cost_g} }
-  boms.forEach(b=>{ const it=bySku[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100||1;
-    const rawG=(+b.usable_g||0)/y, procG=(+b.usable_g||0); const r=rootOf(b.ingredient_sku); const rt=r.it||{};
-    const pm=agg[b.product_sku]=agg[b.product_sku]||{};
-    const cur=pm[r.sku]=pm[r.sku]||{ingredient_sku:r.sku, raw_g:0, processed_g:0, unit_cost_g:(+rt.moving_avg_cost_kg||+rt.list_price_kg||0)/1000};
-    cur.raw_g+=rawG; cur.processed_g+=procG; });
-  const m={}; Object.keys(agg).forEach(p=>{ m[p]=Object.values(agg[p]); }); return m; }
-async function _prodConfirm(){
-  const recs=await prodPersist('confirmed'); if(!recs)return;
-  const cm=await prodCostMap(); const bm=await prodBOMMap(); let posted=0, failed=0, drawn=0;
-  for(const r of recs){ if((+r.good_packs||0)>0){ const cpp=Math.round((cm[r.product_sku]||0)*100)/100;
-    if(await movementExists('Production '+r.batch_ref)) continue;   // already posted — skip (idempotent)
-    const packs=+r.good_packs||0;
-    try{ await db.update('production_batches','batch_ref',r.batch_ref,{cost_per_pack:cpp}); }catch(e){}
-    try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:packs,unit_cost:cpp,movement_type:'batch_output',note:'Production '+r.batch_ref}); posted++; }catch(e){ failed++; }
-    // RAW DRAW-DOWN: deplete each recipe ingredient and record expected issues (feeds Checks 2 & 3).
-    for(const line of (bm[r.product_sku]||[])){ const rawG=Math.round(line.raw_g*packs*100)/100; if(!(rawG>0)) continue;
-      const procG=Math.round((+line.processed_g||0)*packs*100)/100;   // usable (processed) qty that goes into the mix
-      try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:line.ingredient_sku,location_code:'bulacan',qty:-rawG,unit_cost:line.unit_cost_g,movement_type:'issue_to_batch',note:'Production '+r.batch_ref}); drawn++; }catch(e){ failed++; }
-      try{ await db.create('batch_issues',{batch_ref:r.batch_ref,ingredient_sku:line.ingredient_sku,expected_raw_g:rawG,actual_raw_g:rawG,expected_processed_g:procG,actual_processed_g:procG,uom:'kg'}); }catch(e){}
-    } } }
-  sysLog('production_batches',prodRunRef,'✅ Production confirmed ('+recs.length+' batches, '+drawn+' ingredient issues) by '+CURRENT_USER);
-  notifyRecordDone('production_batches', prodRunRef, {batch_ref:prodRunRef,status:'confirmed',operator:CURRENT_USER,production_date:prodPlanDate}, recs);   // PDF → Drive → notify
-  toast('Confirmed · '+posted+' product(s) posted; '+drawn+' raw issue(s) drawn down'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0);
-  // clear the run so the next batch starts clean (no redundant re-save of confirmed lines)
-  prodRunRef=''; prodPlanLines=[]; drawProdPlan();
+  const im={}; ings.forEach(i=>im[i.sku]=i); const m={};
+  boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100||1;
+    const procG=(+b.usable_g||0), rawG=procG/y;
+    const costG=((+it.price_kg_processed||+it.moving_avg_cost_kg||+it.list_price_kg||0))/1000;   // processed cost per g
+    (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:b.ingredient_sku, processed_g:procG, raw_g:rawG, unit_cost_g:costG}); });
+  return m; }
+
+/* ============ Processing / Prep (raw → processed, the two-bin conversion) ============ */
+let _procIngs=[];
+async function openProcessing(){
+  try{ _procIngs=await listIngredients(); }catch(e){ _procIngs=[]; }
+  if(!(window._procLines&&window._procLines.length)) window._procLines=[{sku:'',kg:''}];
+  drawProcessing();
+}
+function _procParent(it,bySku,byName){ if(!it) return null;
+  const bySrc=it.source_sku&&bySku[it.source_sku]?bySku[it.source_sku]:null;
+  const ri=(it.raw_input||'').trim().toLowerCase(); const byRi=(ri&&byName[ri]&&byName[ri].sku!==it.sku)?byName[ri]:null;
+  return bySrc||byRi||null; }
+function drawProcessing(){
+  const outs=_procIngs.filter(i=>i.is_intermediate);
+  const bySku={}, byName={}; _procIngs.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
+  const opt=(sel)=>`<option value="">— processed form —</option>`+outs.map(o=>{ const p=_procParent(o,bySku,byName); return `<option value="${esc(o.sku)}" ${sel===o.sku?'selected':''}>${esc(o.name)}${p?' ← '+esc(p.name):''}</option>`; }).join('');
+  const rows=(window._procLines||[]).map((l,i)=>{ const it=bySku[l.sku]||{}; const y=(+it.yield_pct||100)/100||1; const p=_procParent(it,bySku,byName);
+    const rawKg=(l.sku&&+l.kg>0)?((+l.kg)/y):0;
+    return `<tr><td><select onchange="window._procLines[${i}].sku=this.value;drawProcessing()">${opt(l.sku)}</select></td>
+      <td><input type="number" step="any" value="${l.kg}" oninput="window._procLines[${i}].kg=this.value;drawProcessing()" style="width:88px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td class="num" style="color:var(--muted)">${rawKg?('−'+(Math.round(rawKg*1000)/1000)+' '+(p?esc(p.name):'raw')):'—'}</td>
+      <td><span class="btn link" style="color:var(--danger)" onclick="window._procLines.splice(${i},1);drawProcessing()">✕</span></td></tr>`; }).join('');
+  $('modal').innerHTML=`<div><h3>🔪 Log processing <span class="mini" style="font-weight:400">raw → processed</span></h3>
+    <p class="mini">Record what the prep team processed. Each line <b>adds</b> the processed output to stock and <b>deducts</b> the raw it came from (raw used = processed ÷ yield).</p>
+    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Processed output</th><th class="num">Processed kg</th><th class="num">Raw used</th><th></th></tr></thead><tbody>
+    ${rows||'<tr><td colspan="4" class="empty">Add a line below.</td></tr>'}
+    </tbody></table></div>
+    <div style="margin-top:8px"><span class="addrow" onclick="window._procLines.push({sku:'',kg:''});drawProcessing()">＋ Add line</span></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="processingApply()">✅ Post processing</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+async function processingApply(){
+  if(_postLock){ toast('Still posting…',true); return; }
+  const bySku={}, byName={}; _procIngs.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
+  const lines=(window._procLines||[]).filter(l=>l.sku&&+l.kg>0);
+  if(!lines.length){ toast('Add at least one processed output with a qty',true); return; }
+  _postLock=true;
+  try{
+    const ref='PRC-'+_mmddyyyy(prodPlanDate)+'-'+String(Date.now()).slice(-4); let done=0;
+    for(const l of lines){ const it=bySku[l.sku]||{}; const y=(+it.yield_pct||100)/100||1;
+      const procG=Math.round((+l.kg)*1000*100)/100; const rawG=Math.round(procG/y*100)/100;
+      const parent=_procParent(it,bySku,byName); const rawCostG=(+(parent||{}).moving_avg_cost_kg||+(parent||{}).list_price_kg||0)/1000;
+      try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:it.sku,location_code:'bulacan',qty:procG,unit_cost:(y>0?rawCostG/y:rawCostG),movement_type:'processing_in',note:'Processing '+ref}); }catch(e){}
+      if(parent){ try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:parent.sku,location_code:'bulacan',qty:-rawG,unit_cost:rawCostG,movement_type:'processing_out',note:'Processing '+ref}); }catch(e){} }
+      done++;
+    }
+    sysLog('production_batches',ref,'🔪 Processing '+ref+' — '+done+' output(s) prepped (raw → processed) by '+CURRENT_USER);
+    closeModal(); toast('Processing posted · '+done+' output(s) added to processed stock'); window._procLines=[{sku:'',kg:''}];
+  }catch(e){ toast(e.message,true); } finally{ _postLock=false; }
 }
 
 /* ============ Weekly Inventory (scope + auto book qty + approval) ============ */
@@ -2600,13 +2695,16 @@ async function renderCountForm(idEnc){
     countLines=(DEMO.count_lines||[]).filter(r=>r.count_ref===countRec.count_ref).map(r=>({...r}));
     if(isLive()){ try{ countLines=await db.children({model:'count_lines',fk:'count_ref'}, countRec.count_ref); }catch(e){} }
     // enrich saved lines with their category (count_lines doesn't store it) for grouping/print
-    try{ const im={}; (await db.list('ingredients',{})).forEach(i=>im[i.sku]={n:i.name,c:(/(supply|supplement)/i.test(i.category||'')?'Supplies':(i.category||'Ingredients')),kind:'ingredient',uom:i.uom});
+    try{ const ai=await db.list('ingredients',{}); const _bs={},_bn={}; ai.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
+      const im={}; ai.forEach(i=>{ const isSup=/(supply|supplement)/i.test(i.category||''); const proc=!!i.is_intermediate;
+        const mat=isSup?'Supplies':(proc?((_procParent(i,_bs,_bn)||{}).name||i.name):i.name);
+        im[i.sku]={n:i.name+(proc?' — processed':''), mat, isSup, uom:i.uom, kind:'ingredient'}; });
       (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,fam:(p.family||'Other'),kind:'product'});
       countLines.forEach(l=>{
         if(String(l.ref_sku).startsWith('STK-')){ const h=im[String(l.ref_sku).slice(4)]; l.cat=((h&&h.fam)||'Other')+' — Stickers'; l.name=l.name||l.ref_sku; l.uom='pcs'; l.scale=1; }
         else { const h=im[l.ref_sku];
           if(h&&h.kind==='product'){ l.cat=h.fam||'Other'; l.name=l.name||h.n; l.uom='packs'; l.scale=1; }
-          else if(h){ l.cat=l.cat||h.c; l.name=l.name||h.n; if(l.cat==='Supplies'){ l.uom=h.uom||'pcs'; l.scale=1; } else { const u=countUnitFor(l.cat); l.uom=u.uom; l.scale=u.scale; } }
+          else if(h){ if(h.isSup){ l.cat='Supplies'; l.uom=h.uom||'pcs'; l.scale=1; } else { l.cat=h.mat; l.uom='kg'; l.scale=1000; } l.name=l.name||h.n; }
           else { l.cat=l.cat||'Uncategorized'; l.uom='kg'; l.scale=1000; } } });
     }catch(e){} }
   else { countRec={count_ref:'WR-SC-'+String(Date.now()).slice(-5),location_code:'bulacan',count_date:new Date().toISOString().slice(0,10),status:'draft',scope:['All']}; countLines=[]; }
@@ -2682,9 +2780,14 @@ async function countLoad(){
   const loc=(countRec.location_code||'bulacan');
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
   let lines=[];
-  ings.forEach(i=>{ if(i.is_intermediate) return;   // only purchasable raws are physically stocked/counted (outputs are never held)
-    const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
-    if((wantIng&&!isSup)||(wantSup&&isSup)){ const cat=isSup?'Supplies':(i.category||'Ingredients'); const u=isSup?{uom:(i.uom||'pcs'),scale:1}:countUnitFor(cat); lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat,uom:u.uom,scale:u.scale}); } });
+  // Two-bin: count RAW and PROCESSED, grouped together under each raw material (matches the sheet).
+  const _bs={}, _bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
+  const matOf=(i)=>{ if(!i.is_intermediate) return i.name; const p=_procParent(i,_bs,_bn); return (p&&p.name)||i.name; };
+  ings.forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
+    if(isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:'Supplies',uom:(i.uom||'pcs'),scale:1}); return; }
+    if(!wantIng) return;
+    const isProc=!!i.is_intermediate; const u=countUnitFor('Ingredients');
+    lines.push({ref_sku:i.sku, name:i.name+(isProc?' — processed':''), book_qty:stock[i.sku]||0, counted_qty:'', cat:matOf(i), uom:u.uom, scale:u.scale, form:isProc?'processed':'raw'}); });
   if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),uom:'packs',scale:1}));
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
   if(wantStk) prods.forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
