@@ -1025,7 +1025,15 @@ function renderCleanser(){
     <div class="hint" style="margin-top:10px">Prefer a full database reset? Run <code>wr_cleanse.sql</code> in the Supabase SQL Editor.</div></div>
     <div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 6px">📥 Upload opening inventory balances</h3>
       <div class="hint" style="margin-bottom:10px">Set day-1 stock in bulk. Download the template (pre-filled with every item), enter the starting quantity per row, then upload. Ingredients raw &amp; processed in <b>kg</b>, supplies in their <b>unit</b>, stickers &amp; sellable products in <b>pieces/packs</b>. Posts as opening ledger entries; re-uploading replaces the previous opening upload.</div>
-      <button class="btn" onclick="openOpeningImport()">📥 Open opening-balance uploader</button></div>`;
+      <button class="btn" onclick="openOpeningImport()">📥 Open opening-balance uploader</button></div>
+    <div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 6px">💾 Backup &amp; Restore</h3>
+      <div class="hint" style="margin-bottom:10px">Download a full snapshot of your live data (${BACKUP_TABLES.length} tables) before running tests, then restore it to roll back. <b>Restore replaces</b> the current contents of those tables with the snapshot — master data, transactions, and the stock ledger. Admin only. (Demand plots, MRP plans and reference counters are not part of the snapshot.)</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn sec" onclick="exportBackup()">⬇ Download backup (JSON)</button>
+        <input type="file" id="rbFile" accept=".json" style="display:none" onchange="restoreStage(event)">
+        <button class="btn sec" onclick="document.getElementById('rbFile').click()">📄 Choose backup file to restore</button>
+      </div>
+      <div id="rbArea" class="hint" style="margin-top:10px">No restore file chosen.</div></div>`;
   $('content').innerHTML=h;
 }
 const BACKUP_TABLES=['suppliers','ingredients','products','bom_lines','purchase_orders','po_lines',
@@ -1039,6 +1047,51 @@ async function exportBackup(){
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download='wr-erp-backup-'+todayISO()+'.json'; document.body.appendChild(a); a.click(); a.remove();
   toast('Backup downloaded ('+BACKUP_TABLES.length+' tables)');
+}
+// Primary key per backup table — used to clear rows (delete filter) and to upsert natural-key tables.
+const RESTORE_PK={ suppliers:'name', ingredients:'sku', products:'sku', bom_lines:'id',
+  purchase_orders:'po_ref', po_lines:'id', goods_receipts:'gr_ref', gr_lines:'id',
+  supplier_invoices:'invoice_ref', invoice_lines:'id', production_batches:'batch_ref', batch_issues:'id',
+  transfers:'transfer_ref', transfer_lines:'id', count_sessions:'count_ref', count_lines:'id',
+  variance_log:'id', inventory_movements:'id', raw_material_pricing:'id', record_notes:'id', activity_log:'id' };
+function restoreStage(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader();
+  rd.onload=()=>{ try{ const d=JSON.parse(rd.result);
+      if(typeof d!=='object'||d===null) throw new Error('not a backup file');
+      window._restoreDump=d;
+      const counts=BACKUP_TABLES.map(t=>Array.isArray(d[t])?`${t}: ${d[t].length}`:null).filter(Boolean);
+      const total=BACKUP_TABLES.reduce((s,t)=>s+(Array.isArray(d[t])?d[t].length:0),0);
+      const when=(d._meta&&d._meta.exported_by)?` · by ${esc(d._meta.exported_by)}`:'';
+      $('rbArea').innerHTML=`<b>${esc(f.name)}</b> — ${total} row(s) across ${counts.length} table(s)${when}.
+        <div class="mini" style="margin:6px 0;max-height:90px;overflow:auto">${counts.map(esc).join(' · ')||'no recognised tables'}</div>
+        ${total?`<div style="margin-top:6px">Type <b>RESTORE</b> to enable: <input id="rbConfirm" oninput="var b=document.getElementById('rbBtn'); if(b) b.disabled=(this.value.trim().toUpperCase()!=='RESTORE')" style="border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:130px"></div>
+        <div style="margin-top:10px"><button class="btn" id="rbBtn" disabled style="background:#b23b2e" onclick="restoreBackup()">♻ Restore — replaces current data</button></div>`:''}`;
+    }catch(err){ $('rbArea').innerHTML='<span style="color:var(--danger)">Could not read backup: '+esc(err.message)+'</span>'; } };
+  rd.readAsText(f);
+}
+async function restoreBackup(){
+  if(typeof curRole==='function' && curRole()!=='Admin'){ toast('Only an Admin can restore',true); return; }
+  const d=window._restoreDump; if(!d){ toast('Choose a backup file first',true); return; }
+  if(!isLive()){ toast('Restore runs against the live database only',true); return; }
+  if(!confirm('RESTORE will DELETE the current contents of the '+BACKUP_TABLES.length+' backed-up tables (master data, transactions, and the stock ledger) and load the backup in their place.\n\nThis cannot be undone. Continue?')) return;
+  if(window._postLock){ toast('Busy…',true); return; } window._postLock=true;
+  showBusy('Restoring backup…');
+  const errs=[]; let ins=0;
+  try{
+    // 1) clear existing rows — children first (reverse of the FK-ordered list)
+    for(const t of [...BACKUP_TABLES].reverse()){ const pk=RESTORE_PK[t]||'id';
+      try{ await sb(t+'?'+pk+'=not.is.null',{method:'DELETE',prefer:'return=minimal'}); }
+      catch(e){ errs.push('clear '+t+': '+(e.message||e)); } }
+    // 2) load the snapshot — parents first; drop surrogate id so identity columns regenerate
+    for(const t of BACKUP_TABLES){ let rows=d[t]; if(!Array.isArray(rows)||!rows.length) continue;
+      rows=rows.map(r=>{ const c={...r}; delete c.id; return c; });
+      const pk=RESTORE_PK[t]||'id'; const upsert=(pk!=='id');
+      for(let i=0;i<rows.length;i+=500){ const chunk=rows.slice(i,i+500);
+        try{ await sb(t+(upsert?('?on_conflict='+pk):''),{method:'POST',prefer:(upsert?'resolution=merge-duplicates,return=minimal':'return=minimal'),body:JSON.stringify(chunk)}); ins+=chunk.length; }
+        catch(e){ errs.push('load '+t+': '+(e.message||e)); } } }
+    try{ sysLog('cleanser','restore','♻ Restored backup ('+ins+' rows) by '+CURRENT_USER); }catch(e){}
+  } finally { hideBusy(); window._postLock=false; }
+  if(errs.length) console.warn('Restore issues:', errs);
+  toast('Restore complete — '+ins+' row(s) loaded'+(errs.length?(' · ⚠ '+errs.length+' issue(s), see console'):''), errs.length>0);
 }
 function cleanseAll(on){ CLEANSE_GROUPS.forEach(g=>cleanseSel[g.key]=on); renderCleanser(); }
 function cleanseGuard(v){ const b=$('clBtn'); if(b) b.disabled = (String(v).trim().toUpperCase()!=='CLEANSE'); }
