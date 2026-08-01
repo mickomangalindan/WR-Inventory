@@ -301,7 +301,7 @@
 const MODULES = [
   {id:'master', label:'Master Data', items:['suppliers','ingredients','products']},
   {id:'plan',   label:'Planning',    items:['mrp']},
-  {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder']},
+  {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_po']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
   {id:'analytics', label:'Analytics', items:['reporting']},
@@ -450,6 +450,7 @@ const MODELS = {
   notif:{ label:'Notifications', icon:'🔔', special:'notif' },
   cleanser:{ label:'Data Cleanser', icon:'🧹', special:'cleanser' },
   supplies_reorder:{ label:'Supplies Reorder', icon:'🧻', special:'supplies_reorder' },
+  sticker_po:{ label:'Sticker PO', icon:'🏷️', special:'sticker_po' },
   automations:{ label:'Automations', icon:'⚡', special:'automations' },
   selftest:{ label:'System Check', icon:'🩺', special:'selftest' },
 };
@@ -571,6 +572,7 @@ function route(){
     if(m.special==='notif') return renderNotif();
     if(m.special==='cleanser') return renderCleanser();
     if(m.special==='supplies_reorder') return renderSuppliesReorder();
+    if(m.special==='sticker_po') return renderStickerPO();
     if(m.special==='selftest') return renderSelfTest();
   }
   setCrumb();
@@ -730,6 +732,10 @@ async function renderForm(){
   formNotes = formIsNew ? [] : await notesForRecord(state.model, formRec[m.pk]);
   formAtts  = formIsNew ? [] : await attsForRecord(state.model, formRec[m.pk]);
   window._poPay = (state.model==='purchase_orders' && !formIsNew) ? await poPayments(formRec[m.pk]) : [];
+  const _isStkPO = _isStickerPO(formRec);
+  let _stkProds={}, _stkIngs={};
+  if(_isStkPO){ try{(await db.list('products',{})).forEach(p=>_stkProds[p.sku]=p);}catch(e){}
+                try{(await db.list('ingredients',{})).forEach(i=>_stkIngs[i.sku]=i);}catch(e){} }
   const statusbar = m.status? `<div class="statusbar">${m.status.stages.map(s=>`<div class="stg ${r[m.status.f]===s?'on':''}">${s}</div>`).join('')}</div>`:'';
   const faMode=(f)=> fieldMode(state.model, f.n);
   const fieldInput=(f)=>{
@@ -749,9 +755,15 @@ async function renderForm(){
   let notebook='';
   if(m.o2m){
     const o=m.o2m;
-    notebook=`<div class="notebook"><div class="nbtabs"><button class="on">${o.label}</button></div><div class="lines">
+    if(_isStkPO){
+      const t=_stkTableHTML(_stkRowsFrom(formChildren, _stkProds, _stkIngs));
+      notebook=`<div class="notebook"><div class="nbtabs"><button class="on">🏷️ Sticker Order Lines</button></div><div class="lines">
+        ${t.html}<div class="pager">${t.n} sticker(s) · ${t.linked} with artwork link · ${t.n-t.linked} pending · <span style="color:var(--muted)">manage links in Master Data → Products (sticker fields)</span></div></div></div>`;
+    } else {
+      notebook=`<div class="notebook"><div class="nbtabs"><button class="on">${o.label}</button></div><div class="lines">
       <table><thead><tr>${o.cols.map(c=>`<th>${c.l}</th>`).join('')}<th></th></tr></thead><tbody id="lineBody"></tbody></table>
       ${m.o2mLoader?`<button class="btn sm sec" style="margin-right:8px" onclick="${m.o2mLoader.fn}()">${m.o2mLoader.label}</button>`:''}<span class="addrow" onclick="addLine()">＋ Add a line</span></div></div>`;
+    }
   }
   const titleField = m.fields.find(f=>f.n===m.name)||m.fields[0];
   const cur=m.status?formRec[m.status.f]:null;
@@ -3340,6 +3352,56 @@ async function generateSuppliesPO(){
     }
   } finally { hideBusy(); }
   toast('Created '+refs.length+' supplies PO(s) — ready to send & receive'); openModel('purchase_orders');
+}
+/* ===== Sticker PO — shared layout (master sticker-file format), used by the
+   Sticker PO screen AND the Purchase Order record view for sticker POs ===== */
+function _stkRowsFrom(lines, prods, ings){
+  return (lines||[]).map(l=>{ const p=prods[l.ingredient_sku]||{}; const ing=ings[l.ingredient_sku]||{};
+    return { sku:l.ingredient_sku,
+      name:(p.variant||p.name||String(ing.name||'').replace(/ — Sticker$/,'')||l.ingredient_sku),
+      fam:(p.family||p.feeding_style||'Other'),
+      net:(p.sticker_net||''), dim:(p.sticker_dimension||''), link:(p.sticker_art_url||''),
+      ordered:(+l.ordered_kg||0), received:(+l.received_kg||0) }; });
+}
+function _stkTableHTML(rows){
+  const groups={}; rows.forEach(r=>{ (groups[r.fam]=groups[r.fam]||[]).push(r); });
+  const fams=Object.keys(groups).sort();
+  let n=0, totO=0, totR=0, linked=0;
+  let h=`<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th><th class="num">Qty Ordered</th><th class="num">Qty Received</th></tr></thead><tbody>`;
+  fams.forEach(fam=>{
+    h+=`<tr style="background:#e7f0e9"><td colspan="8"><b>${esc(fam)}</b></td></tr>`;
+    groups[fam].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(r=>{ n++; totO+=r.ordered; totR+=r.received; if(r.link) linked++;
+      h+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)||'—'}</td><td><code>${esc(r.sku)}</code></td>`+
+        `<td>${r.link?`<a href="${esc(r.link)}" target="_blank" rel="noopener">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>`+
+        `<td>${esc(r.dim)||'—'}</td><td class="num">${r.ordered||'—'}</td><td class="num">${r.received||'—'}</td></tr>`;
+    });
+  });
+  h+=`</tbody><tfoot><tr><th colspan="6" class="num">Totals</th><th class="num">${totO}</th><th class="num">${totR}</th></tr></tfoot></table></div>`;
+  return {html:h, n, linked, totO, totR};
+}
+function _isStickerPO(rec){ return !!rec && /\[STICKERS\]/i.test(String(rec.po_ref||'')); }
+
+/* ===== Sticker PO — lives in-app, laid out like the master sticker order file ===== */
+async function renderStickerPO(){
+  let pos=[]; try{ pos=(await db.list('purchase_orders',{})).filter(p=>/\[STICKERS\]/i.test(p.po_ref||'')); }catch(e){}
+  pos.sort((a,b)=>String(b.order_date||'').localeCompare(String(a.order_date||''))||String(b.po_ref).localeCompare(String(a.po_ref)));
+  if((!window._stkPoRef || !pos.some(p=>p.po_ref===window._stkPoRef)) && pos.length) window._stkPoRef=pos[0].po_ref;
+  const ref=window._stkPoRef;
+  const sel=pos.map(p=>`<option value="${esc(p.po_ref)}" ${p.po_ref===ref?'selected':''}>${esc(p.po_ref)} · ${esc(p.status||'')}</option>`).join('');
+  $('cp').innerHTML=`<div class="title">Sticker PO</div>
+    ${pos.length>0?`<select onchange="window._stkPoRef=this.value; renderStickerPO()">${sel}</select><div class="sp"></div>`:''}
+    ${pos.length?`<button class="btn sec" onclick="window.print()">🖨 Print</button>`:''}
+    <div class="sp"></div><span style="color:var(--muted)">SKU · name · Drive artwork link · qty — grouped by family</span>`;
+  if(!pos.length){ $('content').innerHTML='<div class="repcard"><div class="empty">No sticker PO yet. Load a sticker PO (its reference contains <code>[STICKERS]</code>) and it will appear here.</div></div>'; return; }
+  const rec=pos.find(p=>p.po_ref===ref)||pos[0];
+  let lines=[]; try{ lines=(await db.list('po_lines',{})).filter(l=>l.po_ref===ref); }catch(e){}
+  const prods={}; try{ (await db.list('products',{})).forEach(p=>prods[p.sku]=p); }catch(e){}
+  const ings={}; try{ (await db.list('ingredients',{})).forEach(i=>ings[i.sku]=i); }catch(e){}
+  const t=_stkTableHTML(_stkRowsFrom(lines, prods, ings));
+  const h=`<div class="repcard"><div class="hint" style="margin:0 0 10px"><b>${esc(rec.po_ref)}</b> · ${esc(rec.supplier_name||'(sticker vendor unassigned)')} · ${esc(rec.order_date||'')} · status <b>${esc(rec.status||'')}</b>. The artwork link opens the Google Drive file; quantities are in pieces.</div>
+    ${t.html}
+    <div class="pager">${t.n} sticker(s) · ${t.linked} with artwork link · ${t.n-t.linked} pending</div></div>`;
+  $('content').innerHTML=h;
 }
 function openMRPImport(){ _impRows=null; _impReport=null;
   $('modal').innerHTML=`<h3>Import weekly demand</h3>
