@@ -301,7 +301,7 @@
 const MODULES = [
   {id:'master', label:'Master Data', items:['suppliers','ingredients','products']},
   {id:'plan',   label:'Planning',    items:['mrp']},
-  {id:'purch',  label:'Purchasing',  items:['purchase_orders']},
+  {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
   {id:'analytics', label:'Analytics', items:['reporting']},
@@ -354,7 +354,7 @@ const MODELS = {
     status:{f:'status',stages:['No SKU Yet','No Recipe Yet','Active - Scaled','Active']},
     fields:[
       {n:'sku',l:'SKU',t:'text'},{n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant / Product name',t:'text'},
-      {n:'name',l:'Name',t:'text'},{n:'pack_g',l:'Pack (g)',t:'number'},
+      {n:'name',l:'Name',t:'text'},{n:'pack_g',l:'Pack (g)',t:'number'},{n:'box_size',l:'Packs per box',t:'number'},
       {n:'status',l:'Status',t:'select',o:['Active','Active - Scaled','No Recipe Yet','No SKU Yet']},
       {n:'product_line',l:'Product line',t:'text'},{n:'feeding_format',l:'Feeding format',t:'text'},
       {n:'mix_category',l:'Mix category',t:'text'},{n:'animal',l:'Animal',t:'select',o:['Dog','Cat']},
@@ -366,7 +366,7 @@ const MODELS = {
       {n:'sticker_bulacan_on_hand',l:'Labels — Bulacan on hand',t:'number'},{n:'sticker_bulacan_par',l:'Labels — Bulacan PAR',t:'number'},
       {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'}],
     list:['name','status','family','variant','pack_g','sell_price'],
-    groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status'],['pack_g','sell_price','par_packs','tot_cost_ref','feeding_style'],
+    groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
             ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par']],
     tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'🏷️ Stickers', groups:[3]}],
     o2m:{ field:'bom', model:'bom_lines', fk:'product_sku', label:'Recipe (BOM)',
@@ -449,6 +449,7 @@ const MODELS = {
   refs:{ label:'Internal References', icon:'🔢', special:'refs' },
   notif:{ label:'Notifications', icon:'🔔', special:'notif' },
   cleanser:{ label:'Data Cleanser', icon:'🧹', special:'cleanser' },
+  supplies_reorder:{ label:'Supplies Reorder', icon:'🧻', special:'supplies_reorder' },
   automations:{ label:'Automations', icon:'⚡', special:'automations' },
   selftest:{ label:'System Check', icon:'🩺', special:'selftest' },
 };
@@ -569,6 +570,7 @@ function route(){
     if(m.special==='refs') return renderRefs();
     if(m.special==='notif') return renderNotif();
     if(m.special==='cleanser') return renderCleanser();
+    if(m.special==='supplies_reorder') return renderSuppliesReorder();
     if(m.special==='selftest') return renderSelfTest();
   }
   setCrumb();
@@ -711,7 +713,7 @@ async function openForm(idEnc){
   formIsNew = !idEnc; formTab=0;
   if(idEnc){ const pkval=decodeURIComponent(idEnc);
     const rows=await listForModel(state.model); formRec={...(rows.find(r=>String(r[m.pk])===pkval)||{})};
-  } else { formRec={}; if(m.status) formRec[m.status.f]=m.status.stages[0]; if(m.fields.find(f=>f.n==='order_date')) formRec.order_date=new Date().toISOString().slice(0,10);
+  } else { formRec={}; if(m.status) formRec[m.status.f]=m.status.stages[0]; if(m.fields.find(f=>f.n==='order_date')) formRec.order_date=todayISO(); if(m.fields.find(f=>f.n==='transfer_date')) formRec.transfer_date=todayISO();
     // NOTE: document reference numbers are now assigned at SAVE (see saveForm), not here —
     // opening then discarding a new document no longer burns a sequence number.
   }
@@ -1007,9 +1009,9 @@ function renderCleanser(){
     <div style="margin-top:16px"><label style="font-size:13px">Type <b>CLEANSE</b> to enable the button: &nbsp;<input id="clConfirm" oninput="cleanseGuard(this.value)" style="border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:140px"></label></div>
     <div style="margin-top:12px"><button class="btn" id="clBtn" disabled style="background:#b23b2e" onclick="runCleanse()">🧹 Wipe selected</button></div>
     <div class="hint" style="margin-top:10px">Prefer a full database reset? Run <code>wr_cleanse.sql</code> in the Supabase SQL Editor.</div></div>
-    <div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 6px">💾 Backup / export</h3>
-      <div class="hint" style="margin-bottom:10px">Download a full snapshot of every table as a single JSON file — keep it before a cleanse, reset, or big change. There is no automatic backup on the free tier, so do this regularly (or schedule the n8n backup workflow).</div>
-      <button class="btn" onclick="exportBackup()">⬇ Download full backup (JSON)</button></div>`;
+    <div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 6px">📥 Upload opening inventory balances</h3>
+      <div class="hint" style="margin-bottom:10px">Set day-1 stock in bulk. Download the template (pre-filled with every item), enter the starting quantity per row, then upload. Ingredients raw &amp; processed in <b>kg</b>, supplies in their <b>unit</b>, stickers &amp; sellable products in <b>pieces/packs</b>. Posts as opening ledger entries; re-uploading replaces the previous opening upload.</div>
+      <button class="btn" onclick="openOpeningImport()">📥 Open opening-balance uploader</button></div>`;
   $('content').innerHTML=h;
 }
 const BACKUP_TABLES=['suppliers','ingredients','products','bom_lines','purchase_orders','po_lines',
@@ -1021,7 +1023,7 @@ async function exportBackup(){
   for(const t of BACKUP_TABLES){ try{ dump[t]=isLive()? await sb(t+'?select=*') : (DEMO[t]||[]); }catch(e){ dump[t]={error:String(e.message||e)}; } }
   const blob=new Blob([JSON.stringify(dump,null,1)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
-  a.download='wr-erp-backup-'+new Date().toISOString().slice(0,10)+'.json'; document.body.appendChild(a); a.click(); a.remove();
+  a.download='wr-erp-backup-'+todayISO()+'.json'; document.body.appendChild(a); a.click(); a.remove();
   toast('Backup downloaded ('+BACKUP_TABLES.length+' tables)');
 }
 function cleanseAll(on){ CLEANSE_GROUPS.forEach(g=>cleanseSel[g.key]=on); renderCleanser(); }
@@ -1399,6 +1401,9 @@ async function bulkApply(){ const m=MODELS[state.model]; const f=$('bkf').value;
 /* MRP / Demand planning */
 let mrpDemand={}, mrpManual={}, mrpRemarks={};
 function kgf(g){ return (g/1000).toFixed(2); }
+// Local (Philippines) calendar date — NOT UTC. toISOString() is UTC, so before 08:00 PH it
+// still reads the previous day; use Asia/Manila so "today" matches the user's clock.
+function todayISO(){ try{ return new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Manila'}); }catch(e){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); } }
 function dateMinus(d,n){ try{ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()-(n||0)); return x.toISOString().slice(0,10);}catch(e){return d;} }
 async function renderMRP(){
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
@@ -1574,7 +1579,7 @@ async function renderDemandHistory(){
 }
 /* ============ Internal reference numbering (DP / PO / DR / RR) ============ */
 function _p2(n){ return String(n).padStart(2,'0'); }
-function _mmddyyyy(dstr){ const d=dstr||new Date().toISOString().slice(0,10); const t=d.split('-'); return (t[1]||'')+(t[2]||'')+(t[0]||''); }
+function _mmddyyyy(dstr){ const d=dstr||todayISO(); const t=d.split('-'); return (t[1]||'')+(t[2]||'')+(t[0]||''); }
 async function nextSeq(key){   // atomic per-key counter — Supabase RPC when live, localStorage otherwise
   if(isLive()){   // live: the atomic DB counter is the ONLY safe source — never fall back to a per-browser
     if(SUPA&&SUPA.token){ try{ const r=await sb('rpc/next_ref',{method:'POST',body:JSON.stringify({p_key:key})}); const v=Array.isArray(r)?r[0]:r; if(typeof v==='number') return v; if(v&&typeof v.next_ref==='number') return v.next_ref; }catch(e){} }
@@ -1587,6 +1592,7 @@ async function genRef(type,opts){ opts=opts||{}; const dd=_mmddyyyy(opts.date);
   if(type==='PO'){ return {ref:'PO-'+dd+' V'+_p2(opts.xx||1)+'.'+_p2(opts.zz||1), dd}; }
   if(type==='DR'||type==='RR'){ const it=await nextSeq(type+'-'+dd); return {ref:type+'-'+dd+' V'+_p2(it), it, dd}; }
   if(type==='PR'){ const it=await nextSeq('PR-'+dd); return {ref:'PR-'+dd+' V'+_p2(it), it, dd}; }
+  if(type==='WI'){ const sc=(opts.scope||'ALL').toUpperCase(); const it=await nextSeq('WI-'+dd+'-'+sc); return {ref:'WI-'+dd+' ['+sc+'].V'+_p2(it), it, dd}; }
   return {ref:''};
 }
 
@@ -1877,8 +1883,11 @@ async function postReceipt(po){ try{
   // per-location on-hand snapshot (bulacan only — receipts land at bulacan)
   const stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.ref_sku && s.location_code==='bulacan' && s.kind==='ingredient') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
   for(const l of lines){ const recvKg=(l.received_kg!=null&&l.received_kg!=='')?(+l.received_kg||0):(+l.available_kg||+l.ordered_kg||0); if(!(recvKg>0)) continue;
-    const g=recvKg*1000, priceKg=Math.max(0,+l.price_kg||0);
-    await db.create('inventory_movements',{kind:'ingredient',ref_sku:l.ingredient_sku,location_code:'bulacan',qty:g,unit_cost:priceKg/1000,movement_type:'receipt',note:'PO '+po.po_ref});
+    // Supplies are counted in whole units (scale 1), food ingredients in kg (×1000 → grams).
+    const isSup=/(supply|supplement)/i.test((im[l.ingredient_sku]||{}).category||'');
+    const g=isSup?recvKg:recvKg*1000, priceKg=Math.max(0,+l.price_kg||0);
+    await db.create('inventory_movements',{kind:'ingredient',ref_sku:l.ingredient_sku,location_code:'bulacan',qty:g,unit_cost:(isSup?priceKg:priceKg/1000),movement_type:'receipt',note:'PO '+po.po_ref});
+    if(isSup){ n++; continue; }   // supplies carry no per-kg moving-average cost
     // roll the moving-average cost — server-side RPC when masking is on (Warehouse can't touch cost columns), else client-side
     if(secure){ try{ await sb('rpc/wr_roll_cost',{method:'POST',body:JSON.stringify({p_sku:l.ingredient_sku,p_recv_kg:recvKg,p_price_kg:priceKg})}); }catch(e){ costErr++; } }
     else { const it=im[l.ingredient_sku]; if(it){ const ohG=Math.max(0,stock[l.ingredient_sku]||0), oldAvg=+it.moving_avg_cost_kg||priceKg;  // clamp negative on-hand
@@ -2031,7 +2040,7 @@ function openPayment(){
   const lines=formChildren||[]; const billable=poBillable(formRec,lines);
   const paid=(window._poPay||[]).reduce((s,p)=>s+(+p.amount||0),0); const bal=Math.max(0,billable-paid);
   const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
-  const today=new Date().toISOString().slice(0,10);
+  const today=todayISO();
   $('modal').innerHTML=`<div><h3>Register payment — ${esc(formRec.po_ref)}</h3>
     <p class="mini">Billable <b>${P(billable)}</b> · already paid <b>${P(paid)}</b> · <b>balance ${P(bal)}</b>. Record a partial or full payment.</p>
     <div class="fld"><label>Amount ₱</label><div class="val"><input id="pay_amt" type="number" step="any" value="${Math.round(bal*100)/100}" style="width:160px"></div></div>
@@ -2043,7 +2052,7 @@ function openPayment(){
 }
 async function paymentApply(){
   const amt=+($('pay_amt')||{}).value||0; if(!(amt>0)){ toast('Enter a payment amount',true); return; }
-  const method=($('pay_method')||{}).value||''; const paid_at=($('pay_date')||{}).value||new Date().toISOString().slice(0,10); const note=($('pay_note')||{}).value||'';
+  const method=($('pay_method')||{}).value||''; const paid_at=($('pay_date')||{}).value||todayISO(); const note=($('pay_note')||{}).value||'';
   try{
     await db.create('po_payments',{po_ref:formRec.po_ref, amount:Math.round(amt*100)/100, method, paid_at, note, paid_by:CURRENT_USER});
     window._poPay = await poPayments(formRec.po_ref);
@@ -2109,12 +2118,16 @@ async function openTransferReceive(){
   if(!lines.length){ try{ lines=await db.children(MODELS.transfers.o2m, formRec.transfer_ref); formChildren=lines; }catch(e){} }
   if(!lines.length){ toast('No products to receive',true); return; }
   const creator=formRec.created_by||'—';
+  let prodMap={}; try{ (await db.list('products',{})).forEach(p=>prodMap[p.sku]={name:p.name,box:(+p.box_size||1)}); }catch(e){}
+  window._trBox=lines.map(l=>(prodMap[l.product_sku]||{}).box||1);
   $('modal').innerHTML=`<h3>Receive transfer — ${esc(formRec.transfer_ref)}</h3>
-    <p>Sent by <b>${esc(creator)}</b> from <b>${esc(formRec.from_code||'bulacan')}</b>. Enter the <b>packs actually received</b> at <b>${esc(formRec.to_code||'pasig')}</b>. Sent qty is locked. Any shortfall is flagged as a Check 4 variance.</p>
+    <p>Sent by <b>${esc(creator)}</b> from <b>${esc(formRec.from_code||'bulacan')}</b>. Enter the <b>packs actually received</b> at <b>${esc(formRec.to_code||'pasig')}</b> — case-packed products take boxes + loose. Sent qty is locked. Any shortfall is flagged as a Check 4 variance.</p>
     <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Product</th><th class="num">Sent</th><th class="num">Received</th></tr></thead><tbody>
-    ${lines.map((l,i)=>`<tr><td>${esc(l.product_sku)}</td>
-      <td class="num" style="color:var(--muted)">${(+l.sent_packs||0)}</td>
-      <td><input id="tr_r${i}" type="number" step="any" value="${(+l.sent_packs||0)}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td></tr>`).join('')}
+    ${lines.map((l,i)=>{ const box=(prodMap[l.product_sku]||{}).box||1; const nm=(prodMap[l.product_sku]||{}).name||l.product_sku; const sent=+l.sent_packs||0;
+      const cell = box>1
+        ? `<td class="num" style="white-space:nowrap"><input id="tr_bx${i}" type="number" step="1" value="${Math.floor(sent/box)}" style="width:44px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"> box ×${box} + <input id="tr_lo${i}" type="number" step="1" value="${sent-Math.floor(sent/box)*box}" style="width:44px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"> loose</td>`
+        : `<td><input id="tr_r${i}" type="number" step="any" value="${sent}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>`;
+      return `<tr><td>${esc(nm)}${box>1?'<div class="mini">'+box+'/box</div>':''}</td><td class="num" style="color:var(--muted)">${sent}</td>${cell}</tr>`; }).join('')}
     </tbody></table></div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="transferReceiveApply()">📥 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
   $('overlay').classList.add('on');
@@ -2125,7 +2138,10 @@ async function transferReceiveApply(){
 }
 async function _transferReceiveApply(){
   const lines=formChildren||[]; let short=0;
-  const updated=lines.map((l,i)=>{ const rr=+(($('tr_r'+i)||{}).value)||0; if(rr<(+l.sent_packs||0)-0.0001) short++;
+  const updated=lines.map((l,i)=>{ const box=(window._trBox&&window._trBox[i])||1; let rr;
+    if(box>1){ const bx=+(($('tr_bx'+i)||{}).value)||0, lo=+(($('tr_lo'+i)||{}).value)||0; rr=bx*box+lo; }
+    else rr=+(($('tr_r'+i)||{}).value)||0;
+    if(rr<(+l.sent_packs||0)-0.0001) short++;
     return {transfer_ref:formRec.transfer_ref, product_sku:l.product_sku, sent_packs:l.sent_packs, received_packs:rr}; });
   try{
     await db.replaceChildren(MODELS.transfers.o2m, formRec.transfer_ref, updated);
@@ -2330,7 +2346,7 @@ function dueChip(due){ const f=fmtDue(due); if(!f) return ''; return `<span clas
 function openActivity(){
   const m=MODELS[state.model]; const pk=formRec[m.pk];
   if(!pk||formIsNew){ toast('Save the record first, then schedule',true); return; }
-  const today=new Date().toISOString().slice(0,10);
+  const today=todayISO();
   window._actType='todo';
   $('modal').innerHTML=`<h3>Schedule activity</h3>
     <div class="actform">
@@ -2483,7 +2499,7 @@ document.addEventListener('keydown',e=>{
 });
 
 /* ============ Production Plan (bulk load from demand → draft → confirm) ============ */
-let prodPlanDate=new Date().toISOString().slice(0,10);
+let prodPlanDate=todayISO();
 let prodPlanLines=[]; let prodRunRef='';
 let prodTargetMap={}, prodProducedMap={};
 async function renderProdPlan(){
@@ -2699,15 +2715,15 @@ async function renderCountForm(idEnc){
       const im={}; ai.forEach(i=>{ const isSup=/(supply|supplement)/i.test(i.category||''); const proc=!!i.is_intermediate;
         const mat=isSup?'Supplies':(proc?((_procParent(i,_bs,_bn)||{}).name||i.name):i.name);
         im[i.sku]={n:i.name+(proc?' — processed':''), mat, isSup, uom:i.uom, kind:'ingredient'}; });
-      (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,fam:(p.family||'Other'),kind:'product'});
+      (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,fam:(p.family||'Other'),kind:'product',box:(+p.box_size||1)});
       countLines.forEach(l=>{
         if(String(l.ref_sku).startsWith('STK-')){ const h=im[String(l.ref_sku).slice(4)]; l.cat=((h&&h.fam)||'Other')+' — Stickers'; l.name=l.name||l.ref_sku; l.uom='pcs'; l.scale=1; }
         else { const h=im[l.ref_sku];
-          if(h&&h.kind==='product'){ l.cat=h.fam||'Other'; l.name=l.name||h.n; l.uom='packs'; l.scale=1; }
+          if(h&&h.kind==='product'){ l.cat=h.fam||'Other'; l.name=l.name||h.n; l.uom='packs'; l.scale=1; l.isProduct=true; l.box=h.box||1; }
           else if(h){ if(h.isSup){ l.cat='Supplies'; l.uom=h.uom||'pcs'; l.scale=1; } else { l.cat=h.mat; l.uom='kg'; l.scale=1000; } l.name=l.name||h.n; }
           else { l.cat=l.cat||'Uncategorized'; l.uom='kg'; l.scale=1000; } } });
     }catch(e){} }
-  else { countRec={count_ref:'WR-SC-'+String(Date.now()).slice(-5),location_code:'bulacan',count_date:new Date().toISOString().slice(0,10),status:'draft',scope:['All']}; countLines=[]; }
+  else { countRec={count_ref:'',location_code:'bulacan',count_date:todayISO(),status:'draft',scope:['All']}; countLines=[]; }
   drawCountForm();
 }
 function drawCountForm(){
@@ -2721,9 +2737,15 @@ function drawCountForm(){
   Object.values(_byCat).forEach(arr=>arr.sort((a,b)=>String(countLines[a].name||countLines[a].ref_sku).localeCompare(String(countLines[b].name||countLines[b].ref_sku))));
   const rowFor=(i)=>{ const l=countLines[i]; const s=+l.scale||1;
     const bookD=l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):'—';
-    const cntD=(l.counted_qty==null||l.counted_qty==='')?'':(Math.round((+l.counted_qty/s)*1e6)/1e6);
     const varc=(l.counted_qty!==''&&l.counted_qty!=null)?(((+l.counted_qty)-(+l.book_qty||0))/s):null;
-    return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td><td class="num" id="cv${i}" style="color:${varc&&Math.abs(varc)>0.001?'var(--danger)':'var(--muted)'}">${varc==null?'':num(Math.round(varc*100)/100)}</td></tr>`; };
+    const varCell=`<td class="num" id="cv${i}" style="color:${varc&&Math.abs(varc)>0.001?'var(--danger)':'var(--muted)'}">${varc==null?'':num(Math.round(varc*100)/100)}</td>`;
+    // Products with a case pack: enter boxes + loose packs → total packs.
+    if(l.isProduct && (+l.box||1)>1){ const box=+l.box||1; const tot=(l.counted_qty===''||l.counted_qty==null)?null:+l.counted_qty;
+      const bx=(l._boxes!=null&&l._boxes!=='')?l._boxes:(tot!=null?Math.floor(tot/box):''); const lo=(l._loose!=null&&l._loose!=='')?l._loose:(tot!=null?(tot-Math.floor(tot/box)*box):'');
+      return `<tr><td>${esc(l.name||l.ref_sku)}<div class="mini">${box}/box</div></td><td><code>${esc(l.ref_sku)}</code></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td>
+        <td class="num" style="white-space:nowrap"><input type="number" step="1" value="${bx}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},this.value,null)" style="width:46px;text-align:right" title="boxes"> box ×${box} + <input type="number" step="1" value="${lo}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},null,this.value)" style="width:46px;text-align:right" title="loose packs"> loose</td>${varCell}</tr>`; }
+    const cntD=(l.counted_qty==null||l.counted_qty==='')?'':(Math.round((+l.counted_qty/s)*1e6)/1e6);
+    return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td>${varCell}</tr>`; };
   const lineRows=Object.keys(_byCat).sort().map(cat=>`<tr><td colspan="5" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">${esc(cat)} <span style="opacity:.6;font-weight:400">(${_byCat[cat].length})</span></td></tr>`+_byCat[cat].map(rowFor).join('')).join('');
   $('content').innerHTML=`<div class="formwrap"><div class="sheet">
     <div class="statusbar">${MODELS.count_sessions.status.stages.map(s=>`<div class="stg ${countRec.status===s?'on':''}">${s}</div>`).join('')}</div>
@@ -2765,6 +2787,11 @@ function countPrintSheet(){
 }
 // Counted input is in the line's display unit — store back in the canonical (grams) value.
 function countSetCnt(i,v){ const s=+countLines[i].scale||1; countLines[i].counted_qty=(v===''||v==null)?'':(s!==1?(+v*s):+v); countVar(i); }
+// Product case pack: boxes + loose packs → total packs (counted_qty).
+function countSetBoxLoose(i,boxV,looseV){ const l=countLines[i]; const box=+l.box||1;
+  if(boxV!=null) l._boxes=(boxV===''?'':(+boxV||0)); if(looseV!=null) l._loose=(looseV===''?'':(+looseV||0));
+  if((l._boxes===''||l._boxes==null)&&(l._loose===''||l._loose==null)){ l.counted_qty=''; } else { l.counted_qty=(+l._boxes||0)*box+(+l._loose||0); }
+  countVar(i); }
 function countVar(i){ const l=countLines[i]; const el=$('cv'+i); if(!el)return; const s=+l.scale||1; const v=(l.counted_qty!==''&&l.counted_qty!=null)?(((+l.counted_qty)-(+l.book_qty||0))/s):null; el.textContent=v==null?'':num(Math.round(v*100)/100); el.style.color=v&&Math.abs(v)>0.001?'var(--danger)':'var(--muted)'; }
 // Prefill every counted cell with the theoretical (book) qty — a starting point the counter adjusts.
 function countFillBook(){ if(countRec.status==='approved')return; if(!countLines.length){ toast('Load items first',true); return; }
@@ -2788,15 +2815,20 @@ async function countLoad(){
     if(!wantIng) return;
     const isProc=!!i.is_intermediate; const u=countUnitFor('Ingredients');
     lines.push({ref_sku:i.sku, name:i.name+(isProc?' — processed':''), book_qty:stock[i.sku]||0, counted_qty:'', cat:matOf(i), uom:u.uom, scale:u.scale, form:isProc?'processed':'raw'}); });
-  if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),uom:'packs',scale:1}));
+  if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1)}));
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
   if(wantStk) prods.forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
     lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',uom:'pcs',scale:1}); });
   countLines=lines;
   toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')); drawCountForm();
 }
+// Weekly-inventory reference: WI-MMDDYYYY [SCOPE].VXX. Scope tag from the selected scope.
+function _wiScopeTag(scope){ const s=scope||['All']; if(s.includes('All')||!s.length) return 'ALL';
+  const map={'Ingredients':'ING','Supplies':'SUP','Stickers':'STK','Sellable Products':'FG'};
+  return s.map(x=>map[x]||String(x).slice(0,3).toUpperCase()).join('+'); }
 async function countSave(){
   try{
+    if(!countRec.count_ref){ const g=await genRef('WI',{date:countRec.count_date,scope:_wiScopeTag(countRec.scope)}); countRec.count_ref=g.ref; }
     if(isLive()){
       // UPSERT the parent session first (a PATCH to a missing row succeeds with 0 rows and never
       // throws, so the old try-update/catch-create left no session → count_lines FK 23503).
@@ -3180,7 +3212,7 @@ function renderAutomations(){
 }
 
 /* ============ MRP demand import / date ============ */
-let MRPDATE=new Date().toISOString().slice(0,10);
+let MRPDATE=todayISO();
 function parseDemandCSV(text){ const map={}; text.split(/\r?\n/).forEach(line=>{ const p=line.split(/[,\t]/); if(p.length>=2){ const s=(p[0]||'').trim(); if(s&&s.toLowerCase()!=='sku') map[s]=+p[1]||0; } }); return map; }
 function applyDemandMap(map){ Object.keys(map).forEach(sku=>{ mrpDemand[sku]=+map[sku]||0; }); renderMRP(); }
 function mrpImport(){ const t=prompt('Paste demand lines — SKU,qty (one per line):'); if(!t)return; applyDemandMap(parseDemandCSV(t)); toast('Demand imported by SKU'); }
@@ -3189,6 +3221,126 @@ function mrpFileImport(e){ const f=e.target.files[0]; if(!f)return; const rd=new
 /* ---- Import pipeline: download template → test → import ---- */
 let _impRows=null, _impReport=null;
 function dlBlob(content,name,type){ const b=new Blob([content],{type}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u); }
+
+/* ===== Opening-balance uploader (Data Cleanser) ===== */
+let _opRows=null, _opReport=null;
+function openOpeningImport(){ _opRows=null; _opReport=null;
+  $('modal').innerHTML=`<div><h3>📥 Upload opening inventory balances</h3>
+    <p class="mini">1) Download the template (every item, pre-filled). 2) Enter the <b>qty</b> per row — ingredients raw/processed in <b>kg</b>, supplies in their <b>unit</b>, products/stickers in <b>pieces/packs</b>; set the <b>location</b> (bulacan/pasig). 3) Upload &amp; Test, then Import. Re-uploading replaces the previous opening upload.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+      <button class="btn sec" onclick="openingDownloadTemplate()">⬇ Download template (.${typeof XLSX!=='undefined'?'xlsx':'csv'})</button>
+      <input type="file" id="opFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="openingStageFile(event)">
+      <button class="btn sec" onclick="document.getElementById('opFile').click()">📄 Choose file</button></div>
+    <div id="opArea" class="hint" style="margin-top:6px">No file chosen yet.</div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn sec" onclick="closeModal()">Close</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+async function openingDownloadTemplate(){
+  const ings=await listIngredients(); const prods=(await db.list('products',{})).filter(p=>p.active!==false);
+  const rows=[];
+  ings.forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
+    if(isSup) rows.push([i.sku,i.name,'supply',(i.uom||'pcs'),'bulacan',0]);
+    else if(i.is_intermediate) rows.push([i.sku,i.name,'processed','kg','bulacan',0]);
+    else rows.push([i.sku,i.name,'raw','kg','bulacan',0]); });
+  prods.forEach(p=>{ rows.push([p.sku,p.name,'product','packs','bulacan',0]); rows.push([p.sku,p.name,'product','packs','pasig',0]); });
+  prods.forEach(p=>{ rows.push(['STK-'+p.sku,p.name+' — Sticker','sticker','pcs','pasig',0]); });
+  const aoa=[['sku','name','type','unit','location','qty'],...rows];
+  if(typeof XLSX!=='undefined'){ const ws=XLSX.utils.aoa_to_sheet(aoa); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Opening'); XLSX.writeFile(wb,'WR_opening_'+todayISO()+'.xlsx'); }
+  else { dlBlob(aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),'WR_opening_'+todayISO()+'.csv','text/csv'); }
+  toast('Template downloaded ('+rows.length+' rows)');
+}
+function _opParseSheet(name,data){
+  let arr;
+  if(/\.csv$/i.test(name)){ arr=String(data).split(/\r?\n/).filter(x=>x.trim()!=='').map(line=>{ const out=[]; let cur='',q=false; for(let i=0;i<line.length;i++){ const ch=line[i]; if(q){ if(ch==='"'){ if(line[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=ch; } else { if(ch===',')  {out.push(cur);cur='';} else if(ch==='"') q=true; else cur+=ch; } } out.push(cur); return out; }); }
+  else { if(typeof XLSX==='undefined') throw new Error('Spreadsheet support did not load — use a .csv file'); const wb=XLSX.read(data,{type:'binary'}); const ws=wb.Sheets[wb.SheetNames[0]]; arr=XLSX.utils.sheet_to_json(ws,{header:1}); }
+  const hdr=(arr[0]||[]).map(x=>String(x).trim().toLowerCase());
+  const ci=n=>hdr.indexOf(n); const si=ci('sku'),ti=ci('type'),li=ci('location'),qi=ci('qty');
+  if(si<0||qi<0) throw new Error('Template needs at least "sku" and "qty" columns');
+  const rows=[]; for(let i=1;i<arr.length;i++){ const r=arr[i]; if(!r)continue; const sku=r[si]; if(sku==null||String(sku).trim()==='')continue;
+    rows.push({sku:String(sku).trim(), type:ti>=0?String(r[ti]||'').trim().toLowerCase():'', location:li>=0?String(r[li]||'bulacan').trim().toLowerCase():'bulacan', qty:Number(r[qi]||0)}); }
+  return rows;
+}
+function openingStageFile(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader();
+  rd.onload=()=>{ try{ _opRows=_opParseSheet(f.name,rd.result); _opReport=null;
+      $('opArea').innerHTML=`<b>${esc(f.name)}</b> — ${_opRows.length} row(s) read.<div style="margin-top:8px"><button class="btn sec" onclick="openingTest()">🔍 Test</button></div>`; }
+    catch(err){ $('opArea').innerHTML='<span style="color:var(--danger)">Could not read file: '+esc(err.message)+'</span>'; } };
+  if(/\.csv$/i.test(f.name)) rd.readAsText(f); else rd.readAsBinaryString(f); }
+async function openingTest(){ if(!_opRows)return;
+  const ings=new Set((await db.list('ingredients',{})).map(i=>i.sku)); const prods=new Set((await db.list('products',{})).map(p=>p.sku));
+  let ok=0,unknown=0,zero=0;
+  _opReport=_opRows.map(r=>{ let st='ok'; const type=r.type||'';
+    const refOk = type==='sticker'? prods.has(String(r.sku).replace(/^STK-/,'')) : (type==='product'? prods.has(r.sku) : ings.has(r.sku));
+    if(!refOk){ st='unknown sku'; unknown++; } else if(isNaN(r.qty)){ st='bad qty'; unknown++; } else if(!(+r.qty)){ st='zero (skipped)'; zero++; } else ok++;
+    return {...r,st}; });
+  const issues=_opReport.filter(d=>d.st!=='ok'&&d.st!=='zero (skipped)').slice(0,12);
+  $('opArea').innerHTML=`<div style="margin:6px 0"><b style="color:var(--ok,#4e7a3e)">${ok} to post</b> · <b style="color:var(--danger)">${unknown} unknown/bad</b> · <span style="color:var(--muted)">${zero} zero (skipped)</span> of ${_opRows.length}</div>
+    ${issues.length?`<div style="max-height:170px;overflow:auto"><table style="width:100%;font-size:12px"><thead><tr><th>SKU</th><th>Type</th><th class="num">Qty</th><th>Issue</th></tr></thead><tbody>${issues.map(d=>`<tr><td><code>${esc(d.sku)}</code></td><td>${esc(d.type)}</td><td class="num">${esc(d.qty)}</td><td style="color:var(--danger)">${esc(d.st)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="hint">No errors ✅</div>'}
+    <div style="margin-top:12px"><button class="btn" onclick="openingDoImport()" ${ok?'':'disabled'} style="background:#b23b2e">✓ Post ${ok} opening balance(s)</button></div>`;
+}
+async function openingDoImport(){ if(!_opReport)return;
+  if(curRole&&curRole()!=='Admin'){ toast('Only an Admin can post opening balances',true); return; }
+  const valid=_opReport.filter(d=>d.st==='ok');
+  if(!valid.length){ toast('Nothing to post',true); return; }
+  if(_postLock){ toast('Still posting…',true); return; } _postLock=true;
+  const note='Opening upload '+todayISO();
+  try{
+    // replace the previous opening upload (idempotent) — leaves other opening seeds intact
+    if(isLive()){ try{ await sb('inventory_movements?note=like.Opening%20upload*',{method:'DELETE',prefer:'return=minimal'}); }catch(e){} }
+    else { DEMO.inventory_movements=(DEMO.inventory_movements||[]).filter(m=>!String(m.note||'').startsWith('Opening upload')); }
+    let posted=0,fail=0;
+    for(const r of valid){ const qty=+r.qty||0; const loc=(r.location==='pasig'?'pasig':'bulacan'); const type=r.type||'';
+      try{
+        if(type==='sticker'){ const psku=String(r.sku).replace(/^STK-/,''); await db.update('products','sku',psku,{['sticker_'+loc+'_on_hand']:qty}); posted++; continue; }
+        if(type==='product'){ await db.create('inventory_movements',{kind:'product',ref_sku:r.sku,location_code:loc,qty:qty,unit_cost:0,movement_type:'opening',note}); posted++; continue; }
+        const g=(type==='supply')?qty:qty*1000;   // supplies in whole units; food ingredients kg→g
+        await db.create('inventory_movements',{kind:'ingredient',ref_sku:r.sku,location_code:loc,qty:g,unit_cost:0,movement_type:'opening',note}); posted++;
+      }catch(e){ fail++; }
+    }
+    sysLog('inventory_movements',note,'📥 Opening balances uploaded ('+posted+' rows) by '+CURRENT_USER);
+    closeModal(); toast('Opening balances posted: '+posted+(fail?(' · ⚠ '+fail+' failed'):''), fail>0);
+  }catch(e){ toast(e.message,true); } finally{ _postLock=false; }
+}
+
+/* ===== Supplies Reorder → manual PO (PAR − stock, in each item's unit) ===== */
+async function renderSuppliesReorder(){
+  $('cp').innerHTML=`<div class="title">Supplies Reorder</div>
+    <button class="wfbtn" onclick="generateSuppliesPO()">🧾 Generate Supplies PO</button>
+    <div class="sp"></div><span style="color:var(--muted)">reorder qty = PAR − current stock</span>`;
+  const ings=await listIngredients();
+  const sups=ings.filter(i=>/(supply|supplement)/i.test(i.category||''));
+  let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.kind==='ingredient') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} }
+  const rows=sups.map(i=>{ const par=+i.par_g||0; const oh=stock[i.sku]||0; const reorder=Math.max(0,par-oh);
+    const _s1=(i.supplier1||'').trim(); const sup=(i.supplier||'').trim()||(/to be determined/i.test(_s1)?'':_s1);
+    return {sku:i.sku,name:i.name,uom:i.uom||'pcs',par,oh,reorder,supplier:sup,price:+i.list_price_kg||0}; })
+    .sort((a,b)=>b.reorder-a.reorder||String(a.name).localeCompare(b.name));
+  window._supReorder=rows.filter(r=>r.reorder>0);
+  let h=`<div class="repcard"><div class="hint" style="margin:0 0 8px">Extracted ${todayISO()}. Items below PAR need reordering; <b>reorder qty = PAR − current stock</b>, in each item's unit. Set PAR + default supplier on each supply (Master Data → Ingredients). Generate a draft PO grouped by supplier — receiving a supplies PO adds whole units to stock (not kg).</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Item</th><th class="num">Current</th><th class="num">PAR</th><th class="num">Reorder</th><th>Unit</th><th>Supplier</th><th>Alert</th></tr></thead><tbody>`;
+  rows.forEach(r=>{ const low=r.reorder>0; h+=`<tr><td>${esc(r.name)}</td><td class="num">${r.oh}</td><td class="num">${r.par||'—'}</td><td class="num">${low?'<b style="color:var(--berry)">'+r.reorder+'</b>':'—'}</td><td>${esc(r.uom)}</td><td>${esc(r.supplier)||'<span class="mini">set default</span>'}</td><td>${low?'<span style="color:var(--danger)">Reorder Needed</span>':'<span style="color:#4e7a3e">OK</span>'}</td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="7" class="empty">No supply items found. Seed supplies and set PAR first.</td></tr>';
+  h+=`</tbody></table></div><div class="pager">${window._supReorder.length} item(s) below PAR</div></div>`;
+  $('content').innerHTML=h;
+}
+async function generateSuppliesPO(){
+  const need=window._supReorder||[];
+  if(!need.length){ toast('Nothing below PAR to reorder',true); return; }
+  const bySup={}; need.forEach(r=>{ const s=r.supplier||'(unassigned)'; (bySup[s]=bySup[s]||[]).push(r); });
+  showBusy('Creating supplies PO(s)…'); const refs=[];
+  try{
+    const dd=_mmddyyyy(todayISO()); let zz=0;
+    for(const sup of Object.keys(bySup)){ zz++;
+      const ref='PO-'+dd+' V'+_p2(zz)+'.SUP';
+      const rec={po_ref:ref, supplier_name:(sup==='(unassigned)'?null:sup), order_date:todayISO(), status:'confirmed', created_by:CURRENT_USER};
+      try{ await db.create('purchase_orders',rec);
+        const pl=bySup[sup].map(r=>({po_ref:ref, ingredient_sku:r.sku, ordered_kg:r.reorder, available_kg:r.reorder, price_kg:r.price, received_kg:0}));
+        await db.replaceChildren({model:'po_lines',fk:'po_ref'}, ref, pl);
+        sysLog('purchase_orders',ref,'🧾 Supplies reorder (PAR − stock) — '+bySup[sup].length+' item(s) by '+CURRENT_USER);
+        refs.push(ref);
+      }catch(e){ toast(e.message,true); }
+    }
+  } finally { hideBusy(); }
+  toast('Created '+refs.length+' supplies PO(s) — ready to send & receive'); openModel('purchase_orders');
+}
 function openMRPImport(){ _impRows=null; _impReport=null;
   $('modal').innerHTML=`<h3>Import weekly demand</h3>
     <p>1) Download the template, fill the <b>QTY</b> column. &nbsp;2) Upload &amp; Test. &nbsp;3) Import the valid rows.</p>
