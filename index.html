@@ -735,7 +735,9 @@ async function renderForm(){
   const _isStkPO = _isStickerPO(formRec);
   let _stkProds={}, _stkIngs={};
   if(_isStkPO){ try{(await db.list('products',{})).forEach(p=>_stkProds[p.sku]=p);}catch(e){}
-                try{(await db.list('ingredients',{})).forEach(i=>_stkIngs[i.sku]=i);}catch(e){} }
+                try{(await db.list('ingredients',{})).forEach(i=>_stkIngs[i.sku]=i);}catch(e){}
+                window._stkFormProds=_stkProds; window._stkFormIngs=_stkIngs; }
+  else { window._stkFormProds=null; window._stkFormIngs=null; }
   const statusbar = m.status? `<div class="statusbar">${m.status.stages.map(s=>`<div class="stg ${r[m.status.f]===s?'on':''}">${s}</div>`).join('')}</div>`:'';
   const faMode=(f)=> fieldMode(state.model, f.n);
   const fieldInput=(f)=>{
@@ -1285,7 +1287,9 @@ function recordPrintHtml(m, r, children){
   const meta=m.fields.filter(f=>f.n!==m.pk && (r[f.n]!=null&&r[f.n]!=='')||f.t==='formula')
     .map(f=>`<div class="mrow"><span class="ml">${esc(f.l)}</span><span class="mv">${val(f)}</span></div>`).join('');
   let lines='';
-  if(m.o2m){
+  if(_isStickerPO(r)){
+    lines=_stkPrintLines(children, window._stkFormProds, window._stkFormIngs);
+  } else if(m.o2m){
     const cols=m.o2m.cols; const kids=children||[];
     const isNum=c=>['number','currency'].includes(c.t);
     // amount per line when both a qty-ish and a price-ish column exist
@@ -1310,6 +1314,8 @@ function recordPrintHtml(m, r, children){
     table.lines th{background:#4e7a3e;color:#fff;padding:6px 8px;font-weight:600}
     table.lines td{padding:5px 8px;border-bottom:1px solid #eee}
     table.lines tr.tot td{font-weight:700;border-top:2px solid #4e7a3e;background:#f6f8f4}
+    table.lines tr.grp td{background:#e7f0e9;font-weight:700;color:#234a31}
+    table.lines a{color:#1155cc}
     .ft{margin-top:26px;color:#888;font-size:11px;border-top:1px solid #eee;padding-top:8px}
   </style></head><body>
     <div class="hd"><h1>🐇 Wholesome Rabbit</h1><div class="doc"><div class="t">${esc(m.label)}</div><div class="r">${esc(r[m.pk]||'')}</div></div></div>
@@ -3380,6 +3386,23 @@ function _stkTableHTML(rows){
   return {html:h, n, linked, totO, totR};
 }
 function _isStickerPO(rec){ return !!rec && /\[STICKERS\]/i.test(String(rec.po_ref||'')); }
+// Print-friendly sticker lines (grouped by family) — matches the on-screen sticker layout.
+function _stkPrintLines(children, prods, ings){
+  const rows=_stkRowsFrom(children, prods||{}, ings||{});
+  const groups={}; rows.forEach(r=>{ (groups[r.fam]=groups[r.fam]||[]).push(r); });
+  const fams=Object.keys(groups).sort();
+  let n=0, totO=0, totR=0, body='';
+  fams.forEach(fam=>{
+    body+=`<tr class="grp"><td colspan="8"><b>${esc(fam)}</b></td></tr>`;
+    groups[fam].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(r=>{ n++; totO+=r.ordered; totR+=r.received;
+      body+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)}</td><td>${esc(r.sku)}</td>`+
+        `<td>${r.link?`<a href="${esc(r.link)}">Open artwork ↗</a>`:'pending'}</td>`+
+        `<td>${esc(r.dim)}</td><td style="text-align:right">${r.ordered||''}</td><td style="text-align:right">${r.received||''}</td></tr>`;
+    });
+  });
+  const foot=`<tr class="tot"><td colspan="6" style="text-align:right">Totals</td><td style="text-align:right">${totO}</td><td style="text-align:right">${totR}</td></tr>`;
+  return `<h3>Sticker Order Lines</h3><table class="lines"><thead><tr><th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th><th style="text-align:right">Qty Ordered</th><th style="text-align:right">Qty Received</th></tr></thead><tbody>${body}${foot}</tbody></table>`;
+}
 
 /* ===== Sticker PO — lives in-app, laid out like the master sticker order file ===== */
 async function renderStickerPO(){
