@@ -609,7 +609,7 @@ function route(){
   refreshMentionBell();
   if(state.model==='home'){ return renderDashboard(); }
   const m=MODELS[state.model];
-  if(m.special){ setCrumb();
+  if(m.special){ setCrumb(); syncHash();   // special views also get a unique URL (they return early below)
     if(m.special==='mrp') return renderMRP();
     if(m.special==='prodplan') return renderProdPlan();
     if(m.special==='reporting') return renderReporting();
@@ -712,8 +712,12 @@ async function renderList(){
   const cols=m.list.map(n=>m.fields.find(f=>f.n===n)).filter(f=>f && fieldMode(state.model,f.n)!=='hide');
   // Purchase Orders: append Total kg + Est. value columns, summed from each PO's lines.
   if(state.model==='purchase_orders'){
-    try{ const pls=await db.list('po_lines',{}); const agg={};
-      pls.forEach(l=>{ const a=agg[l.po_ref]=agg[l.po_ref]||{q:0,v:0}; const q=+l.ordered_kg||0; a.q+=q; a.v+=q*(+l.price_kg||0); });
+    try{ const pls=await db.list('po_lines',{}); let ings=[]; try{ings=await listIngredients();}catch(e){}
+      const ip={}; ings.forEach(i=>ip[i.sku]=(+i.moving_avg_cost_kg||+i.list_price_kg||0));   // ingredients + supplies historical price
+      const stkCost=_supplyCosts(ings).sticker;                                               // per-sticker cost (Supplies / cost model)
+      const stkPO=new Set(rows.filter(r=>_isStickerPO(r)).map(r=>r.po_ref));
+      const agg={};
+      pls.forEach(l=>{ const a=agg[l.po_ref]=agg[l.po_ref]||{q:0,v:0}; const q=+l.ordered_kg||0; let pr=(+l.price_kg||0)||ip[l.ingredient_sku]||0; if(!pr && stkPO.has(l.po_ref)) pr=stkCost; a.q+=q; a.v+=q*pr; });
       rows.forEach(r=>{ const a=agg[r.po_ref]||{q:0,v:0}; r._total_qty=Math.round(a.q*100)/100; r._total_val=Math.round(a.v*100)/100; });
       cols.push({n:'_total_qty',l:'Total kg',t:'number'},{n:'_total_val',l:'Est. value',t:'currency'});
     }catch(e){}
@@ -1155,7 +1159,7 @@ const CLEANSE_GROUPS = [
 ];
 let cleanseSel={};
 function renderCleanser(){
-  $('cp').innerHTML=`<div class="title">Data Cleanser</div><div class="sp"></div><span style="color:var(--muted)">wipe test transactions — master data is kept</span>`;
+  $('cp').innerHTML=`<div class="title">Data Cleanser <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div><div class="sp"></div><span style="color:var(--muted)">wipe test transactions — master data is kept</span>`;
   let h=`<div class="repcard">
     <div style="background:#f7dcd6;border:1px solid #e6b5ad;color:#7a241a;border-radius:10px;padding:12px 14px;font-size:13.5px">⚠ This permanently deletes the selected transaction data. <b>Master data is never touched</b> — suppliers, ingredients, products, recipes, users, field-access, and numbering formats all stay.</div>
     <h3 style="margin:14px 0 6px">Select what to wipe</h3>
@@ -1268,7 +1272,7 @@ let NOTIF = JSON.parse(localStorage.getItem('wr_notif')||'null') || Object.fromE
 async function loadNotif(){ if(isLive()&&SUPA&&SUPA.token){ try{ const r=await sb("app_config?select=value&key=eq.notif_templates"); if(r&&r[0]&&r[0].value){ NOTIF=r[0].value; localStorage.setItem('wr_notif',JSON.stringify(NOTIF)); } }catch(e){} } }
 async function saveNotif(){ localStorage.setItem('wr_notif',JSON.stringify(NOTIF)); if(isLive()&&SUPA&&SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'notif_templates',value:NOTIF})}); }catch(e){ toast('Saved locally; DB sync failed: '+e.message,true); return; } } }
 async function renderNotif(){ await loadNotif();
-  $('cp').innerHTML=`<div class="title">Notifications</div><div class="sp"></div><span style="color:var(--muted)">edit the message content sent by n8n</span>`;
+  $('cp').innerHTML=`<div class="title">Notifications <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div><div class="sp"></div><span style="color:var(--muted)">edit the message content sent by n8n</span>`;
   let h=`<div class="repcard"><div class="hint">These templates are saved to Supabase (<code>app_config → notif_templates</code>) so your n8n workflows can read them. Keep the <code>{placeholders}</code> — n8n fills them in at send time.</div>`;
   Object.keys(NOTIF_DEFAULTS).forEach(k=>{ const d=NOTIF_DEFAULTS[k]; const v=NOTIF[k]!=null?NOTIF[k]:d.text;
     h+=`<div style="margin-top:14px"><label style="font-weight:700">${esc(d.label)}</label><div class="mini" style="margin:2px 0 4px">placeholders: <code>${esc(d.ph)}</code></div>
@@ -1281,7 +1285,7 @@ async function resetNotif(){ if(!confirm('Reset all notification templates to de
 
 /* ===== Internal References (Administration → References) ===== */
 async function renderRefs(){
-  $('cp').innerHTML=`<div class="title">Internal References</div><button class="btn sec" onclick="renderRefs()">↻ Refresh</button><div class="sp"></div><span style="color:var(--muted)">numbering scheme &amp; live counters</span>`;
+  $('cp').innerHTML=`<div class="title">Internal References <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div><button class="btn sec" onclick="renderRefs()">↻ Refresh</button><div class="sp"></div><span style="color:var(--muted)">numbering scheme &amp; live counters</span>`;
   const dd=_mmddyyyy();
   const scheme=[
     ['Demand Plot — Raw',      'DP-'+dd+' [RAW] V01'],
@@ -1308,7 +1312,7 @@ async function renderRefs(){
 
 /* ===== Connection page (Administration → Connection) ===== */
 function renderConnection(){
-  $('cp').innerHTML=`<div class="title">Connection</div><div class="sp"></div><span style="color:var(--muted)">Supabase project &amp; sign-in</span>`;
+  $('cp').innerHTML=`<div class="title">Connection <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div><div class="sp"></div><span style="color:var(--muted)">Supabase project &amp; sign-in</span>`;
   const signed=!!(SUPA&&SUPA.token); const inp='width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--line);border-radius:6px;margin:4px 0 10px';
   $('content').innerHTML=`<div class="repcard" style="max-width:600px">
     <h3 style="margin:0 0 4px">Supabase project</h3>
@@ -1745,7 +1749,7 @@ async function bulkSubmit(){
 }
 function _bcrChanges(rq){ return Array.isArray(rq.changes)?rq.changes:(function(){try{return JSON.parse(rq.changes||'[]');}catch(e){return [];}})(); }
 async function renderApprovals(){
-  $('cp').innerHTML=`<div class="title">Approvals</div><button class="btn sec" onclick="renderApprovals()">↻ Refresh</button><div class="sp"></div><span style="color:var(--muted)">review &amp; apply pending bulk changes</span>`;
+  $('cp').innerHTML=`<div class="title">Approvals <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div><button class="btn sec" onclick="renderApprovals()">↻ Refresh</button><div class="sp"></div><span style="color:var(--muted)">review &amp; apply pending bulk changes</span>`;
   let reqs=[]; try{ reqs=await db.list('bulk_change_requests',{}); }catch(e){ $('content').innerHTML='<div class="repcard"><div class="empty">Run <code>wr_migration_bulk_approvals.sql</code> first, then refresh.</div></div>'; return; }
   const isAdmin=(typeof curRole==='function' && curRole()==='Admin');
   const pending=reqs.filter(r=>r.status==='pending').sort((a,b)=>String(b.requested_at||'').localeCompare(String(a.requested_at||'')));
@@ -2161,7 +2165,7 @@ function renderFieldAcl(){
   const sources=Object.keys(MODELS).filter(k=>MODELS[k].fields && !MODELS[k].special);
   if(!MODELS[faModel]||!MODELS[faModel].fields) faModel=sources[0];
   const m=MODELS[faModel];
-  $('cp').innerHTML=`<div class="title">Field Access</div><div class="sp"></div><span style="color:var(--muted)">hide or lock fields per role — every module</span>`;
+  $('cp').innerHTML=`<div class="title">Field Access <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div><div class="sp"></div><span style="color:var(--muted)">hide or lock fields per role — every module</span>`;
   let h=`<div class="repcard"><div class="repbar"><span>Module</span>
     <select onchange="faModel=this.value;renderFieldAcl()">${sources.map(k=>`<option value="${k}" ${k===faModel?'selected':''}>${MODELS[k].label}</option>`).join('')}</select>
     <button class="btn sm sec" onclick="resetFieldAcl()">↺ Reset to recommended</button>
@@ -2688,6 +2692,13 @@ async function renderDashboard(){
   const momUrgent=_momRows.slice().sort((a,b)=>a.cover-b.cover)[0];
   const belowReorder = ing.filter(active).filter(i=>!isSupplyItem(i)).filter(i=>{const oh=stock[i.sku]||0;const thr=+i.reorder_g||+i.par_g||0;return thr>0&&oh<thr;}).length
     + prod.filter(active).filter(p=>{const oh=stock[p.sku]||0;const thr=+p.par_packs||0;return thr>0&&oh<thr;}).length;
+  // Estimated value of the open PO pipeline (not yet received), valued at the vendor price if set, else historical price.
+  const _ingP={}; ing.forEach(i=>_ingP[i.sku]=(+i.moving_avg_cost_kg||+i.list_price_kg||0));   // covers raw + supplies
+  const _stkCost=_supplyCosts(ing).sticker; const _stkPO=new Set(po.filter(p=>_isStickerPO(p)).map(p=>p.po_ref));
+  let estPO=0, estPOcount=0;
+  po.forEach(p=>{ if(['received','cancelled'].includes(p.status)) return;
+    let v=0; (_lineByPo[p.po_ref]||[]).forEach(l=>{ let pr=(+l.price_kg||0)||_ingP[l.ingredient_sku]||0; if(!pr && _stkPO.has(p.po_ref)) pr=_stkCost; v+=(+l.ordered_kg||0)*pr; });
+    if(v>0){ estPO+=v; estPOcount++; } });
   const _sum=(a,f)=>a.reduce((s,x)=>s+(+f(x)||0),0);
   const q1o=_sum(_pol,l=>l.ordered_kg), q1r=_sum(_pol,l=>l.received_kg); const q1=q1o?Math.round(q1r/q1o*100):null;
   const q2=_sum(_bi,z=>z.actual_raw_g)-_sum(_bi,z=>z.expected_raw_g);
@@ -2711,7 +2722,7 @@ async function renderDashboard(){
   const kpi=(l,v,s,accent,go)=>`<div class="card kpi"${go?` onclick="${go}" style="cursor:pointer" title="Open ↗"`:''}><div class="l">${l}</div><div class="v${accent?' accent':''}">${v}</div><div class="s">${s||''}</div></div>`;
   const kpis = mh
     ? [kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units',true,"openModel('stock_balance')"),kpi('Finished SKUs',fgSkus,'with stock',false,"openModel('stock_balance')"),kpi('Ingredients',rawItems,'with stock',false,"openModel('ingredients')"),kpi('Items to reorder',reorder.length,'labels below par',false,"gotoReport('lowstock')"),kpi('Open POs',openPo,po.length+' total',false,"openModel('purchase_orders')"),kpi('Supplies tracked',supItems,'consumables',false,"openModel('supplies_reorder')")].join('')
-    : [kpi('Total inventory value',wpeso(fgVal+rawVal),'finished + raw',true,"openModel('stock_balance')"),kpi('Finished goods · Pasig',wpeso(fgVal),Math.round(packs).toLocaleString()+' packs · '+fgSkus+' SKUs',false,"openModel('stock_balance')"),kpi('Raw materials · Bulacan',wpeso(rawVal),rawItems+' ingredients',false,"openModel('ingredients')"),kpi('Payables',wpeso(payables),payCount+' unpaid PO'+(payCount===1?'':'s'),false,"gotoReport('payables')"),kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units',false,"openModel('stock_balance')"),kpi('Items to reorder',reorder.length,'labels below par',false,"gotoReport('lowstock')"),kpi('Supplies tracked',supItems,'consumables',false,"openModel('supplies_reorder')")].join('');
+    : [kpi('Total inventory value',wpeso(fgVal+rawVal),'finished + raw',true,"openModel('stock_balance')"),kpi('Finished goods · Pasig',wpeso(fgVal),Math.round(packs).toLocaleString()+' packs · '+fgSkus+' SKUs',false,"openModel('stock_balance')"),kpi('Raw materials · Bulacan',wpeso(rawVal),rawItems+' ingredients',false,"openModel('ingredients')"),kpi('Payables',wpeso(payables),payCount+' unpaid PO'+(payCount===1?'':'s'),false,"gotoReport('payables')"),kpi('Open PO pipeline',wpeso(estPO),estPOcount+' PO'+(estPOcount===1?'':'s')+' · at est. price',false,"openModel('purchase_orders')"),kpi('Items to reorder',reorder.length,'labels below par',false,"gotoReport('lowstock')"),kpi('Supplies tracked',supItems,'consumables',false,"openModel('supplies_reorder')")].join('');
   const donutBody = (!mh && famArr.length)? wrDonut(famArr) : (mh? '<div class="hint">Value hidden for your role. Packs on hand: <b>'+Math.round(packs).toLocaleString()+'</b></div>' : '<div class="hint">No finished-goods value yet — seed or receive stock to see this.</div>');
   const siteBody = (!mh && siteArr.length)? wrHbars(siteArr,WBRAND,wpeso) : '<div class="hint">Value hidden for your role.</div>';
   const rawlineBody = wrLine(WR_HISTORY.raw_trend,'date','kg',WSER[4])+'<p class="note">Weekly commissary counts, Feb–Jul 2026 (historical).</p>';
@@ -3592,7 +3603,7 @@ async function recipeCostHtml(){
 const COST_MODEL_DEFAULT={ target_gm:0.30,
   perGram:{ electricity:0.0186667, water:0.0006667, transport:0.0058267 },   // ₱ per gram
   labor:{ plain:0.0245, debone:0.147, butcher:0.0119617, sousvide:0.0012 },  // ₱ per gram
-  pack:{ vacuum:3.57, ecobag:12, thermal:13, sticker:5.5 },                  // ₱/pack fallback if not in Supplies
+  pack:{ vacuum:3.57, ecobag:12, thermal:13, sticker:1.375 },                // ₱/pack fallback if not in Supplies (sticker = ₱1.375 each)
   pct:{ transaction:0.06, marketing:0.05 } };
 function _cmMigrate(m){ // tolerate old {fixed,pct[]} shape
   if(!m||m.perGram) return m||JSON.parse(JSON.stringify(COST_MODEL_DEFAULT));
@@ -3640,7 +3651,7 @@ function marginRowsFor(prods,boms,ings){
 }
 async function renderMargin(){
   await loadCostModel();
-  $('cp').innerHTML=`<div class="title">Gross Margin</div><button class="btn" onclick="renderMargin()">↻ Recompute</button><div class="sp"></div><span style="color:var(--muted)">BOM raw + variable process/packaging → GP% → suggested price</span>`;
+  $('cp').innerHTML=`<div class="title">Gross Margin <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div><button class="btn" onclick="renderMargin()">↻ Recompute</button><div class="sp"></div><span style="color:var(--muted)">BOM raw + variable process/packaging → GP% → suggested price</span>`;
   if(typeof moneyHidden==='function' && moneyHidden()){ $('content').innerHTML='<div class="repcard"><div class="hint">Cost &amp; margin are hidden for your role.</div></div>'; return; }
   let prods=[],boms=[],ings=[]; try{ prods=await db.list('products',{}); boms=await db.list('bom_lines',{}); ings=await listIngredients(); }catch(e){}
   const pg=COST_MODEL.perGram||{}, lab=COST_MODEL.labor||{}, pct=COST_MODEL.pct||{}, tgm=+COST_MODEL.target_gm||0;
@@ -3740,7 +3751,7 @@ function momQuad(mom, cover, hasSales){
 }
 
 async function renderMomentum(){
-  $('cp').innerHTML=`<div class="title">Sales Momentum</div><button class="btn" onclick="renderMomentum()">↻ Refresh</button>
+  $('cp').innerHTML=`<div class="title">Sales Momentum <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div><button class="btn" onclick="renderMomentum()">↻ Refresh</button>
     <button class="btn sec" onclick="momImport()">📥 Import / paste sales</button>
     <span class="mini" style="margin-left:8px">Group <select onchange="MOM_GROUP=this.value;renderMomentum()">
       <option value="" ${MOM_GROUP===''?'selected':''}>None</option>
@@ -4151,7 +4162,7 @@ async function openingDoImport(){ if(!_opReport)return;
 
 /* ===== Supplies Reorder → manual PO (PAR − stock, in each item's unit) ===== */
 async function renderSuppliesReorder(){
-  $('cp').innerHTML=`<div class="title">Supplies Reorder</div>
+  $('cp').innerHTML=`<div class="title">Supplies Reorder <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="wfbtn" onclick="generateSuppliesPO()">🧾 Generate Supplies PO</button>
     <div class="sp"></div><span style="color:var(--muted)">reorder qty = PAR − current stock</span>`;
   const ings=await listIngredients();
@@ -4375,7 +4386,18 @@ const KB = {
   stock_balance:{d:'Live on-hand and value per item/location, computed from the ledger.',h:['Read-only — see current stock at Bulacan & Pasig','Group by location or item'],l:['A database VIEW: SUM(qty) and SUM(qty×unit_cost) from movements','Updates the instant any document posts']},
   variance_log:{d:'The resolution center for every reconciliation gap (3-way match, usage, yield, transfer, delivery, shrinkage).',h:['Open a variance to read the gap','Add a resolution note','Use status buttons: Mark Explained → Resolve'],l:['Each check writes here when a gap exceeds tolerance','Stamped with expected/actual, ₱ gap, location and responsible user','This is your single source of truth for leaks']},
   mrp:{d:'Weekly replenishment planner: demand + lead time + PAR → order qty, then auto-create POs grouped by supplier.',h:['Enter demand per product (or Import/Upload by SKU, or Sync from Sheets)','Adjust any line with Manual ±kg','💾 Save plan to keep it; 🧾 Generate Draft POs to order'],l:['Order = weekly need + PAR + lead-time buffer − on-hand, ± manual, rounded up to Min Order','Raw need = usable ÷ yield; lead buffer = need × (lead days ÷ 7); order-by = plan date − lead','Auto-PO groups by each ingredient\'s DEFAULT supplier — when 2 suppliers exist, the default wins']},
-  reporting:{d:'Build a report from any table — pick a source, group-by dimension and a measure.',h:['Choose Source → Measure (count/sum/avg) → Group by','Read the ranked bars','★ Save to keep a report for reuse'],l:['A pivot: groups rows and aggregates a numeric measure','Saved reports are stored per browser','For heavy BI, Metabase runs on the same Supabase database']},
+  reporting:{d:'Standard reports (the 4 Checks + operational reports) and a custom pivot builder. The Checks trace one unit of value across the whole chain; the rest are day-to-day triggers.',h:['⭐ Standard: tap a card — Checks (ordered→received→paid, usage/yield, transfer, delivery), plus Low stock, Supplier payables, Expiring soon (FEFO), COGS drift, Gross margin, Sales momentum','🛠 Custom: choose Source → Measure (count/sum/avg) → Group by, then ★ Save','Most report rows are clickable — open the underlying item, PO or product'],l:['Check 1 = 3-way match (ordered vs received vs paid); Check 2/3 = ingredient usage & yield; Check 4 = produced→sent→received; Check 5 = delivery','Low stock / payables / expiring are operational; the variance log is where you close each gap','Custom reports are pivots saved per browser; for heavy BI, Metabase runs on the same Supabase database']},
+  supplies:{d:'Kitchen supplies — packaging, labels/stickers and consumables (vacuum bags, ecobags, thermal pouches). Split out from food ingredients.',h:['Add/edit a supply with its unit cost, PAR and reorder point','Keep "Kitchen supply" ticked so it stays out of the Ingredients list','Group by Type; reorder via Purchasing → Supplies Reorder'],l:['Shares the ingredients table (is_supply = true) so stock & receiving still work','Cost/unit feeds Gross Margin packaging and PO value estimates','Received & counted in whole units (not kg)']},
+  margin:{d:'Live gross margin per product: BOM raw cost + variable process & packaging + fees → GP% and a suggested price at your target.',h:['Edit the global rate model (per-gram utilities, labor, packaging, fees, target GM) then 💾 Save','Set each product’s Cost profile tab: deboning / butcher / sous-vide / ecobag / thermal','Tap a row to open the product; ⬆ Write total cost pushes COGS to products'],l:['Raw = BOM grams × ingredient moving-average cost (falls back to processed/list price)','Process = (electricity+water+transport) per gram + labor (plain OR deboning) ± butcher ± sous-vide','Packaging = vacuum + sticker + ecobag + thermal, pulled from Kitchen Supplies costs','Fees = (transaction+marketing) % of price; Suggested = fixed cost ÷ (1 − target − fees%)','Rates persist in Supabase (app_settings.cost_model) — shared with the whole team']},
+  momentum:{d:'Reads Shopify rolling sales (30/60/90/120 days) against live stock to show what to make now vs what’s overstocked.',h:['📊 Runway view: days of stock left per product, most urgent first','🎯 Quadrant view: momentum × stock for a two-axis read','Group by family or priority; 📥 Import/paste sales; tap a row to open the product'],l:['Momentum × = recent 30-day daily rate ÷ 120-day average (>1 = accelerating)','Days of cover = current stock ÷ recent daily rate','Stockout risk = low cover + steady/rising demand; overstock = high cover + slowing','Fed hourly from the “90-120 Day Demand” sheet into the sales_momentum table']},
+  supplies_reorder:{d:'Supplies below their PAR, with the quantity to reorder, ready to turn into a supplier PO.',h:['Review items below PAR (reorder = PAR − on hand)','🧾 Generate Supplies PO — one draft per supplier, ready to send','Set each supply’s PAR & reorder in Kitchen Supplies'],l:['Simple PAR rule — supplies have no recipe so they aren’t in MRP','Reorder qty is in the item’s own unit','Generated POs are confirmed and priced at the supply’s unit cost']},
+  prodplan:{d:'Plan and confirm a production run — good packs per product, then the actual raw used and processed made.',h:['Add products + Good packs (target/remaining come from the latest demand plot)','✅ Confirm production → enter actual raw / processed / live yield','🔪 Log processing to convert raw → processed ahead of time'],l:['Posting deducts raw, adds processed, runs the mix and outputs finished packs','Best-before auto-stamps = production date + the product’s shelf-life days','Real yield (made ÷ raw) is recorded on the batch and drives the usage report']},
+  approvals:{d:'Review and approve bulk-edit change requests submitted by non-admin users.',h:['Open a pending request to see the exact field changes','✓ Approve & apply writes the changes','✕ Reject with a reason'],l:['Non-admin bulk edits queue here instead of writing directly','Approving applies every change atomically','Recent decisions are logged; Admin only']},
+  connection:{d:'Connect the app to your Supabase project (LIVE) or run on local demo data.',h:['Paste your Supabase URL + anon key, or sign in','Green LIVE = connected; DEMO = local sample data','Sign out to switch projects'],l:['The anon key is safe in the client — RLS protects the data','Signed-in requests use your user token','Demo data lives only in this browser']},
+  fieldacl:{d:'Hide or lock specific fields (like cost) per role.',h:['Pick a model and field','Set hide / read-only per role','Save — it applies on the next render'],l:['Controls what each role sees in lists and forms','Hiding cost fields also hides margin & value figures for that role','App-level control; enforce hard security with Supabase RLS']},
+  refs:{d:'The numbering scheme and live counters for every document type (DP, PO, DR, RR, PR, WI).',h:['Review the current counter per document type','Adjust a prefix/format if you need to'],l:['References are assigned at SAVE (not on open) so numbers aren’t burned by discarded drafts','Format: PREFIX-MMDDYYYY [SCOPE].Vxx']},
+  notif:{d:'Edit the alert message templates sent to Telegram / email for each event.',h:['Pick an event (PO confirmed, mention, record done…)','Edit its template with {placeholders}','Save'],l:['Templates are filled with the record’s data at send time','Delivery runs through your automations (Apps Script / n8n)']},
+  cleanser:{d:'Admin tools: upload opening balances, back up & restore your data, and wipe test transactions.',h:['📥 Upload opening balances (day-1 stock, auto-valued)','💾 Backup & Restore — download a JSON snapshot or restore to roll back','🧹 Wipe test transactions (type-to-confirm)'],l:['Opening balances post as opening ledger entries, valued from master prices','Backup captures all live tables; restore replaces current data','Always take a backup before any experiment']},
   users:{d:'Manage users, roles, and which modules each role can see.',h:['Add users and assign a role','Tick the role → module matrix to control navigation','Switch the acting user from the top bar'],l:['This governs the app menus only','Real security is enforced in Supabase with RLS + Auth (ask for the SQL)']},
   studio:{d:'Customize the app without code — relabel fields, show/hide columns, add custom & formula fields.',h:['Pick a model','Rename labels or toggle "show in list"','Add a custom field, or a formula field like list_price_kg*1.12'],l:['Changes are saved to this browser and applied on load','Formula fields are read-only, computed over the record','DB-level defaults/automation are done in Supabase SQL']},
   automations:{d:'One-stop hub for the n8n-powered integrations (Sheets, Drive, Shopify, Telegram, MRP schedule).',h:['Toggle an automation on','Paste its webhook / sheet / folder URL','Save — the workflow runs in n8n'],l:['This stores config; the actual workflows live in n8n','The Drive folder here powers attachment links across records']},
