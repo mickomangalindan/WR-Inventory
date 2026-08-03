@@ -299,9 +299,9 @@
 <script>
 /* ============================ CONFIG / METADATA ============================ */
 const MODULES = [
-  {id:'master', label:'Master Data', items:['suppliers','ingredients','products']},
+  {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
   {id:'plan',   label:'Planning',    items:['mrp']},
-  {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_po']},
+  {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
   {id:'analytics', label:'Analytics', items:['reporting','margin','momentum']},
@@ -320,8 +320,9 @@ const MODELS = {
       {n:'dp_pct',l:'Downpayment %',t:'number'},{n:'receiving_pct',l:'On-receiving %',t:'number'},
       {n:'term_pct',l:'Term %',t:'number'},{n:'term_days',l:'Term (days)',t:'number'},
       {n:'shopee',l:'Shopee',t:'text'},{n:'website',l:'Website',t:'text'},{n:'fb_page',l:'FB page',t:'text'},
+      {n:'sells_type',l:'Sells (type)',t:'text',ro:true,virtual:true},
       {n:'notes',l:'Notes',t:'longtext'}],
-    list:['name','supplier_id','payment_term','delivery_days','min_order_kg','mobile'],
+    list:['name','sells_type','supplier_id','payment_term','delivery_days','min_order_kg'],
     groups:[['name','supplier_id','contact','mobile','c1_email','c1_viber'],['c2_name','c2_mobile','c2_email'],['payment_term','delivery_days','sells_by','min_order_kg','dp_pct','receiving_pct','term_pct','term_days','shopee','website','fb_page']],
     tabs:[{l:'🏢 Contacts', groups:[0,1]},{l:'🔗 Online & Terms', groups:[2]}],
     full:['notes'] },
@@ -343,13 +344,30 @@ const MODELS = {
       {n:'shelf_life_days',l:'Shelf life (d)',t:'number'},{n:'lead_time_days',l:'Lead time (d)',t:'number'},
       {n:'par_g',l:'Par / week (g)',t:'number'},{n:'reorder_g',l:'Reorder (g)',t:'number'},{n:'min_order_kg',l:'Min order (kg)',t:'number'},
       {n:'is_live_animal',l:'Live animal',t:'bool'},{n:'is_intermediate',l:'Intermediate',t:'bool'},
+      {n:'is_supply',l:'Kitchen supply (not a food ingredient)',t:'bool'},
       {n:'uom',l:'Unit / pack',t:'text'},
       {n:'notes',l:'Notes',t:'longtext'}],
     list:['name','category','raw_input','yield_pct','list_price_kg'],
     groups:[['sku','name','raw_input','processing_method','category','uom','source','storage','yield_pct','costing_override','approved_alt'],
             ['list_price_kg','price_kg_processed','price_g_raw','price_g_processed','moving_avg_cost_kg','supplier1','supplier2','supplier'],
-            ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','lead_time_days','shelf_life_days','is_live_animal','is_intermediate']],
+            ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','lead_time_days','shelf_life_days','is_live_animal','is_intermediate','is_supply']],
     tabs:[{l:'🥩 Item & yield', groups:[0]},{l:'₱ Costing', groups:[1]},{l:'⚙ Flags & stock', groups:[2]}],
+    full:['notes'] },
+
+  // Kitchen Supplies — a filtered view of the ingredients table (is_supply / supply-like category).
+  supplies:{ label:'Kitchen Supplies', icon:'🧴', name:'name', pk:'sku', archivable:true, srcTable:'ingredients', supplyModel:true,
+    fields:[
+      {n:'sku',l:'SKU',t:'text'},{n:'name',l:'Supply name',t:'text'},{n:'category',l:'Type',t:'text'},
+      {n:'storage',l:'Storage',t:'select',o:['Frozen','Refrigerated','Dry','Live']},
+      {n:'uom',l:'Unit',t:'text'},
+      {n:'list_price_kg',l:'Cost / unit (₱)',t:'currency'},
+      {n:'supplier',l:'Default supplier',t:'rel',rel:'suppliers'},{n:'supplier1',l:'Supplier 1',t:'text'},
+      {n:'par_g',l:'PAR (units)',t:'number'},{n:'reorder_g',l:'Reorder (units)',t:'number'},{n:'min_order_kg',l:'Min order',t:'number'},
+      {n:'lead_time_days',l:'Lead time (d)',t:'number'},{n:'is_supply',l:'Kitchen supply',t:'bool'},
+      {n:'notes',l:'Notes',t:'longtext'}],
+    list:['name','category','uom','list_price_kg','par_g','supplier'],
+    groups:[['sku','name','category','uom','storage'],['list_price_kg','supplier','supplier1'],['par_g','reorder_g','min_order_kg','lead_time_days','is_supply']],
+    tabs:[{l:'🧴 Item', groups:[0]},{l:'₱ & supplier', groups:[1]},{l:'⚙ Stock', groups:[2]}],
     full:['notes'] },
 
   products:{ label:'Products', icon:'📦', name:'name', pk:'sku', archivable:true,
@@ -364,14 +382,17 @@ const MODELS = {
       {n:'shelf_life_days',l:'Shelf life (days)',t:'number'},
       {n:'tot_cost_ref',l:'COGS ref (₱/pack)',t:'currency'},
       {n:'feeding_style',l:'Feeding style',t:'select',o:['Raw Feeding','Gently Cooked','BARF','PMR','Mix']},
+      {n:'cost_debone',l:'Labor: with deboning',t:'bool'},{n:'cost_butcher',l:'Add butcher charge',t:'bool'},
+      {n:'cost_sousvide',l:'Sous-vide',t:'bool'},{n:'cost_ecobag',l:'Ecobag',t:'bool'},{n:'cost_thermal',l:'Thermal pouch',t:'bool'},
       {n:'sticker_net',l:'Sticker — net weight',t:'text'},{n:'sticker_dimension',l:'Sticker — dimension',t:'text'},
       {n:'sticker_art_url',l:'Sticker — artwork link',t:'text'},{n:'sticker_supplier',l:'Sticker — supplier',t:'text'},
       {n:'sticker_bulacan_on_hand',l:'Labels — Bulacan on hand',t:'number'},{n:'sticker_bulacan_par',l:'Labels — Bulacan PAR',t:'number'},
       {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'}],
     list:['name','status','family','variant','pack_g','sell_price'],
     groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
+            ['cost_debone','cost_butcher','cost_sousvide','cost_ecobag','cost_thermal'],
             ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par']],
-    tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'🏷️ Stickers', groups:[3]}],
+    tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'💰 Cost profile', groups:[3]},{l:'🏷️ Stickers', groups:[4]}],
     o2m:{ field:'bom', model:'bom_lines', fk:'product_sku', label:'Recipe (BOM)',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ingredient_category',l:'Category',t:'text'},{n:'usable_g',l:'Grams/pack',t:'number'},{n:'pct_of_pack',l:'% of pack',t:'number'},{n:'has_bones',l:'Bones',t:'text'},{n:'method_override',l:'Method',t:'text'}] } },
 
@@ -394,7 +415,7 @@ const MODELS = {
       {n:'movement_type',l:'Type',t:'text'}],
     list:['created_at','movement_type','ref_sku','location_code','qty'], groups:[[],[]] },
 
-  stock_balance:{ label:'Live Stock', icon:'📈', name:'ref_sku', pk:'ref_sku', readonly:true, report:true,
+  stock_balance:{ label:'Live Stock', icon:'📈', name:'ref_sku', pk:'ref_sku', readonly:true, special:'livestock',
     fields:[{n:'kind',l:'Kind',t:'text'},{n:'ref_sku',l:'Item',t:'text'},{n:'location_code',l:'Location',t:'text'},
       {n:'on_hand',l:'On hand',t:'number'},{n:'stock_value',l:'Value',t:'currency'}],
     list:['ref_sku','location_code','on_hand','stock_value'], groups:[[],[]] },
@@ -493,13 +514,14 @@ async function sbAuth(email,password){
 const db = {
   async list(model, {search,groupBy,page,per}={}){
     const m=MODELS[model]||{};   // child models (bom_lines, po_lines) have no top-level entry
+    const T=m.srcTable||model;   // a model may read/write a shared physical table (e.g. supplies → ingredients)
     if(isLive()){
       let q='?select=*';
       if(search && m.name) q+='&'+m.name+'=ilike.*'+encodeURIComponent(search)+'*';
       q+='&limit='+(per||1000);
-      return await sb(model+q);
+      return await sb(T+q);
     } else {
-      let rows=[...(DEMO[model]||[])];
+      let rows=[...(DEMO[T]||[])];
       if(search && m.name) rows=rows.filter(r=>String(r[m.name]||'').toLowerCase().includes(search.toLowerCase()));
       return rows;
     }
@@ -509,16 +531,19 @@ const db = {
     return (DEMO[o2m.model]||[]).filter(r=>r[o2m.fk]===parentVal);
   },
   async create(model, rec){
-    if(isLive()) return (await sb(model, {method:'POST', body:JSON.stringify(rec)}))[0];
-    DEMO[model]=DEMO[model]||[]; rec.id=rec.id||('loc'+Date.now()+Math.floor(Math.random()*999)); DEMO[model].push(rec); return rec;
+    const T=(MODELS[model]&&MODELS[model].srcTable)||model;
+    if(isLive()) return (await sb(T, {method:'POST', body:JSON.stringify(rec)}))[0];
+    DEMO[T]=DEMO[T]||[]; rec.id=rec.id||('loc'+Date.now()+Math.floor(Math.random()*999)); DEMO[T].push(rec); return rec;
   },
   async update(model, pk, pkval, rec){
-    if(isLive()) return (await sb(model+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'PATCH', body:JSON.stringify(rec)}))[0];
-    const arr=DEMO[model]=DEMO[model]||[]; const i=arr.findIndex(r=>r[pk]===pkval); if(i>=0){arr[i]={...arr[i],...rec}; return arr[i];} return rec;
+    const T=(MODELS[model]&&MODELS[model].srcTable)||model;
+    if(isLive()) return (await sb(T+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'PATCH', body:JSON.stringify(rec)}))[0];
+    const arr=DEMO[T]=DEMO[T]||[]; const i=arr.findIndex(r=>r[pk]===pkval); if(i>=0){arr[i]={...arr[i],...rec}; return arr[i];} return rec;
   },
   async del(model, pk, pkval){
-    if(isLive()) return await sb(model+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'DELETE', prefer:'return=minimal'});
-    DEMO[model]=(DEMO[model]||[]).filter(r=>r[pk]!==pkval);
+    const T=(MODELS[model]&&MODELS[model].srcTable)||model;
+    if(isLive()) return await sb(T+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'DELETE', prefer:'return=minimal'});
+    DEMO[T]=(DEMO[T]||[]).filter(r=>r[pk]!==pkval);
   },
   async replaceChildren(o2m, parentVal, rows){
     if(isLive()){
@@ -539,6 +564,9 @@ function toast(m,err){const t=$('toast');t.className='toast show'+(err?' err':''
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 // safe href: only allow http(s)/mailto so a stored "javascript:" link can't run
 function safeUrl(u){ u=String(u==null?'':u).trim(); return /^(https?:|mailto:)/i.test(u)?u:'#'; }
+// Kitchen supply vs food ingredient. Explicit is_supply flag wins; else infer from category/name.
+function isSupplyItem(i){ if(!i) return false; if(typeof i.is_supply==='boolean') return i.is_supply;
+  return /supply|supplement|packag|consumable|sticker|label|plastic|pouch|vacuum|ecobag|thermal|\bbag\b|\bbox\b|tape|glove|tissue|towel/i.test(String(i.category||'')+' '+String(i.name||'')); }
 
 function renderSide(){
   let h=`<div class="mi ${state.model==='home'?'active':''}" onclick="openModel('home')" style="margin-top:6px"><span class="ic">🏠</span>Dashboard</div>`;
@@ -555,7 +583,17 @@ function setCrumb(extra){
   const link = (state.view==='form'&&!formIsNew) ? ` <span onclick="copyRecordLink()" title="Copy link to this record" style="cursor:pointer;color:var(--muted)">🔗</span>` : '';
   $('crumb').innerHTML = back+`<b>${m.label}</b>`+(extra?` / ${esc(extra)}`:'')+link;
 }
-const DEFAULT_GROUP={ products:'family', ingredients:'category' };   // master lists open grouped, count-sheet style
+const DEFAULT_GROUP={ products:'family', ingredients:'category', supplies:'category', suppliers:'sells_type' };   // master lists open grouped, count-sheet style
+// Tag each supplier row with the ingredient category it mainly supplies (for Group By).
+async function _tagSupplierTypes(supRows){
+  let ings=[]; try{ ings=await db.list('ingredients',{}); }catch(e){}
+  const byName={};
+  ings.forEach(i=>{ const cat=(String(i.category||'').trim())||'Other';
+    [i.supplier,i.supplier1,i.supplier2].forEach(s=>{ s=String(s||'').trim(); if(!s) return; (byName[s]=byName[s]||{}); byName[s][cat]=(byName[s][cat]||0)+1; }); });
+  supRows.forEach(r=>{ const nm=String(r.name||'').trim(); const cnts=byName[nm];
+    if(!cnts){ r.sells_type='— unassigned'; return; }
+    const keys=Object.keys(cnts).sort((a,b)=>cnts[b]-cnts[a]); r.sells_type=keys[0]; });
+}
 function openModel(model){
   if(model==='home'){ state={model:'home',view:'home',search:'',groupBy:'',recId:null}; renderSide(); renderDashboard(); return; }
   const m=MODELS[model];
@@ -586,6 +624,7 @@ function route(){
     if(m.special==='approvals') return renderApprovals();
     if(m.special==='margin') return renderMargin();
     if(m.special==='momentum') return renderMomentum();
+    if(m.special==='livestock') return renderLiveStock();
     if(m.special==='selftest') return renderSelfTest();
   }
   setCrumb();
@@ -662,6 +701,11 @@ async function renderList(){
   catch(e){ $('content').innerHTML=`<div class="empty">⚠ ${esc(e.message)}<br><br>Check your Supabase connection / RLS.</div>`; return; }
   let archivedCount=0;
   if(m.archivable && !state.showArchived){ archivedCount=rows.filter(r=>r.active===false).length; rows=rows.filter(r=>r.active!==false); }
+  // Ingredients hides kitchen supplies; the Supplies module shows only them (same table).
+  if(state.model==='ingredients') rows=rows.filter(r=>!isSupplyItem(r));
+  else if(m.supplyModel) rows=rows.filter(isSupplyItem);
+  // Suppliers: tag each with the ingredient type it mainly sells, so they can be grouped by it.
+  if(state.model==='suppliers'){ try{ await _tagSupplierTypes(rows); }catch(e){} }
   state._rows=rows; const bulk=!m.readonly;
   const cols=m.list.map(n=>m.fields.find(f=>f.n===n)).filter(f=>f && fieldMode(state.model,f.n)!=='hide');
   // Purchase Orders: append Total kg + Est. value columns, summed from each PO's lines.
@@ -730,7 +774,7 @@ async function openForm(idEnc){
   formIsNew = !idEnc; formTab=0;
   if(idEnc){ const pkval=decodeURIComponent(idEnc);
     const rows=await listForModel(state.model); formRec={...(rows.find(r=>String(r[m.pk])===pkval)||{})};
-  } else { formRec={}; if(m.status) formRec[m.status.f]=m.status.stages[0]; if(m.fields.find(f=>f.n==='order_date')) formRec.order_date=todayISO(); if(m.fields.find(f=>f.n==='transfer_date')) formRec.transfer_date=todayISO();
+  } else { formRec={}; if(m.supplyModel) formRec.is_supply=true; if(m.status) formRec[m.status.f]=m.status.stages[0]; if(m.fields.find(f=>f.n==='order_date')) formRec.order_date=todayISO(); if(m.fields.find(f=>f.n==='transfer_date')) formRec.transfer_date=todayISO();
     // NOTE: document reference numbers are now assigned at SAVE (see saveForm), not here —
     // opening then discarding a new document no longer burns a sequence number.
   }
@@ -962,6 +1006,86 @@ async function renderReport(){
     <div class="pager">${data.length} groups · ${rows.length} records</div></div>`;
 }
 function repSet(k,v){ repCfg[k]=v; renderReport(); }
+
+/* ===================== Live Stock — movement reconciliation, grouped, actionable =====================
+   Beginning (opening) + Received − Used + Produced ± Transfers ± Adjustments = Ending, per item,
+   grouped like the count sheet (raw + its processed form together, products by family, supplies apart).
+   Ending equals the ledger SUM(qty), so this both explains and cross-checks on-hand. */
+let LS_LOC='all', LS_ACT=false;
+async function renderLiveStock(){
+  $('cp').innerHTML=`<div class="title">Live Stock <span onclick="openKB('stock_balance')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <button class="btn" onclick="renderLiveStock()">↻ Recompute</button>
+    <span class="mini" style="margin-left:8px">Site <select onchange="LS_LOC=this.value;renderLiveStock()">
+      <option value="all"${LS_LOC==='all'?' selected':''}>All</option>
+      <option value="bulacan"${LS_LOC==='bulacan'?' selected':''}>Bulacan</option>
+      <option value="pasig"${LS_LOC==='pasig'?' selected':''}>Pasig</option></select></span>
+    <label class="mini" style="margin-left:8px"><input type="checkbox" ${LS_ACT?'checked':''} onchange="LS_ACT=this.checked;renderLiveStock()"> Needs action only</label>
+    <div class="sp"></div><span style="color:var(--muted)">begin + in − used + produced ± moves = ending</span>`;
+  let mov=[],ings=[],prods=[]; try{mov=await db.list('inventory_movements',{per:100000});}catch(e){} try{ings=await listIngredients();}catch(e){} try{prods=await db.list('products',{});}catch(e){}
+  const im={}; ings.forEach(i=>im[i.sku]=i); const pm={}; prods.forEach(p=>pm[p.sku]=p);
+  const _bs={},_bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
+  const matOf=(i)=>{ if(!i||!i.is_intermediate) return (i&&i.name)||''; const p=_procParent(i,_bs,_bn); return (p&&p.name)||i.name; };
+
+  const acc={};
+  mov.forEach(v=>{ const loc=v.location_code||'bulacan'; if(LS_LOC!=='all' && loc!==LS_LOC) return;
+    const sku=v.ref_sku; if(!sku) return; const key=sku+'|'+(LS_LOC==='all'?'*':loc);
+    const a=acc[key]||(acc[key]={sku,begin:0,recv:0,prod:0,cons:0,tf:0,adj:0,val:0});
+    const q=+v.qty||0, t=v.movement_type||'';
+    if(t==='opening') a.begin+=q;
+    else if(t==='receipt') a.recv+=q;
+    else if(t==='batch_output'||t==='processing_in') a.prod+=q;
+    else if(t==='issue_to_batch'||t==='processing_out') a.cons+=q;
+    else if(t==='transfer_in'||t==='transfer_out') a.tf+=q;
+    else a.adj+=q;   // count_adjust and anything else nets here
+    a.val += q*(+v.unit_cost||0);
+  });
+
+  let rows=Object.values(acc).map(a=>{ const end=a.begin+a.recv+a.prod+a.cons+a.tf+a.adj;
+    const isProd=!!pm[a.sku]; const it=isProd?pm[a.sku]:(im[a.sku]||{}); const isSup=!isProd&&isSupplyItem(it);
+    const div=(isProd||isSup)?1:1000; const unit=isProd?'packs':(isSup?(it.uom||'units'):'kg');
+    const grp=isProd?('📦 '+(it.family||'Other')):(isSup?'🧴 Kitchen Supplies':('🥩 '+(matOf(it)||a.sku)));
+    const name=(it.name||a.sku)+((!isProd&&!isSup&&it.is_intermediate)?' — processed':'');
+    const par=isProd?(+it.par_packs||0):(+it.reorder_g||+it.par_g||0);
+    const below=par>0 && end<par, neg=end< -0.0001;
+    return {sku:a.sku, name, grp, unit, div, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf, adj:a.adj, end, value:a.val, par, below, neg, gcat:isProd?1:(isSup?2:0)};
+  }).filter(r=> r.begin||r.recv||r.prod||r.cons||r.tf||r.adj);
+  if(LS_ACT) rows=rows.filter(r=>r.below||r.neg);
+
+  const nBelow=rows.filter(r=>r.below).length, nNeg=rows.filter(r=>r.neg).length;
+  const totVal=Object.values(acc).reduce((s,a)=>s+a.val,0);
+  const mh=(typeof moneyHidden==='function'&&moneyHidden());
+  const kpi=(l,val,s,col)=>`<div class="kpi"><div class="l">${l}</div><div class="v"${col?` style="color:${col}"`:''}>${val}</div><div class="s">${s||''}</div></div>`;
+  let h=`<div class="kpirow">
+    ${kpi('Items in stock', rows.length, LS_LOC==='all'?'all sites':LS_LOC)}
+    ${kpi('⚠ Below reorder/PAR', nBelow, 'need replenishing', nBelow?'var(--earth,#b5762a)':'')}
+    ${kpi('🔴 Negative', nNeg, 'ledger to investigate', nNeg?'var(--danger)':'')}
+    ${mh?'':kpi('Stock value', fmt(totVal), 'at moving-avg cost', 'var(--berry)')}
+  </div>`;
+
+  const qf=(v,div)=> div===1000? (Math.round(v/1000*100)/100).toLocaleString('en-PH',{maximumFractionDigits:2}) : num(Math.round(v));
+  // group like the count sheet
+  const groups={}; rows.forEach(r=>{ (groups[r.grp]=groups[r.grp]||[]).push(r); });
+  const gkeys=Object.keys(groups).sort((a,b)=>{ const ga=groups[a][0].gcat-groups[b][0].gcat; return ga||a.localeCompare(b); });
+  h+=`<div class="repcard"><div style="overflow-x:auto"><table><thead><tr>
+    <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
+  if(!rows.length) h+=`<tr><td colspan="${mh?10:11}" class="empty">${LS_ACT?'Nothing needs action ✅':'No stock movements yet.'}</td></tr>`;
+  gkeys.forEach(g=>{ const list=groups[g].sort((a,b)=>a.name.localeCompare(b.name));
+    const gval=list.reduce((s,r)=>s+r.value,0);
+    h+=`<tr style="background:#f6f2ea"><td colspan="${mh?9:9}"><b>${esc(g)}</b> <span class="mini">· ${list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
+    list.forEach(r=>{ const endCol=r.neg?'var(--danger)':(r.below?'var(--earth,#b5762a)':'var(--ink)');
+      const flag=r.neg?'<span style="color:var(--danger);font-weight:700">🔴 negative</span>':(r.below?'<span style="color:var(--earth,#b5762a);font-weight:700">⚠ reorder</span>':'<span class="mini" style="color:var(--ok)">ok</span>');
+      const cl=r.below||r.neg?' style="cursor:pointer"':' style="cursor:pointer"';
+      const model=pm[r.sku]?'products':'ingredients';
+      h+=`<tr${cl} onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open item">
+        <td>${esc(r.name)}</td><td class="mini">${esc(r.unit)}</td>
+        <td class="num">${qf(r.begin,r.div)}</td><td class="num">${r.recv?qf(r.recv,r.div):'—'}</td><td class="num">${r.prod?qf(r.prod,r.div):'—'}</td>
+        <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td><td class="num">${r.tf?qf(r.tf,r.div):'—'}</td><td class="num">${r.adj?qf(r.adj,r.div):'—'}</td>
+        <td class="num" style="color:${endCol}"><b>${qf(r.end,r.div)}</b></td>${mh?'':`<td class="num">${fmt(r.value)}</td>`}<td>${flag}</td></tr>`; });
+  });
+  h+=`</tbody></table></div>
+    <div class="hint" style="margin-top:8px"><b>Ending = Begin + In + Prod − Used ± Transfer ± Adjust</b>, straight from the ledger — so it both explains and equals current on-hand. Ingredients show in <b>kg</b>, finished goods in <b>packs</b>, supplies in their unit. Rows open the item; <b style="color:var(--earth,#b5762a)">⚠ reorder</b> = at/below reorder or PAR, <b style="color:var(--danger)">🔴 negative</b> = a ledger gap to fix. ${LS_LOC==='all'?'Showing both sites combined — switch Site to split Bulacan vs Pasig.':''}</div></div>`;
+  $('content').innerHTML=h;
+}
 
 /* -------- settings / connection -------- */
 function openSettings(){
@@ -2512,8 +2636,8 @@ async function renderDashboard(){
   const fgSkus=new Set(stockRows.filter(s=>s.kind==='product'&&(+s.on_hand||0)!==0).map(s=>s.ref_sku)).size;
   const rawItems=new Set(stockRows.filter(s=>s.kind==='ingredient'&&(+s.on_hand||0)!==0).map(s=>s.ref_sku)).size;
   const supItems=ing.filter(active).filter(i=>(''+(i.category||'')).toLowerCase()==='supplies').length;
-  const costOf=p=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=ing.find(i=>i.sku===b.ingredient_sku)||{}; const y=(+it.yield_pct||100)/100; c+=((+b.usable_g||0)/(y||1))/1000*(+it.list_price_kg||0); }); return c; };
-  const withMargin=prod.filter(active).map(p=>{ const c=costOf(p), sell=+p.sell_price||0; return {name:p.name,cost:c,sell,margin:sell?((sell-c)/sell*100):null}; });
+  await loadCostModel();
+  const withMargin=marginRowsFor(prod.filter(active),boms,ing).map(r=>({name:r.p.name,cost:r.total,sell:r.sell,margin:r.sell?r.gp*100:null}));
   const topMargin=withMargin.filter(x=>x.margin!=null&&x.cost>0).sort((a,b)=>b.margin-a.margin).slice(0,8);
   const thinMargin=withMargin.filter(x=>x.margin!=null&&x.cost>0).sort((a,b)=>a.margin-b.margin).slice(0,8);
   const openVars=vars.filter(v=>v.status==='open');
@@ -3419,49 +3543,97 @@ async function recipeCostHtml(){
   return h;
 }
 /* ============ Gross Margin — full cost per pack (raw + other costs) → GP% → suggested price ============ */
+// Per-pack gross-margin model (from the Product Gross Profit Simulation). Rates are global;
+// per-product toggles (debone / butcher / sous-vide / ecobag / thermal) live on each product.
 const COST_MODEL_DEFAULT={ target_gm:0.30,
-  fixed:[ {k:'overhead',l:'Overhead',v:3.68},{k:'vacuum',l:'Vacuum bag',v:2.88},{k:'sticker',l:'Sticker',v:5.5},
-          {k:'ecobag',l:'Eco bag',v:18},{k:'thermal',l:'Thermal pouch',v:13},{k:'electricity',l:'Electricity',v:2.8},
-          {k:'water',l:'Water',v:0.1},{k:'sousvide',l:'Sous-vide elec.',v:0.6},{k:'transport',l:'Transport to Pasig',v:0.87} ],
-  pct:[ {k:'marketing',l:'Marketing fee',v:0.05},{k:'transaction',l:'Transaction fee',v:0.06} ] };
-let COST_MODEL=(function(){ try{ return JSON.parse(localStorage.getItem('wr_cost_model')||'null')||JSON.parse(JSON.stringify(COST_MODEL_DEFAULT)); }catch(e){ return JSON.parse(JSON.stringify(COST_MODEL_DEFAULT)); } })();
+  perGram:{ electricity:0.0186667, water:0.0006667, transport:0.0058267 },   // ₱ per gram
+  labor:{ plain:0.0245, debone:0.147, butcher:0.0119617, sousvide:0.0012 },  // ₱ per gram
+  pack:{ vacuum:3.57, ecobag:12, thermal:13, sticker:5.5 },                  // ₱/pack fallback if not in Supplies
+  pct:{ transaction:0.06, marketing:0.05 } };
+function _cmMigrate(m){ // tolerate old {fixed,pct[]} shape
+  if(!m||m.perGram) return m||JSON.parse(JSON.stringify(COST_MODEL_DEFAULT));
+  return JSON.parse(JSON.stringify(COST_MODEL_DEFAULT)); }
+let COST_MODEL=(function(){ try{ return _cmMigrate(JSON.parse(localStorage.getItem('wr_cost_model')||'null')); }catch(e){ return JSON.parse(JSON.stringify(COST_MODEL_DEFAULT)); } })();
 async function loadCostModel(){ if(window._costModelLoaded||!isLive()) return; window._costModelLoaded=true;
-  try{ const r=await sb('app_settings?select=value&key=eq.cost_model'); if(r&&r[0]&&r[0].value){ COST_MODEL=Object.assign({},COST_MODEL,r[0].value); localStorage.setItem('wr_cost_model',JSON.stringify(COST_MODEL)); } }catch(e){} }
+  try{ const r=await sb('app_settings?select=value&key=eq.cost_model'); if(r&&r[0]&&r[0].value&&r[0].value.perGram){ COST_MODEL=Object.assign(JSON.parse(JSON.stringify(COST_MODEL_DEFAULT)),r[0].value); localStorage.setItem('wr_cost_model',JSON.stringify(COST_MODEL)); } }catch(e){} }
 function saveCostModel(){ localStorage.setItem('wr_cost_model',JSON.stringify(COST_MODEL));
   if(isLive()){ sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'cost_model',value:COST_MODEL})}).catch(()=>{}); }
   toast('Cost model saved'); renderMargin(); }
-function cmSetFixed(k,v){ const f=COST_MODEL.fixed.find(x=>x.k===k); if(f) f.v=+v||0; }
-function cmSetPct(k,v){ const f=COST_MODEL.pct.find(x=>x.k===k); if(f) f.v=(+v||0)/100; }
+function cmSetPG(k,v){ (COST_MODEL.perGram=COST_MODEL.perGram||{})[k]=+v||0; }
+function cmSetLab(k,v){ (COST_MODEL.labor=COST_MODEL.labor||{})[k]=+v||0; }
+function cmSetPack(k,v){ (COST_MODEL.pack=COST_MODEL.pack||{})[k]=+v||0; }
+function cmSetPct(k,v){ (COST_MODEL.pct=COST_MODEL.pct||{})[k]=(+v||0)/100; }
 function cmSetTarget(v){ COST_MODEL.target_gm=(+v||0)/100; }
 function cmReset(){ COST_MODEL=JSON.parse(JSON.stringify(COST_MODEL_DEFAULT)); renderMargin(); }
+
+// Resolve packaging / sticker unit-costs from the Kitchen Supplies list (by name), falling back to model rates.
+function _supplyCosts(ings){
+  const pk=COST_MODEL.pack||{};
+  const find=re=>{ const it=(ings||[]).find(i=>isSupplyItem(i)&&re.test(String(i.name||''))); return it?(+it.list_price_kg||+it.moving_avg_cost_kg||0):null; };
+  const pick=(re,fb)=>{ const v=find(re); return v==null?(+fb||0):v; };
+  return { vacuum:pick(/vacuum/i,pk.vacuum), ecobag:pick(/eco\s*-?\s*bag|ecobag/i,pk.ecobag),
+           thermal:pick(/thermal/i,pk.thermal), sticker:pick(/sticker|label/i,pk.sticker),
+           src:{ vacuum:find(/vacuum/i)!=null, ecobag:find(/eco\s*-?\s*bag|ecobag/i)!=null, thermal:find(/thermal/i)!=null, sticker:find(/sticker|label/i)!=null } };
+}
+// Full per-product gross-margin rows. Shared by the Gross Margin view, the dashboard, and reports.
+function marginRowsFor(prods,boms,ings){
+  const im={}; (ings||[]).forEach(i=>im[i.sku]=i);
+  const pg=COST_MODEL.perGram||{}, lab=COST_MODEL.labor||{}, pct=COST_MODEL.pct||{}, tgm=+COST_MODEL.target_gm||0;
+  const sc=_supplyCosts(ings); const feesPct=(+pct.transaction||0)+(+pct.marketing||0);
+  const rawCost=p=>{ let c=0; (boms||[]).filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=im[b.ingredient_sku]||{}; const cg=((+it.moving_avg_cost_kg||+it.price_kg_processed||+it.list_price_kg||0))/1000; c+=(+b.usable_g||0)*cg; }); return c; };
+  return (prods||[]).filter(p=>p.active!==false).map(p=>{
+    const g=+p.pack_g||0, sell=+p.sell_price||0, raw=rawCost(p);
+    const elec=(+pg.electricity||0)*g, water=(+pg.water||0)*g, transport=(+pg.transport||0)*g;
+    const labor=(p.cost_debone?(+lab.debone||0):(+lab.plain||0))*g;
+    const butcher=p.cost_butcher?((+lab.butcher||0)*g):0;
+    const sousvide=p.cost_sousvide?((+lab.sousvide||0)*g):0;
+    const vacuum=sc.vacuum, sticker=sc.sticker, ecobag=p.cost_ecobag?sc.ecobag:0, thermal=p.cost_thermal?sc.thermal:0;
+    const process=elec+water+transport+labor+butcher+sousvide, pack=vacuum+sticker+ecobag+thermal;
+    const fixedCost=raw+process+pack, fees=feesPct*sell, total=fixedCost+fees;
+    const gp=sell>0?(sell-total)/sell:0; const denom=1-tgm-feesPct; const suggested=denom>0?fixedCost/denom:0;
+    return {p,g,raw,elec,water,transport,labor,butcher,sousvide,vacuum,sticker,ecobag,thermal,process,pack,fees,fixedCost,total,sell,gp,suggested,feesPct,tgm};
+  });
+}
 async function renderMargin(){
   await loadCostModel();
-  $('cp').innerHTML=`<div class="title">Gross Margin</div><button class="btn" onclick="renderMargin()">↻ Recompute</button><div class="sp"></div><span style="color:var(--muted)">full cost per pack → GP% → suggested price</span>`;
+  $('cp').innerHTML=`<div class="title">Gross Margin</div><button class="btn" onclick="renderMargin()">↻ Recompute</button><div class="sp"></div><span style="color:var(--muted)">BOM raw + variable process/packaging → GP% → suggested price</span>`;
   if(typeof moneyHidden==='function' && moneyHidden()){ $('content').innerHTML='<div class="repcard"><div class="hint">Cost &amp; margin are hidden for your role.</div></div>'; return; }
   let prods=[],boms=[],ings=[]; try{ prods=await db.list('products',{}); boms=await db.list('bom_lines',{}); ings=await listIngredients(); }catch(e){}
-  const im={}; ings.forEach(i=>im[i.sku]=i);
-  const rawCost=p=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=im[b.ingredient_sku]||{}; const cg=((+it.price_kg_processed||+it.moving_avg_cost_kg||+it.list_price_kg||0))/1000; c+=(+b.usable_g||0)*cg; }); return c; };
-  const fixedTot=COST_MODEL.fixed.reduce((s,f)=>s+(+f.v||0),0);
-  const pctTot=COST_MODEL.pct.reduce((s,f)=>s+(+f.v||0),0);
-  const tgm=+COST_MODEL.target_gm||0;
-  let h=`<div class="repcard"><h3 style="margin:0 0 8px">Cost model (per pack)</h3>
-    <div class="hint" style="margin-bottom:8px">Added on top of the raw ingredient cost to get <b>total cost per pack</b>. Fixed items are ₱/pack; fees are a % of the selling price. Edit, then <b>Recompute</b> to preview or <b>Save</b> to share with the team.</div>
-    <div style="display:flex;flex-wrap:wrap;gap:12px">`;
-  COST_MODEL.fixed.forEach(f=>{ h+=`<label style="font-size:12px">${esc(f.l)} ₱<br><input type="number" step="any" value="${f.v}" style="width:88px" onchange="cmSetFixed('${f.k}',this.value)"></label>`; });
-  COST_MODEL.pct.forEach(f=>{ h+=`<label style="font-size:12px">${esc(f.l)} %<br><input type="number" step="any" value="${+(f.v*100).toFixed(4)}" style="width:78px" onchange="cmSetPct('${f.k}',this.value)"></label>`; });
-  h+=`<label style="font-size:12px"><b>Target GM</b> %<br><input type="number" step="any" value="${+(tgm*100).toFixed(4)}" style="width:78px" onchange="cmSetTarget(this.value)"></label>`;
-  h+=`</div><div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <button class="btn" onclick="saveCostModel()">💾 Save cost model</button>
-      <button class="btn sec" onclick="cmReset()">↺ Reset to file defaults</button>
-      <span class="mini">Fixed total: <b>${fmt(fixedTot)}</b>/pack · Fees: <b>${(pctTot*100).toFixed(1)}%</b> of price</span></div></div>`;
-  const rows=prods.filter(p=>p.active!==false).map(p=>{ const raw=rawCost(p); const sell=+p.sell_price||0; const other=fixedTot+pctTot*sell; const total=raw+other; const gp=sell>0?(sell-total)/sell:0; const denom=1-tgm-pctTot; const suggested=denom>0?(raw+fixedTot)/denom:0; return {p,raw,other,total,sell,gp,suggested}; })
-    .sort((a,b)=>(a.sell?a.gp:99)-(b.sell?b.gp:99));
+  const pg=COST_MODEL.perGram||{}, lab=COST_MODEL.labor||{}, pct=COST_MODEL.pct||{}, tgm=+COST_MODEL.target_gm||0;
+  const sc=_supplyCosts(ings); const src=sc.src||{};
+  const pgIn=(k,l)=>`<label style="font-size:12px">${l} ₱/g<br><input type="number" step="any" value="${+(pg[k]||0).toFixed(5)}" style="width:96px" onchange="cmSetPG('${k}',this.value)"></label>`;
+  const labIn=(k,l)=>`<label style="font-size:12px">${l} ₱/g<br><input type="number" step="any" value="${+(lab[k]||0).toFixed(5)}" style="width:96px" onchange="cmSetLab('${k}',this.value)"></label>`;
+  const packIn=(k,l)=>{ const s=src[k]; return `<label style="font-size:12px">${l} ₱/pack${s?' <span class="mini" style="color:var(--ok)">·Supplies</span>':''}<br><input type="number" step="any" value="${+(sc[k]||0).toFixed(2)}" style="width:96px" ${s?'disabled title="from Kitchen Supplies — edit there"':`onchange="cmSetPack('${k}',this.value)"`}></label>`; };
+  let h=`<div class="repcard"><h3 style="margin:0 0 6px">Cost model</h3>
+    <div class="hint" style="margin-bottom:8px">Rates below are global; each product's <b>Cost profile</b> tab decides which variable costs apply (deboning, butcher charge, sous-vide, ecobag, thermal). Packaging &amp; sticker costs come from <b>Kitchen Supplies</b> when a matching item exists (shown ·Supplies), otherwise the fallback rate here. Raw cost is the <b>BOM</b> at moving-average (else processed) cost.</div>
+    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;margin:4px 0">Per-gram (× pack grams)</div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px">${pgIn('electricity','Electricity')}${pgIn('water','Water')}${pgIn('transport','Transport')}</div>
+    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;margin:10px 0 4px">Labor (× pack grams)</div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px">${labIn('plain','4-Man no debone')}${labIn('debone','4-Man w/ debone')}${labIn('butcher','Butcher charge')}${labIn('sousvide','Sous-vide')}</div>
+    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;margin:10px 0 4px">Packaging &amp; sticker (per pack)</div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px">${packIn('vacuum','Vacuum bag')}${packIn('sticker','Sticker')}${packIn('ecobag','Ecobag')}${packIn('thermal','Thermal pouch')}</div>
+    <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;margin:10px 0 4px">Fees (% of price) &amp; target</div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px">
+      <label style="font-size:12px">Transaction %<br><input type="number" step="any" value="${+((pct.transaction||0)*100).toFixed(3)}" style="width:80px" onchange="cmSetPct('transaction',this.value)"></label>
+      <label style="font-size:12px">Marketing %<br><input type="number" step="any" value="${+((pct.marketing||0)*100).toFixed(3)}" style="width:80px" onchange="cmSetPct('marketing',this.value)"></label>
+      <label style="font-size:12px"><b>Target GM</b> %<br><input type="number" step="any" value="${+(tgm*100).toFixed(3)}" style="width:80px" onchange="cmSetTarget(this.value)"></label></div>
+    <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="saveCostModel()">💾 Save cost model</button><button class="btn sec" onclick="cmReset()">↺ Reset to file defaults</button></div></div>`;
+
+  const rows=marginRowsFor(prods,boms,ings).sort((a,b)=>(a.sell?a.gp:99)-(b.sell?b.gp:99));
+  const flagsOf=p=>[p.cost_debone?'<span title="with deboning" style="color:var(--earth,#b5762a)">D</span>':'',p.cost_butcher?'<span title="butcher charge" style="color:var(--earth,#b5762a)">B</span>':'',p.cost_sousvide?'<span title="sous-vide" style="color:var(--berry)">S</span>':'',p.cost_ecobag?'<span title="ecobag">E</span>':'',p.cost_thermal?'<span title="thermal pouch">T</span>':''].filter(Boolean).join(' ')||'<span class="mini">—</span>';
   h+=`<div class="repcard" style="margin-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><h3 style="margin:0">Product gross margin</h3><button class="btn sec sm" onclick="marginWriteCogs()">⬆ Write total cost to products (COGS ref)</button></div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>SKU</th><th class="num">Raw cost</th><th class="num">Other</th><th class="num">Total cost</th><th class="num">Sell</th><th class="num">GP%</th><th class="num">Suggested @ ${(tgm*100).toFixed(0)}%</th><th>Status</th></tr></thead><tbody>`;
-  rows.forEach(r=>{ const below=r.gp<tgm; const col=r.gp<0?'var(--danger)':(below?'var(--earth)':'var(--ok)');
-    h+=`<tr><td>${esc(r.p.name)}</td><td><code>${esc(r.p.sku)}</code></td><td class="num">${fmt(r.raw)}</td><td class="num">${fmt(r.other)}</td><td class="num">${fmt(r.total)}</td><td class="num">${fmt(r.sell)}</td><td class="num" style="color:${col}"><b>${r.sell?(r.gp*100).toFixed(1)+'%':'—'}</b></td><td class="num">${r.sell?fmt(r.suggested):'—'}</td><td>${r.sell?(below?'<span style="color:var(--earth)">TO ADJUST</span>':'<span style="color:var(--ok)">ABOVE</span>'):'<span class="mini">no price</span>'}</td></tr>`; });
-  if(!rows.length) h+='<tr><td colspan="9" class="empty">No products with recipes yet.</td></tr>';
-  h+=`</tbody></table></div><div class="hint" style="margin-top:8px">Total cost = raw ingredient cost + fixed per-pack costs + (${COST_MODEL.pct.map(x=>x.l.toLowerCase()).join(' + ')}) × sell price. GP% = (Sell − Total) ÷ Sell. Suggested price hits the target GM at current costs. The fixed bundle is a standard estimate — tune it to your actual packaging mix.</div></div>`;
+    <div class="hint" style="margin:6px 0 8px">Tap a row to open the product and set its cost profile. Flags: <b>D</b> debone · <b>B</b> butcher · <b>S</b> sous-vide · <b>E</b> ecobag · <b>T</b> thermal.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>Profile</th><th class="num">g</th><th class="num">Raw</th><th class="num">Process</th><th class="num">Packaging</th><th class="num">Fees</th><th class="num">Total</th><th class="num">Sell</th><th class="num">GP%</th><th class="num">Suggested @ ${(tgm*100).toFixed(0)}%</th><th>Status</th></tr></thead><tbody>`;
+  rows.forEach(r=>{ const below=r.gp<tgm; const col=r.gp<0?'var(--danger)':(below?'var(--earth,#b5762a)':'var(--ok)');
+    h+=`<tr style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.p.sku)).replace(/'/g,'&#39;')}')" title="Open product">
+      <td>${esc(r.p.name)}</td><td class="mini">${flagsOf(r.p)}</td><td class="num">${r.g||'—'}</td>
+      <td class="num">${fmt(r.raw)}</td><td class="num">${fmt(r.process)}</td><td class="num">${fmt(r.pack)}</td><td class="num">${fmt(r.fees)}</td>
+      <td class="num"><b>${fmt(r.total)}</b></td><td class="num">${fmt(r.sell)}</td>
+      <td class="num" style="color:${col}"><b>${r.sell?(r.gp*100).toFixed(1)+'%':'—'}</b></td>
+      <td class="num">${r.sell?fmt(r.suggested):'—'}</td>
+      <td>${r.sell?(below?'<span style="color:var(--earth,#b5762a)">TO ADJUST</span>':'<span style="color:var(--ok)">ABOVE</span>'):'<span class="mini">no price</span>'}</td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="12" class="empty">No products with recipes yet.</td></tr>';
+  h+=`</tbody></table></div><div class="hint" style="margin-top:8px">Total = Raw (BOM) + Process (electricity + water + transport + labor ± butcher ± sous-vide) + Packaging (vacuum + sticker ± ecobag ± thermal) + Fees (${((( +pct.transaction||0)+(+pct.marketing||0))*100).toFixed(0)}% of price). GP% = (Sell − Total) ÷ Sell. Suggested price hits ${(tgm*100).toFixed(0)}% GM at current costs.</div></div>`;
   $('content').innerHTML=h; window._marginRows=rows;
 }
 async function marginWriteCogs(){ const rows=window._marginRows||[]; if(!rows.length){ toast('Nothing to write',true); return; }
@@ -3723,7 +3895,7 @@ async function rptPayables(){
 async function lowStockHtml(){
   const ings=await db.list('ingredients',{}), prods=await db.list('products',{});
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ const k=(s.kind||'')+':'+s.ref_sku; stock[k]=(stock[k]||0)+(+s.on_hand||0); }); }catch(e){} }
-  const ig=ings.map(i=>{ const oh=stock['ingredient:'+i.sku]||0; const thr=+i.reorder_g||+i.par_g||0; return {name:i.name,sku:i.sku,oh,thr,short:thr-oh,unit:'g'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
+  const ig=ings.map(i=>{ const oh=stock['ingredient:'+i.sku]||0; const thr=+i.reorder_g||+i.par_g||0; const sup=isSupplyItem(i); return {name:i.name,sku:i.sku,oh,thr,short:thr-oh,unit:sup?(i.uom||'units'):'g'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
   const pg=prods.map(p=>{ const oh=stock['product:'+p.sku]||0; const thr=+p.par_packs||0; return {name:p.name,sku:p.sku,oh,thr,short:thr-oh,unit:'packs'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
   const tbl=(title,rows,model)=>`<div class="repcard" style="margin-bottom:14px"><h3 style="margin:0 0 8px">${title}</h3>
     <table><thead><tr><th>Item</th><th>SKU</th><th class="num">On hand</th><th class="num">Threshold</th><th class="num">Short by</th></tr></thead>
