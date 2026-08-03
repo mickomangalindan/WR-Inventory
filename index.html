@@ -238,6 +238,8 @@
 .wrdash .grid{display:grid;gap:14px}
 .wrdash .k6{grid-template-columns:repeat(6,1fr)}
 .wrdash .c2{grid-template-columns:1fr 1fr}
+.wrdash .c3{grid-template-columns:1fr 1fr 1fr}
+@media(max-width:820px){.wrdash .c3{grid-template-columns:1fr}}
 .wrdash .card{background:var(--wsurface);border:1px solid var(--wborder);border-radius:14px;padding:16px 18px}
 .wrdash .card h2{font-size:13px;font-weight:600;margin:0 0 12px;color:var(--wink2);letter-spacing:.01em}
 .wrdash .kpi .l{font-size:11.5px;color:var(--wmuted);margin-bottom:6px}
@@ -2662,6 +2664,30 @@ async function renderDashboard(){
   const _payByPo={}; _pay.forEach(p=>_payByPo[p.po_ref]=(_payByPo[p.po_ref]||0)+(+p.amount||0));
   const _lineByPo={}; _pol.forEach(l=>{ (_lineByPo[l.po_ref]=_lineByPo[l.po_ref]||[]).push(l); });
   let payables=0,payCount=0; po.forEach(p=>{ if(['confirmed','received'].includes(p.status)){ const bl=poBillable(p,_lineByPo[p.po_ref]||[]); const b=Math.max(0,bl-(_payByPo[p.po_ref]||0)); if(b>0.5){ payables+=b; payCount++; } } });
+  // Payables detail: total billable / paid, and the remaining-due schedule from each supplier's terms.
+  let _sups=[]; try{_sups=await db.list('suppliers',{})}catch(e){}
+  const _supBy={}; _sups.forEach(s=>_supBy[s.name]=s);
+  let totBillable=0, totPaid=0; const paySched=[];
+  po.forEach(p=>{ if(!['confirmed','received'].includes(p.status)) return;
+    const bl=poBillable(p,_lineByPo[p.po_ref]||[]); const pd=_payByPo[p.po_ref]||0;
+    totBillable+=bl; totPaid+=Math.min(pd,bl); const bal=Math.max(0,bl-pd); if(bal<=0.5) return;
+    const s=_supBy[p.supplier_name]||{}; const dpP=+s.dp_pct||0, rvP=+s.receiving_pct||0, tmP=+s.term_pct||0, tmD=+s.term_days||0;
+    if((dpP+rvP+tmP)>0){
+      const stages=[{l:'Downpayment',pct:dpP,due:p.order_date},{l:'On receiving',pct:rvP,due:(p.status==='received'?(p.received_date||p.order_date):'')},{l:'Term balance',pct:tmP,due:addDaysISO(p.order_date,tmD)}].filter(x=>x.pct>0);
+      let rem=pd; stages.forEach(st=>{ const amt=bl*st.pct/100; const cov=Math.min(amt,Math.max(0,rem)); rem-=cov; const due=amt-cov; if(due>0.5) paySched.push({po:p.po_ref,sup:p.supplier_name||'—',stage:st.l,due:st.due||'',amt:due}); });
+    } else { paySched.push({po:p.po_ref,sup:p.supplier_name||'—',stage:'Balance',due:p.order_date||'',amt:bal}); }
+  });
+  paySched.sort((a,b)=> String(a.due||'9999').localeCompare(String(b.due||'9999')) || b.amt-a.amt);
+  // Glimpse metrics for the quick-analysis cards.
+  const _mr=marginRowsFor(prod.filter(active),boms,ing).filter(r=>r.sell>0);
+  const _tgm=+COST_MODEL.target_gm||0.3;
+  const mgBelow=_mr.filter(r=>r.gp<_tgm).length; const mgAvg=_mr.length?_mr.reduce((s,r)=>s+r.gp,0)/_mr.length:0;
+  let _mom=[]; try{_mom=await momLoad()}catch(e){}
+  const _momRows=_mom.map(r=>{ const stk=stock[r.sku]!=null?stock[r.sku]:0; const met=momMetrics(r,stk); const q=momQuad(met.mom,met.cover,met.hasSales); return {sku:r.sku,product:(prodBy[r.sku]&&prodBy[r.sku].name)||r.product||r.sku,...met,q}; }).filter(r=>r.hasSales);
+  const momStockout=_momRows.filter(r=>r.q.key==='stockout'); const momOver=_momRows.filter(r=>r.q.key==='overstock').length;
+  const momUrgent=_momRows.slice().sort((a,b)=>a.cover-b.cover)[0];
+  const belowReorder = ing.filter(active).filter(i=>!isSupplyItem(i)).filter(i=>{const oh=stock[i.sku]||0;const thr=+i.reorder_g||+i.par_g||0;return thr>0&&oh<thr;}).length
+    + prod.filter(active).filter(p=>{const oh=stock[p.sku]||0;const thr=+p.par_packs||0;return thr>0&&oh<thr;}).length;
   const _sum=(a,f)=>a.reduce((s,x)=>s+(+f(x)||0),0);
   const q1o=_sum(_pol,l=>l.ordered_kg), q1r=_sum(_pol,l=>l.received_kg); const q1=q1o?Math.round(q1r/q1o*100):null;
   const q2=_sum(_bi,z=>z.actual_raw_g)-_sum(_bi,z=>z.expected_raw_g);
@@ -2693,8 +2719,26 @@ async function renderDashboard(){
   const reorderBody = reorder.length? '<table><thead><tr><th>Item</th><th>Site</th><th class="n">On hand</th><th class="n">Par</th><th class="n">Order</th><th></th></tr></thead><tbody>'+reorder.slice(0,12).map(r=>'<tr><td>'+esc(r.name)+'</td><td>'+r.site+'</td><td class="n">'+r.cur+'</td><td class="n">'+r.par+'</td><td class="n"><b>'+r.order+'</b></td><td><span class="pill warn">reorder</span></td></tr>').join('')+'</tbody></table>' : '<div class="hint">All labels at or above PAR ✅. Set a Label PAR on products (Bulacan / Pasig) to track sticker reorders.</div>';
   const famBody = (!mh && famArr.length)? '<table><thead><tr><th>Category</th><th class="n">Value</th><th class="n">Share</th></tr></thead><tbody>'+famArr.map(f=>'<tr><td>'+esc(f.label)+'</td><td class="n">'+wpeso(f.value)+'</td><td class="n">'+(famTot?Math.round(f.value/famTot*100):0)+'%</td></tr>').join('')+'</tbody><tfoot><tr><td>Total finished goods</td><td class="n">'+wpeso(famTot)+'</td><td class="n">100%</td></tr></tfoot></table>' : '';
 
+  // Purchase payables — total payable / paid + remaining-due schedule.
+  const _today=todayISO();
+  const schedRows = paySched.slice(0,10).map(x=>{ const od=x.due&&x.due<_today; return `<tr onclick="event.stopPropagation();gotoRecord('purchase_orders','${esc(String(x.po)).replace(/'/g,'&#39;')}')" style="cursor:pointer"><td class="mini" style="${od?'color:var(--danger);font-weight:700':''}">${esc(x.due||'on delivery')}${od?' ⚠':''}</td><td>${esc(x.sup)}</td><td><code>${esc(x.po)}</code></td><td class="mini">${esc(x.stage)}</td><td class="n"><b>${wpeso(x.amt)}</b></td></tr>`; }).join('') || '<tr><td colspan="5" class="empty">No scheduled payments due ✅</td></tr>';
+  const payBody = mh ? '<div class="hint">Payables are hidden for your role.</div>' : `<div class="kpirow" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px">
+      <div class="kpi"><div class="l">Total payable</div><div class="v" style="color:var(--danger)">${wpeso(payables)}</div><div class="s">${payCount} unpaid PO${payCount===1?'':'s'}</div></div>
+      <div class="kpi"><div class="l">Paid to date</div><div class="v" style="color:#4e7a3e">${wpeso(totPaid)}</div><div class="s">on confirmed POs</div></div>
+      <div class="kpi"><div class="l">Billable total</div><div class="v">${wpeso(totBillable)}</div><div class="s">received × price − disc + fee</div></div></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Due</th><th>Supplier</th><th>PO</th><th>Stage</th><th class="n">Amount due</th></tr></thead><tbody>${schedRows}</tbody></table></div>
+    ${paySched.length>10?`<p class="note">Showing 10 of ${paySched.length} scheduled payments — tap a row to open the PO, or see Reports → Supplier payables.</p>`:'<p class="note">Tap a row to open the PO. Overdue dates are flagged ⚠.</p>'}`;
+
+  // Quick-analysis glimpse cards (headline + link).
+  const glimpse=(icon,title,big,sub,go)=>`<div class="card" style="cursor:pointer" onclick="${go}"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h2 style="margin:0;font-size:16px">${icon} ${title}</h2><span class="mini" style="color:var(--berry);font-weight:700;white-space:nowrap">Open →</span></div><div style="font-size:22px;font-weight:800;color:var(--berry);margin:8px 0 2px">${big}</div><div class="mini">${sub}</div></div>`;
+  const gMargin = mh ? '' : glimpse('📈','Gross margin',(mgAvg*100).toFixed(1)+'% avg GP', (mgBelow>0?('<b style="color:var(--earth,#b5762a)">'+mgBelow+'</b> below '+(_tgm*100).toFixed(0)+'% target · reprice'):'all at/above target ✅')+' · '+_mr.length+' priced',"openModel('margin')");
+  const gStock = glimpse('📦','Live stock',mh?Math.round(packs).toLocaleString()+' packs':wpeso(stockVal), (belowReorder>0?('<b style="color:var(--earth,#b5762a)">'+belowReorder+'</b> below reorder/PAR'):'all above reorder ✅'),"openModel('stock_balance')");
+  const gMom = glimpse('🚀','Sales momentum', (momStockout.length>0?('<span style="color:var(--danger)">'+momStockout.length+' stockout risk</span>'):'no stockout risk ✅'), (momOver>0?momOver+' overstock · ':'')+(momUrgent?('most urgent: '+esc(momUrgent.product)+' ('+(momUrgent.cover>=999?'∞':Math.round(momUrgent.cover))+'d)'):'add sales to see'),"openModel('momentum')");
+
   $('content').innerHTML=`<div class="wrdash">
     <div class="grid k6" style="margin-bottom:14px">${kpis}</div>
+    <div class="grid c3" style="margin-bottom:14px">${gMargin}${gStock}${gMom}</div>
+    ${mh?'':`<div class="grid" style="margin-bottom:14px">${card('💵 Purchase payables &amp; payment schedule',payBody)}</div>`}
     ${ownerCard}
     <div class="grid c2" style="margin-bottom:14px">${card('Inventory value by category',donutBody)}${card('Where the value sits (by site)',siteBody)}</div>
     <div class="grid c2" style="margin-bottom:14px">${card('Raw-material stock over time (kg)',rawlineBody)}${card('Label stock over time (pcs)',lablineBody)}</div>
@@ -3652,6 +3696,7 @@ async function marginWriteCogs(){ const rows=window._marginRows||[]; if(!rows.le
      Days of cover = current stock ÷ recent daily rate (how long stock lasts at today's pace). */
 let MOM_COVER_LOW = 14, MOM_COVER_HIGH = 45;   // days-of-cover bands (owner-tunable)
 let MOM_GROUP = '';                            // '' | 'family' | 'status'  (table grouping)
+let MOM_VIZ = 'bars';                          // 'bars' | 'map'  (default = general-audience bars)
 const MOM_HI = 1.15, MOM_LO = 0.85;            // momentum ratio bands
 
 // Actual sales per month, derived from the cumulative windows (M-1 = last 30d, M-2 = days 31-60, …).
@@ -3677,6 +3722,13 @@ function momMetrics(r, stockUnits){
   const cover = daily30>0 ? stockUnits/daily30 : (stockUnits>0?999:0);
   return {daily30, mom, cover, hasSales:u120>0||u30>0};
 }
+// Urgency rank for sorting/grouping by importance (0 = act first).
+function momPriority(q){ const m={stockout:0,watch:1,overstock:2,steady:3,wellstocked:4,nosale:5}; return (q&&m[q.key]!=null)?m[q.key]:6; }
+function momImportanceSort(a,b){ const pa=momPriority(a.q), pb=momPriority(b.q);
+  if(pa!==pb) return pa-pb;
+  if(a.q.key==='stockout'||a.q.key==='watch') return a.cover-b.cover;      // most urgent (least cover) first
+  if(a.q.key==='overstock'||a.q.key==='wellstocked') return b.cover-a.cover; // biggest excess first
+  return b.m1-a.m1; }
 function momQuad(mom, cover, hasSales){
   if(!hasSales) return {key:'nosale', label:'No recent sales', color:'var(--muted)', icon:'⚪', act:'No 120-day sales — review listing / seasonality'};
   const loCover = cover < MOM_COVER_LOW, hiCover = cover > MOM_COVER_HIGH;
@@ -3693,7 +3745,7 @@ async function renderMomentum(){
     <span class="mini" style="margin-left:8px">Group <select onchange="MOM_GROUP=this.value;renderMomentum()">
       <option value="" ${MOM_GROUP===''?'selected':''}>None</option>
       <option value="family" ${MOM_GROUP==='family'?'selected':''}>Product family</option>
-      <option value="status" ${MOM_GROUP==='status'?'selected':''}>Status</option></select></span>
+      <option value="status" ${MOM_GROUP==='status'?'selected':''}>Priority / status</option></select></span>
     <div class="sp"></div><span style="color:var(--muted)">actual monthly sales × stock → what to act on</span>`;
   let mom=[]; try{ mom=await momLoad(); }catch(e){}
   let prods=[]; try{ prods=await db.list('products',{}); }catch(e){}
@@ -3722,14 +3774,17 @@ async function renderMomentum(){
     ${kpi('Last refreshed', refreshed?esc(String(refreshed).slice(0,10)):'—', 'sales window')}
   </div>`;
 
-  // Quadrant scatter
+  // Visualization — default is the plain-language "days of cover" bars; quadrant map is a toggle.
+  const vbtn=(k,lbl)=>`<button class="btn ${MOM_VIZ===k?'':'sec'} sm" onclick="MOM_VIZ='${k}';renderMomentum()">${lbl}</button>`;
   h+=`<div class="repcard" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-      <h3 style="margin:0">Stock vs momentum map</h3>
-      <span class="mini">Cover bands: <input type="number" value="${MOM_COVER_LOW}" style="width:52px" onchange="MOM_COVER_LOW=+this.value||14;renderMomentum()"> / <input type="number" value="${MOM_COVER_HIGH}" style="width:52px" onchange="MOM_COVER_HIGH=+this.value||45;renderMomentum()"> days</span></div>
-    <div class="hint" style="margin:6px 0 6px">Each dot is a product — bigger = more recent-month units. Left = slowing, right = accelerating; low = little stock left, high = lots of cover. <b style="color:var(--danger)">Bottom-right</b> needs making; <b style="color:var(--earth,#b5762a)">top-left</b> is tying up cash.</div>
-    <details style="margin:0 0 8px"><summary style="cursor:pointer;font-size:12px;color:var(--berry);font-weight:600">❔ What do the cover bands mean?</summary>
-      <div class="hint" style="margin-top:6px"><b>Days of cover</b> = current stock ÷ recent daily sales rate (last month's units ÷ 30). It's how many days your stock lasts at today's pace. The two band numbers are thresholds: <b>below the first (${MOM_COVER_LOW}d)</b> = running low → stockout risk if it's selling; <b>above the second (${MOM_COVER_HIGH}d)</b> = far more stock than sales → cash tied up in overstock. Tune them to your production cadence — e.g. if you produce weekly, ${MOM_COVER_LOW}d gives two cycles of buffer.</div></details>
-    ${momScatter(active)}</div>`;
+      <h3 style="margin:0">${MOM_VIZ==='bars'?'How long stock lasts — by urgency':'Stock vs momentum map'}</h3>
+      <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${vbtn('bars','📊 Runway')}${vbtn('map','🎯 Quadrant')}
+      <span class="mini" style="margin-left:6px">bands <input type="number" value="${MOM_COVER_LOW}" style="width:48px" onchange="MOM_COVER_LOW=+this.value||14;renderMomentum()"> / <input type="number" value="${MOM_COVER_HIGH}" style="width:48px" onchange="MOM_COVER_HIGH=+this.value||45;renderMomentum()"> days</span></span></div>
+    ${MOM_VIZ==='bars'
+      ? `<div class="hint" style="margin:6px 0 8px">Each bar is how many <b>days of stock</b> a product has left at its current selling pace, shortest first. <b style="color:var(--danger)">Red</b> = make/reorder now, <b style="color:var(--earth,#b5762a)">amber</b> = watch, <b style="color:var(--ok)">green</b> = plenty (possibly overstock). The dashed lines mark your ${MOM_COVER_LOW}-day and ${MOM_COVER_HIGH}-day thresholds.</div>${momBars(active)}`
+      : `<div class="hint" style="margin:6px 0 6px">Each dot is a product — bigger = more recent-month units. Left = slowing, right = accelerating; low = little stock left, high = lots of cover. <b style="color:var(--danger)">Bottom-right</b> needs making; <b style="color:var(--earth,#b5762a)">top-left</b> is tying up cash.</div>${momScatter(active)}`}
+    <details style="margin:8px 0 0"><summary style="cursor:pointer;font-size:12px;color:var(--berry);font-weight:600">❔ What do the cover bands mean?</summary>
+      <div class="hint" style="margin-top:6px"><b>Days of cover</b> = current stock ÷ recent daily sales rate (last month's units ÷ 30) — how many days stock lasts at today's pace. <b>Below ${MOM_COVER_LOW}d</b> = running low (stockout risk if it's selling); <b>above ${MOM_COVER_HIGH}d</b> = more stock than sales (cash tied up). Tune to your production cadence.</div></details></div>`;
 
   // Action lists (rows clickable → open the product)
   const actRow=r=>{ const clk=r.matchedProd?` style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open product"`:'';
@@ -3748,22 +3803,51 @@ async function renderMomentum(){
   const head=`<thead><tr><th>Product</th><th>SKU</th><th class="num">M-4</th><th class="num">M-3</th><th class="num">M-2</th><th class="num">M-1</th><th>Trend</th><th class="num">Mom ×</th><th class="num">Stock</th><th class="num">Cover</th><th>Status</th></tr></thead>`;
   let body='';
   if(MOM_GROUP){
-    const keyOf=r=> MOM_GROUP==='family'? r.family : (r.q.icon+' '+r.q.label);
+    const byFam = MOM_GROUP==='family';
+    const keyOf=r=> byFam? r.family : (r.q.icon+' '+r.q.label);
     const groups={}; active.forEach(r=>{ (groups[keyOf(r)]=groups[keyOf(r)]||[]).push(r); });
-    Object.keys(groups).sort((a,b)=> groups[b].reduce((s,r)=>s+r.m1,0)-groups[a].reduce((s,r)=>s+r.m1,0)).forEach(g=>{
-      const list=groups[g].sort((a,b)=>b.m1-a.m1); const sub=list.reduce((s,r)=>s+r.m1,0);
+    // Family groups → by volume; Status groups → by urgency (act-first).
+    const gsort = byFam
+      ? (a,b)=> groups[b].reduce((s,r)=>s+r.m1,0)-groups[a].reduce((s,r)=>s+r.m1,0)
+      : (a,b)=> Math.min(...groups[a].map(r=>momPriority(r.q))) - Math.min(...groups[b].map(r=>momPriority(r.q)));
+    Object.keys(groups).sort(gsort).forEach(g=>{
+      const list=groups[g].slice().sort(momImportanceSort); const sub=list.reduce((s,r)=>s+r.m1,0);
       body+=`<tr style="background:#f6f2ea"><td colspan="6"><b>${esc(g)}</b> <span class="mini">· ${list.length} SKU(s)</span></td><td colspan="5" class="num"><b>M-1 total: ${num(sub)}</b></td></tr>`;
       body+=list.map(rowHtml).join('');
     });
   } else {
-    body=active.slice().sort((a,b)=>b.m1-a.m1).map(rowHtml).join('');
+    body=active.slice().sort(momImportanceSort).map(rowHtml).join('');
   }
-  h+=`<div class="repcard"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><h3 style="margin:0 0 8px">Actual sales by month (M-4 → M-1)</h3><span class="mini">M-1 = last 30 days · M-4 = 3 months before</span></div>
+  h+=`<div class="repcard"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><h3 style="margin:0 0 8px">Actual sales by month (M-4 → M-1)</h3><span class="mini">sorted by urgency · M-1 = last 30 days · M-4 = 3 months before</span></div>
     <div style="overflow-x:auto"><table>${head}<tbody>${body}</tbody></table></div>
     <div class="hint" style="margin-top:8px">M-4…M-1 are actual units sold in each of the last four 30-day months (from the rolling windows). Rows are clickable — open the product. Stock is matched by SKU to finished-goods on-hand. ${nUnmatched?('<b>'+nUnmatched+'</b> sales SKU(s) have no matching product — check the SKU matches the product code.'):''} ${isLive()?'':'Demo mode: showing imported figures without live stock.'}</div></div>`;
   $('content').innerHTML=h; window._momRows=rows;
 }
 
+// Plain-language "runway" bars — days of cover per product, shortest (most urgent) first.
+function momBars(rows){
+  const list=rows.slice().sort((a,b)=>a.cover-b.cover);   // strict runway: least stock left on top
+  const N=Math.min(list.length,26); const shown=list.slice(0,N);
+  const lw=210, rpad=64, W=760, rh=26, top=8, H=top+N*rh+34;
+  const cap=Math.max(MOM_COVER_HIGH*1.4, 30);
+  const x=c=>lw+(Math.min(c,cap)/cap)*(W-lw-rpad);
+  const arrow=m=> m>=1.15?'<tspan fill="#2e7d32">▲</tspan>':(m<=0.85?'<tspan fill="#c0392b">▼</tspan>':'<tspan fill="#888">▬</tspan>');
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;font-family:inherit;font-size:12px">`;
+  // threshold guide lines
+  const xl=x(MOM_COVER_LOW), xh=x(MOM_COVER_HIGH);
+  s+=`<line x1="${xl}" y1="${top}" x2="${xl}" y2="${top+N*rh}" stroke="#e0a4a0" stroke-dasharray="3 3"/><text x="${xl}" y="${top+N*rh+12}" text-anchor="middle" font-size="10" fill="#c0392b">${MOM_COVER_LOW}d</text>`;
+  s+=`<line x1="${xh}" y1="${top}" x2="${xh}" y2="${top+N*rh}" stroke="#b7d1a6" stroke-dasharray="3 3"/><text x="${xh}" y="${top+N*rh+12}" text-anchor="middle" font-size="10" fill="#4e7a3e">${MOM_COVER_HIGH}d</text>`;
+  s+=`<text x="${lw}" y="${top+N*rh+28}" font-size="10" fill="#888">← fewer days of stock left · more days →   (bar labels: units last 30d + trend)</text>`;
+  shown.forEach((r,i)=>{ const y=top+i*rh; const cov=r.cover>=999?cap:r.cover; const bw=Math.max(2,x(cov)-lw);
+    const nm=r.product.length>30?r.product.slice(0,29)+'…':r.product;
+    s+=`<text x="4" y="${y+rh/2+4}" fill="#20241d">${esc(nm)}</text>`;
+    s+=`<rect x="${lw}" y="${y+4}" width="${bw.toFixed(1)}" height="${rh-8}" rx="3" fill="${r.q.color}" fill-opacity="0.82"><title>${esc(r.product)} (${esc(r.sku)})\n${r.cover>=999?'∞':Math.round(r.cover)} days cover · stock ${Math.round(r.stock)}\n30d units ${r.m1} · momentum ×${r.mom}\n${r.q.label} — ${r.q.act}</title></rect>`;
+    s+=`<text x="${(x(cov)+6).toFixed(1)}" y="${y+rh/2+4}" fill="#555" font-size="11"><tspan font-weight="700">${r.cover>=999?'∞':Math.round(r.cover)}d</tspan> · ${r.m1} ${arrow(r.mom)}</text>`;
+  });
+  s+=`</svg>`;
+  if(list.length>N) s+=`<div class="mini" style="color:var(--muted);margin-top:4px">Showing the ${N} most urgent of ${list.length} — full list in the table below.</div>`;
+  return s;
+}
 // Inline SVG scatter: X = momentum (0.4..1.8, centre 1.0), Y = days of cover (0..cap, high=top).
 function momScatter(rows){
   const W=760, H=420, pad=54, x0=pad, x1=W-20, y0=H-pad, y1=20;
