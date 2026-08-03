@@ -304,8 +304,8 @@ const MODULES = [
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_po']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
-  {id:'analytics', label:'Analytics', items:['reporting']},
-  {id:'admin',  label:'Administration', items:['connection','users','fieldacl','refs','automations','notif','studio','selftest','cleanser']},
+  {id:'analytics', label:'Analytics', items:['reporting','margin']},
+  {id:'admin',  label:'Administration', items:['connection','users','approvals','fieldacl','refs','automations','notif','studio','selftest','cleanser']},
 ];
 const MODELS = {
   suppliers:{ label:'Suppliers', icon:'🏢', name:'name', pk:'name', archivable:true,
@@ -317,10 +317,12 @@ const MODELS = {
       {n:'payment_term',l:'Payment term',t:'text'},{n:'delivery_days',l:'Lead time',t:'text'},
       {n:'sells_by',l:'Sells by',t:'select',o:['loose','case','both','head']},
       {n:'min_order_kg',l:'Min order / delivery (kg)',t:'number'},
+      {n:'dp_pct',l:'Downpayment %',t:'number'},{n:'receiving_pct',l:'On-receiving %',t:'number'},
+      {n:'term_pct',l:'Term %',t:'number'},{n:'term_days',l:'Term (days)',t:'number'},
       {n:'shopee',l:'Shopee',t:'text'},{n:'website',l:'Website',t:'text'},{n:'fb_page',l:'FB page',t:'text'},
       {n:'notes',l:'Notes',t:'longtext'}],
     list:['name','supplier_id','payment_term','delivery_days','min_order_kg','mobile'],
-    groups:[['name','supplier_id','contact','mobile','c1_email','c1_viber'],['c2_name','c2_mobile','c2_email'],['payment_term','delivery_days','sells_by','min_order_kg','shopee','website','fb_page']],
+    groups:[['name','supplier_id','contact','mobile','c1_email','c1_viber'],['c2_name','c2_mobile','c2_email'],['payment_term','delivery_days','sells_by','min_order_kg','dp_pct','receiving_pct','term_pct','term_days','shopee','website','fb_page']],
     tabs:[{l:'🏢 Contacts', groups:[0,1]},{l:'🔗 Online & Terms', groups:[2]}],
     full:['notes'] },
 
@@ -359,6 +361,7 @@ const MODELS = {
       {n:'product_line',l:'Product line',t:'text'},{n:'feeding_format',l:'Feeding format',t:'text'},
       {n:'mix_category',l:'Mix category',t:'text'},{n:'animal',l:'Animal',t:'select',o:['Dog','Cat']},
       {n:'sell_price',l:'Sell price',t:'currency'},{n:'par_packs',l:'Par (packs)',t:'number'},
+      {n:'shelf_life_days',l:'Shelf life (days)',t:'number'},
       {n:'tot_cost_ref',l:'COGS ref (₱/pack)',t:'currency'},
       {n:'feeding_style',l:'Feeding style',t:'select',o:['Raw Feeding','Gently Cooked','BARF','PMR','Mix']},
       {n:'sticker_net',l:'Sticker — net weight',t:'text'},{n:'sticker_dimension',l:'Sticker — dimension',t:'text'},
@@ -403,9 +406,9 @@ const MODELS = {
       {n:'planned_packs',l:'Planned packs',t:'number'},
       {n:'good_packs',l:'Good packs',t:'number'},{n:'reject_packs',l:'Reject packs',t:'number'},
       {n:'waste_g',l:'Waste (g)',t:'number'},{n:'output_lot',l:'Output lot',t:'text'},
-      {n:'production_date',l:'Date',t:'date'},{n:'cost_per_pack',l:'₱/pack',t:'currency'},{n:'operator',l:'Operator',t:'text',ro:true}],
+      {n:'production_date',l:'Date',t:'date'},{n:'best_before',l:'Best before',t:'date'},{n:'cost_per_pack',l:'₱/pack',t:'currency'},{n:'operator',l:'Operator',t:'text',ro:true}],
     list:['batch_ref','product_sku','status','planned_packs','good_packs','production_date'],
-    groups:[['batch_ref','product_sku','production_date'],['good_packs','reject_packs','waste_g','output_lot','cost_per_pack']],
+    groups:[['batch_ref','product_sku','production_date','best_before'],['good_packs','reject_packs','waste_g','output_lot','cost_per_pack']],
     o2m:{field:'issues',model:'batch_issues',fk:'batch_ref',label:'Ingredients Issued',
       cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'uom',l:'UoM',t:'select',o:['kg','g','pcs','mL']},
         {n:'expected_raw_g',l:'Exp raw (kg)',t:'number',scale:1000,ro:true},{n:'actual_raw_g',l:'Act raw (kg)',t:'number',scale:1000},
@@ -451,6 +454,8 @@ const MODELS = {
   cleanser:{ label:'Data Cleanser', icon:'🧹', special:'cleanser' },
   supplies_reorder:{ label:'Supplies Reorder', icon:'🧻', special:'supplies_reorder' },
   sticker_po:{ label:'Sticker PO', icon:'🏷️', special:'sticker_po' },
+  approvals:{ label:'Approvals', icon:'✅', special:'approvals' },
+  margin:{ label:'Gross Margin', icon:'📈', special:'margin' },
   automations:{ label:'Automations', icon:'⚡', special:'automations' },
   selftest:{ label:'System Check', icon:'🩺', special:'selftest' },
 };
@@ -549,10 +554,11 @@ function setCrumb(extra){
   const link = (state.view==='form'&&!formIsNew) ? ` <span onclick="copyRecordLink()" title="Copy link to this record" style="cursor:pointer;color:var(--muted)">🔗</span>` : '';
   $('crumb').innerHTML = back+`<b>${m.label}</b>`+(extra?` / ${esc(extra)}`:'')+link;
 }
+const DEFAULT_GROUP={ products:'family', ingredients:'category' };   // master lists open grouped, count-sheet style
 function openModel(model){
   if(model==='home'){ state={model:'home',view:'home',search:'',groupBy:'',recId:null}; renderSide(); renderDashboard(); return; }
   const m=MODELS[model];
-  state={model,view:m.special?'special':(m.report?'report':'list'),search:'',groupBy:'',recId:null,sel:[]}; renderSide(); route();
+  state={model,view:m.special?'special':(m.report?'report':'list'),search:'',groupBy:(DEFAULT_GROUP[model]||''),recId:null,sel:[]}; renderSide(); route();
 }
 function route(){
   renderSide();
@@ -573,10 +579,13 @@ function route(){
     if(m.special==='cleanser') return renderCleanser();
     if(m.special==='supplies_reorder') return renderSuppliesReorder();
     if(m.special==='sticker_po') return renderStickerPO();
+    if(m.special==='approvals') return renderApprovals();
+    if(m.special==='margin') return renderMargin();
     if(m.special==='selftest') return renderSelfTest();
   }
   setCrumb();
   syncHash();
+  if(state.view==='bulk' && window._bulkModel===state.model) return renderBulkEdit();
   if(state.view==='kanban') return renderKanban();
   if(state.view==='list') return renderList();
   if(state.view==='form') return renderForm();
@@ -617,6 +626,7 @@ function controlPanel(){
   $('cp').innerHTML = `
     <div class="title">${m.label} <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     ${!m.readonly?`<button class="btn" onclick="openForm(null)">New</button>`:''}
+    ${(BULK_CFG[state.model]&&state.view==='list')?`<button class="btn sec sm" onclick="openBulkEdit()">🗂 Bulk edit</button>`:''}
     <div class="sp"></div>
     ${chips}
     <div class="search">🔎<input id="q" placeholder="Search ${m.label}..." value="${esc(state.search)}" oninput="onSearch(this.value)"></div>
@@ -738,6 +748,8 @@ async function renderForm(){
                 try{(await db.list('ingredients',{})).forEach(i=>_stkIngs[i.sku]=i);}catch(e){}
                 window._stkFormProds=_stkProds; window._stkFormIngs=_stkIngs; }
   else { window._stkFormProds=null; window._stkFormIngs=null; }
+  window._poSupplier=null;
+  if(state.model==='purchase_orders' && !formIsNew && formRec.supplier_name){ try{ window._poSupplier=(await db.list('suppliers',{})).find(s=>s.name===formRec.supplier_name)||null; }catch(e){} }
   const statusbar = m.status? `<div class="statusbar">${m.status.stages.map(s=>`<div class="stg ${r[m.status.f]===s?'on':''}">${s}</div>`).join('')}</div>`:'';
   const faMode=(f)=> fieldMode(state.model, f.n);
   const fieldInput=(f)=>{
@@ -1469,6 +1481,179 @@ async function bulkApply(){ const m=MODELS[state.model]; const f=$('bkf').value;
   try{ for(const pk of state.sel){ const rec={[f]:v}; await db.update(state.model,m.pk,pk,rec); sysLog(state.model,pk,`${f} set to "${v}" (bulk) by ${CURRENT_USER}`); }
     toast('Updated '+state.sel.length+' record(s)'); state.sel=[]; route(); }catch(e){ toast(e.message,true); } }
 
+/* ============ Master-data Bulk Editor (grouped grid · lock · import · prompts) ============ */
+const BULK_CFG={
+  products:   { group:'family',   cols:['family','variant','pack_g','box_size','sell_price','par_packs','feeding_style','status'] },
+  ingredients:{ group:'category', cols:['category','uom','yield_pct','list_price_kg','price_kg_processed','par_g','reorder_g','min_order_kg','supplier'] },
+  suppliers:  { group:'_alpha',   cols:['contact','mobile','payment_term','delivery_days','sells_by','min_order_kg'] }
+};
+function _bulkGKey(model,r){ const cfg=BULK_CFG[model], m=MODELS[model];
+  if(cfg.group==='_alpha'){ return (String(r[m.name]||'#').trim().charAt(0).toUpperCase())||'#'; }
+  return (r[cfg.group]==null||r[cfg.group]==='')?'— (none) —':String(r[cfg.group]); }
+function _bulkInput(model,f,r){
+  const m=MODELS[model]; const pk=String(r[m.pk]); const locked=window._bulkLocked; const dis=locked?'disabled':'';
+  const d=window._bulkDirty[pk]; const cur=(d&&(f.n in d))?d[f.n]:r[f.n]; const v=cur==null?'':cur;
+  const enc=encodeURIComponent(pk);
+  if(f.t==='select') return `<select ${dis} onchange="bulkSet('${enc}','${f.n}',this.value)">${(f.o||[]).map(o=>`<option ${v===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`;
+  if(f.t==='rel'){ const opts=relCache[f.rel]||[]; return `<select ${dis} onchange="bulkSet('${enc}','${f.n}',this.value)"><option value="">—</option>${opts.map(o=>`<option value="${esc(o.v)}" ${v===o.v?'selected':''}>${esc(o.t)}</option>`).join('')}</select>`; }
+  if(f.t==='bool') return `<select ${dis} onchange="bulkSet('${enc}','${f.n}',this.value==='true')"><option value="false" ${!v?'selected':''}>No</option><option value="true" ${v?'selected':''}>Yes</option></select>`;
+  if(f.t==='currency'||f.t==='number') return `<input type="number" step="any" value="${esc(v)}" ${dis} onchange="bulkSet('${enc}','${f.n}',this.value)" style="width:88px;text-align:right">`;
+  return `<input value="${esc(v)}" ${dis} onchange="bulkSet('${enc}','${f.n}',this.value)" style="width:100%;min-width:120px">`;
+}
+function bulkSet(enc,field,value){ const pk=decodeURIComponent(enc); (window._bulkDirty[pk]=window._bulkDirty[pk]||{})[field]=value;
+  const c=$('bulkDirtyCount'); if(c) c.textContent=Object.keys(window._bulkDirty).length+' record(s) touched'; }
+function bulkToggleLock(){ if(window._bulkLocked && curRole && curRole()!=='Admin'){ /* allow non-admin too, lock is the guard */ }
+  window._bulkLocked=!window._bulkLocked; renderBulkEdit(); }
+async function openBulkEdit(){
+  const model=state.model; const cfg=BULK_CFG[model]; if(!cfg){ toast('Bulk edit is not available for this list',true); return; }
+  window._bulkModel=model; window._bulkLocked=true; window._bulkDirty={}; window._bulkStaged=null; state.view='bulk';
+  showBusy('Loading '+MODELS[model].label+'…');
+  try{
+    for(const c of cfg.cols){ const fd=MODELS[model].fields.find(x=>x.n===c); if(fd&&fd.t==='rel') await relOptions(fd.rel); }
+    let rows=await listForModel(model); rows=rows.filter(r=>r.active!==false);
+    window._bulkRows=rows; window._bulkOrig={}; rows.forEach(r=>{ window._bulkOrig[String(r[MODELS[model].pk])]={...r}; });
+  }catch(e){ hideBusy(); toast(e.message,true); return; }
+  hideBusy(); renderBulkEdit();
+}
+function renderBulkEdit(){
+  const model=window._bulkModel; const m=MODELS[model]; const cfg=BULK_CFG[model]; const rows=window._bulkRows||[];
+  const cols=cfg.cols.map(n=>m.fields.find(f=>f.n===n)).filter(Boolean);
+  const groups={}; rows.forEach(r=>{ const g=_bulkGKey(model,r); (groups[g]=groups[g]||[]).push(r); });
+  const gnames=Object.keys(groups).sort();
+  const glabel=cfg.group==='_alpha'?'name (A–Z)':((m.fields.find(f=>f.n===cfg.group)||{}).l||cfg.group);
+  const isAdmin=(typeof curRole==='function' && curRole()==='Admin');
+  $('cp').innerHTML=`<div class="title">${m.label} — Bulk Edit</div>
+    <button class="btn sec" onclick="state.view='list';route()">← Back</button>
+    <button class="btn ${window._bulkLocked?'sec':''}" onclick="bulkToggleLock()">${window._bulkLocked?'🔒 Locked — tap to edit':'🔓 Editing'}</button>
+    ${isAdmin?`<button class="btn" id="bulkSaveBtn" ${window._bulkLocked?'disabled':''} onclick="bulkSave()">💾 Save now</button>`:''}
+    <button class="btn ${isAdmin?'sec':''}" id="bulkSubmitBtn" ${window._bulkLocked?'disabled':''} onclick="bulkSubmit()">📤 Submit for approval</button>
+    <div class="sp"></div><span class="mini" id="bulkDirtyCount">${Object.keys(window._bulkDirty).length} record(s) touched</span>`;
+  let h=`<div class="repcard">
+    <div class="hint" style="margin:0 0 10px">Grouped by <b>${esc(glabel)}</b>. The grid is <b>locked</b> by default so nothing changes by accident — tap <b>🔒 Locked</b> to edit inline, then <b>Save</b> (you'll be asked to confirm). Or update in bulk from a sheet with <b>Import</b>.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn sec sm" onclick="bulkTemplate()">⬇ Download current data</button>
+      <input type="file" id="bulkFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="bulkImportFile(event)">
+      <button class="btn sec sm" onclick="document.getElementById('bulkFile').click()">📄 Import updates</button>
+    </div>
+    <div id="bulkImportArea" style="margin-bottom:10px"></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>${esc(m.name==='name'?'Name':'Item')}</th>${cols.map(c=>`<th>${esc(c.l)}</th>`).join('')}</tr></thead><tbody>`;
+  gnames.forEach(g=>{
+    h+=`<tr style="background:#e7f0e9"><td colspan="${cols.length+1}"><b>${esc(g)}</b> <span style="opacity:.6">(${groups[g].length})</span></td></tr>`;
+    groups[g].sort((a,b)=>String(a[m.name]||a[m.pk]).localeCompare(String(b[m.name]||b[m.pk]))).forEach(r=>{
+      h+=`<tr><td><b>${esc(r[m.name]||r[m.pk])}</b><div class="mini"><code>${esc(r[m.pk])}</code></div></td>${cols.map(c=>`<td>${_bulkInput(model,c,r)}</td>`).join('')}</tr>`;
+    });
+  });
+  h+=`</tbody></table></div><div class="pager">${rows.length} record(s) · ${gnames.length} group(s)</div></div>`;
+  $('content').innerHTML=h;
+}
+function _bulkChangeSet(model,pk,dirtyObj){ const m=MODELS[model]; const o=(window._bulkOrig||{})[pk]||{}; const set={};
+  Object.keys(dirtyObj).forEach(f=>{ let val=dirtyObj[f]; const fd=m.fields.find(x=>x.n===f)||{};
+    if(fd.t==='number'||fd.t==='currency'){ val=(val===''||val==null)?null:(+val); }
+    const ov=o[f]==null?'':o[f]; if(String(val==null?'':val)!==String(ov)) set[f]=val; });
+  return set; }
+async function bulkSave(){
+  const model=window._bulkModel; const m=MODELS[model]; const dirty=window._bulkDirty||{};
+  const byPk={}; Object.keys(dirty).forEach(pk=>{ const set=_bulkChangeSet(model,pk,dirty[pk]); if(Object.keys(set).length) byPk[pk]=set; });
+  const n=Object.keys(byPk).length;
+  if(!n){ toast('No actual changes to save',true); return; }
+  if(!confirm('Update '+n+' record(s) in '+m.label+'?\nThis writes to the live database.')) return;
+  showBusy('Saving '+n+' record(s)…'); let ok=0,fail=0;
+  for(const pk of Object.keys(byPk)){ try{ await db.update(model,m.pk,pk,byPk[pk]); sysLog(model,pk,'✏ Bulk-edit: '+Object.keys(byPk[pk]).join(', ')+' by '+CURRENT_USER); ok++; }catch(e){ fail++; } }
+  hideBusy(); relCache={}; toast('Saved '+ok+' record(s)'+(fail?(' · ⚠ '+fail+' failed'):''), fail>0); openBulkEdit();
+}
+function bulkTemplate(){ const model=window._bulkModel; const m=MODELS[model]; const cfg=BULK_CFG[model];
+  const header=[m.pk,'name',...cfg.cols];
+  const rows=(window._bulkRows||[]).map(r=>[r[m.pk], r[m.name], ...cfg.cols.map(c=>r[c]==null?'':r[c])]);
+  const aoa=[header,...rows];
+  if(typeof XLSX!=='undefined'){ const ws=XLSX.utils.aoa_to_sheet(aoa); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Data'); XLSX.writeFile(wb,'WR_'+model+'_'+todayISO()+'.xlsx'); }
+  else { dlBlob(aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),'WR_'+model+'_'+todayISO()+'.csv','text/csv'); }
+  toast('Downloaded '+rows.length+' row(s) — edit the columns and re-import');
+}
+function _bulkCsvLine(line){ const out=[]; let cur='',q=false; for(let i=0;i<line.length;i++){ const ch=line[i];
+  if(q){ if(ch==='"'){ if(line[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=ch; }
+  else { if(ch===',') {out.push(cur);cur='';} else if(ch==='"') q=true; else cur+=ch; } } out.push(cur); return out; }
+function bulkImportFile(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader();
+  rd.onload=()=>{ try{ const model=window._bulkModel; const m=MODELS[model]; const cfg=BULK_CFG[model]; let arr;
+      if(/\.csv$/i.test(f.name)){ arr=String(rd.result).split(/\r?\n/).filter(x=>x.trim()!=='').map(_bulkCsvLine); }
+      else { if(typeof XLSX==='undefined') throw new Error('Spreadsheet support did not load — use a .csv'); const wb=XLSX.read(rd.result,{type:'binary'}); const ws=wb.Sheets[wb.SheetNames[0]]; arr=XLSX.utils.sheet_to_json(ws,{header:1}); }
+      const hdr=(arr[0]||[]).map(x=>String(x).trim().toLowerCase()); const pki=hdr.indexOf(String(m.pk).toLowerCase());
+      if(pki<0) throw new Error('the sheet needs a "'+m.pk+'" column');
+      const colIdx={}; cfg.cols.forEach(c=>{ const i=hdr.indexOf(c.toLowerCase()); if(i>=0) colIdx[c]=i; });
+      const orig=window._bulkOrig||{}; const staged=[]; let unknown=0;
+      for(let i=1;i<arr.length;i++){ const row=arr[i]; if(!row)continue; const pk=String(row[pki]==null?'':row[pki]).trim(); if(!pk)continue;
+        const o=orig[pk]; if(!o){ unknown++; continue; }
+        const dirty={}; Object.keys(colIdx).forEach(c=>{ dirty[c]=row[colIdx[c]]; });
+        const set=_bulkChangeSet(model,pk,dirty); if(Object.keys(set).length) staged.push({pk,set}); }
+      window._bulkStaged=staged;
+      $('bulkImportArea').innerHTML = staged.length
+        ? `<div class="tip">Ready to update <b>${staged.length}</b> record(s) from <b>${esc(f.name)}</b> — only changed cells will be written${unknown?` · <span style="color:var(--danger)">${unknown} row(s) skipped (unknown ${esc(m.pk)})</span>`:''}.<div style="margin-top:8px"><button class="btn" style="background:#b23b2e" onclick="bulkImportApply()">✓ Apply ${staged.length} update(s)</button> <button class="btn sec" onclick="window._bulkStaged=null;document.getElementById('bulkImportArea').innerHTML=''">Cancel</button></div></div>`
+        : `<div class="hint">No changes detected in <b>${esc(f.name)}</b>${unknown?` (${unknown} row(s) had an unknown ${esc(m.pk)})`:''}.</div>`;
+    }catch(err){ $('bulkImportArea').innerHTML='<span style="color:var(--danger)">Could not read file: '+esc(err.message)+'</span>'; } };
+  if(/\.csv$/i.test(f.name)) rd.readAsText(f); else rd.readAsBinaryString(f);
+}
+async function bulkImportApply(){ const staged=window._bulkStaged||[]; const model=window._bulkModel; const m=MODELS[model];
+  if(!staged.length){ toast('Nothing to apply',true); return; }
+  if(!confirm('Apply '+staged.length+' record update(s) to '+m.label+'?\nThis writes to the live database.')) return;
+  showBusy('Applying '+staged.length+' update(s)…'); let ok=0,fail=0;
+  for(const s of staged){ try{ await db.update(model,m.pk,s.pk,s.set); sysLog(model,s.pk,'📥 Bulk-import: '+Object.keys(s.set).join(', ')+' by '+CURRENT_USER); ok++; }catch(e){ fail++; } }
+  hideBusy(); window._bulkStaged=null; relCache={}; toast('Updated '+ok+' record(s)'+(fail?(' · ⚠ '+fail+' failed'):''), fail>0); openBulkEdit();
+}
+/* --- Approval workflow: submit bulk changes for an Admin to review & apply --- */
+async function bulkSubmit(){
+  const model=window._bulkModel; const m=MODELS[model]; const dirty=window._bulkDirty||{};
+  const changes=[]; Object.keys(dirty).forEach(pk=>{ const set=_bulkChangeSet(model,pk,dirty[pk]); if(Object.keys(set).length) changes.push({pk,set}); });
+  if(!changes.length){ toast('No actual changes to submit',true); return; }
+  const fields=[...new Set(changes.reduce((a,c)=>a.concat(Object.keys(c.set)),[]))];
+  const summary=changes.length+' '+m.label.toLowerCase()+' · '+fields.join(', ');
+  if(!confirm('Submit '+changes.length+' change(s) to '+m.label+' for approval?')) return;
+  showBusy('Submitting for approval…');
+  try{ await db.create('bulk_change_requests',{ model:model, changes:changes, summary:summary, requested_by:CURRENT_USER, status:'pending' });
+    sysLog('bulk_change_requests','—','📤 '+CURRENT_USER+' submitted for approval: '+summary);
+    hideBusy(); window._bulkDirty={}; toast('Submitted — an Admin will review it under Administration → Approvals'); openBulkEdit();
+  }catch(e){ hideBusy(); toast(e.message,true); }
+}
+function _bcrChanges(rq){ return Array.isArray(rq.changes)?rq.changes:(function(){try{return JSON.parse(rq.changes||'[]');}catch(e){return [];}})(); }
+async function renderApprovals(){
+  $('cp').innerHTML=`<div class="title">Approvals</div><button class="btn sec" onclick="renderApprovals()">↻ Refresh</button><div class="sp"></div><span style="color:var(--muted)">review &amp; apply pending bulk changes</span>`;
+  let reqs=[]; try{ reqs=await db.list('bulk_change_requests',{}); }catch(e){ $('content').innerHTML='<div class="repcard"><div class="empty">Run <code>wr_migration_bulk_approvals.sql</code> first, then refresh.</div></div>'; return; }
+  const isAdmin=(typeof curRole==='function' && curRole()==='Admin');
+  const pending=reqs.filter(r=>r.status==='pending').sort((a,b)=>String(b.requested_at||'').localeCompare(String(a.requested_at||'')));
+  let h=`<div class="repcard"><div class="hint" style="margin:0 0 10px">Bulk edits submitted by the team wait here. ${isAdmin?'Approve to apply them to the live data, or reject with a note.':'Only an Admin can approve — yours will show here until then.'}</div>`;
+  if(!pending.length) h+='<div class="empty">No pending change requests 🎉</div>';
+  pending.forEach(rq=>{ const changes=_bcrChanges(rq);
+    const rows=changes.map(c=>`<tr><td><code>${esc(c.pk)}</code></td><td>${esc(Object.keys(c.set).map(function(k){return k+' → '+c.set[k];}).join(', '))}</td></tr>`).join('');
+    h+=`<div style="border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px">
+      <div><b>${esc(MODELS[rq.model]?MODELS[rq.model].label:rq.model)}</b> · ${esc(rq.summary||'')}</div>
+      <div class="mini">requested by ${esc(rq.requested_by||'')} · ${esc(String(rq.requested_at||'').slice(0,16).replace('T',' '))}</div>
+      <div style="overflow-x:auto"><table style="margin:8px 0"><thead><tr><th>Record</th><th>Changes</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${isAdmin?`<div style="display:flex;gap:8px"><button class="btn" onclick="approveReq('${esc(String(rq.id))}')">✓ Approve &amp; apply</button><button class="btn sec" style="color:var(--danger)" onclick="rejectReq('${esc(String(rq.id))}')">✕ Reject</button></div>`:''}
+    </div>`; });
+  h+='</div>';
+  const decided=reqs.filter(r=>r.status!=='pending').sort((a,b)=>String(b.reviewed_at||'').localeCompare(String(a.reviewed_at||''))).slice(0,10);
+  if(decided.length){ h+=`<div class="repcard" style="margin-top:12px"><h3 style="margin:0 0 6px">Recent decisions</h3><div style="overflow-x:auto"><table><thead><tr><th>Model</th><th>Summary</th><th>Status</th><th>Reviewed by</th></tr></thead><tbody>${decided.map(r=>`<tr><td>${esc(MODELS[r.model]?MODELS[r.model].label:r.model)}</td><td>${esc(r.summary||'')}</td><td><span class="badge b-${r.status==='approved'?'true':'false'}">${esc(r.status)}</span></td><td>${esc(r.reviewed_by||'')}</td></tr>`).join('')}</tbody></table></div></div>`; }
+  $('content').innerHTML=h;
+}
+async function approveReq(id){
+  if(typeof curRole==='function' && curRole()!=='Admin'){ toast('Only an Admin can approve',true); return; }
+  let reqs=[]; try{ reqs=await db.list('bulk_change_requests',{}); }catch(e){}
+  const rq=reqs.find(r=>String(r.id)===String(id)); if(!rq){ toast('Request not found',true); return; }
+  const changes=_bcrChanges(rq); const m=MODELS[rq.model];
+  if(!m){ toast('Unknown model',true); return; }
+  if(!confirm('Approve and apply '+changes.length+' change(s) to '+m.label+'?')) return;
+  showBusy('Applying…'); let ok=0,fail=0;
+  for(const c of changes){ try{ await db.update(rq.model, m.pk, c.pk, c.set); ok++; }catch(e){ fail++; } }
+  try{ await db.update('bulk_change_requests','id',rq.id,{status:'approved',reviewed_by:CURRENT_USER,reviewed_at:new Date().toISOString()}); }catch(e){}
+  sysLog(rq.model,'—','✅ '+CURRENT_USER+' approved: '+(rq.summary||'')+' ('+ok+' applied'+(fail?(', '+fail+' failed'):'')+')');
+  hideBusy(); relCache={}; toast('Approved — '+ok+' applied'+(fail?(' · ⚠ '+fail+' failed'):''), fail>0); renderApprovals();
+}
+async function rejectReq(id){
+  if(typeof curRole==='function' && curRole()!=='Admin'){ toast('Only an Admin can approve',true); return; }
+  const note=prompt('Reason for rejecting (optional):'); if(note===null) return;
+  try{ await db.update('bulk_change_requests','id',id,{status:'rejected',reviewed_by:CURRENT_USER,reviewed_at:new Date().toISOString(),review_note:note||''}); }catch(e){ toast(e.message,true); return; }
+  sysLog('bulk_change_requests',String(id),'✕ '+CURRENT_USER+' rejected a change request');
+  toast('Rejected'); renderApprovals();
+}
+
 /* MRP / Demand planning */
 let mrpDemand={}, mrpManual={}, mrpRemarks={};
 function kgf(g){ return (g/1000).toFixed(2); }
@@ -1476,6 +1661,14 @@ function kgf(g){ return (g/1000).toFixed(2); }
 // still reads the previous day; use Asia/Manila so "today" matches the user's clock.
 function todayISO(){ try{ return new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Manila'}); }catch(e){ const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); } }
 function dateMinus(d,n){ try{ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()-(n||0)); return x.toISOString().slice(0,10);}catch(e){return d;} }
+function addDaysISO(d,n){ try{ const x=new Date((d||todayISO())+'T00:00:00'); x.setDate(x.getDate()+(+n||0)); return x.toISOString().slice(0,10);}catch(e){return d||'';} }
+/* ---- #3 Bin locations: one bin per (item sku, location) — used by Receiving + Count ---- */
+async function loadBins(){ try{ const rows=await db.list('item_bins',{}); const m={}; (rows||[]).forEach(r=>{ m[r.sku+'|'+(r.location_code||'bulacan')]=r.bin||''; }); window._binMap=m; }catch(e){ window._binMap=window._binMap||{}; } }
+function binOf(sku,loc){ return (window._binMap||{})[String(sku)+'|'+(loc||'bulacan')]||''; }
+async function setBin(sku,loc,bin){ loc=loc||'bulacan'; sku=String(sku); (window._binMap=window._binMap||{})[sku+'|'+loc]=bin;
+  try{ if(isLive()){ await sb('item_bins?on_conflict=sku,location_code',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({sku:sku,location_code:loc,bin:bin})}); }
+    else { DEMO.item_bins=(DEMO.item_bins||[]).filter(x=>!(x.sku===sku&&(x.location_code||'bulacan')===loc)); DEMO.item_bins.push({sku:sku,location_code:loc,bin:bin}); } }catch(e){} }
+function countSetBin(sku,loc,v){ setBin(sku,loc,v); }
 async function renderMRP(){
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderMRP()">↻ Compute</button>
@@ -1957,7 +2150,8 @@ async function postReceipt(po){ try{
     // Supplies are counted in whole units (scale 1), food ingredients in kg (×1000 → grams).
     const isSup=/(supply|supplement)/i.test((im[l.ingredient_sku]||{}).category||'');
     const g=isSup?recvKg:recvKg*1000, priceKg=Math.max(0,+l.price_kg||0);
-    await db.create('inventory_movements',{kind:'ingredient',ref_sku:l.ingredient_sku,location_code:'bulacan',qty:g,unit_cost:(isSup?priceKg:priceKg/1000),movement_type:'receipt',note:'PO '+po.po_ref});
+    const _exp=(window._recvExpiry&&window._recvExpiry[l.ingredient_sku])||null;
+    await db.create('inventory_movements',{kind:'ingredient',ref_sku:l.ingredient_sku,location_code:'bulacan',qty:g,unit_cost:(isSup?priceKg:priceKg/1000),movement_type:'receipt',note:'PO '+po.po_ref, expiry_date:_exp});
     if(isSup){ n++; continue; }   // supplies carry no per-kg moving-average cost
     // roll the moving-average cost — server-side RPC when masking is on (Warehouse can't touch cost columns), else client-side
     if(secure){ try{ await sb('rpc/wr_roll_cost',{method:'POST',body:JSON.stringify({p_sku:l.ingredient_sku,p_recv_kg:recvKg,p_price_kg:priceKg})}); }catch(e){ costErr++; } }
@@ -1972,6 +2166,11 @@ async function postReceipt(po){ try{
 async function postTransfer(t){ try{
   if(await movementExists('Transfer '+t.transfer_ref)){ toast('This transfer was already received — not posted again.',true); return; }
   const lines=await db.children(MODELS.transfers.o2m, t.transfer_ref); const cm=await prodCostMap();
+  // Soft best-before warning — flag products that have finished stock already past best-before.
+  try{ const _today=todayISO(); const _bad={}; (await db.list('production_batches',{})).forEach(b=>{ const bb=b.best_before?String(b.best_before).slice(0,10):''; if(bb && bb<_today && (!_bad[b.product_sku]||bb<_bad[b.product_sku])) _bad[b.product_sku]=bb; });
+    const _mv=[...new Set(lines.map(l=>l.product_sku))].filter(s=>_bad[s]);
+    if(_mv.length){ const _pn={}; (await db.list('products',{})).forEach(p=>_pn[p.sku]=p.name);
+      if(!confirm('⚠ Best-before warning — these products have finished stock past best-before:\n\n'+_mv.map(s=>'• '+(_pn[s]||s)+' (best before '+_bad[s]+')').join('\n')+'\n\nMake sure you are not shipping expired packs. Proceed with the transfer?')) return; } }catch(e){}
   const from=t.from_code||'bulacan', to=t.to_code||'pasig'; let n=0,flags=0;
   for(const l of lines){ const sent=Math.max(0,+l.sent_packs||0), recv=Math.max(0,+l.received_packs||0); if(sent<=0&&recv<=0) continue; const uc=cm[l.product_sku]||0;
     if(sent>0) await db.create('inventory_movements',{kind:'product',ref_sku:l.product_sku,location_code:from,qty:-sent,unit_cost:uc,movement_type:'transfer_out',note:'Transfer '+t.transfer_ref});
@@ -2095,6 +2294,17 @@ function poPaymentsPanel(rec, lines){
   const canPay = ['confirmed','received'].includes(rec.status);
   const rows = pays.length ? pays.map(p=>`<tr><td>${esc(p.paid_at||'')}</td><td>${esc(p.method||'—')}</td><td class="num">${P(+p.amount||0)}</td><td>${esc(p.paid_by||'')}</td><td class="mini">${esc(p.note||'')}</td></tr>`).join('')
     : `<tr><td colspan="5" class="empty" style="padding:8px">No payments yet.</td></tr>`;
+  // Payment schedule from the supplier's terms (downpayment / on-receiving / term) applied to the billable.
+  const sup=window._poSupplier||{}; const dpP=+sup.dp_pct||0, rvP=+sup.receiving_pct||0, tmP=+sup.term_pct||0, tmD=+sup.term_days||0;
+  let schedHtml='';
+  if((dpP+rvP+tmP)>0){
+    const stages=[{l:'Downpayment',pct:dpP,due:rec.order_date,when:'on order'},{l:'On receiving',pct:rvP,due:'',when:'on delivery'},{l:'Term balance',pct:tmP,due:addDaysISO(rec.order_date,tmD),when:tmD?tmD+'-day term':'term'}].filter(s=>s.pct>0);
+    let rem=paid; const srows=stages.map(s=>{ const amt=billable*s.pct/100; const cov=Math.min(amt,Math.max(0,rem)); rem-=cov; const stt=cov>=amt-0.5?'paid':(cov>0?'partial':'due'); const col=stt==='paid'?'#4e7a3e':(stt==='partial'?'var(--earth,#b5762a)':'var(--danger)');
+      return `<tr><td>${s.l} <span class="mini">(${s.pct}% · ${esc(s.when)})</span></td><td class="mini">${esc(s.due||'on delivery')}</td><td class="num">${P(amt)}</td><td><span style="color:${col};font-weight:700">${stt.toUpperCase()}</span></td></tr>`; }).join('');
+    const schedTot=stages.reduce((a,s)=>a+(+s.pct||0),0);
+    schedHtml=`<div style="margin:2px 0 10px"><div class="mini" style="margin-bottom:4px">Payment schedule — <b>${esc(sup.name||rec.supplier_name||'')}</b> terms${schedTot!==100?` · <span style="color:var(--earth)">covers ${schedTot}%</span>`:''}</div>
+      <div style="overflow-x:auto"><table><thead><tr><th>Stage</th><th>Due</th><th class="num">Amount</th><th>Status</th></tr></thead><tbody>${srows}</tbody></table></div></div>`;
+  }
   return `<div style="padding:6px 22px 14px"><div class="repcard" style="margin:0">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
       <h3 style="margin:0">💵 Payments</h3>
@@ -2103,6 +2313,7 @@ function poPaymentsPanel(rec, lines){
       <span class="mini">Billable <b>${P(billable)}</b> · Paid <b>${P(paid)}</b> · Balance <b style="color:${bal>0.5?'var(--danger)':'#4e7a3e'}">${P(bal)}</b></span>
       ${canPay?`<button class="btn sm" onclick="openPayment()">➕ Register payment</button>`:''}
     </div>
+    ${schedHtml}
     <div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Method</th><th class="num">Amount</th><th>By</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>
   </div></div>`;
 }
@@ -2143,12 +2354,17 @@ async function openPOReceive(){
   if(!lines.length){ try{ lines=await db.children(MODELS.purchase_orders.o2m, formRec.po_ref); formChildren=lines; }catch(e){} }
   if(!lines.length){ toast('No order lines to receive',true); return; }
   window._poOrd=lines.map(l=>+l.ordered_kg||0);
+  await loadBins();
+  const _im={}; try{ (await listIngredients()).forEach(x=>_im[x.sku]=x); }catch(e){}
+  const _expDefault=(sku)=>{ const it=_im[sku]||{}; const d=+it.shelf_life_days||0; return d>0?addDaysISO(todayISO(),d):''; };
   $('modal').innerHTML=`<h3>Receive order — ${esc(formRec.po_ref)}</h3>
-    <p>Enter the <b>quantity actually received</b> for each line. Only what you enter is posted to Bulacan stock. If a delivery is <b>short</b>, the PO is received at what actually arrived and the shortfall is flagged and logged.</p>
-    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Ordered kg</th><th class="num">Received kg</th><th></th></tr></thead><tbody>
+    <p>Enter the <b>quantity actually received</b> for each line, the <b>bin</b> where it's stored, and its <b>expiry date</b>. Only what you enter is posted to Bulacan stock. If a delivery is <b>short</b>, the PO is received at what actually arrived and the shortfall is flagged and logged.</p>
+    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Ordered kg</th><th class="num">Received kg</th><th>Bin</th><th>Expiry</th><th></th></tr></thead><tbody>
     ${lines.map((l,i)=>`<tr><td>${esc(ingName(l.ingredient_sku))}</td>
       <td class="num" style="color:var(--muted)">${(+l.ordered_kg||0)}</td>
       <td><input id="rc_q${i}" type="number" step="any" value="${(+l.ordered_kg||+l.available_kg||0)}" oninput="rcFlag(${i})" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td><input id="rc_bin${i}" value="${esc(binOf(l.ingredient_sku,'bulacan'))}" placeholder="bin" style="width:76px;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td>${/(supply|supplement)/i.test((_im[l.ingredient_sku]||{}).category||'')?'<span class="mini" style="color:var(--muted)" title="non-perishable — no expiry">—</span>':`<input id="rc_exp${i}" type="date" value="${esc(_expDefault(l.ingredient_sku))}" style="padding:5px;border:1px solid var(--line);border-radius:5px" title="expiry date (optional)">`}</td>
       <td id="rc_flag${i}" style="font-size:12px;white-space:nowrap"></td></tr>`).join('')}
     </tbody></table></div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="poReceiveApply()">📦 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
@@ -2171,6 +2387,9 @@ async function _poReceiveApply(){
     else if(rq>oq+0.0001){ notes.push(ingName(l.ingredient_sku)+': ordered '+oq+' → received '+rq+'kg (over '+(Math.round((rq-oq)*100)/100)+')'); }
     return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:l.available_kg, price_kg:l.price_kg, received_kg:rq}; });
   if(shortG>0.0001) notes.push('⚠ short delivery — '+(Math.round(shortG*100)/100)+' kg not delivered (raise a new PO to fulfil the balance)');
+  window._recvExpiry={};
+  lines.forEach((l,i)=>{ const bv=($('rc_bin'+i)||{}).value; if(bv!==undefined&&bv!==null) setBin(l.ingredient_sku,'bulacan',bv);
+    const ev=($('rc_exp'+i)||{}).value; if(ev) window._recvExpiry[l.ingredient_sku]=ev; });
   try{
     await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
     formChildren=updated; formRec.status='received';
@@ -2310,6 +2529,10 @@ async function renderDashboard(){
   try{_bi=await db.list('batch_issues',{})}catch(e){}
   try{_pol=await db.list('po_lines',{})}catch(e){}
   try{_dl=await db.list('delivery_lines',{})}catch(e){}
+  let _pay=[]; try{_pay=await db.list('po_payments',{})}catch(e){}
+  const _payByPo={}; _pay.forEach(p=>_payByPo[p.po_ref]=(_payByPo[p.po_ref]||0)+(+p.amount||0));
+  const _lineByPo={}; _pol.forEach(l=>{ (_lineByPo[l.po_ref]=_lineByPo[l.po_ref]||[]).push(l); });
+  let payables=0,payCount=0; po.forEach(p=>{ if(['confirmed','received'].includes(p.status)){ const bl=poBillable(p,_lineByPo[p.po_ref]||[]); const b=Math.max(0,bl-(_payByPo[p.po_ref]||0)); if(b>0.5){ payables+=b; payCount++; } } });
   const _sum=(a,f)=>a.reduce((s,x)=>s+(+f(x)||0),0);
   const q1o=_sum(_pol,l=>l.ordered_kg), q1r=_sum(_pol,l=>l.received_kg); const q1=q1o?Math.round(q1r/q1o*100):null;
   const q2=_sum(_bi,z=>z.actual_raw_g)-_sum(_bi,z=>z.expected_raw_g);
@@ -2333,7 +2556,7 @@ async function renderDashboard(){
   const kpi=(l,v,s,accent)=>`<div class="card kpi"><div class="l">${l}</div><div class="v${accent?' accent':''}">${v}</div><div class="s">${s||''}</div></div>`;
   const kpis = mh
     ? [kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units',true),kpi('Finished SKUs',fgSkus,'with stock'),kpi('Ingredients',rawItems,'with stock'),kpi('Items to reorder',reorder.length,'labels below par'),kpi('Open POs',openPo,po.length+' total'),kpi('Supplies tracked',supItems,'consumables')].join('')
-    : [kpi('Total inventory value',wpeso(fgVal+rawVal),'finished + raw',true),kpi('Finished goods · Pasig',wpeso(fgVal),Math.round(packs).toLocaleString()+' packs · '+fgSkus+' SKUs'),kpi('Raw materials · Bulacan',wpeso(rawVal),rawItems+' ingredients'),kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units'),kpi('Items to reorder',reorder.length,'labels below par'),kpi('Supplies tracked',supItems,'consumables')].join('');
+    : [kpi('Total inventory value',wpeso(fgVal+rawVal),'finished + raw',true),kpi('Finished goods · Pasig',wpeso(fgVal),Math.round(packs).toLocaleString()+' packs · '+fgSkus+' SKUs'),kpi('Raw materials · Bulacan',wpeso(rawVal),rawItems+' ingredients'),kpi('Payables',wpeso(payables),payCount+' unpaid PO'+(payCount===1?'':'s')),kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units'),kpi('Items to reorder',reorder.length,'labels below par'),kpi('Supplies tracked',supItems,'consumables')].join('');
   const donutBody = (!mh && famArr.length)? wrDonut(famArr) : (mh? '<div class="hint">Value hidden for your role. Packs on hand: <b>'+Math.round(packs).toLocaleString()+'</b></div>' : '<div class="hint">No finished-goods value yet — seed or receive stock to see this.</div>');
   const siteBody = (!mh && siteArr.length)? wrHbars(siteArr,WBRAND,wpeso) : '<div class="hint">Value hidden for your role.</div>';
   const rawlineBody = wrLine(WR_HISTORY.raw_trend,'date','kg',WSER[4])+'<p class="note">Weekly commissary counts, Feb–Jul 2026 (historical).</p>';
@@ -2687,6 +2910,7 @@ async function prodActualsApply(){
   try{
     const recs=await prodPersist('confirmed'); if(!recs){ _postLock=false; return; }
     const cm=await prodCostMap(); const bm=await prodBOMMap();
+    const DEFAULT_FG_SHELF=4; const _shelfBy={}; try{ (await db.list('products',{})).forEach(p=>_shelfBy[p.sku]=+p.shelf_life_days||0); }catch(e){}
     const totProc={}; recs.forEach(r=>{ const packs=+r.good_packs||0; (bm[r.product_sku]||[]).forEach(line=>{ totProc[line.ingredient_sku]=(totProc[line.ingredient_sku]||0)+line.processed_g*packs; }); });
     const procRef='Production '+prodRunRef;
     // 1) processing per output (aggregate): consume raw (actual), produce processed (actual made)
@@ -2699,8 +2923,9 @@ async function prodActualsApply(){
     for(const r of recs){ const packs=+r.good_packs||0; if(packs<=0) continue;
       if(await movementExists('Production '+r.batch_ref)) continue;
       const cpp=Math.round((cm[r.product_sku]||0)*100)/100;
-      try{ await db.update('production_batches','batch_ref',r.batch_ref,{cost_per_pack:cpp}); }catch(e){}
-      try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:packs,unit_cost:cpp,movement_type:'batch_output',note:'Production '+r.batch_ref}); posted++; }catch(e){ failed++; }
+      const _bb=addDaysISO(prodPlanDate||todayISO(), _shelfBy[r.product_sku]||DEFAULT_FG_SHELF);   // best-before = production date + shelf life
+      try{ await db.update('production_batches','batch_ref',r.batch_ref,{cost_per_pack:cpp,best_before:_bb}); }catch(e){}
+      try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:packs,unit_cost:cpp,movement_type:'batch_output',note:'Production '+r.batch_ref,expiry_date:_bb}); posted++; }catch(e){ failed++; }
       for(const line of (bm[r.product_sku]||[])){ const procG=Math.round(line.processed_g*packs*100)/100; if(!(procG>0)) continue;
         const x=actBy[line.ingredient_sku]||{}; const tot=totProc[line.ingredient_sku]||procG; const share=tot>0?(line.processed_g*packs)/tot:1;
         const actRawB=Math.round((+x.actualRawKg||0)*1000*share*100)/100; const madeB=Math.round((+x.actualMadeKg||0)*1000*share*100)/100;
@@ -2795,6 +3020,7 @@ async function renderCountForm(idEnc){
           else { l.cat=l.cat||'Uncategorized'; l.uom='kg'; l.scale=1000; } } });
     }catch(e){} }
   else { countRec={count_ref:'',location_code:'bulacan',count_date:todayISO(),status:'draft',scope:['All']}; countLines=[]; }
+  await loadBins();
   drawCountForm();
 }
 function drawCountForm(){
@@ -2813,11 +3039,11 @@ function drawCountForm(){
     // Products with a case pack: enter boxes + loose packs → total packs.
     if(l.isProduct && (+l.box||1)>1){ const box=+l.box||1; const tot=(l.counted_qty===''||l.counted_qty==null)?null:+l.counted_qty;
       const bx=(l._boxes!=null&&l._boxes!=='')?l._boxes:(tot!=null?Math.floor(tot/box):''); const lo=(l._loose!=null&&l._loose!=='')?l._loose:(tot!=null?(tot-Math.floor(tot/box)*box):'');
-      return `<tr><td>${esc(l.name||l.ref_sku)}<div class="mini">${box}/box</div></td><td><code>${esc(l.ref_sku)}</code></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td>
+      return `<tr><td>${esc(l.name||l.ref_sku)}<div class="mini">${box}/box</div></td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td>
         <td class="num" style="white-space:nowrap"><input type="number" step="1" value="${bx}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},this.value,null)" style="width:46px;text-align:right" title="boxes"> box ×${box} + <input type="number" step="1" value="${lo}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},null,this.value)" style="width:46px;text-align:right" title="loose packs"> loose</td>${varCell}</tr>`; }
     const cntD=(l.counted_qty==null||l.counted_qty==='')?'':(Math.round((+l.counted_qty/s)*1e6)/1e6);
-    return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td>${varCell}</tr>`; };
-  const lineRows=Object.keys(_byCat).sort().map(cat=>`<tr><td colspan="5" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">${esc(cat)} <span style="opacity:.6;font-weight:400">(${_byCat[cat].length})</span></td></tr>`+_byCat[cat].map(rowFor).join('')).join('');
+    return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td>${varCell}</tr>`; };
+  const lineRows=Object.keys(_byCat).sort().map(cat=>`<tr><td colspan="6" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">${esc(cat)} <span style="opacity:.6;font-weight:400">(${_byCat[cat].length})</span></td></tr>`+_byCat[cat].map(rowFor).join('')).join('');
   $('content').innerHTML=`<div class="formwrap"><div class="sheet">
     <div class="statusbar">${MODELS.count_sessions.status.stages.map(s=>`<div class="stg ${countRec.status===s?'on':''}">${s}</div>`).join('')}</div>
     <div class="hd"><input class="ttl" value="${esc(countRec.count_ref||'')}" ${approved?'disabled':''} oninput="countRec.count_ref=this.value"><div class="sub">Physical count · book qty is auto-generated &amp; locked</div></div>
@@ -2828,8 +3054,8 @@ function drawCountForm(){
         ${!approved?`<div style="margin-top:10px"><button class="btn sec" onclick="countLoad()">⬇ Load items</button></div>`:''}</div>
     </div>
     <div class="notebook"><div class="nbtabs"><button class="on">Count Lines (${countLines.length})</button></div>
-      <div class="lines"><table><thead><tr><th>Item</th><th>SKU</th><th class="num">Book qty</th><th class="num">Counted</th><th class="num">Variance</th></tr></thead>
-      <tbody>${lineRows||'<tr><td colspan="5" class="empty">Pick a scope and Load items.</td></tr>'}</tbody></table></div></div>
+      <div class="lines"><table><thead><tr><th>Item</th><th>SKU</th><th>Bin</th><th class="num">Book qty</th><th class="num">Counted</th><th class="num">Variance</th></tr></thead>
+      <tbody>${lineRows||'<tr><td colspan="6" class="empty">Pick a scope and Load items.</td></tr>'}</tbody></table></div></div>
   </div>
   <div class="formbar">
     ${!approved?`<button class="btn" onclick="countSave()">💾 Save draft</button>`:''}
@@ -2847,12 +3073,12 @@ function countPrintSheet(){
   let body='';
   Object.keys(byCat).sort().forEach(cat=>{
     const arr=byCat[cat].slice().sort((a,b)=>String(a.name||a.ref_sku).localeCompare(String(b.name||b.ref_sku)));
-    body+=`<tr class="cat"><td colspan="4">${esc(cat)} (${arr.length})</td></tr>`+arr.map(l=>{ const s=+l.scale||1; return `<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`; }).join('');
+    body+=`<tr class="cat"><td colspan="5">${esc(cat)} (${arr.length})</td></tr>`+arr.map(l=>{ const s=+l.scale||1; return `<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td>${esc(binOf(l.ref_sku,countRec.location_code))}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`; }).join('');
   });
   const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.cat td{background:#eef3ea;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:130px;border-bottom:1px solid #333}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Weekly Count Sheet</h1>
     <h2>${esc(countRec.count_ref||'')} · ${esc((countRec.location_code||'').toUpperCase())} · ${esc(countRec.count_date||'')} · counted by: ____________________</h2>
-    <table><thead><tr><th>Item</th><th>SKU</th><th style="text-align:right">Book qty</th><th>Counted</th></tr></thead><tbody>${body}</tbody></table>
+    <table><thead><tr><th>Item</th><th>SKU</th><th>Bin</th><th style="text-align:right">Book qty</th><th>Counted</th></tr></thead><tbody>${body}</tbody></table>
     <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · write the physical count in the right column, then enter it in the app.</p></body></html>`;
   const w=window.open('','_pr','width=840,height=980'); if(!w){toast('Allow pop-ups to print',true);return;} w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
 }
@@ -2891,6 +3117,7 @@ async function countLoad(){
   if(wantStk) prods.forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
     lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',uom:'pcs',scale:1}); });
   countLines=lines;
+  await loadBins();
   toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')); drawCountForm();
 }
 // Weekly-inventory reference: WI-MMDDYYYY [SCOPE].VXX. Scope tag from the selected scope.
@@ -3130,8 +3357,10 @@ async function renderStdReports(){
   if(!mh) cards+=`<div class="qcard" onclick="runRecipeCost()"><div class="ic">🧮</div><div><div class="t">Recipe cost per product</div><div class="d">Computed ingredient cost & margin per product.</div></div></div>`;
   if(!mh) cards+=`<div class="qcard" onclick="repActive='cogsrecon';renderStdReports()"><div class="ic">📐</div><div><div class="t">COGS: standard vs actual</div><div class="d">Planned worst-case cost vs real moving-average — the drift is yield loss or price creep.</div></div></div>`;
   cards+=`<div class="qcard" onclick="repActive='lowstock';renderStdReports()"><div class="ic">📉</div><div><div class="t">Low stock / reorder</div><div class="d">Ingredients below reorder point and finished goods below PAR.</div></div></div>`;
+  cards+=`<div class="qcard" onclick="repActive='expiring';renderStdReports()"><div class="ic">⏳</div><div><div class="t">Expiring soon (FEFO)</div><div class="d">Received raw batches by expiry date — use the oldest first.</div></div></div>`;
   cards+=`<div class="qcard" onclick="runLabelsReorder()"><div class="ic">🏷️</div><div><div class="t">Labels to reorder</div><div class="d">Products whose sticker stock is below its PAR.</div></div></div>`;
   cards+=`<div class="qcard" onclick="repActive='dupbom';renderStdReports()"><div class="ic">🔁</div><div><div class="t">Repeated recipe ingredients</div><div class="d">Products listing an ingredient on more than one line — intentional substitution, or an accidental copy?</div></div></div>`;
+  if(!mh) cards+=`<div class="qcard" onclick="repActive='payables';renderStdReports()"><div class="ic">💳</div><div><div class="t">Supplier payables</div><div class="d">Open PO balances &amp; payment status by supplier (billable − paid).</div></div></div>`;
   const OWNER=[['q_recv','Ordered → received → paid','Was what we ordered received & does it match what we paid?',true],
     ['q_usage','Ingredient usage & yield','Fully used, or skimmed / wasted?',false],
     ['q_pasig','Produced → Pasig','Did everything produced reach Pasig?',false],
@@ -3144,6 +3373,8 @@ async function renderStdReports(){
   else if(repActive==='cogsrecon'){ result= mh?'<div class="repcard"><div class="hint">Cost is hidden for your role.</div></div>' : await cogsReconHtml(); }
   else if(repActive==='lowstock'){ result=await lowStockHtml(); }
   else if(repActive==='dupbom'){ result=await dupBomHtml(); }
+  else if(repActive==='payables'){ result=await rptPayables(); }
+  else if(repActive==='expiring'){ result=await rptExpiring(); }
   else if(repActive==='labels'){ result=await labelsReorderHtml(); }
   else if(repActive==='q_recv'){ result=await rptReceiving(); }
   else if(repActive==='q_usage'){ result=await rptUsage(); }
@@ -3182,6 +3413,59 @@ async function recipeCostHtml(){
   h+='</tbody></table><div class="hint" style="margin-top:8px">Ingredient cost only (raw ÷ yield × list price). Add labour + packaging in Production for full cost/pack.</div></div>';
   return h;
 }
+/* ============ Gross Margin — full cost per pack (raw + other costs) → GP% → suggested price ============ */
+const COST_MODEL_DEFAULT={ target_gm:0.30,
+  fixed:[ {k:'overhead',l:'Overhead',v:3.68},{k:'vacuum',l:'Vacuum bag',v:2.88},{k:'sticker',l:'Sticker',v:5.5},
+          {k:'ecobag',l:'Eco bag',v:18},{k:'thermal',l:'Thermal pouch',v:13},{k:'electricity',l:'Electricity',v:2.8},
+          {k:'water',l:'Water',v:0.1},{k:'sousvide',l:'Sous-vide elec.',v:0.6},{k:'transport',l:'Transport to Pasig',v:0.87} ],
+  pct:[ {k:'marketing',l:'Marketing fee',v:0.05},{k:'transaction',l:'Transaction fee',v:0.06} ] };
+let COST_MODEL=(function(){ try{ return JSON.parse(localStorage.getItem('wr_cost_model')||'null')||JSON.parse(JSON.stringify(COST_MODEL_DEFAULT)); }catch(e){ return JSON.parse(JSON.stringify(COST_MODEL_DEFAULT)); } })();
+async function loadCostModel(){ if(window._costModelLoaded||!isLive()) return; window._costModelLoaded=true;
+  try{ const r=await sb('app_settings?select=value&key=eq.cost_model'); if(r&&r[0]&&r[0].value){ COST_MODEL=Object.assign({},COST_MODEL,r[0].value); localStorage.setItem('wr_cost_model',JSON.stringify(COST_MODEL)); } }catch(e){} }
+function saveCostModel(){ localStorage.setItem('wr_cost_model',JSON.stringify(COST_MODEL));
+  if(isLive()){ sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'cost_model',value:COST_MODEL})}).catch(()=>{}); }
+  toast('Cost model saved'); renderMargin(); }
+function cmSetFixed(k,v){ const f=COST_MODEL.fixed.find(x=>x.k===k); if(f) f.v=+v||0; }
+function cmSetPct(k,v){ const f=COST_MODEL.pct.find(x=>x.k===k); if(f) f.v=(+v||0)/100; }
+function cmSetTarget(v){ COST_MODEL.target_gm=(+v||0)/100; }
+function cmReset(){ COST_MODEL=JSON.parse(JSON.stringify(COST_MODEL_DEFAULT)); renderMargin(); }
+async function renderMargin(){
+  await loadCostModel();
+  $('cp').innerHTML=`<div class="title">Gross Margin</div><button class="btn" onclick="renderMargin()">↻ Recompute</button><div class="sp"></div><span style="color:var(--muted)">full cost per pack → GP% → suggested price</span>`;
+  if(typeof moneyHidden==='function' && moneyHidden()){ $('content').innerHTML='<div class="repcard"><div class="hint">Cost &amp; margin are hidden for your role.</div></div>'; return; }
+  let prods=[],boms=[],ings=[]; try{ prods=await db.list('products',{}); boms=await db.list('bom_lines',{}); ings=await listIngredients(); }catch(e){}
+  const im={}; ings.forEach(i=>im[i.sku]=i);
+  const rawCost=p=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=im[b.ingredient_sku]||{}; const cg=((+it.price_kg_processed||+it.moving_avg_cost_kg||+it.list_price_kg||0))/1000; c+=(+b.usable_g||0)*cg; }); return c; };
+  const fixedTot=COST_MODEL.fixed.reduce((s,f)=>s+(+f.v||0),0);
+  const pctTot=COST_MODEL.pct.reduce((s,f)=>s+(+f.v||0),0);
+  const tgm=+COST_MODEL.target_gm||0;
+  let h=`<div class="repcard"><h3 style="margin:0 0 8px">Cost model (per pack)</h3>
+    <div class="hint" style="margin-bottom:8px">Added on top of the raw ingredient cost to get <b>total cost per pack</b>. Fixed items are ₱/pack; fees are a % of the selling price. Edit, then <b>Recompute</b> to preview or <b>Save</b> to share with the team.</div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px">`;
+  COST_MODEL.fixed.forEach(f=>{ h+=`<label style="font-size:12px">${esc(f.l)} ₱<br><input type="number" step="any" value="${f.v}" style="width:88px" onchange="cmSetFixed('${f.k}',this.value)"></label>`; });
+  COST_MODEL.pct.forEach(f=>{ h+=`<label style="font-size:12px">${esc(f.l)} %<br><input type="number" step="any" value="${+(f.v*100).toFixed(4)}" style="width:78px" onchange="cmSetPct('${f.k}',this.value)"></label>`; });
+  h+=`<label style="font-size:12px"><b>Target GM</b> %<br><input type="number" step="any" value="${+(tgm*100).toFixed(4)}" style="width:78px" onchange="cmSetTarget(this.value)"></label>`;
+  h+=`</div><div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button class="btn" onclick="saveCostModel()">💾 Save cost model</button>
+      <button class="btn sec" onclick="cmReset()">↺ Reset to file defaults</button>
+      <span class="mini">Fixed total: <b>${fmt(fixedTot)}</b>/pack · Fees: <b>${(pctTot*100).toFixed(1)}%</b> of price</span></div></div>`;
+  const rows=prods.filter(p=>p.active!==false).map(p=>{ const raw=rawCost(p); const sell=+p.sell_price||0; const other=fixedTot+pctTot*sell; const total=raw+other; const gp=sell>0?(sell-total)/sell:0; const denom=1-tgm-pctTot; const suggested=denom>0?(raw+fixedTot)/denom:0; return {p,raw,other,total,sell,gp,suggested}; })
+    .sort((a,b)=>(a.sell?a.gp:99)-(b.sell?b.gp:99));
+  h+=`<div class="repcard" style="margin-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><h3 style="margin:0">Product gross margin</h3><button class="btn sec sm" onclick="marginWriteCogs()">⬆ Write total cost to products (COGS ref)</button></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>SKU</th><th class="num">Raw cost</th><th class="num">Other</th><th class="num">Total cost</th><th class="num">Sell</th><th class="num">GP%</th><th class="num">Suggested @ ${(tgm*100).toFixed(0)}%</th><th>Status</th></tr></thead><tbody>`;
+  rows.forEach(r=>{ const below=r.gp<tgm; const col=r.gp<0?'var(--danger)':(below?'var(--earth)':'var(--ok)');
+    h+=`<tr><td>${esc(r.p.name)}</td><td><code>${esc(r.p.sku)}</code></td><td class="num">${fmt(r.raw)}</td><td class="num">${fmt(r.other)}</td><td class="num">${fmt(r.total)}</td><td class="num">${fmt(r.sell)}</td><td class="num" style="color:${col}"><b>${r.sell?(r.gp*100).toFixed(1)+'%':'—'}</b></td><td class="num">${r.sell?fmt(r.suggested):'—'}</td><td>${r.sell?(below?'<span style="color:var(--earth)">TO ADJUST</span>':'<span style="color:var(--ok)">ABOVE</span>'):'<span class="mini">no price</span>'}</td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="9" class="empty">No products with recipes yet.</td></tr>';
+  h+=`</tbody></table></div><div class="hint" style="margin-top:8px">Total cost = raw ingredient cost + fixed per-pack costs + (${COST_MODEL.pct.map(x=>x.l.toLowerCase()).join(' + ')}) × sell price. GP% = (Sell − Total) ÷ Sell. Suggested price hits the target GM at current costs. The fixed bundle is a standard estimate — tune it to your actual packaging mix.</div></div>`;
+  $('content').innerHTML=h; window._marginRows=rows;
+}
+async function marginWriteCogs(){ const rows=window._marginRows||[]; if(!rows.length){ toast('Nothing to write',true); return; }
+  if(!confirm('Write the computed Total Cost to each product’s COGS ref field ('+rows.length+' products)?')) return;
+  showBusy('Writing total cost…'); let ok=0,fail=0;
+  for(const r of rows){ try{ await db.update('products','sku',r.p.sku,{tot_cost_ref:Math.round(r.total*100)/100}); ok++; }catch(e){ fail++; } }
+  hideBusy(); toast('Updated '+ok+' product(s)'+(fail?(' · ⚠ '+fail+' failed'):''), fail>0);
+}
+
 // Standard (planned worst-case) vs actual (moving-average) recipe cost per product — the drift is yield loss / price creep.
 async function cogsReconHtml(){
   if(moneyHidden()) return '<div class="repcard"><div class="hint">Cost is hidden for your role.</div></div>';
@@ -3197,6 +3481,55 @@ async function cogsReconHtml(){
     h+=`<tr><td>${esc(r.p.name)}</td><td class="num">${fmt(r.std)}</td><td class="num">${fmt(r.act)}</td><td class="num" style="color:${col}">${r.drift>0?'+':''}${fmt(r.drift)}</td><td class="num" style="color:${col}">${r.std?((r.pct>0?'+':'')+r.pct.toFixed(1)+'%'):'—'}</td></tr>`; });
   if(!rows.length) h+='<tr><td colspan="5" class="empty">No costed recipes yet.</td></tr>';
   h+='</tbody></table></div>'; return h;
+}
+// Expiring soon (FEFO) — received raw batches with an expiry date, earliest first. Supplies (no expiry) are excluded.
+async function rptExpiring(){
+  const days=+(window._expDays||7);
+  await loadBins();
+  let mov=[],ings=[],prods=[]; try{mov=await db.list('inventory_movements',{});}catch(e){} try{ings=await listIngredients();}catch(e){} try{prods=await db.list('products',{});}catch(e){}
+  const im={}; ings.forEach(i=>im[i.sku]=i); const pm={}; prods.forEach(p=>pm[p.sku]=p); const today=todayISO();
+  const dbetween=(a,b)=>{ try{ return Math.round((new Date(b+'T00:00:00')-new Date(a+'T00:00:00'))/86400000); }catch(e){ return null; } };
+  const rows=mov.filter(m=>m.expiry_date && ((m.movement_type==='receipt'&&m.kind==='ingredient')||(m.movement_type==='batch_output'&&m.kind==='product'))).map(m=>{
+    const isFin=m.kind==='product'; const it=isFin?(pm[m.ref_sku]||{}):(im[m.ref_sku]||{}); const isSup=!isFin&&/(supply|supplement)/i.test(it.category||'');
+    const qty=isFin?(+m.qty||0):(isSup?(+m.qty||0):((+m.qty||0)/1000)); const unit=isFin?'packs':(isSup?'':'kg');
+    const dleft=dbetween(today,String(m.expiry_date).slice(0,10));
+    return {type:isFin?'Finished':'Raw',name:it.name||m.ref_sku,bin:binOf(m.ref_sku,m.location_code||'bulacan'),qty,unit,recv:String(m.created_at||'').slice(0,10),exp:String(m.expiry_date).slice(0,10),dleft};
+  }).sort((a,b)=>String(a.exp).localeCompare(String(b.exp)));
+  const nExp=rows.filter(r=>r.dleft!=null&&r.dleft<0).length, nSoon=rows.filter(r=>r.dleft!=null&&r.dleft>=0&&r.dleft<=days).length;
+  let h=`<div class="repcard"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><h3 style="margin:0">Expiring soon — raw receipts &amp; finished batches (FEFO)</h3>
+    <label class="mini">within <input type="number" value="${days}" style="width:56px" onchange="window._expDays=+this.value||7;repActive='expiring';renderStdReports()"> days</label></div>
+    <div class="hint" style="margin:6px 0 8px">Batches that carry an expiry / best-before date, earliest first — use these before newer stock. <b style="color:var(--danger)">${nExp} expired</b> · <b style="color:var(--earth,#b5762a)">${nSoon} within ${days}d</b>. Supplies (plastic, packaging, stickers) usually have no expiry and aren't listed.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Type</th><th>Item</th><th>Bin</th><th class="num">Qty</th><th>Made / received</th><th>Expiry</th><th class="num">Days left</th><th>Status</th></tr></thead><tbody>`;
+  rows.forEach(r=>{ const st=r.dleft==null?'':(r.dleft<0?'EXPIRED':(r.dleft<=days?'EXPIRING':'OK')); const col=r.dleft==null?'var(--muted)':(r.dleft<0?'var(--danger)':(r.dleft<=days?'var(--earth,#b5762a)':'var(--ok)'));
+    h+=`<tr><td><span class="mini">${esc(r.type)}</span></td><td>${esc(r.name)}</td><td>${esc(r.bin)||'—'}</td><td class="num">${num(Math.round(r.qty*100)/100)}${r.unit?' '+r.unit:''}</td><td class="mini">${esc(r.recv)}</td><td>${esc(r.exp)}</td><td class="num" style="color:${col}"><b>${r.dleft==null?'—':r.dleft}</b></td><td><span style="color:${col};font-weight:700">${st}</span></td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="8" class="empty">No batches with an expiry date yet — enter expiry when receiving raw, or confirm production (best-before auto-set from shelf life).</td></tr>';
+  h+=`</tbody></table></div><div class="hint" style="margin-top:8px">This lists received batches by expiry as a FEFO guide; the ledger doesn't deplete specific lots on consumption, so pair it with the physical count.</div></div>`;
+  return h;
+}
+// #5 — Supplier payables: open PO balances (billable − paid) with payment status, by PO and by supplier.
+async function rptPayables(){
+  if(typeof moneyHidden==='function' && moneyHidden()) return '<div class="repcard"><div class="hint">Cost is hidden for your role.</div></div>';
+  let po=[],pol=[],pay=[]; try{po=await db.list('purchase_orders',{});}catch(e){} try{pol=await db.list('po_lines',{});}catch(e){} try{pay=await db.list('po_payments',{});}catch(e){}
+  const payByPo={}; pay.forEach(p=>payByPo[p.po_ref]=(payByPo[p.po_ref]||0)+(+p.amount||0));
+  const lineByPo={}; pol.forEach(l=>{ (lineByPo[l.po_ref]=lineByPo[l.po_ref]||[]).push(l); });
+  const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
+  const rows=po.filter(p=>['confirmed','received'].includes(p.status)).map(p=>{ const bl=poBillable(p,lineByPo[p.po_ref]||[]); const pd=payByPo[p.po_ref]||0; const bal=Math.max(0,bl-pd); const st=pd<=0.005?'unpaid':(bal>0.5?'partial':'paid'); return {p,bl,pd,bal,st}; }).sort((a,b)=>b.bal-a.bal);
+  const bySup={}; rows.forEach(r=>{ const s=r.p.supplier_name||'(unassigned)'; bySup[s]=(bySup[s]||0)+r.bal; });
+  const totBal=rows.reduce((s,r)=>s+r.bal,0), totBill=rows.reduce((s,r)=>s+r.bl,0), totPaid=rows.reduce((s,r)=>s+r.pd,0);
+  let h=`<div class="repcard"><h3 style="margin:0 0 4px">Supplier payables &amp; payment status</h3>
+    <div class="hint" style="margin-bottom:8px">Confirmed &amp; received POs. Balance = billable (received × price − discount + fee) − payments recorded.</div>
+    <div class="kpirow" style="margin-bottom:12px">
+      <div class="kpi"><div class="l">Total payable</div><div class="v">${P(totBal)}</div><div class="s">${rows.length} PO(s)</div></div>
+      <div class="kpi"><div class="l">Billable</div><div class="v" style="color:var(--ink)">${P(totBill)}</div><div class="s">confirmed + received</div></div>
+      <div class="kpi"><div class="l">Paid to date</div><div class="v" style="color:#4e7a3e">${P(totPaid)}</div><div class="s">across these POs</div></div></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>PO</th><th>Supplier</th><th>Status</th><th class="num">Billable</th><th class="num">Paid</th><th class="num">Balance</th><th>Payment</th></tr></thead><tbody>`;
+  rows.forEach(r=>{ const col=r.st==='paid'?'#4e7a3e':(r.st==='partial'?'var(--earth,#b5762a)':'var(--danger)');
+    h+=`<tr><td><code>${esc(r.p.po_ref)}</code></td><td>${esc(r.p.supplier_name||'—')}</td><td><span class="badge b-${esc(r.p.status)}">${esc(r.p.status)}</span></td><td class="num">${P(r.bl)}</td><td class="num">${P(r.pd)}</td><td class="num"><b>${P(r.bal)}</b></td><td><span style="color:${col};font-weight:700">${r.st.toUpperCase()}</span></td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="7" class="empty">No confirmed / received POs.</td></tr>';
+  h+=`</tbody></table></div>`;
+  const sup=Object.keys(bySup).filter(s=>bySup[s]>0.5).sort((a,b)=>bySup[b]-bySup[a]);
+  if(sup.length){ h+=`<div style="margin-top:14px"><h3 style="margin:0 0 6px">Payable by supplier</h3><table><thead><tr><th>Supplier</th><th class="num">Balance</th></tr></thead><tbody>${sup.map(s=>`<tr><td>${esc(s)}</td><td class="num"><b>${P(bySup[s])}</b></td></tr>`).join('')}</tbody></table></div>`; }
+  h+='</div>'; return h;
 }
 // Ingredients below their reorder point and finished goods below PAR (live stock vs thresholds).
 async function lowStockHtml(){
