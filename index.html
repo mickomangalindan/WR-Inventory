@@ -304,7 +304,7 @@ const MODULES = [
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_po']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
-  {id:'analytics', label:'Analytics', items:['reporting','margin']},
+  {id:'analytics', label:'Analytics', items:['reporting','margin','momentum']},
   {id:'admin',  label:'Administration', items:['connection','users','approvals','fieldacl','refs','automations','notif','studio','selftest','cleanser']},
 ];
 const MODELS = {
@@ -456,6 +456,7 @@ const MODELS = {
   sticker_po:{ label:'Sticker PO', icon:'🏷️', special:'sticker_po' },
   approvals:{ label:'Approvals', icon:'✅', special:'approvals' },
   margin:{ label:'Gross Margin', icon:'📈', special:'margin' },
+  momentum:{ label:'Sales Momentum', icon:'🚀', special:'momentum' },
   automations:{ label:'Automations', icon:'⚡', special:'automations' },
   selftest:{ label:'System Check', icon:'🩺', special:'selftest' },
 };
@@ -581,6 +582,7 @@ function route(){
     if(m.special==='sticker_po') return renderStickerPO();
     if(m.special==='approvals') return renderApprovals();
     if(m.special==='margin') return renderMargin();
+    if(m.special==='momentum') return renderMomentum();
     if(m.special==='selftest') return renderSelfTest();
   }
   setCrumb();
@@ -3464,6 +3466,154 @@ async function marginWriteCogs(){ const rows=window._marginRows||[]; if(!rows.le
   showBusy('Writing total cost…'); let ok=0,fail=0;
   for(const r of rows){ try{ await db.update('products','sku',r.p.sku,{tot_cost_ref:Math.round(r.total*100)/100}); ok++; }catch(e){ fail++; } }
   hideBusy(); toast('Updated '+ok+' product(s)'+(fail?(' · ⚠ '+fail+' failed'):''), fail>0);
+}
+
+/* ===================== Sales Momentum — 30/60/90/120 vs live stock =====================
+   Owner decision view. Cross-references each product's current stock with its Shopify
+   rolling-sales momentum so slow-movers-with-stock and fast-movers-running-low jump out.
+   Data lives in the sales_momentum table (sku, product, u30, u60, u90, u120, refreshed_at),
+   refreshed by the Shopify report Apps Script or pasted in via "Import" below.
+     Momentum × = recent 30-day daily sales rate ÷ 120-day daily average (>1 = accelerating).
+     Days of cover = current stock ÷ recent daily rate (how long stock lasts at today's pace). */
+let MOM_COVER_LOW = 14, MOM_COVER_HIGH = 45;   // days-of-cover bands (owner-tunable)
+const MOM_HI = 1.15, MOM_LO = 0.85;            // momentum ratio bands
+
+async function momLoad(){
+  if(isLive()){ try{ return await sb('sales_momentum?select=*&limit=2000'); }catch(e){ return []; } }
+  return window._momDemo || JSON.parse(localStorage.getItem('wr_mom')||'[]');
+}
+function momMetrics(r, stockUnits){
+  const u30=+r.u30||0, u120=+r.u120||0, daily30=u30/30;
+  const mom = u120>0 ? Math.round((u30*4)/u120*100)/100 : (u30>0?2:0);
+  const cover = daily30>0 ? stockUnits/daily30 : (stockUnits>0?999:0);
+  return {daily30, mom, cover, hasSales:u120>0||u30>0};
+}
+function momQuad(mom, cover, hasSales){
+  if(!hasSales) return {key:'nosale', label:'No recent sales', color:'var(--muted)', icon:'⚪', act:'No 120-day sales — review listing / seasonality'};
+  const loCover = cover < MOM_COVER_LOW, hiCover = cover > MOM_COVER_HIGH;
+  if(loCover && mom>=1)  return {key:'stockout', label:'Stockout risk',        color:'var(--danger)',       icon:'🔴', act:'Produce / reorder now — low stock, demand holding or rising'};
+  if(loCover)            return {key:'watch',    label:'Low stock · cooling',   color:'var(--earth,#b5762a)',icon:'🟡', act:'Low stock but slowing — small top-up, watch'};
+  if(hiCover && mom<=MOM_LO) return {key:'overstock',label:'Overstock / slow mover',color:'var(--earth,#b5762a)',icon:'🟠', act:'Slow production · promote or bundle to clear'};
+  if(hiCover)            return {key:'wellstocked',label:'Well stocked',        color:'var(--ok)',           icon:'🟢', act:'Comfortable cover — hold'};
+  return {key:'steady', label:'Steady', color:'var(--berry)', icon:'🔵', act:'Balanced — on track'};
+}
+
+async function renderMomentum(){
+  $('cp').innerHTML=`<div class="title">Sales Momentum</div><button class="btn" onclick="renderMomentum()">↻ Refresh</button>
+    <button class="btn sec" onclick="momImport()">📥 Import / paste sales</button><div class="sp"></div>
+    <span style="color:var(--muted)">stock × 30/60/90/120 momentum → what to act on</span>`;
+  let mom=[]; try{ mom=await momLoad(); }catch(e){}
+  let prods=[]; try{ prods=await db.list('products',{}); }catch(e){}
+  const pm={}; prods.forEach(p=>pm[p.sku]=p);
+  let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if((s.kind||'')==='product'){ const k=s.ref_sku; stock[k]=(stock[k]||0)+(+s.on_hand||0); } }); }catch(e){} }
+  const refreshed = mom.reduce((a,r)=>{ const t=r.refreshed_at||''; return t>a?t:a; }, '');
+
+  const rows = mom.map(r=>{ const sku=r.sku; const p=pm[sku]||{}; const stk=stock[sku]!=null?stock[sku]:( +p.on_hand||0 );
+    const met=momMetrics(r, stk); const q=momQuad(met.mom, met.cover, met.hasSales);
+    return { sku, product:(p.name||r.product||sku), u30:+r.u30||0,u60:+r.u60||0,u90:+r.u90||0,u120:+r.u120||0, stock:stk, matched:stock[sku]!=null||p.sku!=null, ...met, q };
+  });
+  const active = rows.filter(r=>r.hasSales);
+  const stockout = active.filter(r=>r.q.key==='stockout').sort((a,b)=>a.cover-b.cover);
+  const overstock = active.filter(r=>r.q.key==='overstock').sort((a,b)=>b.cover-a.cover);
+  const nUnmatched = rows.filter(r=>!r.matched).length;
+
+  if(!rows.length){ $('content').innerHTML=`<div class="repcard"><h3 style="margin:0 0 6px">No sales data yet 🚀</h3>
+    <div class="hint">This view reads the <b>sales_momentum</b> table (30/60/90/120-day units per SKU) and crosses it with your live stock. Populate it by running the Shopify report Apps Script, or click <b>📥 Import / paste sales</b> and paste columns <b>SKU · Product · 30d · 60d · 90d · 120d</b> from your rolling-sales sheet.</div></div>`; return; }
+
+  const kpi=(l,v,s,col)=>`<div class="kpi"><div class="l">${l}</div><div class="v"${col?` style="color:${col}"`:''}>${v}</div><div class="s">${s||''}</div></div>`;
+  let h=`<div class="kpirow">
+    ${kpi('🔴 Stockout risk', stockout.length, 'low stock · demand holding/rising', 'var(--danger)')}
+    ${kpi('🟠 Overstock', overstock.length, 'high cover · slowing', 'var(--earth,#b5762a)')}
+    ${kpi('SKUs tracked', active.length, rows.length+' rows'+(nUnmatched?' · '+nUnmatched+' unmatched':''))}
+    ${kpi('Last refreshed', refreshed?esc(String(refreshed).slice(0,10)):'—', 'sales window')}
+  </div>`;
+
+  // Quadrant scatter
+  h+=`<div class="repcard" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <h3 style="margin:0">Stock vs momentum map</h3>
+      <span class="mini">Cover bands: <input type="number" value="${MOM_COVER_LOW}" style="width:52px" onchange="MOM_COVER_LOW=+this.value||14;renderMomentum()"> / <input type="number" value="${MOM_COVER_HIGH}" style="width:52px" onchange="MOM_COVER_HIGH=+this.value||45;renderMomentum()"> days</span></div>
+    <div class="hint" style="margin:6px 0 10px">Each dot is a product — bigger = more 30-day units. Left = slowing, right = accelerating; low = little stock left, high = lots of cover. <b style="color:var(--danger)">Bottom-right</b> needs making; <b style="color:var(--earth,#b5762a)">top-left</b> is tying up cash.</div>
+    ${momScatter(active)}</div>`;
+
+  // Action lists
+  const actTable=(title,list,note)=>`<div class="repcard" style="margin-bottom:14px"><h3 style="margin:0 0 4px">${title}</h3>
+    <div class="hint" style="margin-bottom:8px">${note}</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>SKU</th><th class="num">30d</th><th class="num">Mom ×</th><th class="num">Stock</th><th class="num">Days cover</th><th>Action</th></tr></thead><tbody>
+    ${list.map(r=>`<tr><td>${esc(r.product)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(r.u30)}</td><td class="num" style="color:${r.q.color}"><b>${r.mom}</b></td><td class="num">${num(Math.round(r.stock))}</td><td class="num" style="color:${r.q.color}"><b>${r.cover>=999?'∞':Math.round(r.cover)}</b></td><td class="mini">${esc(r.q.act)}</td></tr>`).join('')||`<tr><td colspan="7" class="empty">None right now ✅</td></tr>`}
+    </tbody></table></div></div>`;
+  h+=actTable('🔴 Make / reorder now — stockout risk', stockout, 'Selling at or above their long-run pace with less than '+MOM_COVER_LOW+' days of stock left. Prioritise these in the next production plan.');
+  h+=actTable('🟠 Slow down / promote — overstock', overstock, 'More than '+MOM_COVER_HIGH+' days of cover while sales cool off — cash tied up. Ease production and consider a promo or bundle.');
+
+  // Full table
+  const all=active.slice().sort((a,b)=>b.u30-a.u30);
+  h+=`<div class="repcard"><h3 style="margin:0 0 8px">All tracked SKUs</h3>
+    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>SKU</th><th class="num">30d</th><th class="num">60d</th><th class="num">90d</th><th class="num">120d</th><th class="num">Mom ×</th><th class="num">Stock</th><th class="num">Days cover</th><th>Status</th></tr></thead><tbody>
+    ${all.map(r=>`<tr><td>${esc(r.product)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(r.u30)}</td><td class="num">${num(r.u60)}</td><td class="num">${num(r.u90)}</td><td class="num">${num(r.u120)}</td><td class="num" style="color:${r.q.color}"><b>${r.mom}</b></td><td class="num">${r.matched?num(Math.round(r.stock)):'<span class="mini">—</span>'}</td><td class="num">${r.cover>=999?'∞':Math.round(r.cover)}</td><td><span style="color:${r.q.color};font-weight:700">${r.q.icon} ${esc(r.q.label)}</span></td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="hint" style="margin-top:8px">Stock is matched by SKU to your finished-goods on-hand. ${nUnmatched?('<b>'+nUnmatched+'</b> sales SKU(s) have no matching product — check the SKU matches the product code.'):''} ${isLive()?'':'Demo mode: showing imported/pasted figures without live stock.'}</div></div>`;
+  $('content').innerHTML=h; window._momRows=rows;
+}
+
+// Inline SVG scatter: X = momentum (0.4..1.8, centre 1.0), Y = days of cover (0..cap, high=top).
+function momScatter(rows){
+  const W=760, H=420, pad=54, x0=pad, x1=W-20, y0=H-pad, y1=20;
+  const capCover = Math.max(MOM_COVER_HIGH*1.6, 60);
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const MX0=0.4, MX1=1.8;
+  const sx=m=>x0+((clamp(m,MX0,MX1)-MX0)/(MX1-MX0))*(x1-x0);
+  const sy=c=>y0-((clamp(c,0,capCover))/capCover)*(y0-y1);
+  const maxU=Math.max(1,...rows.map(r=>r.u30));
+  const rad=u=>4+Math.sqrt(u/maxU)*13;
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;font-family:inherit">`;
+  // quadrant shading around mom=1 and cover bands
+  const xMid=sx(1), yLo=sy(MOM_COVER_LOW), yHi=sy(MOM_COVER_HIGH);
+  s+=`<rect x="${x0}" y="${y1}" width="${xMid-x0}" height="${yHi-y1}" fill="#f6efe4"/>`;                 // top-left overstock-ish
+  s+=`<rect x="${xMid}" y="${yLo}" width="${x1-xMid}" height="${y0-yLo}" fill="#fbe9e7"/>`;               // bottom-right stockout
+  // grid lines
+  s+=`<line x1="${xMid}" y1="${y1}" x2="${xMid}" y2="${y0}" stroke="#d9cfc0" stroke-dasharray="4 3"/>`;
+  s+=`<line x1="${x0}" y1="${yLo}" x2="${x1}" y2="${yLo}" stroke="#e5b48a" stroke-dasharray="4 3"/>`;
+  s+=`<line x1="${x0}" y1="${yHi}" x2="${x1}" y2="${yHi}" stroke="#bcd3ad" stroke-dasharray="4 3"/>`;
+  // axes
+  s+=`<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y0}" stroke="#333"/><line x1="${x0}" y1="${y1}" x2="${x0}" y2="${y0}" stroke="#333"/>`;
+  s+=`<text x="${(x0+x1)/2}" y="${H-16}" text-anchor="middle" font-size="12" font-weight="700">Momentum × (← slowing · accelerating →)</text>`;
+  s+=`<text x="16" y="${(y1+y0)/2}" text-anchor="middle" font-size="12" font-weight="700" transform="rotate(-90 16 ${(y1+y0)/2})">Days of cover (← low stock · high stock →)</text>`;
+  // x ticks
+  [0.5,0.75,1,1.25,1.5,1.75].forEach(t=>{ const x=sx(t); s+=`<text x="${x}" y="${y0+16}" text-anchor="middle" font-size="10" fill="#666">${t}</text>`; });
+  [MOM_COVER_LOW,MOM_COVER_HIGH].forEach(c=>{ const y=sy(c); s+=`<text x="${x0-6}" y="${y+3}" text-anchor="end" font-size="10" fill="#666">${c}d</text>`; });
+  // corner labels
+  s+=`<text x="${x0+8}" y="${y1+14}" font-size="10" fill="#b5762a">🟠 Overstock (high stock · low momentum)</text>`;
+  s+=`<text x="${x1-8}" y="${y0-8}" text-anchor="end" font-size="10" fill="#c0392b">🔴 Stockout risk (low stock · high momentum)</text>`;
+  // dots (draw larger first)
+  rows.slice().sort((a,b)=>b.u30-a.u30).forEach(r=>{ const cx=sx(r.mom), cy=sy(r.cover), rr=rad(r.u30);
+    s+=`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${rr.toFixed(1)}" fill="${r.q.color}" fill-opacity="0.62" stroke="${r.q.color}" stroke-width="1"><title>${esc(r.product)} (${esc(r.sku)})\n30d: ${r.u30} · Momentum ×${r.mom}\nStock: ${Math.round(r.stock)} · ${r.cover>=999?'∞':Math.round(r.cover)} days cover\n${r.q.label} — ${r.q.act}</title></circle>`; });
+  s+=`</svg>`;
+  return s;
+}
+
+// Import / paste rolling-sales figures into sales_momentum (or demo store).
+function momImport(){
+  const eg='SKU\tProduct\t30d\t60d\t90d\t120d\nPKWMGCGD0500\tWholesome Mix\t251\t478\t725\t1018';
+  $('content').innerHTML=`<div class="repcard"><h3 style="margin:0 0 6px">Import rolling-sales figures</h3>
+    <div class="hint" style="margin-bottom:8px">Paste rows with columns <b>SKU · Product · 30d · 60d · 90d · 120d</b> (tab or comma separated — copy straight from your rolling-sales sheet's A:F). A header row is ignored. This replaces the momentum figures for the SKUs you paste.</div>
+    <textarea id="momPaste" style="width:100%;height:220px;font-family:monospace;font-size:12px" placeholder="${esc(eg)}"></textarea>
+    <div style="margin-top:10px;display:flex;gap:8px"><button class="btn" onclick="momImportApply()">✔ Import</button><button class="btn sec" onclick="renderMomentum()">Cancel</button></div>
+    <div class="hint" style="margin-top:8px">Tip: the Shopify report Apps Script can also write this table automatically so it stays fresh.</div></div>`;
+}
+async function momImportApply(){
+  const raw=($('momPaste').value||'').trim(); if(!raw){ toast('Nothing to import',true); return; }
+  const out=[]; raw.split(/\r?\n/).forEach(line=>{ if(!line.trim())return;
+    const c=line.split(/\t|,(?![^"]*")/).map(x=>x.trim().replace(/^"|"$/g,''));
+    const sku=c[0]||''; if(!sku||/^sku$/i.test(sku))return;   // skip header / blank
+    const nz=v=>{ const n=parseFloat(String(v).replace(/[^\d.\-]/g,'')); return isNaN(n)?0:n; };
+    out.push({ sku, product:c[1]||'', u30:nz(c[2]),u60:nz(c[3]),u90:nz(c[4]),u120:nz(c[5]), refreshed_at:new Date().toISOString() });
+  });
+  if(!out.length){ toast('No valid rows found',true); return; }
+  showBusy('Importing '+out.length+' SKU(s)…');
+  try{
+    if(isLive()){ await sb('sales_momentum?on_conflict=sku',{method:'POST',body:JSON.stringify(out),prefer:'resolution=merge-duplicates,return=minimal'}); }
+    else{ const cur=JSON.parse(localStorage.getItem('wr_mom')||'[]'); const map={}; cur.forEach(r=>map[r.sku]=r); out.forEach(r=>map[r.sku]=r); const arr=Object.values(map); window._momDemo=arr; localStorage.setItem('wr_mom',JSON.stringify(arr)); }
+    hideBusy(); toast('Imported '+out.length+' SKU(s)'); renderMomentum();
+  }catch(e){ hideBusy(); toast(e.message||'Import failed',true); }
 }
 
 // Standard (planned worst-case) vs actual (moving-average) recipe cost per product — the drift is yield loss / price creep.
