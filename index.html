@@ -561,6 +561,9 @@ function openModel(model){
   const m=MODELS[model];
   state={model,view:m.special?'special':(m.report?'report':'list'),search:'',groupBy:(DEFAULT_GROUP[model]||''),recId:null,sel:[]}; renderSide(); route();
 }
+// Deep-links used by clickable dashboard tiles & report rows.
+async function gotoRecord(model, pkval){ if(!MODELS[model]||pkval==null) return; state={model,view:'form',search:'',groupBy:'',recId:null,sel:[]}; renderSide(); try{ await openForm(encodeURIComponent(String(pkval))); }catch(e){ toast('Could not open record',true); } }
+function gotoReport(id){ if(typeof repTab!=='undefined'){ repTab='standard'; repActive=id; } openModel('reporting'); }
 function route(){
   renderSide();
   refreshMentionBell();
@@ -2555,10 +2558,10 @@ async function renderDashboard(){
     <div class="note">Tap any question to open its full report in Reports → Standard.</div></div>`;
   // ---- render (standalone layout) ----
   const card=(t,b)=>`<div class="card"><h2>${t}</h2>${b}</div>`;
-  const kpi=(l,v,s,accent)=>`<div class="card kpi"><div class="l">${l}</div><div class="v${accent?' accent':''}">${v}</div><div class="s">${s||''}</div></div>`;
+  const kpi=(l,v,s,accent,go)=>`<div class="card kpi"${go?` onclick="${go}" style="cursor:pointer" title="Open ↗"`:''}><div class="l">${l}</div><div class="v${accent?' accent':''}">${v}</div><div class="s">${s||''}</div></div>`;
   const kpis = mh
-    ? [kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units',true),kpi('Finished SKUs',fgSkus,'with stock'),kpi('Ingredients',rawItems,'with stock'),kpi('Items to reorder',reorder.length,'labels below par'),kpi('Open POs',openPo,po.length+' total'),kpi('Supplies tracked',supItems,'consumables')].join('')
-    : [kpi('Total inventory value',wpeso(fgVal+rawVal),'finished + raw',true),kpi('Finished goods · Pasig',wpeso(fgVal),Math.round(packs).toLocaleString()+' packs · '+fgSkus+' SKUs'),kpi('Raw materials · Bulacan',wpeso(rawVal),rawItems+' ingredients'),kpi('Payables',wpeso(payables),payCount+' unpaid PO'+(payCount===1?'':'s')),kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units'),kpi('Items to reorder',reorder.length,'labels below par'),kpi('Supplies tracked',supItems,'consumables')].join('');
+    ? [kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units',true,"openModel('stock_balance')"),kpi('Finished SKUs',fgSkus,'with stock',false,"openModel('stock_balance')"),kpi('Ingredients',rawItems,'with stock',false,"openModel('ingredients')"),kpi('Items to reorder',reorder.length,'labels below par',false,"gotoReport('lowstock')"),kpi('Open POs',openPo,po.length+' total',false,"openModel('purchase_orders')"),kpi('Supplies tracked',supItems,'consumables',false,"openModel('supplies_reorder')")].join('')
+    : [kpi('Total inventory value',wpeso(fgVal+rawVal),'finished + raw',true,"openModel('stock_balance')"),kpi('Finished goods · Pasig',wpeso(fgVal),Math.round(packs).toLocaleString()+' packs · '+fgSkus+' SKUs',false,"openModel('stock_balance')"),kpi('Raw materials · Bulacan',wpeso(rawVal),rawItems+' ingredients',false,"openModel('ingredients')"),kpi('Payables',wpeso(payables),payCount+' unpaid PO'+(payCount===1?'':'s'),false,"gotoReport('payables')"),kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units',false,"openModel('stock_balance')"),kpi('Items to reorder',reorder.length,'labels below par',false,"gotoReport('lowstock')"),kpi('Supplies tracked',supItems,'consumables',false,"openModel('supplies_reorder')")].join('');
   const donutBody = (!mh && famArr.length)? wrDonut(famArr) : (mh? '<div class="hint">Value hidden for your role. Packs on hand: <b>'+Math.round(packs).toLocaleString()+'</b></div>' : '<div class="hint">No finished-goods value yet — seed or receive stock to see this.</div>');
   const siteBody = (!mh && siteArr.length)? wrHbars(siteArr,WBRAND,wpeso) : '<div class="hint">Value hidden for your role.</div>';
   const rawlineBody = wrLine(WR_HISTORY.raw_trend,'date','kg',WSER[4])+'<p class="note">Weekly commissary counts, Feb–Jul 2026 (historical).</p>';
@@ -3476,7 +3479,21 @@ async function marginWriteCogs(){ const rows=window._marginRows||[]; if(!rows.le
      Momentum × = recent 30-day daily sales rate ÷ 120-day daily average (>1 = accelerating).
      Days of cover = current stock ÷ recent daily rate (how long stock lasts at today's pace). */
 let MOM_COVER_LOW = 14, MOM_COVER_HIGH = 45;   // days-of-cover bands (owner-tunable)
+let MOM_GROUP = '';                            // '' | 'family' | 'status'  (table grouping)
 const MOM_HI = 1.15, MOM_LO = 0.85;            // momentum ratio bands
+
+// Actual sales per month, derived from the cumulative windows (M-1 = last 30d, M-2 = days 31-60, …).
+function momMonthly(r){
+  const u30=+r.u30||0,u60=+r.u60||0,u90=+r.u90||0,u120=+r.u120||0;
+  return { m1:Math.max(0,u30), m2:Math.max(0,u60-u30), m3:Math.max(0,u90-u60), m4:Math.max(0,u120-u90) };
+}
+// Tiny inline trend line for [m4,m3,m2,m1] (oldest → newest). Green if rising, red if falling.
+function sparkline(vals,w,h){ w=w||66; h=h||20; const n=vals.length; if(!n) return '';
+  const max=Math.max(1,...vals), min=Math.min(0,...vals), rng=(max-min)||1;
+  const pts=vals.map((v,i)=>{ const x=(n===1?0:(i/(n-1)))*(w-4)+2; const y=h-2-((v-min)/rng)*(h-4); return x.toFixed(1)+','+y.toFixed(1); });
+  const col=(vals[n-1]>=vals[0])?'var(--ok)':'var(--danger)'; const lp=pts[n-1].split(',');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="vertical-align:middle"><polyline points="${pts.join(' ')}" fill="none" stroke="${col}" stroke-width="1.5"/><circle cx="${lp[0]}" cy="${lp[1]}" r="2.2" fill="${col}"/></svg>`;
+}
 
 async function momLoad(){
   if(isLive()){ try{ return await sb('sales_momentum?select=*&limit=2000'); }catch(e){ return []; } }
@@ -3500,8 +3517,12 @@ function momQuad(mom, cover, hasSales){
 
 async function renderMomentum(){
   $('cp').innerHTML=`<div class="title">Sales Momentum</div><button class="btn" onclick="renderMomentum()">↻ Refresh</button>
-    <button class="btn sec" onclick="momImport()">📥 Import / paste sales</button><div class="sp"></div>
-    <span style="color:var(--muted)">stock × 30/60/90/120 momentum → what to act on</span>`;
+    <button class="btn sec" onclick="momImport()">📥 Import / paste sales</button>
+    <span class="mini" style="margin-left:8px">Group <select onchange="MOM_GROUP=this.value;renderMomentum()">
+      <option value="" ${MOM_GROUP===''?'selected':''}>None</option>
+      <option value="family" ${MOM_GROUP==='family'?'selected':''}>Product family</option>
+      <option value="status" ${MOM_GROUP==='status'?'selected':''}>Status</option></select></span>
+    <div class="sp"></div><span style="color:var(--muted)">actual monthly sales × stock → what to act on</span>`;
   let mom=[]; try{ mom=await momLoad(); }catch(e){}
   let prods=[]; try{ prods=await db.list('products',{}); }catch(e){}
   const pm={}; prods.forEach(p=>pm[p.sku]=p);
@@ -3509,8 +3530,9 @@ async function renderMomentum(){
   const refreshed = mom.reduce((a,r)=>{ const t=r.refreshed_at||''; return t>a?t:a; }, '');
 
   const rows = mom.map(r=>{ const sku=r.sku; const p=pm[sku]||{}; const stk=stock[sku]!=null?stock[sku]:( +p.on_hand||0 );
-    const met=momMetrics(r, stk); const q=momQuad(met.mom, met.cover, met.hasSales);
-    return { sku, product:(p.name||r.product||sku), u30:+r.u30||0,u60:+r.u60||0,u90:+r.u90||0,u120:+r.u120||0, stock:stk, matched:stock[sku]!=null||p.sku!=null, ...met, q };
+    const met=momMetrics(r, stk); const q=momQuad(met.mom, met.cover, met.hasSales); const mth=momMonthly(r);
+    return { sku, product:(p.name||r.product||sku), family:(p.family||'(no family)'), matchedProd:!!p.sku,
+      u30:+r.u30||0,u60:+r.u60||0,u90:+r.u90||0,u120:+r.u120||0, ...mth, stock:stk, matched:stock[sku]!=null||p.sku!=null, ...met, q };
   });
   const active = rows.filter(r=>r.hasSales);
   const stockout = active.filter(r=>r.q.key==='stockout').sort((a,b)=>a.cover-b.cover);
@@ -3518,7 +3540,7 @@ async function renderMomentum(){
   const nUnmatched = rows.filter(r=>!r.matched).length;
 
   if(!rows.length){ $('content').innerHTML=`<div class="repcard"><h3 style="margin:0 0 6px">No sales data yet 🚀</h3>
-    <div class="hint">This view reads the <b>sales_momentum</b> table (30/60/90/120-day units per SKU) and crosses it with your live stock. Populate it by running the Shopify report Apps Script, or click <b>📥 Import / paste sales</b> and paste columns <b>SKU · Product · 30d · 60d · 90d · 120d</b> from your rolling-sales sheet.</div></div>`; return; }
+    <div class="hint">This view reads the <b>sales_momentum</b> table (30/60/90/120-day units per SKU) and crosses it with your live stock. Populate it with the hourly sheet sync, or click <b>📥 Import / paste sales</b> and paste columns <b>SKU · Product · 30d · 60d · 90d · 120d</b> from your rolling-sales sheet.</div></div>`; return; }
 
   const kpi=(l,v,s,col)=>`<div class="kpi"><div class="l">${l}</div><div class="v"${col?` style="color:${col}"`:''}>${v}</div><div class="s">${s||''}</div></div>`;
   let h=`<div class="kpirow">
@@ -3532,25 +3554,41 @@ async function renderMomentum(){
   h+=`<div class="repcard" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
       <h3 style="margin:0">Stock vs momentum map</h3>
       <span class="mini">Cover bands: <input type="number" value="${MOM_COVER_LOW}" style="width:52px" onchange="MOM_COVER_LOW=+this.value||14;renderMomentum()"> / <input type="number" value="${MOM_COVER_HIGH}" style="width:52px" onchange="MOM_COVER_HIGH=+this.value||45;renderMomentum()"> days</span></div>
-    <div class="hint" style="margin:6px 0 10px">Each dot is a product — bigger = more 30-day units. Left = slowing, right = accelerating; low = little stock left, high = lots of cover. <b style="color:var(--danger)">Bottom-right</b> needs making; <b style="color:var(--earth,#b5762a)">top-left</b> is tying up cash.</div>
+    <div class="hint" style="margin:6px 0 6px">Each dot is a product — bigger = more recent-month units. Left = slowing, right = accelerating; low = little stock left, high = lots of cover. <b style="color:var(--danger)">Bottom-right</b> needs making; <b style="color:var(--earth,#b5762a)">top-left</b> is tying up cash.</div>
+    <details style="margin:0 0 8px"><summary style="cursor:pointer;font-size:12px;color:var(--berry);font-weight:600">❔ What do the cover bands mean?</summary>
+      <div class="hint" style="margin-top:6px"><b>Days of cover</b> = current stock ÷ recent daily sales rate (last month's units ÷ 30). It's how many days your stock lasts at today's pace. The two band numbers are thresholds: <b>below the first (${MOM_COVER_LOW}d)</b> = running low → stockout risk if it's selling; <b>above the second (${MOM_COVER_HIGH}d)</b> = far more stock than sales → cash tied up in overstock. Tune them to your production cadence — e.g. if you produce weekly, ${MOM_COVER_LOW}d gives two cycles of buffer.</div></details>
     ${momScatter(active)}</div>`;
 
-  // Action lists
+  // Action lists (rows clickable → open the product)
+  const actRow=r=>{ const clk=r.matchedProd?` style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open product"`:'';
+    return `<tr${clk}><td>${esc(r.product)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(r.m1)}</td><td>${sparkline([r.m4,r.m3,r.m2,r.m1])}</td><td class="num" style="color:${r.q.color}"><b>${r.mom}</b></td><td class="num">${num(Math.round(r.stock))}</td><td class="num" style="color:${r.q.color}"><b>${r.cover>=999?'∞':Math.round(r.cover)}</b></td><td class="mini">${esc(r.q.act)}</td></tr>`; };
   const actTable=(title,list,note)=>`<div class="repcard" style="margin-bottom:14px"><h3 style="margin:0 0 4px">${title}</h3>
     <div class="hint" style="margin-bottom:8px">${note}</div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>SKU</th><th class="num">30d</th><th class="num">Mom ×</th><th class="num">Stock</th><th class="num">Days cover</th><th>Action</th></tr></thead><tbody>
-    ${list.map(r=>`<tr><td>${esc(r.product)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(r.u30)}</td><td class="num" style="color:${r.q.color}"><b>${r.mom}</b></td><td class="num">${num(Math.round(r.stock))}</td><td class="num" style="color:${r.q.color}"><b>${r.cover>=999?'∞':Math.round(r.cover)}</b></td><td class="mini">${esc(r.q.act)}</td></tr>`).join('')||`<tr><td colspan="7" class="empty">None right now ✅</td></tr>`}
+    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>SKU</th><th class="num">M-1</th><th>Trend</th><th class="num">Mom ×</th><th class="num">Stock</th><th class="num">Days cover</th><th>Action</th></tr></thead><tbody>
+    ${list.map(actRow).join('')||`<tr><td colspan="8" class="empty">None right now ✅</td></tr>`}
     </tbody></table></div></div>`;
   h+=actTable('🔴 Make / reorder now — stockout risk', stockout, 'Selling at or above their long-run pace with less than '+MOM_COVER_LOW+' days of stock left. Prioritise these in the next production plan.');
   h+=actTable('🟠 Slow down / promote — overstock', overstock, 'More than '+MOM_COVER_HIGH+' days of cover while sales cool off — cash tied up. Ease production and consider a promo or bundle.');
 
-  // Full table
-  const all=active.slice().sort((a,b)=>b.u30-a.u30);
-  h+=`<div class="repcard"><h3 style="margin:0 0 8px">All tracked SKUs</h3>
-    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>SKU</th><th class="num">30d</th><th class="num">60d</th><th class="num">90d</th><th class="num">120d</th><th class="num">Mom ×</th><th class="num">Stock</th><th class="num">Days cover</th><th>Status</th></tr></thead><tbody>
-    ${all.map(r=>`<tr><td>${esc(r.product)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(r.u30)}</td><td class="num">${num(r.u60)}</td><td class="num">${num(r.u90)}</td><td class="num">${num(r.u120)}</td><td class="num" style="color:${r.q.color}"><b>${r.mom}</b></td><td class="num">${r.matched?num(Math.round(r.stock)):'<span class="mini">—</span>'}</td><td class="num">${r.cover>=999?'∞':Math.round(r.cover)}</td><td><span style="color:${r.q.color};font-weight:700">${r.q.icon} ${esc(r.q.label)}</span></td></tr>`).join('')}
-    </tbody></table></div>
-    <div class="hint" style="margin-top:8px">Stock is matched by SKU to your finished-goods on-hand. ${nUnmatched?('<b>'+nUnmatched+'</b> sales SKU(s) have no matching product — check the SKU matches the product code.'):''} ${isLive()?'':'Demo mode: showing imported/pasted figures without live stock.'}</div></div>`;
+  // Full table — actual monthly sales (M-4…M-1) + trend, grouped per selector
+  const rowHtml=r=>{ const clk=r.matchedProd?` style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open product"`:'';
+    return `<tr${clk}><td>${esc(r.product)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(r.m4)}</td><td class="num">${num(r.m3)}</td><td class="num">${num(r.m2)}</td><td class="num">${num(r.m1)}</td><td>${sparkline([r.m4,r.m3,r.m2,r.m1])}</td><td class="num" style="color:${r.q.color}"><b>${r.mom}</b></td><td class="num">${r.matched?num(Math.round(r.stock)):'<span class="mini">—</span>'}</td><td class="num">${r.cover>=999?'∞':Math.round(r.cover)}</td><td><span style="color:${r.q.color};font-weight:700">${r.q.icon} ${esc(r.q.label)}</span></td></tr>`; };
+  const head=`<thead><tr><th>Product</th><th>SKU</th><th class="num">M-4</th><th class="num">M-3</th><th class="num">M-2</th><th class="num">M-1</th><th>Trend</th><th class="num">Mom ×</th><th class="num">Stock</th><th class="num">Cover</th><th>Status</th></tr></thead>`;
+  let body='';
+  if(MOM_GROUP){
+    const keyOf=r=> MOM_GROUP==='family'? r.family : (r.q.icon+' '+r.q.label);
+    const groups={}; active.forEach(r=>{ (groups[keyOf(r)]=groups[keyOf(r)]||[]).push(r); });
+    Object.keys(groups).sort((a,b)=> groups[b].reduce((s,r)=>s+r.m1,0)-groups[a].reduce((s,r)=>s+r.m1,0)).forEach(g=>{
+      const list=groups[g].sort((a,b)=>b.m1-a.m1); const sub=list.reduce((s,r)=>s+r.m1,0);
+      body+=`<tr style="background:#f6f2ea"><td colspan="6"><b>${esc(g)}</b> <span class="mini">· ${list.length} SKU(s)</span></td><td colspan="5" class="num"><b>M-1 total: ${num(sub)}</b></td></tr>`;
+      body+=list.map(rowHtml).join('');
+    });
+  } else {
+    body=active.slice().sort((a,b)=>b.m1-a.m1).map(rowHtml).join('');
+  }
+  h+=`<div class="repcard"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><h3 style="margin:0 0 8px">Actual sales by month (M-4 → M-1)</h3><span class="mini">M-1 = last 30 days · M-4 = 3 months before</span></div>
+    <div style="overflow-x:auto"><table>${head}<tbody>${body}</tbody></table></div>
+    <div class="hint" style="margin-top:8px">M-4…M-1 are actual units sold in each of the last four 30-day months (from the rolling windows). Rows are clickable — open the product. Stock is matched by SKU to finished-goods on-hand. ${nUnmatched?('<b>'+nUnmatched+'</b> sales SKU(s) have no matching product — check the SKU matches the product code.'):''} ${isLive()?'':'Demo mode: showing imported figures without live stock.'}</div></div>`;
   $('content').innerHTML=h; window._momRows=rows;
 }
 
@@ -3628,7 +3666,7 @@ async function cogsReconHtml(){
     <div class="hint" style="margin-bottom:8px">Standard = list (worst-case) price ÷ yield. Actual = moving-average price from real receipts. A positive drift means the real cost is running above plan.</div>
     <table><thead><tr><th>Product</th><th class="num">Standard/pack</th><th class="num">Actual/pack</th><th class="num">Drift ₱</th><th class="num">Drift %</th></tr></thead><tbody>`;
   rows.forEach(r=>{ const col=r.drift>0.009?'var(--danger)':(r.drift<-0.009?'var(--ok)':'var(--muted)');
-    h+=`<tr><td>${esc(r.p.name)}</td><td class="num">${fmt(r.std)}</td><td class="num">${fmt(r.act)}</td><td class="num" style="color:${col}">${r.drift>0?'+':''}${fmt(r.drift)}</td><td class="num" style="color:${col}">${r.std?((r.pct>0?'+':'')+r.pct.toFixed(1)+'%'):'—'}</td></tr>`; });
+    h+=`<tr style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.p.sku)).replace(/'/g,'&#39;')}')" title="Open product"><td>${esc(r.p.name)}</td><td class="num">${fmt(r.std)}</td><td class="num">${fmt(r.act)}</td><td class="num" style="color:${col}">${r.drift>0?'+':''}${fmt(r.drift)}</td><td class="num" style="color:${col}">${r.std?((r.pct>0?'+':'')+r.pct.toFixed(1)+'%'):'—'}</td></tr>`; });
   if(!rows.length) h+='<tr><td colspan="5" class="empty">No costed recipes yet.</td></tr>';
   h+='</tbody></table></div>'; return h;
 }
@@ -3674,7 +3712,7 @@ async function rptPayables(){
       <div class="kpi"><div class="l">Paid to date</div><div class="v" style="color:#4e7a3e">${P(totPaid)}</div><div class="s">across these POs</div></div></div>
     <div style="overflow-x:auto"><table><thead><tr><th>PO</th><th>Supplier</th><th>Status</th><th class="num">Billable</th><th class="num">Paid</th><th class="num">Balance</th><th>Payment</th></tr></thead><tbody>`;
   rows.forEach(r=>{ const col=r.st==='paid'?'#4e7a3e':(r.st==='partial'?'var(--earth,#b5762a)':'var(--danger)');
-    h+=`<tr><td><code>${esc(r.p.po_ref)}</code></td><td>${esc(r.p.supplier_name||'—')}</td><td><span class="badge b-${esc(r.p.status)}">${esc(r.p.status)}</span></td><td class="num">${P(r.bl)}</td><td class="num">${P(r.pd)}</td><td class="num"><b>${P(r.bal)}</b></td><td><span style="color:${col};font-weight:700">${r.st.toUpperCase()}</span></td></tr>`; });
+    h+=`<tr style="cursor:pointer" onclick="gotoRecord('purchase_orders','${esc(String(r.p.po_ref)).replace(/'/g,'&#39;')}')" title="Open PO"><td><code>${esc(r.p.po_ref)}</code></td><td>${esc(r.p.supplier_name||'—')}</td><td><span class="badge b-${esc(r.p.status)}">${esc(r.p.status)}</span></td><td class="num">${P(r.bl)}</td><td class="num">${P(r.pd)}</td><td class="num"><b>${P(r.bal)}</b></td><td><span style="color:${col};font-weight:700">${r.st.toUpperCase()}</span></td></tr>`; });
   if(!rows.length) h+='<tr><td colspan="7" class="empty">No confirmed / received POs.</td></tr>';
   h+=`</tbody></table></div>`;
   const sup=Object.keys(bySup).filter(s=>bySup[s]>0.5).sort((a,b)=>bySup[b]-bySup[a]);
@@ -3687,11 +3725,11 @@ async function lowStockHtml(){
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ const k=(s.kind||'')+':'+s.ref_sku; stock[k]=(stock[k]||0)+(+s.on_hand||0); }); }catch(e){} }
   const ig=ings.map(i=>{ const oh=stock['ingredient:'+i.sku]||0; const thr=+i.reorder_g||+i.par_g||0; return {name:i.name,sku:i.sku,oh,thr,short:thr-oh,unit:'g'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
   const pg=prods.map(p=>{ const oh=stock['product:'+p.sku]||0; const thr=+p.par_packs||0; return {name:p.name,sku:p.sku,oh,thr,short:thr-oh,unit:'packs'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
-  const tbl=(title,rows)=>`<div class="repcard" style="margin-bottom:14px"><h3 style="margin:0 0 8px">${title}</h3>
+  const tbl=(title,rows,model)=>`<div class="repcard" style="margin-bottom:14px"><h3 style="margin:0 0 8px">${title}</h3>
     <table><thead><tr><th>Item</th><th>SKU</th><th class="num">On hand</th><th class="num">Threshold</th><th class="num">Short by</th></tr></thead>
-    <tbody>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(Math.round(r.oh))}</td><td class="num">${num(r.thr)}</td><td class="num"><b style="color:var(--danger)">${num(Math.round(r.short))} ${r.unit}</b></td></tr>`).join('')||`<tr><td colspan="5" class="empty">All at or above threshold ✅</td></tr>`}</tbody></table>
-    <div class="pager">${rows.length} item(s) below threshold</div></div>`;
-  return tbl('🥩 Ingredients below reorder point', ig)+tbl('📦 Finished goods below PAR', pg)+
+    <tbody>${rows.map(r=>`<tr style="cursor:pointer" onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open record"><td>${esc(r.name)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(Math.round(r.oh))}</td><td class="num">${num(r.thr)}</td><td class="num"><b style="color:var(--danger)">${num(Math.round(r.short))} ${r.unit}</b></td></tr>`).join('')||`<tr><td colspan="5" class="empty">All at or above threshold ✅</td></tr>`}</tbody></table>
+    <div class="pager">${rows.length} item(s) below threshold · tap a row to open</div></div>`;
+  return tbl('🥩 Ingredients below reorder point', ig, 'ingredients')+tbl('📦 Finished goods below PAR', pg, 'products')+
     (isLive()?'':'<div class="hint">Live stock needed for accurate on-hand — this uses demo data.</div>');
 }
 // Soft check (not a hard block): products whose recipe lists an ingredient on >1 line.
