@@ -332,6 +332,7 @@ const MODELS = {
   ingredients:{ label:'Ingredients', icon:'🥩', name:'name', pk:'sku', archivable:true,
     fields:[
       {n:'sku',l:'SKU',t:'text'},{n:'name',l:'Processed output (into mix)',t:'text'},
+      {n:'ingredient_group',l:'Raw group',t:'text'},{n:'sort_order',l:'Sort #',t:'number'},
       {n:'raw_input',l:'Raw input (what you buy)',t:'text'},{n:'processing_method',l:'Processing method',t:'text'},
       {n:'source',l:'Source',t:'text'},{n:'category',l:'PMR category',t:'text'},
       {n:'storage',l:'Storage',t:'select',o:['Frozen','Refrigerated','Dry','Live']},
@@ -349,8 +350,8 @@ const MODELS = {
       {n:'is_supply',l:'Kitchen supply (not a food ingredient)',t:'bool'},
       {n:'uom',l:'Unit / pack',t:'text'},
       {n:'notes',l:'Notes',t:'longtext'}],
-    list:['name','category','raw_input','yield_pct','list_price_kg'],
-    groups:[['sku','name','raw_input','processing_method','category','uom','source','storage','yield_pct','costing_override','approved_alt'],
+    list:['name','processing_method','category','gently_cooked','cookable','raw_feeding','yield_pct','list_price_kg','supplier1'],
+    groups:[['sku','name','ingredient_group','sort_order','raw_input','processing_method','category','uom','source','storage','yield_pct','costing_override','approved_alt'],
             ['list_price_kg','price_kg_processed','price_g_raw','price_g_processed','moving_avg_cost_kg','supplier1','supplier2','supplier'],
             ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','lead_time_days','shelf_life_days','is_live_animal','is_intermediate','is_supply']],
     tabs:[{l:'🥩 Item & yield', groups:[0]},{l:'₱ Costing', groups:[1]},{l:'⚙ Flags & stock', groups:[2]}],
@@ -579,11 +580,13 @@ function cmpGroupKeys(a,b){ return _grank(a)-_grank(b) || String(a).localeCompar
 function _so(r){ const v=+(r&&r.sort_order); return (isFinite(v)&&v>0)?v:999999; }
 function cmpItems(a,b){ return _so(a)-_so(b) || String(a.name||a.variant||a.sku||a.ref_sku||'').localeCompare(String(b.name||b.variant||b.sku||b.ref_sku||'')); }
 // 3-level hierarchy: Group (group_1) → Subgroup (group_2) → Item (sort_order). Groups ordered by their first item.
-const HIER={ products:{g1:'group_1', g2:'group_2'} };
+const HIER={ products:{g1:'group_1', g2:'group_2'}, ingredients:{g1:'ingredient_group'} };
 function hierGroups(rows,H){
   const gmin=list=>Math.min(...list.map(_so));
   const byG1={}; rows.forEach(r=>{ const k=(r[H.g1]||'Other'); (byG1[k]=byG1[k]||[]).push(r); });
   return Object.keys(byG1).sort((a,b)=>gmin(byG1[a])-gmin(byG1[b])||String(a).localeCompare(b)).map(g1=>{
+    // 2-level (no g2): one flat item list per group, kept in master (sort_order) order.
+    if(!H.g2){ return {g1, subs:[{g2:null, items:byG1[g1].slice().sort(cmpItems)}], all:byG1[g1]}; }
     const byG2={}; byG1[g1].forEach(r=>{ const k=(r[H.g2]||'Other'); (byG2[k]=byG2[k]||[]).push(r); });
     const subs=Object.keys(byG2).sort((a,b)=>gmin(byG2[a])-gmin(byG2[b])||String(a).localeCompare(b)).map(g2=>({g2, items:byG2[g2].slice().sort(cmpItems)}));
     return {g1, subs, all:byG1[g1]};
@@ -605,7 +608,7 @@ function setCrumb(extra){
   const link = (state.view==='form'&&!formIsNew) ? ` <span onclick="copyRecordLink()" title="Copy link to this record" style="cursor:pointer;color:var(--muted)">🔗</span>` : '';
   $('crumb').innerHTML = back+`<b>${m.label}</b>`+(extra?` / ${esc(extra)}`:'')+link;
 }
-const DEFAULT_GROUP={ products:'group_1', ingredients:'category', supplies:'category', suppliers:'sells_type' };   // products open in 3-level hierarchy (Group › Subgroup › Item)
+const DEFAULT_GROUP={ products:'group_1', ingredients:'ingredient_group', supplies:'category', suppliers:'sells_type' };   // products = 3-level hierarchy; ingredients grouped by raw source (Ingredient Master order)
 // Tag each supplier row with the ingredient category it mainly supplies (for Group By).
 async function _tagSupplierTypes(supRows){
   let ings=[]; try{ ings=await db.list('ingredients',{}); }catch(e){}
@@ -749,7 +752,7 @@ async function renderList(){
     if(f.t==='formula'){ const val=evalF(f.expr,r); return `<td class="num">${isNaN(+val)?esc(val):num(Math.round(+val*100)/100)}</td>`; }
     if(f.t==='currency') return `<td class="num">${fmt(v)}</td>`;
     if(f.t==='number') return `<td class="num">${v==null?'':num(v)}</td>`;
-    if(f.t==='bool') return `<td><span class="badge b-${!!v}">${v?'Yes':'No'}</span></td>`;
+    if(f.t==='bool') return `<td style="text-align:center">${v?'<span title="Yes" style="color:#2f7d33;font-weight:800">✓</span>':'<span title="No" style="color:#cbcbcb">–</span>'}</td>`;
     if(f.n==='status') return `<td><span class="badge b-${v}">${esc(v)}</span></td>`;
     return `<td>${esc(v)}</td>`;
   };
@@ -775,8 +778,9 @@ async function renderList(){
     hierGroups(rows,HIER[state.model]).forEach(G=>{
       body+=`<tr class="grp grp1"><td colspan="${span}" style="background:#e7f0e9;color:#2f5d33"><b style="font-size:13.5px">${esc(G.g1)}</b> <span style="opacity:.55;font-weight:400">(${G.all.length})</span></td></tr>`;
       G.subs.forEach(S=>{
-        body+=`<tr class="grp">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td style="padding-left:20px">▸ ${esc(S.g2)} <span style="opacity:.6;font-weight:400">(${S.items.length})</span></td>`; return numCols.includes(f)?sumCell(f,sumOf(S.items,f)):'<td></td>'; }).join('')+`</tr>`;
-        S.items.forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map((f,idx)=>idx===0?`<td style="padding-left:32px">${cell(f,r).replace(/^<td[^>]*>/,'').replace(/<\/td>$/,'')}</td>`:cell(f,r)).join('')}</tr>`; });
+        const twoLevel = S.g2==null; const pad = twoLevel?20:32;
+        if(!twoLevel) body+=`<tr class="grp">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td style="padding-left:20px">▸ ${esc(S.g2)} <span style="opacity:.6;font-weight:400">(${S.items.length})</span></td>`; return numCols.includes(f)?sumCell(f,sumOf(S.items,f)):'<td></td>'; }).join('')+`</tr>`;
+        S.items.forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map((f,idx)=>idx===0?`<td style="padding-left:${pad}px">${cell(f,r).replace(/^<td[^>]*>/,'').replace(/<\/td>$/,'')}</td>`:cell(f,r)).join('')}</tr>`; });
       });
     });
   } else if(state.groupBy){
@@ -802,10 +806,10 @@ async function relOptions(model){
   if(relCache[model]) return relCache[model];
   const m=MODELS[model]; let rows=await db.list(model,{});
   if(m.archivable) rows=rows.filter(r=>r.active!==false);   // don't offer archived records in pickers
-  let list=rows.map(r=>({v:r[m.pk], t:r[m.name]+(r[m.pk]!==r[m.name]?` (${r[m.pk]})`:''), g1:r.group_1, g2:r.group_2, cat:r.category, so:_so(r)}));
-  // Products & ingredients get ordered + group tags so line pickers can show Group › Subgroup optgroups.
+  let list=rows.map(r=>({v:r[m.pk], t:r[m.name]+(r[m.pk]!==r[m.name]?` (${r[m.pk]})`:''), g1:r.group_1, g2:r.group_2, cat:r.category, rg:r.ingredient_group, so:_so(r)}));
+  // Products & ingredients get ordered + group tags so line pickers can show grouped optgroups.
   if(model==='products'){ list.sort((a,b)=>a.so-b.so||String(a.t).localeCompare(b.t)); list.forEach(o=>{ o.g1=o.g1||'Products'; o.g2=o.g2||'Other'; }); }
-  else if(model==='ingredients'){ list.sort((a,b)=>(_grank(a.cat)*1e6+a.so)-(_grank(b.cat)*1e6+b.so)||String(a.t).localeCompare(b.t)); list.forEach(o=>{ o.g1=o.cat||'Ingredients'; o.g2=null; }); }
+  else if(model==='ingredients'){ list.sort((a,b)=>a.so-b.so||String(a.t).localeCompare(b.t)); list.forEach(o=>{ o.g1=o.rg||o.cat||'Ingredients'; o.g2=null; }); }
   relCache[model]=list;
   return list;
 }
