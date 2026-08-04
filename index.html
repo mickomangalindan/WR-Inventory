@@ -375,7 +375,7 @@ const MODELS = {
   products:{ label:'Products', icon:'📦', name:'name', pk:'sku', archivable:true,
     status:{f:'status',stages:['No SKU Yet','No Recipe Yet','Active - Scaled','Active']},
     fields:[
-      {n:'sku',l:'SKU',t:'text'},{n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant / Product name',t:'text'},
+      {n:'sku',l:'SKU',t:'text'},{n:'group_1',l:'Group',t:'text'},{n:'group_2',l:'Subgroup',t:'text'},{n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant / Product name',t:'text'},{n:'sort_order',l:'Sort #',t:'number'},
       {n:'name',l:'Name',t:'text'},{n:'pack_g',l:'Pack (g)',t:'number'},{n:'box_size',l:'Packs per box',t:'number'},
       {n:'status',l:'Status',t:'select',o:['Active','Active - Scaled','No Recipe Yet','No SKU Yet']},
       {n:'product_line',l:'Product line',t:'text'},{n:'feeding_format',l:'Feeding format',t:'text'},
@@ -578,6 +578,17 @@ function _grank(n){ const i=GROUP_ORDER.indexOf(String(n||'').replace(/^[^0-9A-Z
 function cmpGroupKeys(a,b){ return _grank(a)-_grank(b) || String(a).localeCompare(String(b)); }
 function _so(r){ const v=+(r&&r.sort_order); return (isFinite(v)&&v>0)?v:999999; }
 function cmpItems(a,b){ return _so(a)-_so(b) || String(a.name||a.variant||a.sku||a.ref_sku||'').localeCompare(String(b.name||b.variant||b.sku||b.ref_sku||'')); }
+// 3-level hierarchy: Group (group_1) → Subgroup (group_2) → Item (sort_order). Groups ordered by their first item.
+const HIER={ products:{g1:'group_1', g2:'group_2'} };
+function hierGroups(rows,H){
+  const gmin=list=>Math.min(...list.map(_so));
+  const byG1={}; rows.forEach(r=>{ const k=(r[H.g1]||'Other'); (byG1[k]=byG1[k]||[]).push(r); });
+  return Object.keys(byG1).sort((a,b)=>gmin(byG1[a])-gmin(byG1[b])||String(a).localeCompare(b)).map(g1=>{
+    const byG2={}; byG1[g1].forEach(r=>{ const k=(r[H.g2]||'Other'); (byG2[k]=byG2[k]||[]).push(r); });
+    const subs=Object.keys(byG2).sort((a,b)=>gmin(byG2[a])-gmin(byG2[b])||String(a).localeCompare(b)).map(g2=>({g2, items:byG2[g2].slice().sort(cmpItems)}));
+    return {g1, subs, all:byG1[g1]};
+  });
+}
 
 function renderSide(){
   let h=`<div class="mi ${state.model==='home'?'active':''}" onclick="openModel('home')" style="margin-top:6px"><span class="ic">🏠</span>Dashboard</div>`;
@@ -594,7 +605,7 @@ function setCrumb(extra){
   const link = (state.view==='form'&&!formIsNew) ? ` <span onclick="copyRecordLink()" title="Copy link to this record" style="cursor:pointer;color:var(--muted)">🔗</span>` : '';
   $('crumb').innerHTML = back+`<b>${m.label}</b>`+(extra?` / ${esc(extra)}`:'')+link;
 }
-const DEFAULT_GROUP={ products:'family', ingredients:'category', supplies:'category', suppliers:'sells_type' };   // master lists open grouped, count-sheet style
+const DEFAULT_GROUP={ products:'group_1', ingredients:'category', supplies:'category', suppliers:'sells_type' };   // products open in 3-level hierarchy (Group › Subgroup › Item)
 // Tag each supplier row with the ingredient category it mainly supplies (for Group By).
 async function _tagSupplierTypes(supRows){
   let ings=[]; try{ ings=await db.list('ingredients',{}); }catch(e){}
@@ -758,6 +769,16 @@ async function renderList(){
         sr.forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map(f=>cell(f,r)).join('')}</tr>`; });
       });
     });
+  } else if(HIER[state.model] && state.groupBy){
+    // 3-level: Group → Subgroup → Item
+    const span=cols.length+(bulk?1:0);
+    hierGroups(rows,HIER[state.model]).forEach(G=>{
+      body+=`<tr class="grp grp1"><td colspan="${span}" style="background:#e7f0e9;color:#2f5d33"><b style="font-size:13.5px">${esc(G.g1)}</b> <span style="opacity:.55;font-weight:400">(${G.all.length})</span></td></tr>`;
+      G.subs.forEach(S=>{
+        body+=`<tr class="grp">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td style="padding-left:20px">▸ ${esc(S.g2)} <span style="opacity:.6;font-weight:400">(${S.items.length})</span></td>`; return numCols.includes(f)?sumCell(f,sumOf(S.items,f)):'<td></td>'; }).join('')+`</tr>`;
+        S.items.forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map((f,idx)=>idx===0?`<td style="padding-left:32px">${cell(f,r).replace(/^<td[^>]*>/,'').replace(/<\/td>$/,'')}</td>`:cell(f,r)).join('')}</tr>`; });
+      });
+    });
   } else if(state.groupBy){
     const g={}; rows.forEach(r=>{const k=r[state.groupBy]==null?'—':r[state.groupBy]; (g[k]=g[k]||[]).push(r);});
     Object.keys(g).sort(cmpGroupKeys).forEach(k=>{
@@ -781,8 +802,24 @@ async function relOptions(model){
   if(relCache[model]) return relCache[model];
   const m=MODELS[model]; let rows=await db.list(model,{});
   if(m.archivable) rows=rows.filter(r=>r.active!==false);   // don't offer archived records in pickers
-  relCache[model]=rows.map(r=>({v:r[m.pk], t:r[m.name]+(r[m.pk]!==r[m.name]?` (${r[m.pk]})`:'')}));
-  return relCache[model];
+  let list=rows.map(r=>({v:r[m.pk], t:r[m.name]+(r[m.pk]!==r[m.name]?` (${r[m.pk]})`:''), g1:r.group_1, g2:r.group_2, cat:r.category, so:_so(r)}));
+  // Products & ingredients get ordered + group tags so line pickers can show Group › Subgroup optgroups.
+  if(model==='products'){ list.sort((a,b)=>a.so-b.so||String(a.t).localeCompare(b.t)); list.forEach(o=>{ o.g1=o.g1||'Products'; o.g2=o.g2||'Other'; }); }
+  else if(model==='ingredients'){ list.sort((a,b)=>(_grank(a.cat)*1e6+a.so)-(_grank(b.cat)*1e6+b.so)||String(a.t).localeCompare(b.t)); list.forEach(o=>{ o.g1=o.cat||'Ingredients'; o.g2=null; }); }
+  relCache[model]=list;
+  return list;
+}
+// Build <option>/<optgroup> markup — grouped (Group › Subgroup) when the options carry group tags.
+function relOptsHTML(opts,v){
+  if(!opts.some(o=>o.g1)) return opts.map(o=>`<option value="${esc(o.v)}" ${v===o.v?'selected':''}>${esc(o.t)}</option>`).join('');
+  const byG1={}; opts.forEach(o=>{ const k=o.g1||o.cat||'Other'; (byG1[k]=byG1[k]||[]).push(o); });
+  let h='';
+  Object.keys(byG1).forEach(g1=>{
+    const byG2={}; byG1[g1].forEach(o=>{ const k=o.g2||''; (byG2[k]=byG2[k]||[]).push(o); });
+    Object.keys(byG2).forEach(g2=>{ const lbl=g2?(g1+' › '+g2):g1;
+      h+=`<optgroup label="${esc(lbl)}">`+byG2[g2].map(o=>`<option value="${esc(o.v)}" ${v===o.v?'selected':''}>${esc(o.t)}</option>`).join('')+`</optgroup>`; });
+  });
+  return h;
 }
 async function openForm(idEnc){
   const m=MODELS[state.model]; state.view='form';
@@ -823,7 +860,7 @@ async function renderForm(){
     if(f.t==='longtext') return `<textarea rows="2" oninput="fSet('${f.n}',this.value)" ${dis}>${esc(v)}</textarea>`;
     if(f.t==='bool') return `<select onchange="fSet('${f.n}',this.value==='true')" ${dis}><option value="false" ${!v?'selected':''}>No</option><option value="true" ${v?'selected':''}>Yes</option></select>`;
     if(f.t==='select') return `<select onchange="fSet('${f.n}',this.value)" ${dis}>${(f.o||[]).map(o=>`<option ${v===o?'selected':''}>${o}</option>`).join('')}</select>`;
-    if(f.t==='rel'){ const opts=relCache[f.rel]||[]; return `<select onchange="fSet('${f.n}',this.value)" ${dis}><option value="">—</option>${opts.map(o=>`<option value="${esc(o.v)}" ${v===o.v?'selected':''}>${esc(o.t)}</option>`).join('')}</select>`; }
+    if(f.t==='rel'){ const opts=relCache[f.rel]||[]; return `<select onchange="fSet('${f.n}',this.value)" ${dis}><option value="">—</option>${relOptsHTML(opts,v)}</select>`; }
     if(f.t==='date') return `<input type="date" value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
     if(f.t==='currency'||f.t==='number') return `<input type="number" step="any" value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
     return `<input value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
@@ -898,7 +935,7 @@ function renderLines(){
     let v=ln[c.n]==null?'':ln[c.n];
     const ro=(typeof c.ro==='function'?c.ro(ln,formRec):c.ro)?'disabled':'';
     if(ro&&(c.n==='received_packs'||c.n==='received_kg')&&(v===''||v==null)) v=0; // captured at receiving
-    if(c.t==='rel'){const opts=relCache[c.rel]||[];return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}><option value="">—</option>${opts.map(op=>`<option value="${esc(op.v)}" ${v===op.v?'selected':''}>${esc(op.t)}</option>`).join('')}</select></td>`;}
+    if(c.t==='rel'){const opts=relCache[c.rel]||[];return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}><option value="">—</option>${relOptsHTML(opts,v)}</select></td>`;}
     if(c.t==='select')return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}>${(c.o||[]).map(op=>`<option ${v===op?'selected':''}>${op}</option>`).join('')}</select></td>`;
     if(c.t==='number'){ const sc=+c.scale||1; const disp=(v===''||v==null)?'':(sc!==1?(Math.round((+v/sc)*1e6)/1e6):v);
       return `<td><input type="number" step="any" value="${esc(disp)}" oninput="lSetNum(${i},'${c.n}',this.value,${sc})" ${ro} ${ro?'title="From the recipe" style="background:#f4f5f8;color:#8a93a5"':''}></td>`; }
@@ -1059,11 +1096,15 @@ async function renderLiveStock(){
   let rows=Object.values(acc).map(a=>{ const end=a.begin+a.recv+a.prod+a.cons+a.tf+a.adj;
     const isProd=!!pm[a.sku]; const it=isProd?pm[a.sku]:(im[a.sku]||{}); const isSup=!isProd&&isSupplyItem(it);
     const div=(isProd||isSup)?1:1000; const unit=isProd?'packs':(isSup?(it.uom||'units'):'kg');
-    const grp=isProd?('📦 '+(it.family||'Other')):(isSup?'🧴 Kitchen Supplies':('🥩 '+(matOf(it)||a.sku)));
+    // 3-level grouping (Group › Subgroup › Item), matching the count sheet & master data.
+    let g1,g2,grank;
+    if(isProd){ g1='📦 '+(it.group_1||'Products'); g2=(it.group_2||it.family||'Other'); grank=_so(it); }
+    else if(isSup){ g1='🧴 Kitchen Supplies'; g2=(it.category||'Supplies'); grank=800000; }
+    else { g1='🥩 '+(it.category||'Ingredients'); g2=(matOf(it)||a.sku); grank=400000+_grank(it.category)*1000+_so(it); }
     const name=(it.name||a.sku)+((!isProd&&!isSup&&it.is_intermediate)?' — processed':'');
     const par=isProd?(+it.par_packs||0):(+it.reorder_g||+it.par_g||0);
     const below=par>0 && end<par, neg=end< -0.0001;
-    return {sku:a.sku, name, grp, unit, div, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf, adj:a.adj, end, value:a.val, par, below, neg, gcat:isProd?1:(isSup?2:0), sort_order:it.sort_order};
+    return {sku:a.sku, name, g1, g2, grank, unit, div, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf, adj:a.adj, end, value:a.val, par, below, neg, sort_order:it.sort_order};
   }).filter(r=> r.begin||r.recv||r.prod||r.cons||r.tf||r.adj);
   if(LS_ACT) rows=rows.filter(r=>r.below||r.neg);
 
@@ -1079,15 +1120,20 @@ async function renderLiveStock(){
   </div>`;
 
   const qf=(v,div)=> div===1000? (Math.round(v/1000*100)/100).toLocaleString('en-PH',{maximumFractionDigits:2}) : num(Math.round(v));
-  // group like the count sheet
-  const groups={}; rows.forEach(r=>{ (groups[r.grp]=groups[r.grp]||[]).push(r); });
-  const gkeys=Object.keys(groups).sort((a,b)=>{ const ga=groups[a][0].gcat-groups[b][0].gcat; return ga||cmpGroupKeys(a,b); });
+  // 3-level grouping (Group › Subgroup › Item) — same order everywhere.
+  const _lr=r=>r.grank==null?500000:r.grank;
+  const _gmin=arr=>Math.min(...arr.map(_lr));
+  const byG1={}; rows.forEach(r=>{ (byG1[r.g1]=byG1[r.g1]||[]).push(r); });
   h+=`<div class="repcard"><div style="overflow-x:auto"><table><thead><tr>
     <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
   if(!rows.length) h+=`<tr><td colspan="${mh?10:11}" class="empty">${LS_ACT?'Nothing needs action ✅':'No stock movements yet.'}</td></tr>`;
-  gkeys.forEach(g=>{ const list=groups[g].sort(cmpItems);
-    const gval=list.reduce((s,r)=>s+r.value,0);
-    h+=`<tr style="background:#f6f2ea"><td colspan="${mh?9:9}"><b>${esc(g)}</b> <span class="mini">· ${list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
+  Object.keys(byG1).sort((a,b)=>_gmin(byG1[a])-_gmin(byG1[b])||cmpGroupKeys(a,b)).forEach(g1=>{
+    const g1list=byG1[g1]; const gval=g1list.reduce((s,r)=>s+r.value,0);
+    h+=`<tr style="background:#e7f0e9"><td colspan="${mh?9:9}"><b>${esc(g1)}</b> <span class="mini">· ${g1list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
+    const byG2={}; g1list.forEach(r=>{ (byG2[r.g2]=byG2[r.g2]||[]).push(r); });
+    Object.keys(byG2).sort((a,b)=>_gmin(byG2[a])-_gmin(byG2[b])||cmpGroupKeys(a,b)).forEach(g2=>{
+    const list=byG2[g2].slice().sort((a,b)=>_lr(a)-_lr(b)||cmpItems(a,b));
+    h+=`<tr style="background:#f6f8f4"><td colspan="${mh?10:11}" style="padding-left:24px">▸ <b>${esc(g2)}</b> <span class="mini">(${list.length})</span></td></tr>`;
     list.forEach(r=>{ const endCol=r.neg?'var(--danger)':(r.below?'var(--earth,#b5762a)':'var(--ink)');
       const flag=r.neg?'<span style="color:var(--danger);font-weight:700">🔴 negative</span>':(r.below?'<span style="color:var(--earth,#b5762a);font-weight:700">⚠ reorder</span>':'<span class="mini" style="color:var(--ok)">ok</span>');
       const cl=r.below||r.neg?' style="cursor:pointer"':' style="cursor:pointer"';
@@ -1097,6 +1143,7 @@ async function renderLiveStock(){
         <td class="num">${qf(r.begin,r.div)}</td><td class="num">${r.recv?qf(r.recv,r.div):'—'}</td><td class="num">${r.prod?qf(r.prod,r.div):'—'}</td>
         <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td><td class="num">${r.tf?qf(r.tf,r.div):'—'}</td><td class="num">${r.adj?qf(r.adj,r.div):'—'}</td>
         <td class="num" style="color:${endCol}"><b>${qf(r.end,r.div)}</b></td>${mh?'':`<td class="num">${fmt(r.value)}</td>`}<td>${flag}</td></tr>`; });
+    });
   });
   h+=`</tbody></table></div>
     <div class="hint" style="margin-top:8px"><b>Ending = Begin + In + Prod − Used ± Transfer ± Adjust</b>, straight from the ledger — so it both explains and equals current on-hand. Ingredients show in <b>kg</b>, finished goods in <b>packs</b>, supplies in their unit. Rows open the item; <b style="color:var(--earth,#b5762a)">⚠ reorder</b> = at/below reorder or PAR, <b style="color:var(--danger)">🔴 negative</b> = a ledger gap to fix. ${LS_LOC==='all'?'Showing both sites combined — switch Site to split Bulacan vs Pasig.':''}</div></div>`;
@@ -1640,7 +1687,7 @@ function _bulkInput(model,f,r){
   const d=window._bulkDirty[pk]; const cur=(d&&(f.n in d))?d[f.n]:r[f.n]; const v=cur==null?'':cur;
   const enc=encodeURIComponent(pk);
   if(f.t==='select') return `<select ${dis} onchange="bulkSet('${enc}','${f.n}',this.value)">${(f.o||[]).map(o=>`<option ${v===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`;
-  if(f.t==='rel'){ const opts=relCache[f.rel]||[]; return `<select ${dis} onchange="bulkSet('${enc}','${f.n}',this.value)"><option value="">—</option>${opts.map(o=>`<option value="${esc(o.v)}" ${v===o.v?'selected':''}>${esc(o.t)}</option>`).join('')}</select>`; }
+  if(f.t==='rel'){ const opts=relCache[f.rel]||[]; return `<select ${dis} onchange="bulkSet('${enc}','${f.n}',this.value)"><option value="">—</option>${relOptsHTML(opts,v)}</select>`; }
   if(f.t==='bool') return `<select ${dis} onchange="bulkSet('${enc}','${f.n}',this.value==='true')"><option value="false" ${!v?'selected':''}>No</option><option value="true" ${v?'selected':''}>Yes</option></select>`;
   if(f.t==='currency'||f.t==='number') return `<input type="number" step="any" value="${esc(v)}" ${dis} onchange="bulkSet('${enc}','${f.n}',this.value)" style="width:88px;text-align:right">`;
   return `<input value="${esc(v)}" ${dis} onchange="bulkSet('${enc}','${f.n}',this.value)" style="width:100%;min-width:120px">`;
@@ -1833,7 +1880,11 @@ async function renderMRP(){
       <button class="btn sm sec" onclick="mrpImport()">⬆ Paste</button>
       <button class="btn sm sec" onclick="mrpSheetSync()">☁ Sync from Google Sheets</button></div>
     <h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3><table><thead><tr><th>Product</th><th>SKU</th><th class="num">Demand</th></tr></thead><tbody>`;
-  prods.forEach(p=>{ dh+=`<tr><td>${esc(p.name)}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpDemand['${p.sku}']=+this.value||0;renderMRP()"></td></tr>`; });
+  const _demRow=p=>`<tr><td>${esc(p.name)}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpDemand['${p.sku}']=+this.value||0;renderMRP()"></td></tr>`;
+  hierGroups(prods,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    dh+=`<tr style="background:#e7f0e9"><td colspan="3"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
+    G.subs.forEach(S=>{ dh+=`<tr style="background:#f6f8f4"><td colspan="3" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(_demRow).join(''); });
+  });
   dh+='</tbody></table></div>';
   // ---- Ingredient need, ROLLED UP to the purchasable ingredient -------------
   // We only buy the whole-dressed / raw (WD) form; processed forms (deboned, ground,
@@ -2645,7 +2696,7 @@ async function renderDashboard(){
   const stock={}; let stockVal=0; const siteVal={}; const famVal={};
   stockRows.forEach(s=>{ stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);
     const v=+s.stock_value||0; stockVal+=v; siteVal[s.location_code]=(siteVal[s.location_code]||0)+v;
-    if(s.kind==='product'){ const p=prodBy[s.ref_sku]; const fam=(p&&p.family)||'Other'; famVal[fam]=(famVal[fam]||0)+v; } });
+    if(s.kind==='product'){ const p=prodBy[s.ref_sku]; const fam=(p&&p.group_1)||(p&&p.family)||'Other'; famVal[fam]=(famVal[fam]||0)+v; } });
   const fgVal=stockRows.filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.stock_value||0),0);
   const rawVal=stockRows.filter(s=>s.kind==='ingredient').reduce((a,s)=>a+(+s.stock_value||0),0);
   const packs=stockRows.filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.on_hand||0),0);
@@ -2738,7 +2789,7 @@ async function renderDashboard(){
   const rawlineBody = wrLine(WR_HISTORY.raw_trend,'date','kg',WSER[4])+'<p class="note">Weekly commissary counts, Feb–Jul 2026 (historical).</p>';
   const lablineBody = wrLine(WR_HISTORY.label_trend,'date','n',WSER[0])+'<p class="note">Sticker inventory drawdown ≈ packing activity (historical).</p>';
   const reorderBody = reorder.length? '<table><thead><tr><th>Item</th><th>Site</th><th class="n">On hand</th><th class="n">Par</th><th class="n">Order</th><th></th></tr></thead><tbody>'+reorder.slice(0,12).map(r=>'<tr><td>'+esc(r.name)+'</td><td>'+r.site+'</td><td class="n">'+r.cur+'</td><td class="n">'+r.par+'</td><td class="n"><b>'+r.order+'</b></td><td><span class="pill warn">reorder</span></td></tr>').join('')+'</tbody></table>' : '<div class="hint">All labels at or above PAR ✅. Set a Label PAR on products (Bulacan / Pasig) to track sticker reorders.</div>';
-  const famBody = (!mh && famArr.length)? '<table><thead><tr><th>Category</th><th class="n">Value</th><th class="n">Share</th></tr></thead><tbody>'+famArr.map(f=>'<tr><td>'+esc(f.label)+'</td><td class="n">'+wpeso(f.value)+'</td><td class="n">'+(famTot?Math.round(f.value/famTot*100):0)+'%</td></tr>').join('')+'</tbody><tfoot><tr><td>Total finished goods</td><td class="n">'+wpeso(famTot)+'</td><td class="n">100%</td></tr></tfoot></table>' : '';
+  const famBody = (!mh && famArr.length)? '<table><thead><tr><th>Group</th><th class="n">Value</th><th class="n">Share</th></tr></thead><tbody>'+famArr.map(f=>'<tr><td>'+esc(f.label)+'</td><td class="n">'+wpeso(f.value)+'</td><td class="n">'+(famTot?Math.round(f.value/famTot*100):0)+'%</td></tr>').join('')+'</tbody><tfoot><tr><td>Total finished goods</td><td class="n">'+wpeso(famTot)+'</td><td class="n">100%</td></tr></tfoot></table>' : '';
 
   // Purchase payables — total payable / paid + remaining-due schedule.
   const _today=todayISO();
@@ -2761,12 +2812,12 @@ async function renderDashboard(){
     <div class="grid c3" style="margin-bottom:14px">${gMargin}${gStock}${gMom}</div>
     ${mh?'':`<div class="grid" style="margin-bottom:14px">${card('💵 Purchase payables &amp; payment schedule',payBody)}</div>`}
     ${ownerCard}
-    <div class="grid c2" style="margin-bottom:14px">${card('Inventory value by category',donutBody)}${card('Where the value sits (by site)',siteBody)}</div>
+    <div class="grid c2" style="margin-bottom:14px">${card('Inventory value by group',donutBody)}${card('Where the value sits (by site)',siteBody)}</div>
     <div class="grid c2" style="margin-bottom:14px">${card('Raw-material stock over time (kg)',rawlineBody)}${card('Label stock over time (pcs)',lablineBody)}</div>
     ${mh?'':`<div class="grid c2" style="margin-bottom:14px">${card('Best margins',wrMargins(topMargin))}${card('Thin &amp; negative margins — review pricing',wrMargins(thinMargin))}</div>`}
     ${mh
       ? `<div class="grid" style="margin-bottom:14px">${card('To reorder now (labels below par)',reorderBody)}</div>`
-      : `<div class="grid c2" style="margin-bottom:14px">${card('To reorder now (labels below par)',reorderBody)}${card('Inventory value by category — full picture',famBody)}</div>`}
+      : `<div class="grid c2" style="margin-bottom:14px">${card('To reorder now (labels below par)',reorderBody)}${card('Inventory value by group — full picture',famBody)}</div>`}
   </div>`;
 }
 async function renderKanban(){
@@ -3017,7 +3068,8 @@ function drawProdPlan(){
   const totGood=prodPlanLines.reduce((s,l)=>s+(+l.good_packs||0),0);
   const totRemain=prodPlanLines.reduce((s,l)=>s+_prodRemain(l.product_sku,l.good_packs),0);
   const inLines=new Set(prodPlanLines.map(l=>l.product_sku));
-  const pickOpts=(window._prodAllProducts||[]).filter(p=>!inLines.has(p.sku)).map(p=>`<option value="${esc(p.sku)}">${esc(p.name)}${prodTargetMap[p.sku]?' · target '+prodTargetMap[p.sku]:''}</option>`).join('');
+  const _avail=(window._prodAllProducts||[]).filter(p=>!inLines.has(p.sku));
+  const pickOpts=hierGroups(_avail,{g1:'group_1',g2:'group_2'}).map(G=>G.subs.map(S=>`<optgroup label="${esc(G.g1+' › '+S.g2)}">`+S.items.map(p=>`<option value="${esc(p.sku)}">${esc(p.name)}${prodTargetMap[p.sku]?' · target '+prodTargetMap[p.sku]:''}</option>`).join('')+`</optgroup>`).join('')).join('');
   let h=`<div class="repcard"><div class="repbar"><span>Production date</span>
     <input type="date" value="${prodPlanDate}" onchange="prodPlanDate=this.value;renderProdPlan()">
     ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
@@ -3204,14 +3256,14 @@ async function renderCountForm(idEnc){
     try{ const ai=await db.list('ingredients',{}); const _bs={},_bn={}; ai.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
       const im={}; ai.forEach(i=>{ const isSup=/(supply|supplement)/i.test(i.category||''); const proc=!!i.is_intermediate;
         const mat=isSup?'Supplies':(proc?((_procParent(i,_bs,_bn)||{}).name||i.name):i.name);
-        im[i.sku]={n:i.name+(proc?' — processed':''), mat, isSup, uom:i.uom, kind:'ingredient'}; });
-      (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,fam:(p.family||'Other'),kind:'product',box:(+p.box_size||1)});
+        im[i.sku]={n:i.name+(proc?' — processed':''), mat, cat:(i.category||'Ingredients'), isSup, uom:i.uom, kind:'ingredient', so:_so(i), grk:_grank(i.category)}; });
+      (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,fam:(p.family||'Other'),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),so:_so(p),kind:'product',box:(+p.box_size||1)});
       countLines.forEach(l=>{
-        if(String(l.ref_sku).startsWith('STK-')){ const h=im[String(l.ref_sku).slice(4)]; l.cat=((h&&h.fam)||'Other')+' — Stickers'; l.name=l.name||l.ref_sku; l.uom='pcs'; l.scale=1; }
+        if(String(l.ref_sku).startsWith('STK-')){ const h=im[String(l.ref_sku).slice(4)]; l.cat=((h&&h.fam)||'Other')+' — Stickers'; l.g1=((h&&h.g1)||'Products')+' — Stickers'; l.g2=(h&&h.g2)||'Other'; l.grank=600000+((h&&h.so)||0); l.name=l.name||l.ref_sku; l.uom='pcs'; l.scale=1; }
         else { const h=im[l.ref_sku];
-          if(h&&h.kind==='product'){ l.cat=h.fam||'Other'; l.name=l.name||h.n; l.uom='packs'; l.scale=1; l.isProduct=true; l.box=h.box||1; }
-          else if(h){ if(h.isSup){ l.cat='Supplies'; l.uom=h.uom||'pcs'; l.scale=1; } else { l.cat=h.mat; l.uom='kg'; l.scale=1000; } l.name=l.name||h.n; }
-          else { l.cat=l.cat||'Uncategorized'; l.uom='kg'; l.scale=1000; } } });
+          if(h&&h.kind==='product'){ l.cat=h.fam||'Other'; l.g1=h.g1; l.g2=h.g2; l.grank=h.so||0; l.name=l.name||h.n; l.uom='packs'; l.scale=1; l.isProduct=true; l.box=h.box||1; }
+          else if(h){ if(h.isSup){ l.cat='Supplies'; l.g1='Kitchen Supplies'; l.g2=h.cat||'Supplies'; l.grank=800000; l.uom=h.uom||'pcs'; l.scale=1; } else { l.cat=h.mat; l.g1=h.cat||'Ingredients'; l.g2=h.mat; l.grank=400000+(h.grk||900)*1000+(h.so||0); l.uom='kg'; l.scale=1000; } l.name=l.name||h.n; }
+          else { l.cat=l.cat||'Uncategorized'; l.g1=l.cat||'Uncategorized'; l.g2='Other'; l.grank=500000; l.uom='kg'; l.scale=1000; } } });
     }catch(e){} }
   else { countRec={count_ref:'',location_code:'bulacan',count_date:todayISO(),status:'draft',scope:['All']}; countLines=[]; }
   await loadBins();
@@ -3223,10 +3275,8 @@ function drawCountForm(){
   $('cp').innerHTML=`<div class="title">Weekly Inventory</div><div class="sp"></div><span style="color:var(--muted)">book qty auto · needs approval</span>`;
   const scopes=['All','Ingredients','Supplies','Stickers','Sellable Products']; const sc=countRec.scope||['All'];
   const scopeHtml=scopes.map(s=>`<label class="sck"><input type="checkbox" ${sc.includes(s)?'checked':''} ${approved?'disabled':''} onchange="countScope('${s}',this.checked)"> ${s}</label>`).join('');
-  // group by category, sort by name within group (easier physical counting)
-  const _byCat={}, _crk={}; countLines.forEach((l,i)=>{ const c=l.cat||'Uncategorized'; (_byCat[c]=_byCat[c]||[]).push(i); if(l.catrank!=null) _crk[c]=Math.min(_crk[c]==null?999:_crk[c], l.catrank); });
-  const _catcmp=(a,b)=>((_crk[a]==null?900:_crk[a])-(_crk[b]==null?900:_crk[b]))||cmpGroupKeys(a,b);
-  Object.values(_byCat).forEach(arr=>arr.sort((a,b)=>String(countLines[a].name||countLines[a].ref_sku).localeCompare(String(countLines[b].name||countLines[b].ref_sku))));
+  // 3-level grouping (Group › Subgroup › Item), ordered by each line's grank.
+  const _lr=i=>countLines[i].grank==null?500000:countLines[i].grank;
   const rowFor=(i)=>{ const l=countLines[i]; const s=+l.scale||1;
     const bookD=l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):'—';
     const varc=(l.counted_qty!==''&&l.counted_qty!=null)?(((+l.counted_qty)-(+l.book_qty||0))/s):null;
@@ -3238,7 +3288,16 @@ function drawCountForm(){
         <td class="num" style="white-space:nowrap"><input type="number" step="1" value="${bx}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},this.value,null)" style="width:46px;text-align:right" title="boxes"> box ×${box} + <input type="number" step="1" value="${lo}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},null,this.value)" style="width:46px;text-align:right" title="loose packs"> loose</td>${varCell}</tr>`; }
     const cntD=(l.counted_qty==null||l.counted_qty==='')?'':(Math.round((+l.counted_qty/s)*1e6)/1e6);
     return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td>${varCell}</tr>`; };
-  const lineRows=Object.keys(_byCat).sort(_catcmp).map(cat=>`<tr><td colspan="6" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">${esc(cat)} <span style="opacity:.6;font-weight:400">(${_byCat[cat].length})</span></td></tr>`+_byCat[cat].map(rowFor).join('')).join('');
+  const _idx=countLines.map((l,i)=>i).sort((a,b)=>_lr(a)-_lr(b)||String(countLines[a].name||'').localeCompare(countLines[b].name||''));
+  const _bg1={}; _idx.forEach(i=>{ const k=countLines[i].g1||countLines[i].cat||'Other'; (_bg1[k]=_bg1[k]||[]).push(i); });
+  const _gmin=arr=>Math.min(...arr.map(_lr));
+  let lineRows=''; Object.keys(_bg1).sort((a,b)=>_gmin(_bg1[a])-_gmin(_bg1[b])).forEach(g1=>{
+    lineRows+=`<tr><td colspan="6" style="background:#e7f0e9;font-weight:700;color:#2f5d33;padding:6px 8px">${esc(g1)} <span style="opacity:.55;font-weight:400">(${_bg1[g1].length})</span></td></tr>`;
+    const _bg2={}; _bg1[g1].forEach(i=>{ const k=countLines[i].g2||'Other'; (_bg2[k]=_bg2[k]||[]).push(i); });
+    Object.keys(_bg2).sort((a,b)=>_gmin(_bg2[a])-_gmin(_bg2[b])).forEach(g2=>{
+      lineRows+=`<tr><td colspan="6" style="background:#f6f8f4;font-weight:600;color:#4e7a3e;padding:4px 8px 4px 22px">▸ ${esc(g2)} <span style="opacity:.6;font-weight:400">(${_bg2[g2].length})</span></td></tr>`+_bg2[g2].map(rowFor).join('');
+    });
+  });
   $('content').innerHTML=`<div class="formwrap"><div class="sheet">
     <div class="statusbar">${MODELS.count_sessions.status.stages.map(s=>`<div class="stg ${countRec.status===s?'on':''}">${s}</div>`).join('')}</div>
     <div class="hd"><input class="ttl" value="${esc(countRec.count_ref||'')}" ${approved?'disabled':''} oninput="countRec.count_ref=this.value"><div class="sub">Physical count · book qty is auto-generated &amp; locked</div></div>
@@ -3264,14 +3323,18 @@ function drawCountForm(){
 // Printable physical-count sheet: grouped by category, sorted, with a blank column to write counts.
 function countPrintSheet(){
   if(!countLines.length){ toast('Load items first',true); return; }
-  const byCat={}, _crk2={}; countLines.forEach(l=>{ const c=l.cat||'Uncategorized'; (byCat[c]=byCat[c]||[]).push(l); if(l.catrank!=null) _crk2[c]=Math.min(_crk2[c]==null?999:_crk2[c], l.catrank); });
-  const _catcmp2=(a,b)=>((_crk2[a]==null?900:_crk2[a])-(_crk2[b]==null?900:_crk2[b]))||cmpGroupKeys(a,b);
+  const _lr2=l=>l.grank==null?500000:l.grank;
+  const _bg1={}; countLines.slice().sort((a,b)=>_lr2(a)-_lr2(b)||String(a.name||'').localeCompare(b.name||'')).forEach(l=>{ const k=l.g1||l.cat||'Other'; (_bg1[k]=_bg1[k]||[]).push(l); });
+  const _gmin=arr=>Math.min(...arr.map(_lr2));
   let body='';
-  Object.keys(byCat).sort(_catcmp2).forEach(cat=>{
-    const arr=byCat[cat].slice().sort(cmpItems);
-    body+=`<tr class="cat"><td colspan="5">${esc(cat)} (${arr.length})</td></tr>`+arr.map(l=>{ const s=+l.scale||1; return `<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td>${esc(binOf(l.ref_sku,countRec.location_code))}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`; }).join('');
+  Object.keys(_bg1).sort((a,b)=>_gmin(_bg1[a])-_gmin(_bg1[b])).forEach(g1=>{
+    body+=`<tr class="grp1"><td colspan="5">${esc(g1)} (${_bg1[g1].length})</td></tr>`;
+    const _bg2={}; _bg1[g1].forEach(l=>{ const k=l.g2||'Other'; (_bg2[k]=_bg2[k]||[]).push(l); });
+    Object.keys(_bg2).sort((a,b)=>_gmin(_bg2[a])-_gmin(_bg2[b])).forEach(g2=>{
+      body+=`<tr class="cat"><td colspan="5">&nbsp;&nbsp;▸ ${esc(g2)} (${_bg2[g2].length})</td></tr>`+_bg2[g2].map(l=>{ const s=+l.scale||1; return `<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td>${esc(binOf(l.ref_sku,countRec.location_code))}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`; }).join('');
+    });
   });
-  const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.cat td{background:#eef3ea;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:130px;border-bottom:1px solid #333}</style></head><body>
+  const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.grp1 td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.cat td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:130px;border-bottom:1px solid #333}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Weekly Count Sheet</h1>
     <h2>${esc(countRec.count_ref||'')} · ${esc((countRec.location_code||'').toUpperCase())} · ${esc(countRec.count_date||'')} · counted by: ____________________</h2>
     <table><thead><tr><th>Item</th><th>SKU</th><th>Bin</th><th style="text-align:right">Book qty</th><th>Counted</th></tr></thead><tbody>${body}</tbody></table>
@@ -3304,14 +3367,14 @@ async function countLoad(){
   const _bs={}, _bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
   const matOf=(i)=>{ if(!i.is_intermediate) return i.name; const p=_procParent(i,_bs,_bn); return (p&&p.name)||i.name; };
   ings.slice().sort(cmpItems).forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
-    if(isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:'Supplies',catrank:_grank('Supplies'),uom:(i.uom||'pcs'),scale:1,sort_order:i.sort_order}); return; }
+    if(isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:'Supplies',catrank:_grank('Supplies'),g1:'Kitchen Supplies',g2:(i.category||'Supplies'),grank:800000,uom:(i.uom||'pcs'),scale:1,sort_order:i.sort_order}); return; }
     if(!wantIng) return;
     const isProc=!!i.is_intermediate; const u=countUnitFor('Ingredients');
-    lines.push({ref_sku:i.sku, name:i.name+(isProc?' — processed':''), book_qty:stock[i.sku]||0, counted_qty:'', cat:matOf(i), catrank:_grank(i.category), uom:u.uom, scale:u.scale, form:isProc?'processed':'raw', sort_order:i.sort_order}); });
-  if(wantProd) prods.slice().sort(cmpItems).forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order}));
+    lines.push({ref_sku:i.sku, name:i.name+(isProc?' — processed':''), book_qty:stock[i.sku]||0, counted_qty:'', cat:matOf(i), catrank:_grank(i.category), g1:(i.category||'Ingredients'), g2:matOf(i), grank:400000+_grank(i.category)*1000+_so(i), uom:u.uom, scale:u.scale, form:isProc?'processed':'raw', sort_order:i.sort_order}); });
+  if(wantProd) prods.slice().sort(cmpItems).forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order}));
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
   if(wantStk) prods.slice().sort(cmpItems).forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
-    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',catrank:_grank(p.family)+0.5,uom:'pcs',scale:1,sort_order:p.sort_order}); });
+    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',catrank:_grank(p.family)+0.5,g1:(p.group_1||'Products')+' — Stickers',g2:(p.group_2||p.family||'Other'),grank:600000+_so(p),uom:'pcs',scale:1,sort_order:p.sort_order}); });
   countLines=lines;
   await loadBins();
   toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')); drawCountForm();
@@ -3376,6 +3439,7 @@ const STD_REPORTS=[
  {id:'ing_cat',name:'Ingredients by category',desc:'Item count in each PMR category.',source:'ingredients',cfg:{dim:'category',measure:'',agg:'count'}},
  {id:'ing_src',name:'Ingredients by species',desc:'Breadth of proteins, plants & fish.',source:'ingredients',cfg:{dim:'source',measure:'',agg:'count'}},
  {id:'spend_sup',name:'List price by supplier',desc:'Where ingredient spend concentrates (Σ ₱/kg).',source:'ingredients',cfg:{dim:'supplier',measure:'list_price_kg',agg:'sum'}},
+ {id:'prod_grp',name:'Products by group',desc:'Catalog spread across the Group hierarchy.',source:'products',cfg:{dim:'group_1',measure:'',agg:'count'}},
  {id:'prod_feed',name:'Products by feeding style',desc:'Catalog spread across Raw / Cooked.',source:'products',cfg:{dim:'feeding_style',measure:'',agg:'count'}},
  {id:'var_check',name:'₱ at risk by check',desc:'Total variance value per reconciliation type.',source:'variance_log',cfg:{dim:'check_type',measure:'gap_value',agg:'sum'}},
  {id:'var_user',name:'Variances by person',desc:'Accountability — gap value by responsible user.',source:'variance_log',cfg:{dim:'responsible_user',measure:'gap_value',agg:'sum'}},
@@ -3604,9 +3668,13 @@ async function recipeCostHtml(){
   const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await listIngredients();
   const cost=p=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=ings.find(i=>i.sku===b.ingredient_sku)||{}; const y=(+it.yield_pct||100)/100; const rawg=(+b.usable_g||0)/(y||1); c+=(rawg/1000)*(+it.list_price_kg||0); }); return c; };
   let h=`<div class="repcard"><h3 style="margin:0 0 8px">Recipe cost per product</h3><table><thead><tr><th>Product</th><th class="num">Pack (g)</th><th class="num">Ingredient cost/pack</th><th class="num">Sell</th><th class="num">Margin</th></tr></thead><tbody>`;
-  prods.forEach(p=>{ const c=cost(p), sell=+p.sell_price||0, mg=sell?((sell-c)/sell*100):0;
-    h+=`<tr><td>${esc(p.name)}</td><td class="num">${p.pack_g}</td><td class="num">${fmt(c)}</td><td class="num">${fmt(sell)}</td><td class="num" style="color:${mg<0?'var(--danger)':'var(--ok)'}">${sell?mg.toFixed(0)+'%':'—'}</td></tr>`; });
-  h+='</tbody></table><div class="hint" style="margin-top:8px">Ingredient cost only (raw ÷ yield × list price). Add labour + packaging in Production for full cost/pack.</div></div>';
+  const rcRow=p=>{ const c=cost(p), sell=+p.sell_price||0, mg=sell?((sell-c)/sell*100):0;
+    return `<tr><td>${esc(p.name)}</td><td class="num">${p.pack_g}</td><td class="num">${fmt(c)}</td><td class="num">${fmt(sell)}</td><td class="num" style="color:${mg<0?'var(--danger)':'var(--ok)'}">${sell?mg.toFixed(0)+'%':'—'}</td></tr>`; };
+  hierGroups(prods,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    h+=`<tr style="background:#e7f0e9"><td colspan="5"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
+    G.subs.forEach(S=>{ h+=`<tr style="background:#f6f8f4"><td colspan="5" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(rcRow).join(''); });
+  });
+  h+='</tbody></table><div class="hint" style="margin-top:8px">Grouped Group › Subgroup › Item. Ingredient cost only (raw ÷ yield × list price). Add labour + packaging in Production for full cost/pack.</div></div>';
   return h;
 }
 /* ============ Gross Margin — full cost per pack (raw + other costs) → GP% → suggested price ============ */
@@ -3686,19 +3754,27 @@ async function renderMargin(){
       <label style="font-size:12px"><b>Target GM</b> %<br><input type="number" step="any" value="${+(tgm*100).toFixed(3)}" style="width:80px" onchange="cmSetTarget(this.value)"></label></div>
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="saveCostModel()">💾 Save cost model</button><button class="btn sec" onclick="cmReset()">↺ Reset to file defaults</button></div></div>`;
 
-  const rows=marginRowsFor(prods,boms,ings).sort((a,b)=>(a.sell?a.gp:99)-(b.sell?b.gp:99));
+  const rows=marginRowsFor(prods,boms,ings);
+  rows.forEach(r=>{ r.group_1=r.p.group_1||'Products'; r.group_2=r.p.group_2||r.p.family||'Other'; r.sort_order=r.p.sort_order; r.name=r.p.name; r.variant=r.p.variant; });
   const flagsOf=p=>[p.cost_debone?'<span title="with deboning" style="color:var(--earth,#b5762a)">D</span>':'',p.cost_butcher?'<span title="butcher charge" style="color:var(--earth,#b5762a)">B</span>':'',p.cost_sousvide?'<span title="sous-vide" style="color:var(--berry)">S</span>':'',p.cost_ecobag?'<span title="ecobag">E</span>':'',p.cost_thermal?'<span title="thermal pouch">T</span>':''].filter(Boolean).join(' ')||'<span class="mini">—</span>';
-  h+=`<div class="repcard" style="margin-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><h3 style="margin:0">Product gross margin</h3><button class="btn sec sm" onclick="marginWriteCogs()">⬆ Write total cost to products (COGS ref)</button></div>
-    <div class="hint" style="margin:6px 0 8px">Tap a row to open the product and set its cost profile. Flags: <b>D</b> debone · <b>B</b> butcher · <b>S</b> sous-vide · <b>E</b> ecobag · <b>T</b> thermal.</div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>Profile</th><th class="num">g</th><th class="num">Raw</th><th class="num">Process</th><th class="num">Packaging</th><th class="num">Fees</th><th class="num">Total</th><th class="num">Sell</th><th class="num">GP%</th><th class="num">Suggested @ ${(tgm*100).toFixed(0)}%</th><th>Status</th></tr></thead><tbody>`;
-  rows.forEach(r=>{ const below=r.gp<tgm; const col=r.gp<0?'var(--danger)':(below?'var(--earth,#b5762a)':'var(--ok)');
-    h+=`<tr style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.p.sku)).replace(/'/g,'&#39;')}')" title="Open product">
+  const mRow=r=>{ const below=r.gp<tgm; const col=r.gp<0?'var(--danger)':(below?'var(--earth,#b5762a)':'var(--ok)');
+    return `<tr style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.p.sku)).replace(/'/g,'&#39;')}')" title="Open product">
       <td>${esc(r.p.name)}</td><td class="mini">${flagsOf(r.p)}</td><td class="num">${r.g||'—'}</td>
       <td class="num">${fmt(r.raw)}</td><td class="num">${fmt(r.process)}</td><td class="num">${fmt(r.pack)}</td><td class="num">${fmt(r.fees)}</td>
       <td class="num"><b>${fmt(r.total)}</b></td><td class="num">${fmt(r.sell)}</td>
       <td class="num" style="color:${col}"><b>${r.sell?(r.gp*100).toFixed(1)+'%':'—'}</b></td>
       <td class="num">${r.sell?fmt(r.suggested):'—'}</td>
-      <td>${r.sell?(below?'<span style="color:var(--earth,#b5762a)">TO ADJUST</span>':'<span style="color:var(--ok)">ABOVE</span>'):'<span class="mini">no price</span>'}</td></tr>`; });
+      <td>${r.sell?(below?'<span style="color:var(--earth,#b5762a)">TO ADJUST</span>':'<span style="color:var(--ok)">ABOVE</span>'):'<span class="mini">no price</span>'}</td></tr>`; };
+  h+=`<div class="repcard" style="margin-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><h3 style="margin:0">Product gross margin</h3><button class="btn sec sm" onclick="marginWriteCogs()">⬆ Write total cost to products (COGS ref)</button></div>
+    <div class="hint" style="margin:6px 0 8px">Grouped Group › Subgroup › Item. Tap a row to open the product and set its cost profile. Flags: <b>D</b> debone · <b>B</b> butcher · <b>S</b> sous-vide · <b>E</b> ecobag · <b>T</b> thermal. <b style="color:var(--earth,#b5762a)">TO ADJUST</b> = below target GM.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>Profile</th><th class="num">g</th><th class="num">Raw</th><th class="num">Process</th><th class="num">Packaging</th><th class="num">Fees</th><th class="num">Total</th><th class="num">Sell</th><th class="num">GP%</th><th class="num">Suggested @ ${(tgm*100).toFixed(0)}%</th><th>Status</th></tr></thead><tbody>`;
+  hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    const priced=G.all.filter(r=>r.sell); const gAvg=priced.length?priced.reduce((s,r)=>s+r.gp,0)/priced.length:null;
+    h+=`<tr style="background:#e7f0e9"><td colspan="9"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length} item(s)</span></td><td class="num"${gAvg!=null?` style="color:${gAvg<tgm?'var(--earth,#b5762a)':'var(--ok)'}"`:''}>${gAvg!=null?'<b>'+(gAvg*100).toFixed(1)+'%</b>':''}</td><td colspan="2"></td></tr>`;
+    G.subs.forEach(S=>{
+      h+=`<tr style="background:#f6f8f4"><td colspan="12" style="padding-left:22px">▸ <b>${esc(S.g2)}</b> <span class="mini">(${S.items.length})</span></td></tr>`+S.items.map(mRow).join('');
+    });
+  });
   if(!rows.length) h+='<tr><td colspan="12" class="empty">No products with recipes yet.</td></tr>';
   h+=`</tbody></table></div><div class="hint" style="margin-top:8px">Total = Raw (BOM) + Process (electricity + water + transport + labor ± butcher ± sous-vide) + Packaging (vacuum + sticker ± ecobag ± thermal) + Fees (${((( +pct.transaction||0)+(+pct.marketing||0))*100).toFixed(0)}% of price). GP% = (Sell − Total) ÷ Sell. Suggested price hits ${(tgm*100).toFixed(0)}% GM at current costs.</div></div>`;
   $('content').innerHTML=h; window._marginRows=rows;
@@ -3718,7 +3794,7 @@ async function marginWriteCogs(){ const rows=window._marginRows||[]; if(!rows.le
      Momentum × = recent 30-day daily sales rate ÷ 120-day daily average (>1 = accelerating).
      Days of cover = current stock ÷ recent daily rate (how long stock lasts at today's pace). */
 let MOM_COVER_LOW = 14, MOM_COVER_HIGH = 45;   // days-of-cover bands (owner-tunable)
-let MOM_GROUP = '';                            // '' | 'family' | 'status'  (table grouping)
+let MOM_GROUP = 'hier';                         // '' | 'hier' | 'family' | 'status'  (table grouping)
 let MOM_VIZ = 'bars';                          // 'bars' | 'map'  (default = general-audience bars)
 const MOM_HI = 1.15, MOM_LO = 0.85;            // momentum ratio bands
 
@@ -3766,6 +3842,7 @@ async function renderMomentum(){
   $('cp').innerHTML=`<div class="title">Sales Momentum <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div><button class="btn" onclick="renderMomentum()">↻ Refresh</button>
     <button class="btn sec" onclick="momImport()">📥 Import / paste sales</button>
     <span class="mini" style="margin-left:8px">Group <select onchange="MOM_GROUP=this.value;renderMomentum()">
+      <option value="hier" ${MOM_GROUP==='hier'?'selected':''}>Group › Subgroup</option>
       <option value="" ${MOM_GROUP===''?'selected':''}>None</option>
       <option value="family" ${MOM_GROUP==='family'?'selected':''}>Product family</option>
       <option value="status" ${MOM_GROUP==='status'?'selected':''}>Priority / status</option></select></span>
@@ -3778,7 +3855,8 @@ async function renderMomentum(){
 
   const rows = mom.map(r=>{ const sku=r.sku; const p=pm[sku]||{}; const stk=stock[sku]!=null?stock[sku]:( +p.on_hand||0 );
     const met=momMetrics(r, stk); const q=momQuad(met.mom, met.cover, met.hasSales); const mth=momMonthly(r);
-    return { sku, product:(p.name||r.product||sku), family:(p.family||'(no family)'), matchedProd:!!p.sku,
+    return { sku, product:(p.name||r.product||sku), family:(p.family||'(no family)'),
+      group_1:(p.group_1||'Products'), group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order, matchedProd:!!p.sku,
       u30:+r.u30||0,u60:+r.u60||0,u90:+r.u90||0,u120:+r.u120||0, ...mth, stock:stk, matched:stock[sku]!=null||p.sku!=null, ...met, q };
   });
   const active = rows.filter(r=>r.hasSales);
@@ -3825,7 +3903,18 @@ async function renderMomentum(){
     return `<tr${clk}><td>${esc(r.product)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(r.m4)}</td><td class="num">${num(r.m3)}</td><td class="num">${num(r.m2)}</td><td class="num">${num(r.m1)}</td><td>${sparkline([r.m4,r.m3,r.m2,r.m1])}</td><td class="num" style="color:${r.q.color}"><b>${r.mom}</b></td><td class="num">${r.matched?num(Math.round(r.stock)):'<span class="mini">—</span>'}</td><td class="num">${r.cover>=999?'∞':Math.round(r.cover)}</td><td><span style="color:${r.q.color};font-weight:700">${r.q.icon} ${esc(r.q.label)}</span></td></tr>`; };
   const head=`<thead><tr><th>Product</th><th>SKU</th><th class="num">M-4</th><th class="num">M-3</th><th class="num">M-2</th><th class="num">M-1</th><th>Trend</th><th class="num">Mom ×</th><th class="num">Stock</th><th class="num">Cover</th><th>Status</th></tr></thead>`;
   let body='';
-  if(MOM_GROUP){
+  if(MOM_GROUP==='hier'){
+    // 3-level Group › Subgroup › Item — same hierarchy as the master data & count sheet.
+    hierGroups(active,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+      const g1sub=G.all.reduce((s,r)=>s+r.m1,0);
+      body+=`<tr style="background:#e7f0e9"><td colspan="6"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length} SKU(s)</span></td><td colspan="5" class="num"><b>M-1 total: ${num(g1sub)}</b></td></tr>`;
+      G.subs.forEach(S=>{
+        const sub=S.items.reduce((s,r)=>s+r.m1,0);
+        body+=`<tr style="background:#f6f8f4"><td colspan="6" style="padding-left:22px">▸ <b>${esc(S.g2)}</b> <span class="mini">· ${S.items.length} SKU(s)</span></td><td colspan="5" class="num"><b>${num(sub)}</b></td></tr>`;
+        body+=S.items.slice().sort(momImportanceSort).map(rowHtml).join('');
+      });
+    });
+  } else if(MOM_GROUP){
     const byFam = MOM_GROUP==='family';
     const keyOf=r=> byFam? r.family : (r.q.icon+' '+r.q.label);
     const groups={}; active.forEach(r=>{ (groups[keyOf(r)]=groups[keyOf(r)]||[]).push(r); });
@@ -4003,12 +4092,22 @@ async function lowStockHtml(){
   const ings=await db.list('ingredients',{}), prods=await db.list('products',{});
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ const k=(s.kind||'')+':'+s.ref_sku; stock[k]=(stock[k]||0)+(+s.on_hand||0); }); }catch(e){} }
   const ig=ings.map(i=>{ const oh=stock['ingredient:'+i.sku]||0; const thr=+i.reorder_g||+i.par_g||0; const sup=isSupplyItem(i); return {name:i.name,sku:i.sku,oh,thr,short:thr-oh,unit:sup?(i.uom||'units'):'g'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
-  const pg=prods.map(p=>{ const oh=stock['product:'+p.sku]||0; const thr=+p.par_packs||0; return {name:p.name,sku:p.sku,oh,thr,short:thr-oh,unit:'packs'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
+  const pg=prods.map(p=>{ const oh=stock['product:'+p.sku]||0; const thr=+p.par_packs||0; return {name:p.name,variant:p.variant,sku:p.sku,oh,thr,short:thr-oh,unit:'packs',group_1:p.group_1||'Products',group_2:p.group_2||p.family||'Other',sort_order:p.sort_order}; }).filter(r=>r.thr>0&&r.oh<r.thr);
+  const lrow=(r,model)=>`<tr style="cursor:pointer" onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open record"><td>${esc(r.name)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(Math.round(r.oh))}</td><td class="num">${num(r.thr)}</td><td class="num"><b style="color:var(--danger)">${num(Math.round(r.short))} ${r.unit}</b></td></tr>`;
   const tbl=(title,rows,model)=>`<div class="repcard" style="margin-bottom:14px"><h3 style="margin:0 0 8px">${title}</h3>
     <table><thead><tr><th>Item</th><th>SKU</th><th class="num">On hand</th><th class="num">Threshold</th><th class="num">Short by</th></tr></thead>
-    <tbody>${rows.map(r=>`<tr style="cursor:pointer" onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open record"><td>${esc(r.name)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(Math.round(r.oh))}</td><td class="num">${num(r.thr)}</td><td class="num"><b style="color:var(--danger)">${num(Math.round(r.short))} ${r.unit}</b></td></tr>`).join('')||`<tr><td colspan="5" class="empty">All at or above threshold ✅</td></tr>`}</tbody></table>
+    <tbody>${rows.slice().sort((a,b)=>b.short-a.short).map(r=>lrow(r,model)).join('')||`<tr><td colspan="5" class="empty">All at or above threshold ✅</td></tr>`}</tbody></table>
     <div class="pager">${rows.length} item(s) below threshold · tap a row to open</div></div>`;
-  return tbl('🥩 Ingredients below reorder point', ig, 'ingredients')+tbl('📦 Finished goods below PAR', pg, 'products')+
+  // Finished goods grouped Group › Subgroup › Item (consistent with every product view).
+  let pgBody=''; hierGroups(pg,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    pgBody+=`<tr style="background:#e7f0e9"><td colspan="5"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length} below PAR</span></td></tr>`;
+    G.subs.forEach(S=>{ pgBody+=`<tr style="background:#f6f8f4"><td colspan="5" style="padding-left:22px">▸ <b>${esc(S.g2)}</b> <span class="mini">(${S.items.length})</span></td></tr>`+S.items.map(r=>lrow(r,'products')).join(''); });
+  });
+  const pgTbl=`<div class="repcard" style="margin-bottom:14px"><h3 style="margin:0 0 8px">📦 Finished goods below PAR</h3>
+    <table><thead><tr><th>Item</th><th>SKU</th><th class="num">On hand</th><th class="num">Threshold</th><th class="num">Short by</th></tr></thead>
+    <tbody>${pgBody||`<tr><td colspan="5" class="empty">All at or above PAR ✅</td></tr>`}</tbody></table>
+    <div class="pager">${pg.length} item(s) below PAR · grouped Group › Subgroup › Item · tap a row to open</div></div>`;
+  return tbl('🥩 Ingredients below reorder point', ig, 'ingredients')+pgTbl+
     (isLive()?'':'<div class="hint">Live stock needed for accurate on-hand — this uses demo data.</div>');
 }
 // Soft check (not a hard block): products whose recipe lists an ingredient on >1 line.
@@ -4218,22 +4317,23 @@ function _stkRowsFrom(lines, prods, ings){
   return (lines||[]).map(l=>{ const p=prods[l.ingredient_sku]||{}; const ing=ings[l.ingredient_sku]||{};
     return { sku:l.ingredient_sku,
       name:(p.variant||p.name||String(ing.name||'').replace(/ — Sticker$/,'')||l.ingredient_sku),
-      fam:(p.family||p.feeding_style||'Other'),
+      fam:(p.family||p.feeding_style||'Other'), group_1:(p.group_1||'Other'), group_2:(p.group_2||p.family||'Other'),
       net:(p.sticker_net||''), dim:(p.sticker_dimension||''), link:(p.sticker_art_url||''),
       sort_order:p.sort_order,
       ordered:(+l.ordered_kg||0), received:(+l.received_kg||0) }; });
 }
 function _stkTableHTML(rows){
-  const groups={}; rows.forEach(r=>{ (groups[r.fam]=groups[r.fam]||[]).push(r); });
-  const fams=Object.keys(groups).sort(cmpGroupKeys);
   let n=0, totO=0, totR=0, linked=0;
   let h=`<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th><th class="num">Qty Ordered</th><th class="num">Qty Received</th></tr></thead><tbody>`;
-  fams.forEach(fam=>{
-    h+=`<tr style="background:#e7f0e9"><td colspan="8"><b>${esc(fam)}</b></td></tr>`;
-    groups[fam].sort(cmpItems).forEach(r=>{ n++; totO+=r.ordered; totR+=r.received; if(r.link) linked++;
-      h+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)||'—'}</td><td><code>${esc(r.sku)}</code></td>`+
-        `<td>${r.link?`<a href="${esc(r.link)}" target="_blank" rel="noopener">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>`+
-        `<td>${esc(r.dim)||'—'}</td><td class="num">${r.ordered||'—'}</td><td class="num">${r.received||'—'}</td></tr>`;
+  hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    h+=`<tr style="background:#d7e7db"><td colspan="8"><b style="font-size:13.5px">${esc(G.g1)}</b></td></tr>`;
+    G.subs.forEach(S=>{
+      h+=`<tr style="background:#eef3ea"><td colspan="8" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
+      S.items.forEach(r=>{ n++; totO+=r.ordered; totR+=r.received; if(r.link) linked++;
+        h+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)||'—'}</td><td><code>${esc(r.sku)}</code></td>`+
+          `<td>${r.link?`<a href="${esc(r.link)}" target="_blank" rel="noopener">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>`+
+          `<td>${esc(r.dim)||'—'}</td><td class="num">${r.ordered||'—'}</td><td class="num">${r.received||'—'}</td></tr>`;
+      });
     });
   });
   h+=`</tbody><tfoot><tr><th colspan="6" class="num">Totals</th><th class="num">${totO}</th><th class="num">${totR}</th></tr></tfoot></table></div>`;
@@ -4243,15 +4343,16 @@ function _isStickerPO(rec){ return !!rec && /\[STICKERS\]/i.test(String(rec.po_r
 // Print-friendly sticker lines (grouped by family) — matches the on-screen sticker layout.
 function _stkPrintLines(children, prods, ings){
   const rows=_stkRowsFrom(children, prods||{}, ings||{});
-  const groups={}; rows.forEach(r=>{ (groups[r.fam]=groups[r.fam]||[]).push(r); });
-  const fams=Object.keys(groups).sort(cmpGroupKeys);
   let n=0, totO=0, totR=0, body='';
-  fams.forEach(fam=>{
-    body+=`<tr class="grp"><td colspan="8"><b>${esc(fam)}</b></td></tr>`;
-    groups[fam].sort(cmpItems).forEach(r=>{ n++; totO+=r.ordered; totR+=r.received;
-      body+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)}</td><td>${esc(r.sku)}</td>`+
-        `<td>${r.link?`<a href="${esc(r.link)}">Open artwork ↗</a>`:'pending'}</td>`+
-        `<td>${esc(r.dim)}</td><td style="text-align:right">${r.ordered||''}</td><td style="text-align:right">${r.received||''}</td></tr>`;
+  hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    body+=`<tr class="grp"><td colspan="8"><b>${esc(G.g1)}</b></td></tr>`;
+    G.subs.forEach(S=>{
+      body+=`<tr class="cat"><td colspan="8">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`;
+      S.items.forEach(r=>{ n++; totO+=r.ordered; totR+=r.received;
+        body+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)}</td><td>${esc(r.sku)}</td>`+
+          `<td>${r.link?`<a href="${esc(r.link)}">Open artwork ↗</a>`:'pending'}</td>`+
+          `<td>${esc(r.dim)}</td><td style="text-align:right">${r.ordered||''}</td><td style="text-align:right">${r.received||''}</td></tr>`;
+      });
     });
   });
   const foot=`<tr class="tot"><td colspan="6" style="text-align:right">Totals</td><td style="text-align:right">${totO}</td><td style="text-align:right">${totR}</td></tr>`;
