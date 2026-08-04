@@ -570,6 +570,15 @@ function safeUrl(u){ u=String(u==null?'':u).trim(); return /^(https?:|mailto:)/i
 function isSupplyItem(i){ if(!i) return false; if(typeof i.is_supply==='boolean') return i.is_supply;
   return /supply|supplement|packag|consumable|sticker|label|plastic|pouch|vacuum|ecobag|thermal|\bbag\b|\bbox\b|tape|glove|tissue|towel/i.test(String(i.category||'')+' '+String(i.name||'')); }
 
+// ---- Canonical warehouse ordering (WR_Sort_Order_Setup / products.sort_order) ----
+// Groups (families/categories) come in this order across every view; items sort by their sort_order.
+const GROUP_ORDER=['Wholesome Mix','BARF Mix','PMR Mix','Meatballs — Wholesome Mix','Meatballs — Single Protein','Single Protein','Bone Broth','Dog Chew','Organs','Fish',"Goat's Milk",
+  'Muscle Meat','Muscle meat','Organ Meat','Muscle organ','Secreting organ','Other secreting organs','Liver','Raw meaty bones','Whole dressed','Bone','Vegetables','Fruit','Seeds','Supplement','Source materials','Supplies','Kitchen Supplies'];
+function _grank(n){ const i=GROUP_ORDER.indexOf(String(n||'').replace(/^[^0-9A-Za-z]+/,'').trim()); return i<0?900:i; }
+function cmpGroupKeys(a,b){ return _grank(a)-_grank(b) || String(a).localeCompare(String(b)); }
+function _so(r){ const v=+(r&&r.sort_order); return (isFinite(v)&&v>0)?v:999999; }
+function cmpItems(a,b){ return _so(a)-_so(b) || String(a.name||a.variant||a.sku||a.ref_sku||'').localeCompare(String(b.name||b.variant||b.sku||b.ref_sku||'')); }
+
 function renderSide(){
   let h=`<div class="mi ${state.model==='home'?'active':''}" onclick="openModel('home')" style="margin-top:6px"><span class="ic">🏠</span>Dashboard</div>`;
   const role=curRole();
@@ -708,6 +717,7 @@ async function renderList(){
   else if(m.supplyModel) rows=rows.filter(isSupplyItem);
   // Suppliers: tag each with the ingredient type it mainly sells, so they can be grouped by it.
   if(state.model==='suppliers'){ try{ await _tagSupplierTypes(rows); }catch(e){} }
+  if(['products','ingredients','supplies'].includes(state.model)) rows.sort(cmpItems);   // warehouse ordering
   state._rows=rows; const bulk=!m.readonly;
   const cols=m.list.map(n=>m.fields.find(f=>f.n===n)).filter(f=>f && fieldMode(state.model,f.n)!=='hide');
   // Purchase Orders: append Total kg + Est. value columns, summed from each PO's lines.
@@ -750,7 +760,7 @@ async function renderList(){
     });
   } else if(state.groupBy){
     const g={}; rows.forEach(r=>{const k=r[state.groupBy]==null?'—':r[state.groupBy]; (g[k]=g[k]||[]).push(r);});
-    Object.keys(g).sort().forEach(k=>{
+    Object.keys(g).sort(cmpGroupKeys).forEach(k=>{
       body+=`<tr class="grp">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td>▸ ${esc(k)} <span style="opacity:.6;font-weight:400">(${g[k].length})</span></td>`; return numCols.includes(f)?sumCell(f,sumOf(g[k],f)):'<td></td>'; }).join('')+`</tr>`;
       g[k].forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map(f=>cell(f,r)).join('')}</tr>`; });
     });
@@ -1053,7 +1063,7 @@ async function renderLiveStock(){
     const name=(it.name||a.sku)+((!isProd&&!isSup&&it.is_intermediate)?' — processed':'');
     const par=isProd?(+it.par_packs||0):(+it.reorder_g||+it.par_g||0);
     const below=par>0 && end<par, neg=end< -0.0001;
-    return {sku:a.sku, name, grp, unit, div, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf, adj:a.adj, end, value:a.val, par, below, neg, gcat:isProd?1:(isSup?2:0)};
+    return {sku:a.sku, name, grp, unit, div, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf, adj:a.adj, end, value:a.val, par, below, neg, gcat:isProd?1:(isSup?2:0), sort_order:it.sort_order};
   }).filter(r=> r.begin||r.recv||r.prod||r.cons||r.tf||r.adj);
   if(LS_ACT) rows=rows.filter(r=>r.below||r.neg);
 
@@ -1071,11 +1081,11 @@ async function renderLiveStock(){
   const qf=(v,div)=> div===1000? (Math.round(v/1000*100)/100).toLocaleString('en-PH',{maximumFractionDigits:2}) : num(Math.round(v));
   // group like the count sheet
   const groups={}; rows.forEach(r=>{ (groups[r.grp]=groups[r.grp]||[]).push(r); });
-  const gkeys=Object.keys(groups).sort((a,b)=>{ const ga=groups[a][0].gcat-groups[b][0].gcat; return ga||a.localeCompare(b); });
+  const gkeys=Object.keys(groups).sort((a,b)=>{ const ga=groups[a][0].gcat-groups[b][0].gcat; return ga||cmpGroupKeys(a,b); });
   h+=`<div class="repcard"><div style="overflow-x:auto"><table><thead><tr>
     <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
   if(!rows.length) h+=`<tr><td colspan="${mh?10:11}" class="empty">${LS_ACT?'Nothing needs action ✅':'No stock movements yet.'}</td></tr>`;
-  gkeys.forEach(g=>{ const list=groups[g].sort((a,b)=>a.name.localeCompare(b.name));
+  gkeys.forEach(g=>{ const list=groups[g].sort(cmpItems);
     const gval=list.reduce((s,r)=>s+r.value,0);
     h+=`<tr style="background:#f6f2ea"><td colspan="${mh?9:9}"><b>${esc(g)}</b> <span class="mini">· ${list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
     list.forEach(r=>{ const endCol=r.neg?'var(--danger)':(r.below?'var(--earth,#b5762a)':'var(--ink)');
@@ -3214,7 +3224,8 @@ function drawCountForm(){
   const scopes=['All','Ingredients','Supplies','Stickers','Sellable Products']; const sc=countRec.scope||['All'];
   const scopeHtml=scopes.map(s=>`<label class="sck"><input type="checkbox" ${sc.includes(s)?'checked':''} ${approved?'disabled':''} onchange="countScope('${s}',this.checked)"> ${s}</label>`).join('');
   // group by category, sort by name within group (easier physical counting)
-  const _byCat={}; countLines.forEach((l,i)=>{ const c=l.cat||'Uncategorized'; (_byCat[c]=_byCat[c]||[]).push(i); });
+  const _byCat={}, _crk={}; countLines.forEach((l,i)=>{ const c=l.cat||'Uncategorized'; (_byCat[c]=_byCat[c]||[]).push(i); if(l.catrank!=null) _crk[c]=Math.min(_crk[c]==null?999:_crk[c], l.catrank); });
+  const _catcmp=(a,b)=>((_crk[a]==null?900:_crk[a])-(_crk[b]==null?900:_crk[b]))||cmpGroupKeys(a,b);
   Object.values(_byCat).forEach(arr=>arr.sort((a,b)=>String(countLines[a].name||countLines[a].ref_sku).localeCompare(String(countLines[b].name||countLines[b].ref_sku))));
   const rowFor=(i)=>{ const l=countLines[i]; const s=+l.scale||1;
     const bookD=l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):'—';
@@ -3227,7 +3238,7 @@ function drawCountForm(){
         <td class="num" style="white-space:nowrap"><input type="number" step="1" value="${bx}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},this.value,null)" style="width:46px;text-align:right" title="boxes"> box ×${box} + <input type="number" step="1" value="${lo}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},null,this.value)" style="width:46px;text-align:right" title="loose packs"> loose</td>${varCell}</tr>`; }
     const cntD=(l.counted_qty==null||l.counted_qty==='')?'':(Math.round((+l.counted_qty/s)*1e6)/1e6);
     return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td>${varCell}</tr>`; };
-  const lineRows=Object.keys(_byCat).sort().map(cat=>`<tr><td colspan="6" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">${esc(cat)} <span style="opacity:.6;font-weight:400">(${_byCat[cat].length})</span></td></tr>`+_byCat[cat].map(rowFor).join('')).join('');
+  const lineRows=Object.keys(_byCat).sort(_catcmp).map(cat=>`<tr><td colspan="6" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">${esc(cat)} <span style="opacity:.6;font-weight:400">(${_byCat[cat].length})</span></td></tr>`+_byCat[cat].map(rowFor).join('')).join('');
   $('content').innerHTML=`<div class="formwrap"><div class="sheet">
     <div class="statusbar">${MODELS.count_sessions.status.stages.map(s=>`<div class="stg ${countRec.status===s?'on':''}">${s}</div>`).join('')}</div>
     <div class="hd"><input class="ttl" value="${esc(countRec.count_ref||'')}" ${approved?'disabled':''} oninput="countRec.count_ref=this.value"><div class="sub">Physical count · book qty is auto-generated &amp; locked</div></div>
@@ -3253,10 +3264,11 @@ function drawCountForm(){
 // Printable physical-count sheet: grouped by category, sorted, with a blank column to write counts.
 function countPrintSheet(){
   if(!countLines.length){ toast('Load items first',true); return; }
-  const byCat={}; countLines.forEach(l=>{ const c=l.cat||'Uncategorized'; (byCat[c]=byCat[c]||[]).push(l); });
+  const byCat={}, _crk2={}; countLines.forEach(l=>{ const c=l.cat||'Uncategorized'; (byCat[c]=byCat[c]||[]).push(l); if(l.catrank!=null) _crk2[c]=Math.min(_crk2[c]==null?999:_crk2[c], l.catrank); });
+  const _catcmp2=(a,b)=>((_crk2[a]==null?900:_crk2[a])-(_crk2[b]==null?900:_crk2[b]))||cmpGroupKeys(a,b);
   let body='';
-  Object.keys(byCat).sort().forEach(cat=>{
-    const arr=byCat[cat].slice().sort((a,b)=>String(a.name||a.ref_sku).localeCompare(String(b.name||b.ref_sku)));
+  Object.keys(byCat).sort(_catcmp2).forEach(cat=>{
+    const arr=byCat[cat].slice().sort(cmpItems);
     body+=`<tr class="cat"><td colspan="5">${esc(cat)} (${arr.length})</td></tr>`+arr.map(l=>{ const s=+l.scale||1; return `<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td>${esc(binOf(l.ref_sku,countRec.location_code))}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`; }).join('');
   });
   const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.cat td{background:#eef3ea;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:130px;border-bottom:1px solid #333}</style></head><body>
@@ -3291,15 +3303,15 @@ async function countLoad(){
   // Two-bin: count RAW and PROCESSED, grouped together under each raw material (matches the sheet).
   const _bs={}, _bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
   const matOf=(i)=>{ if(!i.is_intermediate) return i.name; const p=_procParent(i,_bs,_bn); return (p&&p.name)||i.name; };
-  ings.forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
-    if(isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:'Supplies',uom:(i.uom||'pcs'),scale:1}); return; }
+  ings.slice().sort(cmpItems).forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
+    if(isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:'Supplies',catrank:_grank('Supplies'),uom:(i.uom||'pcs'),scale:1,sort_order:i.sort_order}); return; }
     if(!wantIng) return;
     const isProc=!!i.is_intermediate; const u=countUnitFor('Ingredients');
-    lines.push({ref_sku:i.sku, name:i.name+(isProc?' — processed':''), book_qty:stock[i.sku]||0, counted_qty:'', cat:matOf(i), uom:u.uom, scale:u.scale, form:isProc?'processed':'raw'}); });
-  if(wantProd) prods.forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1)}));
+    lines.push({ref_sku:i.sku, name:i.name+(isProc?' — processed':''), book_qty:stock[i.sku]||0, counted_qty:'', cat:matOf(i), catrank:_grank(i.category), uom:u.uom, scale:u.scale, form:isProc?'processed':'raw', sort_order:i.sort_order}); });
+  if(wantProd) prods.slice().sort(cmpItems).forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order}));
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
-  if(wantStk) prods.forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
-    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',uom:'pcs',scale:1}); });
+  if(wantStk) prods.slice().sort(cmpItems).forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
+    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',catrank:_grank(p.family)+0.5,uom:'pcs',scale:1,sort_order:p.sort_order}); });
   countLines=lines;
   await loadBins();
   toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')); drawCountForm();
@@ -4208,16 +4220,17 @@ function _stkRowsFrom(lines, prods, ings){
       name:(p.variant||p.name||String(ing.name||'').replace(/ — Sticker$/,'')||l.ingredient_sku),
       fam:(p.family||p.feeding_style||'Other'),
       net:(p.sticker_net||''), dim:(p.sticker_dimension||''), link:(p.sticker_art_url||''),
+      sort_order:p.sort_order,
       ordered:(+l.ordered_kg||0), received:(+l.received_kg||0) }; });
 }
 function _stkTableHTML(rows){
   const groups={}; rows.forEach(r=>{ (groups[r.fam]=groups[r.fam]||[]).push(r); });
-  const fams=Object.keys(groups).sort();
+  const fams=Object.keys(groups).sort(cmpGroupKeys);
   let n=0, totO=0, totR=0, linked=0;
   let h=`<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th><th class="num">Qty Ordered</th><th class="num">Qty Received</th></tr></thead><tbody>`;
   fams.forEach(fam=>{
     h+=`<tr style="background:#e7f0e9"><td colspan="8"><b>${esc(fam)}</b></td></tr>`;
-    groups[fam].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(r=>{ n++; totO+=r.ordered; totR+=r.received; if(r.link) linked++;
+    groups[fam].sort(cmpItems).forEach(r=>{ n++; totO+=r.ordered; totR+=r.received; if(r.link) linked++;
       h+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)||'—'}</td><td><code>${esc(r.sku)}</code></td>`+
         `<td>${r.link?`<a href="${esc(r.link)}" target="_blank" rel="noopener">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>`+
         `<td>${esc(r.dim)||'—'}</td><td class="num">${r.ordered||'—'}</td><td class="num">${r.received||'—'}</td></tr>`;
@@ -4231,11 +4244,11 @@ function _isStickerPO(rec){ return !!rec && /\[STICKERS\]/i.test(String(rec.po_r
 function _stkPrintLines(children, prods, ings){
   const rows=_stkRowsFrom(children, prods||{}, ings||{});
   const groups={}; rows.forEach(r=>{ (groups[r.fam]=groups[r.fam]||[]).push(r); });
-  const fams=Object.keys(groups).sort();
+  const fams=Object.keys(groups).sort(cmpGroupKeys);
   let n=0, totO=0, totR=0, body='';
   fams.forEach(fam=>{
     body+=`<tr class="grp"><td colspan="8"><b>${esc(fam)}</b></td></tr>`;
-    groups[fam].sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(r=>{ n++; totO+=r.ordered; totR+=r.received;
+    groups[fam].sort(cmpItems).forEach(r=>{ n++; totO+=r.ordered; totR+=r.received;
       body+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)}</td><td>${esc(r.sku)}</td>`+
         `<td>${r.link?`<a href="${esc(r.link)}">Open artwork ↗</a>`:'pending'}</td>`+
         `<td>${esc(r.dim)}</td><td style="text-align:right">${r.ordered||''}</td><td style="text-align:right">${r.received||''}</td></tr>`;
