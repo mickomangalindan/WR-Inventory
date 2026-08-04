@@ -1924,6 +1924,7 @@ async function renderMRP(){
   const RAW_REORDER_G = 5000;   // reorder point for raw ingredients: 5 kg
   const plan=[];
   ings.forEach(it=>{ if(it.is_intermediate) return;   // only the purchasable (WD / raw) ingredients get ordered
+    if(isSupplyItem(it)) return;   // Kitchen Supplies & stickers reorder in their own module (PAR in units), not the raw-material MRP
     const rawNeed=need[it.sku]||0;   // already as-purchased — processed forms have been rolled up into this one
     const lead=+it.lead_time_days||0, oh=stock[it.sku]||0;
     const endInv=oh-rawNeed;                                 // projected ending inventory after this week's demand
