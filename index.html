@@ -839,6 +839,9 @@ async function openForm(idEnc){
   // preload rel options
   for(const f of m.fields) if(f.t==='rel') await relOptions(f.rel);
   if(m.o2m) for(const c of m.o2m.cols) if(c.t==='rel') await relOptions(c.rel);
+  // product map (box size + name + group) for transfer lines: box/loose entry, name, and grouped print
+  if(m.o2m && m.o2m.cols.some(c=>c.n==='product_sku')){ window._prodLineMap={};
+    try{ (await db.list('products',{})).forEach(p=>window._prodLineMap[p.sku]={name:p.name,variant:p.variant,box:(+p.box_size||1),group_1:p.group_1,group_2:p.group_2,family:p.family,sort_order:p.sort_order}); }catch(e){} }
   renderForm(); syncHash();
 }
 async function renderForm(){
@@ -935,17 +938,28 @@ function switchFormTab(i){ formTab=i; const m=MODELS[state.model];
   document.querySelectorAll('.ftabs button').forEach((b,j)=>b.classList.toggle('on',j===i)); }
 function renderLines(){
   const o=MODELS[state.model].o2m; const tb=$('lineBody'); if(!tb) return;
+  const PM=window._prodLineMap||{};
   tb.innerHTML=formChildren.map((ln,i)=>`<tr>${o.cols.map(c=>{
     let v=ln[c.n]==null?'':ln[c.n];
     const ro=(typeof c.ro==='function'?c.ro(ln,formRec):c.ro)?'disabled':'';
     if(ro&&(c.n==='received_packs'||c.n==='received_kg')&&(v===''||v==null)) v=0; // captured at receiving
-    if(c.t==='rel'){const opts=relCache[c.rel]||[];return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}><option value="">—</option>${relOptsHTML(opts,v)}</select></td>`;}
+    // Product picker: show the SKU under the name so both are visible on the line.
+    if(c.t==='rel'){const opts=relCache[c.rel]||[]; const skuHint=(c.n==='product_sku'&&v)?`<div class="mini"><code>${esc(v)}</code></div>`:'';
+      return `<td><select onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}><option value="">—</option>${relOptsHTML(opts,v)}</select>${skuHint}</td>`;}
     if(c.t==='select')return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}>${(c.o||[]).map(op=>`<option ${v===op?'selected':''}>${op}</option>`).join('')}</select></td>`;
+    // Transfer "Sent" packs: case-packed finished goods entered as boxes + loose packs (like receiving & count).
+    if(c.n==='sent_packs' && !ro){ const box=(PM[ln.product_sku]||{}).box||1;
+      if(box>1){ const tot=(v===''||v==null)?null:+v; const bx=(ln._sbx!=null&&ln._sbx!=='')?ln._sbx:(tot!=null?Math.floor(tot/box):''); const lo=(ln._slo!=null&&ln._slo!=='')?ln._slo:(tot!=null?(tot-Math.floor(tot/box)*box):'');
+        return `<td style="white-space:nowrap"><input type="number" step="1" value="${esc(bx)}" oninput="trSetBoxLoose(${i},this.value,null)" style="width:44px;text-align:right" title="boxes"> box ×${box} + <input type="number" step="1" value="${esc(lo)}" oninput="trSetBoxLoose(${i},null,this.value)" style="width:44px;text-align:right" title="loose"> loose</td>`; } }
     if(c.t==='number'){ const sc=+c.scale||1; const disp=(v===''||v==null)?'':(sc!==1?(Math.round((+v/sc)*1e6)/1e6):v);
       return `<td><input type="number" step="any" value="${esc(disp)}" oninput="lSetNum(${i},'${c.n}',this.value,${sc})" ${ro} ${ro?'title="From the recipe" style="background:#f4f5f8;color:#8a93a5"':''}></td>`; }
     return `<td><input value="${esc(v)}" oninput="lSet(${i},'${c.n}',this.value)" ${ro}></td>`;
   }).join('')}<td><span class="btn link" style="color:var(--danger)" onclick="delLine(${i})">✕</span></td></tr>`).join('');
 }
+// Transfer send: boxes + loose packs → total sent_packs.
+function trSetBoxLoose(i,boxV,looseV){ const l=formChildren[i]; const box=((window._prodLineMap||{})[l.product_sku]||{}).box||1;
+  if(boxV!=null) l._sbx=(boxV===''?'':(+boxV||0)); if(looseV!=null) l._slo=(looseV===''?'':(+looseV||0));
+  if((l._sbx===''||l._sbx==null)&&(l._slo===''||l._slo==null)){ l.sent_packs=''; } else { l.sent_packs=(+l._sbx||0)*box+(+l._slo||0); } }
 function addLine(){ formChildren.push({}); renderLines(); }
 function delLine(i){ formChildren.splice(i,1); renderLines(); }
 function lSet(i,n,v){ formChildren[i][n]=v; }
@@ -1577,6 +1591,25 @@ function recordPrintHtml(m, r, children){
   let lines='';
   if(_isStickerPO(r)){
     lines=_stkPrintLines(children, window._stkFormProds, window._stkFormIngs);
+  } else if(m.o2m && m.o2m.cols.some(c=>c.n==='product_sku')){
+    // Product-line documents (transfers / deliveries): grouped Group › Subgroup › Item, with SKU + name.
+    const cols=m.o2m.cols; const kids=children||[];
+    const P=window._prodLineMap||{};
+    const numCols=cols.filter(c=>['number','currency'].includes(c.t));
+    const rows=kids.map(l=>{ const p=P[l.product_sku]||{}; return {...l, sku:l.product_sku, name:(p.variant||p.name||l.product_sku),
+      group_1:(p.group_1||'Products'), group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order}; });
+    const span=3+numCols.length; let n=0, body='';
+    hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+      body+=`<tr class="grp"><td colspan="${span}"><b>${esc(G.g1)}</b></td></tr>`;
+      G.subs.forEach(S=>{
+        body+=`<tr class="cat"><td colspan="${span}">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`+
+          S.items.map(r=>{ n++; return `<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.sku)}</td>`+numCols.map(c=>`<td style="text-align:right">${esc(r[c.n]==null?'':r[c.n])}</td>`).join('')+`</tr>`; }).join('');
+      });
+    });
+    const head=`<th>#</th><th>Item</th><th>SKU</th>`+numCols.map(c=>`<th style="text-align:right">${esc(c.l)}</th>`).join('');
+    const tot=numCols.map(c=>rows.reduce((s,r)=>s+(+r[c.n]||0),0));
+    const foot=`<tr class="tot"><td colspan="3" style="text-align:right">Total · ${n} item(s)</td>`+tot.map(v=>`<td style="text-align:right">${num(Math.round(v*100)/100)}</td>`).join('')+`</tr>`;
+    lines=`<h3>${esc(m.o2m.label)}</h3><table class="lines"><thead><tr>${head}</tr></thead><tbody>${body}${foot}</tbody></table>`;
   } else if(m.o2m){
     const cols=m.o2m.cols; const kids=children||[];
     const isNum=c=>['number','currency'].includes(c.t);
@@ -1602,7 +1635,8 @@ function recordPrintHtml(m, r, children){
     table.lines th{background:#4e7a3e;color:#fff;padding:6px 8px;font-weight:600}
     table.lines td{padding:5px 8px;border-bottom:1px solid #eee}
     table.lines tr.tot td{font-weight:700;border-top:2px solid #4e7a3e;background:#f6f8f4}
-    table.lines tr.grp td{background:#e7f0e9;font-weight:700;color:#234a31}
+    table.lines tr.grp td{background:#dbe8de;font-weight:800;color:#234a31}
+    table.lines tr.cat td{background:#f2f6ef;font-weight:600;color:#4e7a3e}
     table.lines a{color:#1155cc}
     .ft{margin-top:26px;color:#888;font-size:11px;border-top:1px solid #eee;padding-top:8px}
   </style></head><body>
@@ -1611,9 +1645,13 @@ function recordPrintHtml(m, r, children){
     <p class="ft">Generated ${new Date().toLocaleString()} · ${esc(CURRENT_USER)}</p>
   </body></html>`;
 }
-function printForm(){ const m=MODELS[state.model], r=formRec;
+async function printForm(){ const m=MODELS[state.model], r=formRec;
   const w=window.open('','_pr','width=840,height=920'); if(!w){toast('Allow pop-ups to print',true);return;}
-  w.document.write(recordPrintHtml(m,r,formChildren)); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+  w.document.write('<p style="font-family:Arial;padding:24px;color:#4e7a3e">Preparing print…</p>');
+  // Make sure the product map is loaded (name/SKU/group) for grouped product-line prints.
+  if(m.o2m && m.o2m.cols.some(c=>c.n==='product_sku') && !window._prodLineMap){ window._prodLineMap={};
+    try{ (await db.list('products',{})).forEach(p=>window._prodLineMap[p.sku]={name:p.name,variant:p.variant,box:(+p.box_size||1),group_1:p.group_1,group_2:p.group_2,family:p.family,sort_order:p.sort_order}); }catch(e){} }
+  try{ w.document.open(); w.document.write(recordPrintHtml(m,r,formChildren)); w.document.close(); w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},250); }catch(e){ toast('Print failed: '+e.message,true); } }
 
 /* ✉ Send Purchase Order — build a copyable draft (summary + PDF link) for email / Viber / Messenger. */
 // Resolve an ingredient SKU to its human name (suppliers don't know our SKUs).
@@ -3648,14 +3686,14 @@ async function rptToPasig(){
   const tl=await _L('transfer_lines'), mov=await _L('inventory_movements'), prod=await _L('products');
   const pn={}; prod.forEach(p=>pn[p.sku]=p.name);
   const produced={}; mov.forEach(m=>{ if(m.movement_type==='batch_output') produced[m.ref_sku]=(produced[m.ref_sku]||0)+(+m.qty||0); });
-  const rows=tl.map(l=>({ref:l.transfer_ref,prod:pn[l.product_sku]||l.product_sku,sent:+l.sent_packs||0,rcv:+l.received_packs||0,gap:(+l.received_packs||0)-(+l.sent_packs||0)}));
+  const rows=tl.map(l=>({ref:l.transfer_ref,sku:l.product_sku,prod:pn[l.product_sku]||l.product_sku,sent:+l.sent_packs||0,rcv:+l.received_packs||0,gap:(+l.received_packs||0)-(+l.sent_packs||0)}));
   const tSent=rows.reduce((s,r)=>s+r.sent,0), tRcv=rows.reduce((s,r)=>s+r.rcv,0), tProd=Object.values(produced).reduce((s,v)=>s+v,0), tGap=tRcv-tSent;
   const flag=r=>r.gap<0?'<span class="pill" style="background:rgba(178,59,46,.12);color:var(--danger)">short '+r.gap+'</span>':'<span class="pill" style="background:rgba(78,122,62,.14);color:var(--ok,#4e7a3e)">full</span>';
   let h=`<div class="repcard"><h3 style="margin:0 0 4px">Produced → sent → received at Pasig</h3><div class="hint" style="margin-bottom:8px">Answers: “did everything produced actually reach Pasig?”</div>
-   <table><thead><tr><th>Transfer</th><th>Product</th><th class="num">Sent</th><th class="num">Received</th><th class="num">Gap</th><th class="num">Arrival %</th><th></th></tr></thead><tbody>`;
-  rows.forEach(r=>{ h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.prod)}</td><td class="num">${r.sent}</td><td class="num">${r.rcv}</td><td class="num" ${r.gap<0?'style="color:var(--danger)"':''}>${r.gap}</td><td class="num">${r.sent?Math.round(r.rcv/r.sent*100):0}%</td><td>${flag(r)}</td></tr>`; });
-  if(!rows.length) h+='<tr><td colspan="7" class="empty">No transfers yet.</td></tr>';
-  h+='</tbody>'+_tfoot([{v:'Total'},{v:'produced '+tProd},{v:tSent,n:1},{v:tRcv,n:1},{v:tGap,n:1},{v:(tSent?Math.round(tRcv/tSent*100):0)+'%',n:1},{v:''}])+`</table><div class="pager">Produced ${tProd} · sent ${tSent} · received ${tRcv} packs.</div>`+
+   <table><thead><tr><th>Transfer</th><th>Product</th><th>SKU</th><th class="num">Sent</th><th class="num">Received</th><th class="num">Gap</th><th class="num">Arrival %</th><th></th></tr></thead><tbody>`;
+  rows.forEach(r=>{ h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.prod)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${r.sent}</td><td class="num">${r.rcv}</td><td class="num" ${r.gap<0?'style="color:var(--danger)"':''}>${r.gap}</td><td class="num">${r.sent?Math.round(r.rcv/r.sent*100):0}%</td><td>${flag(r)}</td></tr>`; });
+  if(!rows.length) h+='<tr><td colspan="8" class="empty">No transfers yet.</td></tr>';
+  h+='</tbody>'+_tfoot([{v:'Total'},{v:'produced '+tProd},{v:''},{v:tSent,n:1},{v:tRcv,n:1},{v:tGap,n:1},{v:(tSent?Math.round(tRcv/tSent*100):0)+'%',n:1},{v:''}])+`</table><div class="pager">Produced ${tProd} · sent ${tSent} · received ${tRcv} packs.</div>`+
     _repNote('<b>Sent</b> vs <b>Received</b> packs per transfer to Pasig; <b>Arrival %</b> = received ÷ sent. The footer shows total <b>produced</b> at Bulacan for comparison.',
       'any <b>Gap &lt; 0 (short)</b> — packs left the commissary but didn\'t arrive (lost or miscounted in transit); and <b>produced &gt; sent</b>, which means finished stock is still sitting at Bulacan instead of moved to Pasig for selling.')+`</div>`;
   return h;
@@ -3665,12 +3703,12 @@ async function rptDelivery(){
   const d=await _L('deliveries'), dl=await _L('delivery_lines'), prod=await _L('products');
   if(!dl.length) return `<div class="repcard"><h3 style="margin:0 0 4px">Dispatched → delivered</h3><div class="hint">No deliveries recorded yet. Once you log deliveries (or sync Shopify fulfillments), this reconciles dispatched vs customer-confirmed packs, per delivery and per customer, and flags shortfalls.</div></div>`;
   const pn={}; prod.forEach(p=>pn[p.sku]=p.name); const dc={}; d.forEach(x=>dc[x.delivery_ref]=x.customer||'');
-  const rows=dl.map(l=>({ref:l.delivery_ref,cust:dc[l.delivery_ref]||'',prod:pn[l.product_sku]||l.product_sku,disp:+l.dispatched_packs||0,conf:+l.confirmed_packs||0,ret:+l.returned_packs||0}));
+  const rows=dl.map(l=>({ref:l.delivery_ref,cust:dc[l.delivery_ref]||'',sku:l.product_sku,prod:pn[l.product_sku]||l.product_sku,disp:+l.dispatched_packs||0,conf:+l.confirmed_packs||0,ret:+l.returned_packs||0}));
   const T={disp:0,conf:0,ret:0}; rows.forEach(r=>{for(const k in T)T[k]+=r[k];});
   let h=`<div class="repcard"><h3 style="margin:0 0 4px">Dispatched → delivered</h3><div class="hint" style="margin-bottom:8px">Answers: “did everything sent actually reach the customer?”</div>
-   <table><thead><tr><th>Delivery</th><th>Customer</th><th>Product</th><th class="num">Dispatched</th><th class="num">Confirmed</th><th class="num">Returned</th><th class="num">Short</th></tr></thead><tbody>`;
-  rows.forEach(r=>{ const sh=r.disp-r.conf-r.ret; h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.cust)}</td><td>${esc(r.prod)}</td><td class="num">${r.disp}</td><td class="num">${r.conf}</td><td class="num">${r.ret}</td><td class="num" ${sh>0?'style="color:var(--danger)"':''}>${sh>0?sh:'—'}</td></tr>`; });
-  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' line(s)'},{v:''},{v:''},{v:T.disp,n:1},{v:T.conf,n:1},{v:T.ret,n:1},{v:(T.disp-T.conf-T.ret)||'—',n:1}])+`</table><div class="pager">${T.disp} dispatched · ${T.conf} confirmed${T.disp?' ('+Math.round(T.conf/T.disp*100)+'% delivered)':''}.</div>`+
+   <table><thead><tr><th>Delivery</th><th>Customer</th><th>Product</th><th>SKU</th><th class="num">Dispatched</th><th class="num">Confirmed</th><th class="num">Returned</th><th class="num">Short</th></tr></thead><tbody>`;
+  rows.forEach(r=>{ const sh=r.disp-r.conf-r.ret; h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.cust)}</td><td>${esc(r.prod)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${r.disp}</td><td class="num">${r.conf}</td><td class="num">${r.ret}</td><td class="num" ${sh>0?'style="color:var(--danger)"':''}>${sh>0?sh:'—'}</td></tr>`; });
+  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' line(s)'},{v:''},{v:''},{v:''},{v:T.disp,n:1},{v:T.conf,n:1},{v:T.ret,n:1},{v:(T.disp-T.conf-T.ret)||'—',n:1}])+`</table><div class="pager">${T.disp} dispatched · ${T.conf} confirmed${T.disp?' ('+Math.round(T.conf/T.disp*100)+'% delivered)':''}.</div>`+
     _repNote('<b>Dispatched</b> = packs sent to customers; <b>Confirmed</b> = customer-acknowledged as received; <b>Returned</b> = came back; <b>Short</b> = dispatched − confirmed − returned.',
       '<b>Short &gt; 0</b> (the customer didn\'t get everything — follow up, redeliver or refund) and a high <b>Returned</b> count (a sign of quality, cold-chain or wrong-address issues worth investigating).')+`</div>`;
   return h;
