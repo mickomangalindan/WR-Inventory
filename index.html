@@ -410,7 +410,7 @@ const MODELS = {
     list:['po_ref','supplier_name','order_date','status','payment_status'],
     groups:[['po_ref','order_date'],['created_by','discount','delivery_fee']], full:['supplier_name'],
     o2m:{ field:'lines', model:'po_lines', fk:'po_ref', label:'Order Lines',
-          cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Ordered (kg)',t:'number'},{n:'available_kg',l:'Vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
+          cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Requested (kg)',t:'number'},{n:'available_kg',l:'Order qty · vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
 
   inventory_movements:{ label:'Inventory Moves', icon:'📊', name:'id', pk:'id', readonly:true,
     fields:[{n:'created_at',l:'When',t:'text'},{n:'kind',l:'Kind',t:'text'},{n:'ref_sku',l:'Item',t:'text'},
@@ -741,7 +741,7 @@ async function renderList(){
       const stkCost=_supplyCosts(ings).sticker;                                               // per-sticker cost (Supplies / cost model)
       const stkPO=new Set(rows.filter(r=>_isStickerPO(r)).map(r=>r.po_ref));
       const agg={};
-      pls.forEach(l=>{ const a=agg[l.po_ref]=agg[l.po_ref]||{q:0,v:0}; const q=+l.ordered_kg||0; let pr=(+l.price_kg||0)||ip[l.ingredient_sku]||0; if(!pr && stkPO.has(l.po_ref)) pr=stkCost; a.q+=q; a.v+=q*pr; });
+      pls.forEach(l=>{ const a=agg[l.po_ref]=agg[l.po_ref]||{q:0,v:0}; const q=poOrderQty(l); let pr=(+l.price_kg||0)||ip[l.ingredient_sku]||0; if(!pr && stkPO.has(l.po_ref)) pr=stkCost; a.q+=q; a.v+=q*pr; });
       rows.forEach(r=>{ const a=agg[r.po_ref]||{q:0,v:0}; r._total_qty=Math.round(a.q*100)/100; r._total_val=Math.round(a.v*100)/100; });
       cols.push({n:'_total_qty',l:'Total kg',t:'number'},{n:'_total_val',l:'Est. value',t:'currency'});
     }catch(e){}
@@ -1235,7 +1235,7 @@ function renderCleanser(){
       <div class="hint" style="margin-bottom:10px">Set day-1 stock in bulk. Download the template (pre-filled with every item), enter the starting quantity per row, then upload. Ingredients raw &amp; processed in <b>kg</b>, supplies in their <b>unit</b>, stickers &amp; sellable products in <b>pieces/packs</b>. Posts as opening ledger entries; re-uploading replaces the previous opening upload.</div>
       <button class="btn" onclick="openOpeningImport()">📥 Open opening-balance uploader</button></div>
     <div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 6px">💾 Backup &amp; Restore</h3>
-      <div class="hint" style="margin-bottom:10px">Download a full snapshot of your live data (${BACKUP_TABLES.length} tables) before running tests, then restore it to roll back. <b>Restore replaces</b> the current contents of those tables with the snapshot — master data, transactions, and the stock ledger. Admin only. (Demand plots, MRP plans and reference counters are not part of the snapshot.)</div>
+      <div class="hint" style="margin-bottom:10px">Download a full snapshot of your live data (${BACKUP_TABLES.length} tables) before running tests, then restore it to roll back. <b>Restore replaces</b> the current contents of those tables with the snapshot — master data, transactions, and the stock ledger. Admin only. (Demand plots, MRP plans and reference counters are not part of the snapshot.) <b>Automated:</b> a daily <b>Google Drive backup</b> runs from the Apps Script (<code>backupToDrive</code>) into the “WR ERP Backups” folder — same file format, so any Drive backup can be restored here.</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="btn sec" onclick="exportBackup()">⬇ Download backup (JSON)</button>
         <input type="file" id="rbFile" accept=".json" style="display:none" onchange="restoreStage(event)">
@@ -1613,7 +1613,7 @@ function sendPODraft(){
     $('overlay').classList.add('on'); return;
   }
   let total=0;
-  const rows=lines.map(l=>{ const qty=+l.ordered_kg||0, price=+l.price_kg||0, amt=qty*price; total+=amt;
+  const rows=lines.map(l=>{ const qty=poOrderQty(l), price=+l.price_kg||0, amt=qty*price; total+=amt;
     return `  • ${ingName(l.ingredient_sku)} — ${qty} kg @ ₱${price.toLocaleString('en-PH',{minimumFractionDigits:2})} = ₱${amt.toLocaleString('en-PH',{minimumFractionDigits:2})}`; }).join('\n');
   const pdfLine=r.drive_url?('\nPO document (PDF): '+r.drive_url):'';
   const draft=`Hi ${vendor},\n\nPlease find our purchase order below.\n\n`+
@@ -2297,7 +2297,7 @@ const FLOW = { purchase_orders:{ buttons:[
   transfers:{ buttons:[ {when:'sent',label:'📥 Receive transfer',fn:'openTransferReceive()'} ]}};
 function smartTiles(model, rec, children){
   if(model==='purchase_orders'){
-    const ordTot=children.reduce((s,l)=>s+(+l.ordered_kg||0)*(+l.price_kg||0),0);
+    const ordTot=children.reduce((s,l)=>s+poOrderQty(l)*(+l.price_kg||0),0);   // order value = vendor-avail qty × price
     const recvTot=children.reduce((s,l)=>s+(+l.received_kg||0)*(+l.price_kg||0),0);
     const anyRecv=children.some(l=>+l.received_kg>0);
     const disc=+rec.discount||0, fee=+rec.delivery_fee||0;
@@ -2305,7 +2305,7 @@ function smartTiles(model, rec, children){
     const P=n=>'₱'+Math.round(n).toLocaleString('en-PH');
     const paid=(window._poPay||[]).reduce((s,p)=>s+(+p.amount||0),0);
     const bal=billable-paid;
-    const tiles=[{v:children.length,l:'Lines'},{v:P(ordTot),l:'Ordered'}];
+    const tiles=[{v:children.length,l:'Lines'},{v:P(ordTot),l:'Order value'}];
     if(anyRecv) tiles.push({v:P(recvTot),l:'Received'});
     if(disc) tiles.push({v:'−'+P(disc),l:'Discount'});
     if(fee)  tiles.push({v:'+'+P(fee),l:'Delivery'});
@@ -2397,12 +2397,27 @@ async function sendRFQ(){
   }catch(e){ toast(e.message,true); }
 }
 // STEP 2 — record the vendor's quotation: available qty + unit price per line (rfq → quoted).
-function openPOQuote(){
+// Load a sku→ingredient map once per PO modal so we can offer historical prices / detect supplies.
+async function _poLoadIngPrice(){ const m={}; try{ (await listIngredients()).forEach(i=>m[i.sku]=i); }catch(e){}
+  window._poIngPrice={_map:m, hist:(sku)=>{ const it=m[sku]||{}; return +it.moving_avg_cost_kg||+it.last_price_kg||+it.list_price_kg||0; }};
+  return window._poIngPrice; }
+// Fill sticker/supply unit prices from their historical cost — with a confirmation. kind: 'q' (quote) | 'c' (issue).
+function poFillHistPrice(kind){ const P=window._poIngPrice; if(!P){ toast('Prices still loading…',true); return; }
+  const lines=formChildren||[]; const preview=[]; const hits=[];
+  lines.forEach((l,i)=>{ const it=P._map[l.ingredient_sku]||{}; if(!isSupplyItem(it)) return; const hp=P.hist(l.ingredient_sku); if(hp>0){ preview.push('• '+ingName(l.ingredient_sku)+' → ₱'+hp); hits.push({i,hp}); } });
+  if(!hits.length){ toast('No sticker/supply lines with a historical price on file',true); return; }
+  if(!confirm('Stickers & supplies usually keep the same price — fill these unit prices from history?\n\n'+preview.join('\n'))) return;
+  let n=0; hits.forEach(({i,hp})=>{ const el=$((kind==='q'?'pq_p':'pc_p')+i); if(el){ el.value=hp; n++; } });
+  toast('Filled '+n+' sticker/supply price(s) from history — review before saving'); }
+async function openPOQuote(){
   if(formIsNew){ toast('Save the PO first',true); return; }
   const lines=formChildren||[];
   if(!lines.length){ toast('No lines to quote',true); return; }
+  await _poLoadIngPrice();
+  const anySupply=lines.some(l=>isSupplyItem((window._poIngPrice._map||{})[l.ingredient_sku]||{}));
   $('modal').innerHTML=`<div><h3>Enter vendor quotation — ${esc(formRec.po_ref)}</h3>
     <p class="mini">Key in what the vendor said they can <b>supply</b> and the <b>unit price</b> they quoted, per item. Your requested qty is shown for reference. This does <b>not</b> send the order — you'll issue the final PO next, based on availability.</p>
+    ${anySupply?`<div style="margin:0 0 8px"><button class="btn sec sm" onclick="poFillHistPrice('q')">₱ Fill sticker/supply prices from history</button></div>`:''}
     <div style="max-height:360px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Requested kg</th><th class="num">Vendor available kg</th><th class="num">Unit price ₱/kg</th></tr></thead><tbody>
     ${lines.map((l,i)=>{ const req=+l.ordered_kg||0; const avail=(l.available_kg==null||l.available_kg==='')?req:(+l.available_kg||0);
       return `<tr><td>${esc(ingName(l.ingredient_sku))}</td>
@@ -2414,26 +2429,32 @@ function openPOQuote(){
   $('overlay').classList.add('on');
 }
 async function poQuoteApply(){
-  const lines=formChildren||[]; const notes=[];
+  const lines=formChildren||[]; const notes=[]; const _vars=[];   // _vars → variance_log (1a · Supply shortfall)
   const updated=lines.map((l,i)=>{ const na=+($('pq_a'+i).value)||0, np=+($('pq_p'+i).value)||0; const req=+l.ordered_kg||0;
-    if(na<req-0.0001) notes.push(ingName(l.ingredient_sku)+' avail '+na+' of '+req+'kg');
+    if(na<req-0.0001){ const g=req-na; notes.push(ingName(l.ingredient_sku)+' avail '+na+' of '+req+'kg');
+      // Vendor can't supply the full request — a NON-COSTED availability gap (you don't pay for what you didn't order).
+      _vars.push({check_type:'1a · Supply shortfall',source_ref:formRec.po_ref,expected:req,actual:na,gap_qty:-g,gap_value:0,location:'procurement',responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' requested '+req+' vs vendor available '+na+' (short '+(Math.round(g*100)/100)+'kg) — raise a backup PO to cover the gap'}); }
     return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:na, price_kg:np, received_kg:l.received_kg||0}; });
   try{
     await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
     formChildren=updated; formRec.status='quoted';
     await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'quoted'});
     sysLog('purchase_orders',formRec.po_ref,'📝 Vendor quotation recorded'+(notes.length?(' — short: '+notes.join('; ')):' — full availability')+' by '+CURRENT_USER);
-    closeModal(); toast('Quotation saved — review, then Issue PO (qty defaults to what the vendor can supply)'); renderForm();
+    for(const v of _vars){ try{ await db.create('variance_log',v); }catch(e){} }   // log vendor-availability shortfalls (non-costed)
+    closeModal(); toast('Quotation saved'+(_vars.length?(' · '+_vars.length+' supply shortfall(s) flagged'):'')+' — review, then Issue PO'); renderForm();
   }catch(e){ toast(e.message,true); }
 }
 // STEP 3 — issue the final PO, with order qty based on the quoted availability (quoted → confirmed).
-function openPOConfirm(){
+async function openPOConfirm(){
   if(formIsNew){ toast('Save the PO first',true); return; }
   const lines=formChildren||[];
   if(!lines.length){ toast('Add & save order lines first',true); return; }
+  await _poLoadIngPrice();
+  const anySupply=lines.some(l=>isSupplyItem((window._poIngPrice._map||{})[l.ingredient_sku]||{}));
   window._poAvail=lines.map(l=>{ const req=+l.ordered_kg||0; return (l.available_kg==null||l.available_kg==='')?req:(+l.available_kg||0); });
   $('modal').innerHTML=`<div><h3>Issue purchase order — ${esc(formRec.po_ref)}</h3>
-    <p class="mini">Order qty is set from what the vendor said they can <b>supply</b> (capped at what you requested) — trim any line if you want less. Issuing sends the final PO and generates its PDF. Every change is logged.</p>
+    <p class="mini">Order qty is set from what the vendor said they can <b>supply</b> (capped at what you requested) — trim any line if you want less. The requested qty stays locked; this order qty becomes the basis for receiving &amp; payment. Issuing sends the final PO and generates its PDF.</p>
+    ${anySupply?`<div style="margin:0 0 8px"><button class="btn sec sm" onclick="poFillHistPrice('c')">₱ Fill sticker/supply prices from history</button></div>`:''}
     <div style="max-height:360px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Requested kg</th><th class="num">Vendor avail kg</th><th class="num">Order qty kg</th><th class="num">₱/kg</th><th></th></tr></thead><tbody>
     ${lines.map((l,i)=>{ const req=+l.ordered_kg||0; const avail=window._poAvail[i]; const fin=Math.min(req,avail);
       return `<tr><td>${esc(ingName(l.ingredient_sku))}</td>
@@ -2457,7 +2478,8 @@ async function poConfirmApply(){
   const updated=lines.map((l,i)=>{ const nq=+($('pc_q'+i).value)||0, np=+($('pc_p'+i).value)||0; const req=+l.ordered_kg||0, av=(window._poAvail&&window._poAvail[i])||0, op=+l.price_kg||0;
     if(Math.abs(nq-req)>0.0001) changes.push(ingName(l.ingredient_sku)+': req '+req+' → order '+nq+'kg'); if(Math.abs(np-op)>0.0001) changes.push(ingName(l.ingredient_sku)+': ₱'+op+'→₱'+np);
     if(nq>av+0.0001) overs.push(ingName(l.ingredient_sku)+' (order '+nq+' > avail '+av+'kg)');
-    return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:nq, available_kg:av, price_kg:np, received_kg:l.received_kg||0}; });
+    // Requested (ordered_kg) stays LOCKED; the issued order qty is stored in available_kg — the basis for receiving & payment.
+    return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:req, available_kg:nq, price_kg:np, received_kg:l.received_kg||0}; });
   if(overs.length) changes.push('⚠ order exceeds availability: '+overs.join('; '));
   try{
     await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
@@ -2480,9 +2502,13 @@ const PO_PAY_METHODS=['Bank transfer','GCash','Cash'];
 async function poPayments(ref){ if(!ref) return [];
   if(isLive()){ try{ return await sb('po_payments?po_ref=eq.'+encodeURIComponent(ref)+'&order=paid_at.asc,id.asc'); }catch(e){ return []; } }
   return (DEMO.po_payments||[]).filter(p=>p.po_ref===ref); }
-// Billable = received qty × price (falls back to ordered until anything is received) − discount + delivery fee.
+// Effective ORDER qty per line = vendor-available (what we actually order), falling back to the
+// original requested qty until a quotation sets availability. The requested (ordered_kg) is locked.
+function poOrderQty(l){ return (l&&l.available_kg!=null&&l.available_kg!=='')?(+l.available_kg||0):(+((l||{}).ordered_kg)||0); }
+// Billable = received qty × price (falls back to the ORDER qty — vendor avail — until anything is
+// received) − discount + delivery fee.
 function poBillable(rec, lines){ lines=lines||[];
-  const ordTot=lines.reduce((s,l)=>s+(+l.ordered_kg||0)*(+l.price_kg||0),0);
+  const ordTot=lines.reduce((s,l)=>s+poOrderQty(l)*(+l.price_kg||0),0);
   const recvTot=lines.reduce((s,l)=>s+(+l.received_kg||0)*(+l.price_kg||0),0);
   const anyRecv=lines.some(l=>+l.received_kg>0);
   const disc=+rec.discount||0, fee=+rec.delivery_fee||0;
@@ -2554,25 +2580,39 @@ async function openPOReceive(){
   let lines=formChildren||[];
   if(!lines.length){ try{ lines=await db.children(MODELS.purchase_orders.o2m, formRec.po_ref); formChildren=lines; }catch(e){} }
   if(!lines.length){ toast('No order lines to receive',true); return; }
-  window._poOrd=lines.map(l=>+l.ordered_kg||0);
+  window._poOrd=lines.map(l=>poOrderQty(l));    // basis = order qty (vendor avail), not the locked request
   await loadBins();
   const _im={}; try{ (await listIngredients()).forEach(x=>_im[x.sku]=x); }catch(e){}
   const _expDefault=(sku)=>{ const it=_im[sku]||{}; const d=+it.shelf_life_days||0; return d>0?addDaysISO(todayISO(),d):''; };
+  // Perishable = a real food ingredient, or a supply that actually carries a shelf life. Stickers &
+  // non-perishable supplies get no expiry field.
+  const _perish=(sku)=>{ const it=_im[sku]||{}; return (+it.shelf_life_days>0) || !isSupplyItem(it); };
+  window._rcN=lines.length;
   $('modal').innerHTML=`<h3>Receive order — ${esc(formRec.po_ref)}</h3>
-    <p>Enter the <b>quantity actually received</b> for each line, the <b>bin</b> where it's stored, and its <b>expiry date</b>. Only what you enter is posted to Bulacan stock. If a delivery is <b>short</b>, the PO is received at what actually arrived and the shortfall is flagged and logged.</p>
-    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Ordered kg</th><th class="num">Received kg</th><th>Bin</th><th>Expiry</th><th></th></tr></thead><tbody>
+    <p>Enter the <b>quantity actually received</b> per line, the <b>bin</b>, and (for perishables) the <b>expiry date</b>. Only what you enter posts to Bulacan stock. A <b>short</b> delivery is received at what arrived; the shortfall is flagged, logged, and raised as a variance.</p>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin:0 0 10px;padding:8px 10px;background:#f6f8f4;border-radius:8px">
+      <label class="mini">Set bin for all&nbsp;<input id="rc_binAll" placeholder="e.g. A-1" style="width:90px;padding:4px;border:1px solid var(--line);border-radius:5px"></label>
+      <label class="mini">Set expiry for all&nbsp;<input id="rc_expAll" type="date" style="padding:4px;border:1px solid var(--line);border-radius:5px"></label>
+      <button class="btn sec sm" onclick="rcFillAll()">↧ Apply to all lines</button>
+      <span class="mini" style="color:var(--muted)">handy when stickers &amp; supplies share one shelf</span>
+    </div>
+    <div style="max-height:320px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Order qty</th><th class="num">Received</th><th>Bin</th><th>Expiry</th><th></th></tr></thead><tbody>
     ${lines.map((l,i)=>`<tr><td>${esc(ingName(l.ingredient_sku))}</td>
-      <td class="num" style="color:var(--muted)">${(+l.ordered_kg||0)}</td>
-      <td><input id="rc_q${i}" type="number" step="any" value="${(+l.ordered_kg||+l.available_kg||0)}" oninput="rcFlag(${i})" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td class="num" style="color:var(--muted)">${poOrderQty(l)}</td>
+      <td><input id="rc_q${i}" type="number" step="any" value="${poOrderQty(l)}" oninput="rcFlag(${i})" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
       <td><input id="rc_bin${i}" value="${esc(binOf(l.ingredient_sku,'bulacan'))}" placeholder="bin" style="width:76px;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
-      <td>${/(supply|supplement)/i.test((_im[l.ingredient_sku]||{}).category||'')?'<span class="mini" style="color:var(--muted)" title="non-perishable — no expiry">—</span>':`<input id="rc_exp${i}" type="date" value="${esc(_expDefault(l.ingredient_sku))}" style="padding:5px;border:1px solid var(--line);border-radius:5px" title="expiry date (optional)">`}</td>
+      <td>${_perish(l.ingredient_sku)?`<input id="rc_exp${i}" type="date" value="${esc(_expDefault(l.ingredient_sku))}" style="padding:5px;border:1px solid var(--line);border-radius:5px" title="expiry date (optional)">`:'<span class="mini" style="color:var(--muted)" title="non-perishable — no expiry">—</span>'}</td>
       <td id="rc_flag${i}" style="font-size:12px;white-space:nowrap"></td></tr>`).join('')}
     </tbody></table></div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="poReceiveApply()">📦 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
   $('overlay').classList.add('on');
   lines.forEach((l,i)=>rcFlag(i));
 }
-// Live received-vs-ordered check per line (short deliveries close at what arrived).
+// Fill every line's bin and/or expiry from the "set for all" boxes (supplies & stickers usually share one shelf).
+function rcFillAll(){ const bin=($('rc_binAll')||{}).value||''; const exp=($('rc_expAll')||{}).value||''; const n=window._rcN||0;
+  for(let i=0;i<n;i++){ if(bin){ const b=$('rc_bin'+i); if(b) b.value=bin; } if(exp){ const e=$('rc_exp'+i); if(e) e.value=exp; } }
+  toast('Applied to all lines'+(bin?' · bin '+bin:'')+(exp?' · expiry '+exp:'')); }
+// Live received-vs-order-qty check per line (short deliveries close at what arrived).
 function rcFlag(i){ const r=+($('rc_q'+i)||{}).value||0; const o=(window._poOrd&&window._poOrd[i])||0; const e=$('rc_flag'+i); if(!e)return;
   if(r<o-0.0001){ e.innerHTML='<span style="color:var(--danger)">⚠ short '+(Math.round((o-r)*100)/100)+' kg</span>'; }
   else if(r>o+0.0001){ e.innerHTML='<span style="color:var(--muted)">+'+(Math.round((r-o)*100)/100)+' kg over</span>'; }
@@ -2582,10 +2622,12 @@ async function poReceiveApply(){
   try{ await _poReceiveApply(); } finally{ _postLock=false; }
 }
 async function _poReceiveApply(){
-  const lines=formChildren||[]; const notes=[]; let shortG=0;
-  const updated=lines.map((l,i)=>{ const rq=+(($('rc_q'+i)||{}).value)||0; const oq=+l.ordered_kg||0;
-    if(rq<oq-0.0001){ notes.push(ingName(l.ingredient_sku)+': ordered '+oq+' → received '+rq+'kg (short '+(Math.round((oq-rq)*100)/100)+')'); shortG+=(oq-rq); }
-    else if(rq>oq+0.0001){ notes.push(ingName(l.ingredient_sku)+': ordered '+oq+' → received '+rq+'kg (over '+(Math.round((rq-oq)*100)/100)+')'); }
+  const lines=formChildren||[]; const notes=[]; let shortG=0; const _vars=[];   // _vars → variance_log (Check 1 · PO fulfilment)
+  const updated=lines.map((l,i)=>{ const rq=+(($('rc_q'+i)||{}).value)||0; const oq=poOrderQty(l); const pr=+l.price_kg||0;
+    if(rq<oq-0.0001){ const g=oq-rq; notes.push(ingName(l.ingredient_sku)+': order '+oq+' → received '+rq+'kg (short '+(Math.round(g*100)/100)+')'); shortG+=g;
+      _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:rq,gap_qty:-g,gap_value:Math.round(g*pr*100)/100,location:'bulacan',responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+rq+' (short)'}); }
+    else if(rq>oq+0.0001){ const g=rq-oq; notes.push(ingName(l.ingredient_sku)+': order '+oq+' → received '+rq+'kg (over '+(Math.round(g*100)/100)+')');
+      _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:rq,gap_qty:g,gap_value:Math.round(g*pr*100)/100,location:'bulacan',responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+rq+' (over)'}); }
     return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:l.available_kg, price_kg:l.price_kg, received_kg:rq}; });
   if(shortG>0.0001) notes.push('⚠ short delivery — '+(Math.round(shortG*100)/100)+' kg not delivered (raise a new PO to fulfil the balance)');
   window._recvExpiry={};
@@ -2596,6 +2638,7 @@ async function _poReceiveApply(){
     formChildren=updated; formRec.status='received';
     await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'received'});
     sysLog('purchase_orders',formRec.po_ref, '📦 Received by '+CURRENT_USER+(notes.length?(' — '+notes.join('; ')):' — full quantities received'));
+    for(const v of _vars){ try{ await db.create('variance_log',v); }catch(e){} }   // log receiving variances (ordered vs received)
     await postReceipt(formRec);
     notifyRecordDone('purchase_orders', formRec.po_ref);   // PDF → Drive → notify
     closeModal(); renderForm();
@@ -2763,10 +2806,10 @@ async function renderDashboard(){
   const _stkCost=_supplyCosts(ing).sticker; const _stkPO=new Set(po.filter(p=>_isStickerPO(p)).map(p=>p.po_ref));
   let estPO=0, estPOcount=0;
   po.forEach(p=>{ if(['received','cancelled'].includes(p.status)) return;
-    let v=0; (_lineByPo[p.po_ref]||[]).forEach(l=>{ let pr=(+l.price_kg||0)||_ingP[l.ingredient_sku]||0; if(!pr && _stkPO.has(p.po_ref)) pr=_stkCost; v+=(+l.ordered_kg||0)*pr; });
+    let v=0; (_lineByPo[p.po_ref]||[]).forEach(l=>{ let pr=(+l.price_kg||0)||_ingP[l.ingredient_sku]||0; if(!pr && _stkPO.has(p.po_ref)) pr=_stkCost; v+=poOrderQty(l)*pr; });
     if(v>0){ estPO+=v; estPOcount++; } });
   const _sum=(a,f)=>a.reduce((s,x)=>s+(+f(x)||0),0);
-  const q1o=_sum(_pol,l=>l.ordered_kg), q1r=_sum(_pol,l=>l.received_kg); const q1=q1o?Math.round(q1r/q1o*100):null;
+  const q1o=_sum(_pol,l=>poOrderQty(l)), q1r=_sum(_pol,l=>l.received_kg); const q1=q1o?Math.round(q1r/q1o*100):null;
   const q2=_sum(_bi,z=>z.actual_raw_g)-_sum(_bi,z=>z.expected_raw_g);
   const q3s=_sum(_tl,l=>l.sent_packs), q3r=_sum(_tl,l=>l.received_packs); const q3=q3s?Math.round(q3r/q3s*100):null;
   const q4d=_sum(_dl,l=>l.dispatched_packs), q4c=_sum(_dl,l=>l.confirmed_packs); const q4=q4d?Math.round(q4c/q4d*100):null;
@@ -3048,7 +3091,7 @@ let prodPlanLines=[]; let prodRunRef='';
 let prodTargetMap={}, prodProducedMap={};
 async function renderProdPlan(){
   $('cp').innerHTML=`<div class="title">Production Plan <span onclick="openKB('production_batches')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
-    <button class="btn sec" onclick="openProcessing()">🔪 Log processing</button>
+    <button class="btn sec" onclick="openProcessing()">🔪 Raw → Process Logs</button>
     <button class="btn sec" onclick="prodSaveDraft()">💾 Save draft</button>
     <button class="wfbtn" onclick="prodConfirm()">✅ Confirm production</button>
     <div class="sp"></div><span style="color:var(--muted)">daily production · target from demand plot · remaining to make</span>`;
@@ -3221,8 +3264,8 @@ function drawProcessing(){
       <td><input type="number" step="any" value="${l.kg}" oninput="window._procLines[${i}].kg=this.value;drawProcessing()" style="width:88px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
       <td class="num" style="color:var(--muted)">${rawKg?('−'+(Math.round(rawKg*1000)/1000)+' '+(p?esc(p.name):'raw')):'—'}</td>
       <td><span class="btn link" style="color:var(--danger)" onclick="window._procLines.splice(${i},1);drawProcessing()">✕</span></td></tr>`; }).join('');
-  $('modal').innerHTML=`<div><h3>🔪 Log processing <span class="mini" style="font-weight:400">raw → processed</span></h3>
-    <p class="mini">Record what the prep team processed. Each line <b>adds</b> the processed output to stock and <b>deducts</b> the raw it came from (raw used = processed ÷ yield).</p>
+  $('modal').innerHTML=`<div><h3>🔪 Raw → Process Logs <span class="mini" style="font-weight:400">raw → processed</span></h3>
+    <p class="mini">Record what the prep team processed. Enter the <b>processed output</b> and how many <b>kg you made</b> (decimals OK). Each line <b>adds</b> that processed output to stock and <b>auto-deducts</b> the raw it came from — raw used = processed ÷ yield% (you don't type the raw). Optional: this pre-stages processed stock ahead of a run; you can also capture actual raw→processed inside ✅ Confirm production instead.</p>
     <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Processed output</th><th class="num">Processed kg</th><th class="num">Raw used</th><th></th></tr></thead><tbody>
     ${rows||'<tr><td colspan="4" class="empty">Add a line below.</td></tr>'}
     </tbody></table></div>
@@ -3493,6 +3536,8 @@ function pivotTable(title,data,rows,cfg,m){
     <div class="card" style="margin-top:14px"><h2>Detail &amp; Pareto (cumulative share)</h2>
       <table><thead><tr><th>${esc(dimL)}</th><th class="n">${esc(measL)}</th><th class="n">Share</th><th class="n">Cumulative</th></tr></thead>
       <tbody>${tbody}</tbody>${tfoot}</table></div>
+    ${_repNote('Your chosen <b>measure</b> ('+esc(measL.toLowerCase())+') summed or counted by a <b>dimension</b> ('+esc(dimL.toLowerCase())+'), ranked largest first. <b>Share</b> is each group\'s % of the total; <b>Cumulative</b> is the running total — a Pareto view showing how few groups make up most of the value.',
+      'a high <b>Top-3 concentration</b> KPI (you\'re heavily dependent on a few items / suppliers / categories — a risk if one falls through) and the long tail at the bottom (small contributors you could simplify or drop).')}
   </div>`; }
 async function renderReporting(){
   $('crumb').innerHTML='<b>Reports</b>';
@@ -3505,6 +3550,11 @@ async function renderReporting(){
 
 async function _L(t){ try{ return await db.list(t,{}); }catch(e){ return []; } }
 function _mnum(v){ return moneyHidden()? '—' : fmt(v); }
+// Standard "how to read this" documentation note, appended to every report.
+function _repNote(meaning, watch){
+  return `<div class="hint" style="margin-top:12px;border-left:3px solid var(--berry,#7a4b8b);padding:8px 12px;background:rgba(122,75,139,.06);border-radius:0 8px 8px 0;line-height:1.5">
+    <b>📖 How to read this.</b> ${meaning}<br><b>⚠ Watch out for:</b> ${watch}</div>`;
+}
 function _tfoot(cells){ return '<tbody style="border-top:2px solid var(--line,#ddd)"><tr>'+cells.map(c=>'<td'+(c.n?' class="num"':'')+'><b>'+c.v+'</b></td>').join('')+'</tr></tbody>'; }
 // Q1 — ordered vs received vs paid (3-way match, Check 1)
 async function rptReceiving(){
@@ -3513,7 +3563,7 @@ async function rptReceiving(){
   const grVal={}; grl.forEach(l=>{ const p=grefPo[l.gr_ref]; if(p) grVal[p]=(grVal[p]||0)+((+l.received_kg||0)*(+l.price_kg||0)); });
   const invVal={}; inv.forEach(i=>{ if(i.po_ref) invVal[i.po_ref]=(invVal[i.po_ref]||0)+(+i.amount||0); });
   const rows=po.map(p=>{ const ls=pol.filter(l=>l.po_ref===p.po_ref);
-    const ordKg=ls.reduce((s,l)=>s+(+l.ordered_kg||0),0), ordV=ls.reduce((s,l)=>s+((+l.ordered_kg||0)*(+l.price_kg||0)),0);
+    const ordKg=ls.reduce((s,l)=>s+poOrderQty(l),0), ordV=ls.reduce((s,l)=>s+(poOrderQty(l)*(+l.price_kg||0)),0);
     const rcvKg=ls.reduce((s,l)=>s+(+l.received_kg||0),0); let rcvV=ls.reduce((s,l)=>s+((+l.received_kg||0)*(+l.price_kg||0)),0);
     if(!rcvV && grVal[p.po_ref]) rcvV=grVal[p.po_ref];
     return {ref:p.po_ref,sup:p.supplier_name||'',st:p.status,ordKg,ordV,rcvKg,rcvV,inv:invVal[p.po_ref]||0,gap:rcvV-ordV}; }).filter(r=>r.ordV>0||r.rcvV>0);
@@ -3525,7 +3575,9 @@ async function rptReceiving(){
    <table><thead><tr><th>PO</th><th>Supplier</th><th>Status</th><th class="num">Ordered kg</th><th class="num">Recv kg</th><th class="num">Ordered ₱</th><th class="num">Received ₱</th><th class="num">Invoiced ₱</th><th class="num">Gap ₱</th><th></th></tr></thead><tbody>`;
   rows.forEach(r=>{ h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.sup)}</td><td>${esc(r.st||'')}</td><td class="num">${num(r.ordKg)}</td><td class="num">${num(r.rcvKg)}</td><td class="num">${_mnum(r.ordV)}</td><td class="num">${_mnum(r.rcvV)}</td><td class="num">${r.inv?_mnum(r.inv):'<span style="color:var(--muted)">—</span>'}</td><td class="num" ${r.gap<0?'style="color:var(--danger)"':''}>${_mnum(r.gap)}</td><td>${flag(r)}</td></tr>`; });
   if(!rows.length) h+='<tr><td colspan="10" class="empty">No purchase orders with lines yet.</td></tr>';
-  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' PO(s)'},{v:''},{v:''},{v:num(T.ordKg),n:1},{v:num(T.rcvKg),n:1},{v:_mnum(T.ordV),n:1},{v:_mnum(T.rcvV),n:1},{v:_mnum(T.inv),n:1},{v:_mnum(T.gap),n:1},{v:''}])+`</table><div class="pager">Invoiced column fills as supplier invoices are logged; “price gap” = invoice ≠ received value.</div></div>`;
+  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' PO(s)'},{v:''},{v:''},{v:num(T.ordKg),n:1},{v:num(T.rcvKg),n:1},{v:_mnum(T.ordV),n:1},{v:_mnum(T.rcvV),n:1},{v:_mnum(T.inv),n:1},{v:_mnum(T.gap),n:1},{v:''}])+`</table><div class="pager">Invoiced column fills as supplier invoices are logged.</div>`+
+    _repNote('Each row rolls up one PO. <b>Ordered kg/₱</b> = the final order qty (vendor-available) × price; <b>Recv</b> = what actually arrived × price; <b>Invoiced ₱</b> = the supplier\'s bill; <b>Gap ₱</b> = received value − ordered value. A green <b>matched</b> means received = ordered and the invoice agrees.',
+      '<b>short</b> (received &lt; ordered — chase the balance or a credit note), <b>price gap</b> (invoiced ₱ ≠ received value — you\'re billed a different price than agreed), and any negative <b>Gap ₱</b> (you\'d pay for more than arrived).')+`</div>`;
   return h;
 }
 // Q2 — ingredients fully used, or skimmed/wasted (Check 2/3)
@@ -3544,7 +3596,9 @@ async function rptUsage(){
    <table><thead><tr><th>Batch</th><th>Product</th><th class="num">Expected raw</th><th class="num">Actual raw</th><th class="num">Δ over-use</th><th class="num">Δ %</th><th class="num">Over-use ₱</th><th class="num">Waste</th><th class="num">Good/Rej</th><th></th></tr></thead><tbody>`;
   rows.forEach(r=>{ h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.prod)}</td><td class="num">${kgf(r.exp)}</td><td class="num">${kgf(r.act)}</td><td class="num" ${r.over>0?'style="color:var(--danger)"':''}>${(r.over>0?'+':'')+kgf(r.over)}</td><td class="num" ${r.pct>3?'style="color:var(--danger)"':''}>${(r.pct>0?'+':'')+Math.round(r.pct)}%</td><td class="num">${_mnum(r.overCost)}</td><td class="num">${kgf(r.waste)}</td><td class="num">${r.good}/${r.rej}</td><td>${flag(r)}</td></tr>`; });
   if(!rows.length) h+='<tr><td colspan="10" class="empty">No production batches yet.</td></tr>';
-  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' batch(es)'},{v:''},{v:kgf(T.exp),n:1},{v:kgf(T.act),n:1},{v:(T.over>0?'+':'')+kgf(T.over),n:1},{v:'',n:1},{v:_mnum(T.overCost),n:1},{v:kgf(T.waste),n:1},{v:T.good+'/'+T.rej,n:1},{v:''}])+`</table><div class="pager">Over-use ₱ = the peso value of raw drawn beyond the recipe (skim / spillage / waste).</div></div>`;
+  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' batch(es)'},{v:''},{v:kgf(T.exp),n:1},{v:kgf(T.act),n:1},{v:(T.over>0?'+':'')+kgf(T.over),n:1},{v:'',n:1},{v:_mnum(T.overCost),n:1},{v:kgf(T.waste),n:1},{v:T.good+'/'+T.rej,n:1},{v:''}])+`</table><div class="pager">Over-use ₱ = the peso value of raw drawn beyond the recipe.</div>`+
+    _repNote('<b>Expected raw</b> is what the recipe needs for the packs made; <b>Actual raw</b> is what the kitchen actually drew. <b>Δ over-use</b> = actual − expected; <b>Δ%</b> is that as a share of the recipe; <b>Over-use ₱</b> prices the excess. <b>Good/Rej</b> = good vs rejected packs.',
+      '<b>Δ% above +3%</b> (flagged <b>over-use</b> — over-portioning, spillage or skim) and a large <b>Over-use ₱</b>. A big negative Δ% (<b>under</b>) can mean an unrecorded raw issue or a recipe that no longer matches practice; rising <b>Waste</b> is money going in the bin.')+`</div>`;
   return h;
 }
 // Q3 — did everything produced reach Pasig (Check 4)
@@ -3559,7 +3613,9 @@ async function rptToPasig(){
    <table><thead><tr><th>Transfer</th><th>Product</th><th class="num">Sent</th><th class="num">Received</th><th class="num">Gap</th><th class="num">Arrival %</th><th></th></tr></thead><tbody>`;
   rows.forEach(r=>{ h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.prod)}</td><td class="num">${r.sent}</td><td class="num">${r.rcv}</td><td class="num" ${r.gap<0?'style="color:var(--danger)"':''}>${r.gap}</td><td class="num">${r.sent?Math.round(r.rcv/r.sent*100):0}%</td><td>${flag(r)}</td></tr>`; });
   if(!rows.length) h+='<tr><td colspan="7" class="empty">No transfers yet.</td></tr>';
-  h+='</tbody>'+_tfoot([{v:'Total'},{v:'produced '+tProd},{v:tSent,n:1},{v:tRcv,n:1},{v:tGap,n:1},{v:(tSent?Math.round(tRcv/tSent*100):0)+'%',n:1},{v:''}])+`</table><div class="pager">Produced ${tProd} · sent ${tSent} · received ${tRcv} packs. A gap between produced and sent means finished stock still at Bulacan.</div></div>`;
+  h+='</tbody>'+_tfoot([{v:'Total'},{v:'produced '+tProd},{v:tSent,n:1},{v:tRcv,n:1},{v:tGap,n:1},{v:(tSent?Math.round(tRcv/tSent*100):0)+'%',n:1},{v:''}])+`</table><div class="pager">Produced ${tProd} · sent ${tSent} · received ${tRcv} packs.</div>`+
+    _repNote('<b>Sent</b> vs <b>Received</b> packs per transfer to Pasig; <b>Arrival %</b> = received ÷ sent. The footer shows total <b>produced</b> at Bulacan for comparison.',
+      'any <b>Gap &lt; 0 (short)</b> — packs left the commissary but didn\'t arrive (lost or miscounted in transit); and <b>produced &gt; sent</b>, which means finished stock is still sitting at Bulacan instead of moved to Pasig for selling.')+`</div>`;
   return h;
 }
 // Q4 — did everything sent reach the customer (Check 5)
@@ -3572,7 +3628,9 @@ async function rptDelivery(){
   let h=`<div class="repcard"><h3 style="margin:0 0 4px">Dispatched → delivered</h3><div class="hint" style="margin-bottom:8px">Answers: “did everything sent actually reach the customer?”</div>
    <table><thead><tr><th>Delivery</th><th>Customer</th><th>Product</th><th class="num">Dispatched</th><th class="num">Confirmed</th><th class="num">Returned</th><th class="num">Short</th></tr></thead><tbody>`;
   rows.forEach(r=>{ const sh=r.disp-r.conf-r.ret; h+=`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.cust)}</td><td>${esc(r.prod)}</td><td class="num">${r.disp}</td><td class="num">${r.conf}</td><td class="num">${r.ret}</td><td class="num" ${sh>0?'style="color:var(--danger)"':''}>${sh>0?sh:'—'}</td></tr>`; });
-  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' line(s)'},{v:''},{v:''},{v:T.disp,n:1},{v:T.conf,n:1},{v:T.ret,n:1},{v:(T.disp-T.conf-T.ret)||'—',n:1}])+`</table><div class="pager">${T.disp} dispatched · ${T.conf} confirmed${T.disp?' ('+Math.round(T.conf/T.disp*100)+'% delivered)':''}.</div></div>`;
+  h+='</tbody>'+_tfoot([{v:'Total · '+rows.length+' line(s)'},{v:''},{v:''},{v:T.disp,n:1},{v:T.conf,n:1},{v:T.ret,n:1},{v:(T.disp-T.conf-T.ret)||'—',n:1}])+`</table><div class="pager">${T.disp} dispatched · ${T.conf} confirmed${T.disp?' ('+Math.round(T.conf/T.disp*100)+'% delivered)':''}.</div>`+
+    _repNote('<b>Dispatched</b> = packs sent to customers; <b>Confirmed</b> = customer-acknowledged as received; <b>Returned</b> = came back; <b>Short</b> = dispatched − confirmed − returned.',
+      '<b>Short &gt; 0</b> (the customer didn\'t get everything — follow up, redeliver or refund) and a high <b>Returned</b> count (a sign of quality, cold-chain or wrong-address issues worth investigating).')+`</div>`;
   return h;
 }
 // Q5 — where waste, loss & theft are happening
@@ -3593,7 +3651,9 @@ async function rptLossMap(){
      <div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">BY CHECK TYPE</div>${tbl(roll('check_type'),'Check')}</div>
    </div>
    <div style="font-size:12px;color:var(--muted);margin:14px 0 2px">EVERY VARIANCE (most costly first)</div>${detail}
-   <div class="pager">Total ${_mnum(tot)} at risk across ${v.length} logged variance(s).</div></div>`;
+   <div class="pager">Total ${_mnum(tot)} at risk across ${v.length} logged variance(s).</div>`+
+   _repNote('Every logged variance, rolled up <b>by location</b> and <b>by check type</b>, then listed most-costly first. <b>₱ at risk</b> is the peso value of each gap. Check types: <b>1 · PO fulfilment</b> (received ≠ ordered), <b>1a · Supply shortfall</b> (vendor couldn\'t supply the request — non-costed, shows ₱0), <b>3.5 · Shrinkage</b> (physical count vs book), <b>4 · Transfer</b> (sent vs received).',
+     'the biggest <b>₱ at risk</b> rows, and any location or check type that keeps recurring. A high <b>Open</b> count means gaps aren\'t being explained or resolved — work them to <i>explained</i> then <i>resolved</i>. <b>1a · Supply shortfall</b> is ₱0 on purpose: it flags availability, not money lost.')+`</div>`;
 }
 // Q6 — what is stock really worth, by stage
 async function rptStockStage(){
@@ -3613,7 +3673,9 @@ async function rptStockStage(){
      ${r('Finished goods',fin,'Bulacan + Pasig')}
      ${finRows}
    </tbody><tbody style="border-top:2px solid var(--line,#ddd)"><tr><td><b>Total inventory</b></td><td class="num"><b>${_mnum(tot)}</b></td><td class="num">100%</td><td></td></tr></tbody></table>
-   <div class="pager">WIP = raw already issued to production runs not yet confirmed.</div></div>`;
+   <div class="pager">WIP = raw already issued to production runs not yet confirmed.</div>`+
+   _repNote('Your inventory value split across three stages — <b>Raw materials</b> (Bulacan), <b>WIP</b> (raw already issued to open batches), and <b>Finished goods</b> (by site). <b>Share</b> is each stage\'s % of the total.',
+     'an unusually large <b>WIP</b> share — batches started but never confirmed, so cost is stuck in limbo (post them); and finished-goods value piling up at one site, which points to overproduction or a slow-moving mix.')+`</div>`;
 }
 
 async function renderStdReports(){
@@ -3665,7 +3727,9 @@ async function labelsReorderHtml(){
     <table><thead><tr><th>Product</th><th>SKU</th><th>Site</th><th class="num">On hand</th><th class="num">PAR</th><th class="num">Reorder</th><th>Label supplier</th></tr></thead><tbody>`;
   rows.forEach(r=>{ h+=`<tr><td>${esc(r.p.name)}</td><td><code>${esc(r.p.sku)}</code></td><td>${r.site}</td><td class="num">${r.oh}</td><td class="num">${r.par}</td><td class="num"><b style="color:var(--berry)">${r.ro}</b></td><td>${esc(r.p.sticker_supplier||'')}</td></tr>`; });
   if(!rows.length) h+=`<tr><td colspan="7" class="empty">${anyPar?'All labels at or above PAR at both sites ✅':'Set a Label PAR (Bulacan / Pasig) on products to track sticker reorders.'}</td></tr>`;
-  h+=`</tbody></table><div class="pager">${rows.length} site-level shortfall(s) · ${totOrder.toLocaleString('en-PH')} labels to order</div></div>`;
+  h+=`</tbody></table><div class="pager">${rows.length} site-level shortfall(s) · ${totOrder.toLocaleString('en-PH')} labels to order</div>`+
+    _repNote('Products whose sticker stock is below its per-site PAR (Bulacan / Pasig). <b>Reorder</b> = PAR − on hand, for that site.',
+      'high <b>Reorder</b> counts and any product with no <b>label supplier</b> set — order stickers ahead of a run so packing isn\'t blocked by missing labels.')+`</div>`;
   return h;
 }
 async function recipeCostHtml(){
@@ -3679,7 +3743,9 @@ async function recipeCostHtml(){
     h+=`<tr style="background:#e7f0e9"><td colspan="5"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
     G.subs.forEach(S=>{ h+=`<tr style="background:#f6f8f4"><td colspan="5" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(rcRow).join(''); });
   });
-  h+='</tbody></table><div class="hint" style="margin-top:8px">Grouped Group › Subgroup › Item. Ingredient cost only (raw ÷ yield × list price). Add labour + packaging in Production for full cost/pack.</div></div>';
+  h+='</tbody></table><div class="hint" style="margin-top:8px">Grouped Group › Subgroup › Item. Ingredient cost only (raw ÷ yield × list price). Add labour + packaging in Production for full cost/pack.</div>'+
+    _repNote('<b>Ingredient cost/pack</b> is the raw-material cost only (raw ÷ yield × list price); <b>Margin</b> = (Sell − ingredient cost) ÷ Sell. This is a quick recipe view — the full per-pack cost (labour, packaging, sticker, fees) lives in <b>Gross Margin</b>.',
+      'products with a <b>negative or thin margin</b> (red) — but remember this excludes labour &amp; packaging, so the true margin in Gross Margin is lower. Use this to spot recipe-cost outliers, and Gross Margin to price.')+`</div>`;
   return h;
 }
 /* ============ Gross Margin — full cost per pack (raw + other costs) → GP% → suggested price ============ */
@@ -4041,7 +4107,10 @@ async function cogsReconHtml(){
   rows.forEach(r=>{ const col=r.drift>0.009?'var(--danger)':(r.drift<-0.009?'var(--ok)':'var(--muted)');
     h+=`<tr style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.p.sku)).replace(/'/g,'&#39;')}')" title="Open product"><td>${esc(r.p.name)}</td><td class="num">${fmt(r.std)}</td><td class="num">${fmt(r.act)}</td><td class="num" style="color:${col}">${r.drift>0?'+':''}${fmt(r.drift)}</td><td class="num" style="color:${col}">${r.std?((r.pct>0?'+':'')+r.pct.toFixed(1)+'%'):'—'}</td></tr>`; });
   if(!rows.length) h+='<tr><td colspan="5" class="empty">No costed recipes yet.</td></tr>';
-  h+='</tbody></table></div>'; return h;
+  h+='</tbody></table>'+
+    _repNote('<b>Standard/pack</b> is the planned worst-case cost (list price ÷ yield). <b>Actual/pack</b> uses the moving-average cost from real receipts. <b>Drift ₱/%</b> = actual − standard; positive means real cost is running above plan. Tap a row to open the product.',
+      'products with a <b>positive drift</b> (cost creeping above plan — supplier price increases or yield loss) and a large <b>Drift %</b> — those are your cues to reprice, renegotiate, or check the yield. Sorted worst-first.')+`</div>`;
+  return h;
 }
 // Expiring soon (FEFO) — received raw batches with an expiry date, earliest first. Supplies (no expiry) are excluded.
 async function rptExpiring(){
@@ -4064,7 +4133,9 @@ async function rptExpiring(){
   rows.forEach(r=>{ const st=r.dleft==null?'':(r.dleft<0?'EXPIRED':(r.dleft<=days?'EXPIRING':'OK')); const col=r.dleft==null?'var(--muted)':(r.dleft<0?'var(--danger)':(r.dleft<=days?'var(--earth,#b5762a)':'var(--ok)'));
     h+=`<tr><td><span class="mini">${esc(r.type)}</span></td><td>${esc(r.name)}</td><td>${esc(r.bin)||'—'}</td><td class="num">${num(Math.round(r.qty*100)/100)}${r.unit?' '+r.unit:''}</td><td class="mini">${esc(r.recv)}</td><td>${esc(r.exp)}</td><td class="num" style="color:${col}"><b>${r.dleft==null?'—':r.dleft}</b></td><td><span style="color:${col};font-weight:700">${st}</span></td></tr>`; });
   if(!rows.length) h+='<tr><td colspan="8" class="empty">No batches with an expiry date yet — enter expiry when receiving raw, or confirm production (best-before auto-set from shelf life).</td></tr>';
-  h+=`</tbody></table></div><div class="hint" style="margin-top:8px">This lists received batches by expiry as a FEFO guide; the ledger doesn't deplete specific lots on consumption, so pair it with the physical count.</div></div>`;
+  h+=`</tbody></table></div><div class="hint" style="margin-top:8px">This lists received batches by expiry as a FEFO guide; the ledger doesn't deplete specific lots on consumption, so pair it with the physical count.</div>`+
+    _repNote('Received raw and finished batches that carry an expiry / best-before, <b>earliest first</b>. <b>Days left</b> counts down to that date; change the <b>within N days</b> box to widen the window.',
+      '<b>EXPIRED</b> (red — days left below 0, pull it from stock) and <b>EXPIRING</b> (amber — within your window, use or discount first). Because the ledger doesn\'t deplete specific lots on consumption, treat this as a FEFO guide and confirm against the physical count.')+`</div>`;
   return h;
 }
 // #5 — Supplier payables: open PO balances (billable − paid) with payment status, by PO and by supplier.
@@ -4090,7 +4161,8 @@ async function rptPayables(){
   h+=`</tbody></table></div>`;
   const sup=Object.keys(bySup).filter(s=>bySup[s]>0.5).sort((a,b)=>bySup[b]-bySup[a]);
   if(sup.length){ h+=`<div style="margin-top:14px"><h3 style="margin:0 0 6px">Payable by supplier</h3><table><thead><tr><th>Supplier</th><th class="num">Balance</th></tr></thead><tbody>${sup.map(s=>`<tr><td>${esc(s)}</td><td class="num"><b>${P(bySup[s])}</b></td></tr>`).join('')}</tbody></table></div>`; }
-  h+='</div>'; return h;
+  h+=_repNote('Confirmed &amp; received POs only. <b>Billable</b> = received × price − discount + delivery fee; <b>Balance</b> = billable − payments recorded. The second table totals the balance by supplier. Tap a row to open the PO.',
+    'the largest <b>Balance</b> rows and <b>UNPAID</b>/<b>PARTIAL</b> statuses — especially where the supplier\'s term is near due. Open the PO to see its payment schedule (downpayment / on-receiving / term) and settle in the right order.')+'</div>'; return h;
 }
 // Ingredients below their reorder point and finished goods below PAR (live stock vs thresholds).
 async function lowStockHtml(){
@@ -4113,6 +4185,8 @@ async function lowStockHtml(){
     <tbody>${pgBody||`<tr><td colspan="5" class="empty">All at or above PAR ✅</td></tr>`}</tbody></table>
     <div class="pager">${pg.length} item(s) below PAR · grouped Group › Subgroup › Item · tap a row to open</div></div>`;
   return tbl('🥩 Ingredients below reorder point', ig, 'ingredients')+pgTbl+
+    _repNote('Items currently below their trigger. <b>Ingredients</b> use the reorder point (or PAR); <b>finished goods</b> use PAR packs. <b>Short by</b> = threshold − on hand = how much to order or make. Rows are clickable.',
+      'the biggest <b>Short by</b> first, and any finished good below PAR (stockout risk on a live SKU). Ingredient shortfalls feed the Demand/MRP reorder; finished-goods shortfalls feed the production plan.')+
     (isLive()?'':'<div class="hint">Live stock needed for accurate on-hand — this uses demo data.</div>');
 }
 // Soft check (not a hard block): products whose recipe lists an ingredient on >1 line.
@@ -4129,7 +4203,10 @@ async function dupBomHtml(){
     <table><thead><tr><th>Product</th><th>Ingredient</th><th class="num">Lines</th><th class="num">Grams/line</th><th class="num">Total g</th><th></th></tr></thead><tbody>`;
   rows.forEach(r=>{ h+=`<tr><td>${esc(pn[r.ps]||r.ps)}</td><td>${esc(inm[r.is]||r.is)}</td><td class="num">${r.lines}</td><td class="num">${r.grams.join(' + ')}</td><td class="num">${num(r.total)}</td><td>${r.exact?'<span style="color:var(--danger)">⚠ identical grams</span>':'<span style="color:var(--muted)">substitution?</span>'}</td></tr>`; });
   if(!rows.length) h+='<tr><td colspan="6" class="empty">No product repeats an ingredient. ✅</td></tr>';
-  h+='</tbody></table></div>'; return h;
+  h+='</tbody></table>'+
+    _repNote('Products whose recipe lists the same ingredient on more than one line. <b>Grams/line</b> shows each line; costing sums them all, so a repeat is not an error by itself.',
+      'rows flagged <b>⚠ identical grams</b> — a line may have been copied by accident, which double-counts that ingredient\'s cost and quantity. Different grams is usually a legitimate substitution and is fine.')+`</div>`;
+  return h;
 }
 async function renderCustomReports(){
   reportCache=await reportsList();
@@ -4170,7 +4247,7 @@ let AUTOS = JSON.parse(localStorage.getItem('wr_autos')||'null') || {
   shopify:{on:false,url:'',label:'Shopify — Orders sync',hint:'Orders flow in through your existing Apps Script sheet.'},
   telegram:{on:false,url:'',label:'Telegram / Email — PO & report alerts',hint:'n8n sends on confirmed PO + daily/weekly digests.'},
   mrp_schedule:{on:false,url:'',label:'MRP — scheduled draft POs',hint:'n8n runs the Supabase MRP function on a schedule.'},
-  keepwarm:{on:false,url:'',label:'Supabase keep-warm ping',hint:'Nightly no-op so the free project never pauses.'}
+  keepwarm:{on:false,url:'',label:'Supabase keep-warm ping',hint:'Writes a heartbeat timestamp (a real DB write) every few hours so the free project never pauses. Set up the keepWarm() time trigger in the Apps Script.'}
 };
 function saveAutos(){ localStorage.setItem('wr_autos',JSON.stringify(AUTOS));
   // persist to Supabase so the config is shared across browsers/devices (not just this browser)
@@ -4304,7 +4381,7 @@ async function generateSuppliesPO(){
   try{
     const dd=_mmddyyyy(todayISO()); let zz=0;
     for(const sup of Object.keys(bySup)){ zz++;
-      const ref='PO-'+dd+' V'+_p2(zz)+'.SUP';
+      const ref='PO-'+dd+' [SUPPLIES]'+(zz>1?(' V'+_p2(zz)):'');
       const rec={po_ref:ref, supplier_name:(sup==='(unassigned)'?null:sup), order_date:todayISO(), status:'confirmed', created_by:CURRENT_USER};
       try{ await db.create('purchase_orders',rec);
         const pl=bySup[sup].map(r=>({po_ref:ref, ingredient_sku:r.sku, ordered_kg:r.reorder, available_kg:r.reorder, price_kg:r.price, received_kg:0}));
@@ -4510,7 +4587,7 @@ const KB = {
   margin:{d:'Live gross margin per product: BOM raw cost + variable process & packaging + fees → GP% and a suggested price at your target.',h:['Edit the global rate model (per-gram utilities, labor, packaging, fees, target GM) then 💾 Save','Set each product’s Cost profile tab: deboning / butcher / sous-vide / ecobag / thermal','Tap a row to open the product; ⬆ Write total cost pushes COGS to products'],l:['Raw = BOM grams × ingredient moving-average cost (falls back to processed/list price)','Process = (electricity+water+transport) per gram + labor (plain OR deboning) ± butcher ± sous-vide','Packaging = vacuum + sticker + ecobag + thermal, pulled from Kitchen Supplies costs','Fees = (transaction+marketing) % of price; Suggested = fixed cost ÷ (1 − target − fees%)','Rates persist in Supabase (app_settings.cost_model) — shared with the whole team']},
   momentum:{d:'Reads Shopify rolling sales (30/60/90/120 days) against live stock to show what to make now vs what’s overstocked.',h:['📊 Runway view: days of stock left per product, most urgent first','🎯 Quadrant view: momentum × stock for a two-axis read','Group by family or priority; 📥 Import/paste sales; tap a row to open the product'],l:['Momentum × = recent 30-day daily rate ÷ 120-day average (>1 = accelerating)','Days of cover = current stock ÷ recent daily rate','Stockout risk = low cover + steady/rising demand; overstock = high cover + slowing','Fed hourly from the “90-120 Day Demand” sheet into the sales_momentum table']},
   supplies_reorder:{d:'Supplies below their PAR, with the quantity to reorder, ready to turn into a supplier PO.',h:['Review items below PAR (reorder = PAR − on hand)','🧾 Generate Supplies PO — one draft per supplier, ready to send','Set each supply’s PAR & reorder in Kitchen Supplies'],l:['Simple PAR rule — supplies have no recipe so they aren’t in MRP','Reorder qty is in the item’s own unit','Generated POs are confirmed and priced at the supply’s unit cost']},
-  prodplan:{d:'Plan and confirm a production run — good packs per product, then the actual raw used and processed made.',h:['Add products + Good packs (target/remaining come from the latest demand plot)','✅ Confirm production → enter actual raw / processed / live yield','🔪 Log processing to convert raw → processed ahead of time'],l:['Posting deducts raw, adds processed, runs the mix and outputs finished packs','Best-before auto-stamps = production date + the product’s shelf-life days','Real yield (made ÷ raw) is recorded on the batch and drives the usage report']},
+  prodplan:{d:'Plan and confirm a production run — good packs per product, then the actual raw used and processed made.',h:['Add products + Good packs (target/remaining come from the latest demand plot)','✅ Confirm production → enter actual raw / processed / live yield','🔪 Raw → Process Logs to convert raw → processed ahead of time (optional; decimals OK)'],l:['Posting deducts raw, adds processed, runs the mix and outputs finished packs','Best-before auto-stamps = production date + the product’s shelf-life days','Real yield (made ÷ raw) is recorded on the batch and drives the usage report']},
   approvals:{d:'Review and approve bulk-edit change requests submitted by non-admin users.',h:['Open a pending request to see the exact field changes','✓ Approve & apply writes the changes','✕ Reject with a reason'],l:['Non-admin bulk edits queue here instead of writing directly','Approving applies every change atomically','Recent decisions are logged; Admin only']},
   connection:{d:'Connect the app to your Supabase project (LIVE) or run on local demo data.',h:['Paste your Supabase URL + anon key, or sign in','Green LIVE = connected; DEMO = local sample data','Sign out to switch projects'],l:['The anon key is safe in the client — RLS protects the data','Signed-in requests use your user token','Demo data lives only in this browser']},
   fieldacl:{d:'Hide or lock specific fields (like cost) per role.',h:['Pick a model and field','Set hide / read-only per role','Save — it applies on the next render'],l:['Controls what each role sees in lists and forms','Hiding cost fields also hides margin & value figures for that role','App-level control; enforce hard security with Supabase RLS']},
