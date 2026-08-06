@@ -1235,7 +1235,7 @@ function renderCleanser(){
       <div class="hint" style="margin-bottom:10px">Set day-1 stock in bulk. Download the template (pre-filled with every item), enter the starting quantity per row, then upload. Ingredients raw &amp; processed in <b>kg</b>, supplies in their <b>unit</b>, stickers &amp; sellable products in <b>pieces/packs</b>. Posts as opening ledger entries; re-uploading replaces the previous opening upload.</div>
       <button class="btn" onclick="openOpeningImport()">📥 Open opening-balance uploader</button></div>
     <div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 6px">💾 Backup &amp; Restore</h3>
-      <div class="hint" style="margin-bottom:10px">Download a full snapshot of your live data (${BACKUP_TABLES.length} tables) before running tests, then restore it to roll back. <b>Restore replaces</b> the current contents of those tables with the snapshot — master data, transactions, and the stock ledger. Admin only. (Demand plots, MRP plans and reference counters are not part of the snapshot.) <b>Automated:</b> a daily <b>Google Drive backup</b> runs from the Apps Script (<code>backupToDrive</code>) into the “WR ERP Backups” folder — same file format, so any Drive backup can be restored here.</div>
+      <div class="hint" style="margin-bottom:10px">Download a <b>full-database</b> snapshot (${BACKUP_TABLES.length} tables — master data, all transactions, the stock ledger, demand plots &amp; MRP plans, reference counters, notes/attachments, and the activity log) before running tests, then restore it to roll back. <b>Restore replaces</b> the current contents of those tables with the snapshot. Admin only. User <b>profiles</b> are merged (never wiped) so no one is locked out. <b>Automated:</b> a daily <b>Google Drive backup</b> runs from the Apps Script (<code>backupToDrive</code>) into the “WR ERP Backups” folder — same file format, so any Drive backup can be restored here.</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="btn sec" onclick="exportBackup()">⬇ Download backup (JSON)</button>
         <input type="file" id="rbFile" accept=".json" style="display:none" onchange="restoreStage(event)">
@@ -1244,10 +1244,27 @@ function renderCleanser(){
       <div id="rbArea" class="hint" style="margin-top:10px">No restore file chosen.</div></div>`;
   $('content').innerHTML=h;
 }
-const BACKUP_TABLES=['suppliers','ingredients','products','bom_lines','purchase_orders','po_lines',
-  'goods_receipts','gr_lines','supplier_invoices','invoice_lines','production_batches','batch_issues',
-  'transfers','transfer_lines','count_sessions','count_lines','variance_log','inventory_movements',
-  'raw_material_pricing','record_notes','activity_log'];
+// FULL database snapshot — every user table, ordered parents → children so restore can
+// clear children-first and load parents-first without breaking foreign keys.
+const BACKUP_TABLES=[
+  // master / config (parents)
+  'locations','suppliers','profiles','ingredients','products',
+  'app_config','app_settings','ref_counters',
+  // item reference data
+  'item_bins','item_suppliers','item_yields','item_group_options','bom_lines','raw_material_pricing','sales_momentum',
+  // sales orders
+  'sales_orders','order_lines',
+  // purchasing
+  'purchase_orders','po_lines','po_payments','goods_receipts','gr_lines','supplier_invoices','invoice_lines',
+  // production
+  'production_batches','batch_issues',
+  // transfers & counts
+  'transfers','transfer_lines','count_sessions','count_lines',
+  // deliveries
+  'deliveries','delivery_lines',
+  // ledgers, planning, logs & attachments
+  'inventory_movements','variance_log','demand','mrp_plans','mrp_plan_lines',
+  'saved_reports','record_notes','record_attachments','bulk_change_requests','activity_log'];
 async function exportBackup(){
   toast('Building backup…'); const dump={_meta:{app:'WR ERP',exported_by:CURRENT_USER,live:isLive()}};
   for(const t of BACKUP_TABLES){ try{ dump[t]=isLive()? await sb(t+'?select=*') : (DEMO[t]||[]); }catch(e){ dump[t]={error:String(e.message||e)}; } }
@@ -1256,12 +1273,19 @@ async function exportBackup(){
   a.download='wr-erp-backup-'+todayISO()+'.json'; document.body.appendChild(a); a.click(); a.remove();
   toast('Backup downloaded ('+BACKUP_TABLES.length+' tables)');
 }
-// Primary key per backup table — used to clear rows (delete filter) and to upsert natural-key tables.
-const RESTORE_PK={ suppliers:'name', ingredients:'sku', products:'sku', bom_lines:'id',
-  purchase_orders:'po_ref', po_lines:'id', goods_receipts:'gr_ref', gr_lines:'id',
-  supplier_invoices:'invoice_ref', invoice_lines:'id', production_batches:'batch_ref', batch_issues:'id',
-  transfers:'transfer_ref', transfer_lines:'id', count_sessions:'count_ref', count_lines:'id',
-  variance_log:'id', inventory_movements:'id', raw_material_pricing:'id', record_notes:'id', activity_log:'id' };
+// Conflict key per backup table — used to clear rows (delete filter) and to upsert natural-key tables.
+// Tables not listed default to 'id' (a surrogate identity column): their id is dropped on restore
+// so identity regenerates, and every child references a natural key (sku / *_ref), never that id.
+const RESTORE_PK={ locations:'code', suppliers:'name', ingredients:'sku', products:'sku', profiles:'id',
+  app_config:'key', app_settings:'key', ref_counters:'key', sales_momentum:'sku', item_bins:'sku,location_code',
+  purchase_orders:'po_ref', goods_receipts:'gr_ref', supplier_invoices:'invoice_ref',
+  production_batches:'batch_ref', transfers:'transfer_ref', count_sessions:'count_ref',
+  sales_orders:'order_ref', deliveries:'delivery_ref' };
+// Tables whose 'id' is a meaningful key (not a throwaway surrogate) — keep it on restore & upsert on it.
+const RESTORE_KEEP_ID=new Set(['profiles']);
+// Tables we never DELETE during restore (only upsert) — profiles is linked to auth users; wiping it
+// mid-restore could lock people out. Its rows are merged in instead.
+const RESTORE_NO_DELETE=new Set(['profiles']);
 function restoreStage(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader();
   rd.onload=()=>{ try{ const d=JSON.parse(rd.result);
       if(typeof d!=='object'||d===null) throw new Error('not a backup file');
@@ -1285,18 +1309,21 @@ async function restoreBackup(){
   showBusy('Restoring backup…');
   const errs=[]; let ins=0;
   try{
-    // 1) clear existing rows — children first (reverse of the FK-ordered list)
-    for(const t of [...BACKUP_TABLES].reverse()){ const pk=RESTORE_PK[t]||'id';
+    // 1) clear existing rows — children first (reverse of the FK-ordered list). Skip NO_DELETE tables.
+    for(const t of [...BACKUP_TABLES].reverse()){ if(RESTORE_NO_DELETE.has(t)) continue;
+      const pk=(RESTORE_PK[t]||'id').split(',')[0];   // first column of a composite key for the filter
       try{ await sb(t+'?'+pk+'=not.is.null',{method:'DELETE',prefer:'return=minimal'}); }
       catch(e){ errs.push('clear '+t+': '+(e.message||e)); } }
-    // 2) load the snapshot — parents first; drop surrogate id so identity columns regenerate
+    // 2) load the snapshot — parents first. Drop surrogate id (identity regenerates) EXCEPT where the
+    //    id is a real key (profiles). Upsert natural-key tables on their conflict key.
     for(const t of BACKUP_TABLES){ let rows=d[t]; if(!Array.isArray(rows)||!rows.length) continue;
-      rows=rows.map(r=>{ const c={...r}; delete c.id; return c; });
-      const pk=RESTORE_PK[t]||'id'; const upsert=(pk!=='id');
+      const keepId=RESTORE_KEEP_ID.has(t);
+      rows=rows.map(r=>{ const c={...r}; if(!keepId) delete c.id; return c; });
+      const pk=RESTORE_PK[t]||'id'; const upsert=(pk!=='id')||keepId;
       for(let i=0;i<rows.length;i+=500){ const chunk=rows.slice(i,i+500);
         try{ await sb(t+(upsert?('?on_conflict='+pk):''),{method:'POST',prefer:(upsert?'resolution=merge-duplicates,return=minimal':'return=minimal'),body:JSON.stringify(chunk)}); ins+=chunk.length; }
         catch(e){ errs.push('load '+t+': '+(e.message||e)); } } }
-    try{ sysLog('cleanser','restore','♻ Restored backup ('+ins+' rows) by '+CURRENT_USER); }catch(e){}
+    try{ sysLog('cleanser','restore','♻ Restored full backup ('+ins+' rows across '+BACKUP_TABLES.length+' tables) by '+CURRENT_USER); }catch(e){}
   } finally { hideBusy(); window._postLock=false; }
   if(errs.length) console.warn('Restore issues:', errs);
   toast('Restore complete — '+ins+' row(s) loaded'+(errs.length?(' · ⚠ '+errs.length+' issue(s), see console'):''), errs.length>0);
@@ -2193,8 +2220,8 @@ async function renderUsers(){
   roles.forEach(r=>{ h+=`<tr><td><b>${r}</b></td>${mods.map(x=>`<td style="text-align:center"><input type="checkbox" ${roleCan(r,x)?'checked':''} ${r==='Admin'?'disabled':''} onchange="setAccess('${r}','${x}',this.checked)"></td>`).join('')}</tr>`; });
   h+=`</tbody></table><div class="hint" style="margin-top:8px">This controls the app's navigation per role. <b>Real enforcement</b> is live in Supabase via Row-Level Security (RLS) + Supabase Auth: each signed-in user's role (from their profile) governs what they can read and write at the database level.</div></div>`;
   if(isLive() && SUPA && SUPA.token){
-    h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Supabase Auth users → role <span class="badge b-approved">live</span></h3>
-      <div class="hint">Each person who signs in has a row in the <code>profiles</code> table with one role. That role is what RLS enforces. Create the login in <b>Supabase → Authentication → Users</b>; set their role here (Admin only). New sign-ups default to <b>Warehouse</b>.</div>
+    h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Supabase Auth users → role &amp; contacts <span class="badge b-approved">live</span></h3>
+      <div class="hint">Each person who signs in has a row in the <code>profiles</code> table with a role and their contacts. The role is what RLS enforces; the <b>Email</b> and <b>Telegram chat ID</b> are what @mentions and assigned activities notify. Create the login in <b>Supabase → Authentication → Users</b>; set the rest here (Admin only). New sign-ups default to <b>Warehouse</b>. <span class="mini">Telegram chat ID: the person sends /start to your bot, then read it from <code>getUpdates</code> — a number like 5306350559.</span></div>
       <div id="authUsers">Loading…</div></div>`;
   }
   $('content').innerHTML=h;
@@ -2202,19 +2229,34 @@ async function renderUsers(){
 }
 async function loadAuthUsers(){
   const roles=['Admin','Purchasing','Warehouse','Pasig','Finance']; const admin=curRole()==='Admin';
-  try{ const rows=await sb('profiles?select=id,name,role&order=role.asc');
-    if(!rows.length){ $('authUsers').innerHTML='<div class="empty">No profiles yet — create users in Supabase → Authentication, then they appear here on first sign-in.</div>'; return; }
-    let t=`<table><thead><tr><th>User</th><th>Role</th></tr></thead><tbody>`;
-    rows.forEach(u=>{ const me=u.id===(SUPA&&SUPA.uid); t+=`<tr><td>${esc(u.name||u.id)}${me?' <span class="badge b-true">you</span>':''}</td><td>${admin?`<select onchange="setProfileRole('${u.id}',this.value)">${roles.map(r=>`<option ${u.role===r?'selected':''}>${r}</option>`).join('')}</select>`:`<b>${esc(u.role)}</b>`}</td></tr>`; });
-    t+=`</tbody></table>${admin?'':'<div class="hint" style="margin-top:6px">Only an Admin can change roles.</div>'}`;
-    $('authUsers').innerHTML=t;
-  }catch(e){ $('authUsers').innerHTML='<div class="empty">Could not load profiles: '+esc(e.message)+'</div>'; }
+  // Contact columns may not exist yet (before wr_migration_profile_contacts.sql) — degrade gracefully.
+  let rows, hasContacts=true;
+  try{ rows=await sb('profiles?select=id,name,role,email,telegram_chat_id,mobile&order=role.asc'); }
+  catch(e){ hasContacts=false; try{ rows=await sb('profiles?select=id,name,role&order=role.asc'); }catch(e2){ $('authUsers').innerHTML='<div class="empty">Could not load profiles: '+esc(e2.message)+'</div>'; return; } }
+  if(!rows||!rows.length){ $('authUsers').innerHTML='<div class="empty">No profiles yet — create users in Supabase → Authentication, then they appear here on first sign-in.</div>'; return; }
+  const inp=(id,f,v)=>`<input value="${esc(v||'')}" ${admin?'':'disabled'} onchange="setProfileContact('${id}','${f}',this.value)" style="width:100%;box-sizing:border-box;padding:4px 6px;border:1px solid var(--line);border-radius:5px;font-size:12px" placeholder="${f==='email'?'name@wr.ph':(f==='telegram_chat_id'?'chat id / group id':'09xx…')}">`;
+  let t=`<div style="overflow-x:auto"><table><thead><tr><th>User</th><th>Role</th>${hasContacts?'<th>Email</th><th>Telegram chat ID</th><th>Mobile</th>':''}</tr></thead><tbody>`;
+  rows.forEach(u=>{ const me=u.id===(SUPA&&SUPA.uid);
+    t+=`<tr><td>${esc(u.name||u.id)}${me?' <span class="badge b-true">you</span>':''}</td>`+
+       `<td>${admin?`<select onchange="setProfileRole('${u.id}',this.value)">${roles.map(r=>`<option ${u.role===r?'selected':''}>${r}</option>`).join('')}</select>`:`<b>${esc(u.role)}</b>`}</td>`+
+       (hasContacts?`<td>${inp(u.id,'email',u.email)}</td><td>${inp(u.id,'telegram_chat_id',u.telegram_chat_id)}</td><td>${inp(u.id,'mobile',u.mobile)}</td>`:'')+`</tr>`; });
+  t+=`</tbody></table></div>${admin?'':'<div class="hint" style="margin-top:6px">Only an Admin can change roles &amp; contacts.</div>'}`;
+  if(!hasContacts) t+=`<div class="hint" style="margin-top:6px;color:var(--earth,#b5762a)">⚠ Contact columns not found — run <code>wr_migration_profile_contacts.sql</code> in Supabase to enable Email / Telegram / Mobile for notifications.</div>`;
+  $('authUsers').innerHTML=t;
 }
 async function setProfileRole(id,role){ try{ await sb('profiles?id=eq.'+encodeURIComponent(id),{method:'PATCH',prefer:'return=minimal',body:JSON.stringify({role})});
     // RLS lets only an Admin change roles; a blocked update returns no error but no change — verify.
     const chk=await sb('profiles?select=role&id=eq.'+encodeURIComponent(id));
     if(chk&&chk[0]&&chk[0].role!==role){ toast('Blocked by RLS — only an Admin can change roles. Set the first Admin via SQL.',true); loadAuthUsers(); return; }
     toast('Role updated'); if(id===(SUPA&&SUPA.uid)){ SUPA.role=role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); updateMode(); renderUserSel(); renderSide(); } }
+  catch(e){ toast(e.message,true); } }
+// Save a contact field (email / telegram_chat_id / mobile) on a profile — Admin only, RLS-gated.
+async function setProfileContact(id,field,value){
+  const v=(value||'').trim();
+  try{ await sb('profiles?id=eq.'+encodeURIComponent(id),{method:'PATCH',prefer:'return=minimal',body:JSON.stringify({[field]:v||null})});
+    const chk=await sb('profiles?select='+field+'&id=eq.'+encodeURIComponent(id));
+    if(chk&&chk[0]&&String(chk[0][field]||'')!==v){ toast('Blocked by RLS — only an Admin can edit contacts.',true); return; }
+    toast('Saved'); }
   catch(e){ toast(e.message,true); } }
 async function refreshMyRole(){ if(!(SUPA&&SUPA.token&&SUPA.uid)){ toast('Sign in first',true); return; }
   try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); updateMode(); renderUserSel(); renderSide(); toast('Your role is now: '+curRole()); } else toast('No profile row found for your user',true); }
@@ -4240,7 +4282,7 @@ async function delReport(i){ const x=reportCache[i]; if(!x)return; try{ if(isLiv
 /* ============ Automations (one-stop config hub) ============ */
 let AUTOS = JSON.parse(localStorage.getItem('wr_autos')||'null') || {
   sheets_demand:{on:false,url:'',label:'Google Sheets — Demand sync (by SKU)',hint:'Clicking “Sync from Google Sheets” triggers this n8n webhook — n8n reads your sheet, upserts the demand table for the plan date, then the app pulls it. Paste the wr-demand-sync webhook URL.'},
-  mention_notify:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-mention-notify',label:'n8n — Mention / activity notify',hint:'When someone is @mentioned or assigned an activity, the app sends the person + a link here; n8n looks up their email/Telegram in profiles and notifies them.'},
+  mention_notify:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-mention-notify',label:'Mention / activity notify',hint:'When someone is @mentioned or assigned an activity, the app sends the person + a link here; the handler looks up their Email & Telegram chat ID in profiles and notifies them by name (Telegram + email). Set each person\'s Email / Telegram chat ID in Users & Access (run wr_migration_profile_contacts.sql first).'},
   drive_folder:{on:false,url:'',label:'Google Drive — Attachments folder',hint:'Record attachments live here; uploads route via n8n, links saved on the record.'},
   record_pdf:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-record-done',label:'n8n — Record → PDF → Drive → notify',hint:'When a document is completed, it is sent here: n8n builds a PDF, saves it to the module Drive folder, writes the link back on the record, and notifies Telegram/Email with the Internal Reference.'},
   file_upload:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-file-upload',label:'n8n — File upload to Drive',hint:'Files you attach on a record are sent here and uploaded to the module Drive folder.'},
