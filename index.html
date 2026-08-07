@@ -1380,7 +1380,28 @@ async function renderNotif(){ await loadNotif();
     h+=`<div style="margin-top:14px"><label style="font-weight:700">${esc(d.label)}</label><div class="mini" style="margin:2px 0 4px">placeholders: <code>${esc(d.ph)}</code></div>
       <textarea id="nt_${k}" rows="2" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--line);border-radius:6px" oninput="NOTIF['${k}']=this.value">${esc(v)}</textarea></div>`; });
   h+=`<div style="margin-top:16px;display:flex;gap:8px"><button class="btn" onclick="saveNotifBtn()">💾 Save templates</button><button class="btn sec" onclick="resetNotif()">↺ Reset to defaults</button></div></div>`;
+  // ---- Reminder timing (drives the Apps Script activity reminders) ----
+  await loadReminderCfg();
+  h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 6px">⏰ Reminder timing</h3>
+    <div class="hint" style="margin-bottom:10px">How the assignee is reminded about an unresolved <b>activity</b> (Telegram + email). Saved to Supabase (<code>app_config → reminder_config</code>); the Apps Script <code>remindActivities</code> job reads it (run it every 5 minutes).</div>
+    <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end">
+      <label style="font-size:13px">Minutes before due<br><input id="rc_before" value="${esc((REMIND_CFG.before||[30,15]).join(', '))}" style="width:160px;padding:6px;border:1px solid var(--line);border-radius:6px" placeholder="30, 15"><div class="mini">comma-separated, e.g. 60, 30, 15</div></label>
+      <label style="font-size:13px;display:flex;align-items:center;gap:6px"><input type="checkbox" id="rc_daily" ${REMIND_CFG.daily_overdue?'checked':''}> Daily reminder for overdue tasks</label>
+      <label style="font-size:13px">at hour (0–23)<br><input id="rc_hour" type="number" min="0" max="23" value="${+REMIND_CFG.overdue_hour||8}" style="width:70px;padding:6px;border:1px solid var(--line);border-radius:6px"></label>
+    </div>
+    <div style="margin-top:12px"><button class="btn" onclick="saveReminderCfgBtn()">💾 Save reminder timing</button></div></div>`;
   $('content').innerHTML=h;
+}
+// Reminder timing config (app_config → reminder_config) — read by the Apps Script reminder job.
+let REMIND_CFG={before:[30,15],daily_overdue:true,overdue_hour:8};
+async function loadReminderCfg(){ if(isLive()&&SUPA&&SUPA.token){ try{ const r=await sb("app_config?select=value&key=eq.reminder_config"); if(r&&r[0]&&r[0].value){ REMIND_CFG=Object.assign({before:[30,15],daily_overdue:true,overdue_hour:8},r[0].value); } }catch(e){} }
+  else { try{ const c=JSON.parse(localStorage.getItem('wr_remindcfg')||'null'); if(c) REMIND_CFG=c; }catch(e){} } }
+async function saveReminderCfgBtn(){
+  const before=(($('rc_before')||{}).value||'').split(',').map(x=>parseInt(x.trim(),10)).filter(x=>x>0);
+  REMIND_CFG={ before:before.length?before:[30,15], daily_overdue:!!($('rc_daily')||{}).checked, overdue_hour:Math.max(0,Math.min(23,+($('rc_hour')||{}).value||8)) };
+  localStorage.setItem('wr_remindcfg',JSON.stringify(REMIND_CFG));
+  if(isLive()&&SUPA&&SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'reminder_config',value:REMIND_CFG})}); }catch(e){ toast('Saved locally; DB sync failed: '+e.message,true); return; } }
+  toast('Reminder timing saved — before due: '+REMIND_CFG.before.join(', ')+' min'+(REMIND_CFG.daily_overdue?(' · daily overdue @ '+REMIND_CFG.overdue_hour+':00'):''));
 }
 async function saveNotifBtn(){ await saveNotif(); toast('Notification templates saved'); }
 async function resetNotif(){ if(!confirm('Reset all notification templates to defaults?'))return; NOTIF=Object.fromEntries(Object.entries(NOTIF_DEFAULTS).map(([k,v])=>[k,v.text])); await saveNotif(); renderNotif(); toast('Reset to defaults'); }
@@ -3025,6 +3046,7 @@ function openActivity(){
         <div><label>Time</label><input type="time" id="actTime" value="09:00"></div></div>
       <label>Notes (optional)</label><textarea id="actNotes" rows="2" placeholder="Any details…"></textarea>
     </div>
+    <div class="hint" style="margin-top:10px">The assignee is notified now, then reminded automatically <b>before the due time</b> and <b>daily while overdue</b> (Telegram + email) until it's marked done. Set the timing in Notifications → Reminder timing.</div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="saveActivity()">📅 Schedule</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
   $('overlay').classList.add('on');
 }
