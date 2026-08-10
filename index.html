@@ -302,6 +302,7 @@
 /* ============================ CONFIG / METADATA ============================ */
 const MODULES = [
   {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
+  {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc']},
   {id:'plan',   label:'Planning',    items:['mrp']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
@@ -345,7 +346,7 @@ const MODELS = {
       {n:'price_g_raw',l:'₱/g (raw)',t:'number'},{n:'price_g_processed',l:'₱/g (processed)',t:'number'},
       {n:'moving_avg_cost_kg',l:'Moving avg ₱/kg',t:'currency'},
       {n:'shelf_life_days',l:'Shelf life (d)',t:'number'},{n:'lead_time_days',l:'Lead time (d)',t:'number'},
-      {n:'par_g',l:'Par / week (g)',t:'number'},{n:'reorder_g',l:'Reorder (g)',t:'number'},{n:'min_order_kg',l:'Min order (kg)',t:'number'},
+      {n:'par_g',l:'Par / week (g)',t:'number'},{n:'reorder_g',l:'Reorder (g)',t:'number'},{n:'min_order_kg',l:'Min order (kg)',t:'number'},{n:'pack_size_kg',l:'Order pack (kg)',t:'number'},
       {n:'is_live_animal',l:'Live animal',t:'bool'},{n:'is_intermediate',l:'Intermediate',t:'bool'},
       {n:'is_supply',l:'Kitchen supply (not a food ingredient)',t:'bool'},
       {n:'uom',l:'Unit / pack',t:'text'},
@@ -353,7 +354,7 @@ const MODELS = {
     list:['name','processing_method','category','gently_cooked','cookable','raw_feeding','yield_pct','list_price_kg','supplier1'],
     groups:[['sku','name','ingredient_group','sort_order','raw_input','processing_method','category','uom','source','storage','yield_pct','costing_override','approved_alt'],
             ['list_price_kg','price_kg_processed','price_g_raw','price_g_processed','moving_avg_cost_kg','supplier1','supplier2','supplier'],
-            ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','lead_time_days','shelf_life_days','is_live_animal','is_intermediate','is_supply']],
+            ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','pack_size_kg','lead_time_days','shelf_life_days','is_live_animal','is_intermediate','is_supply']],
     tabs:[{l:'🥩 Item & yield', groups:[0]},{l:'₱ Costing', groups:[1]},{l:'⚙ Flags & stock', groups:[2]}],
     full:['notes'] },
 
@@ -389,21 +390,27 @@ const MODELS = {
       {n:'cost_sousvide',l:'Sous-vide',t:'bool'},{n:'cost_ecobag',l:'Ecobag',t:'bool'},{n:'cost_thermal',l:'Thermal pouch',t:'bool'},
       {n:'sticker_net',l:'Sticker — net weight',t:'text'},{n:'sticker_dimension',l:'Sticker — dimension',t:'text'},
       {n:'sticker_art_url',l:'Sticker — artwork link',t:'text'},{n:'sticker_supplier',l:'Sticker — supplier',t:'text'},
+      {n:'sticker_per_sheet',l:'Stickers per sheet/page',t:'number'},
       {n:'sticker_bulacan_on_hand',l:'Labels — Bulacan on hand',t:'number'},{n:'sticker_bulacan_par',l:'Labels — Bulacan PAR',t:'number'},
-      {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'}],
+      {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'},
+      {n:'is_custom',l:'Custom order product',t:'bool'}],
     list:['name','status','family','variant','pack_g','sell_price'],
     groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
             ['cost_debone','cost_butcher','cost_sousvide','cost_ecobag','cost_thermal'],
-            ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par']],
+            ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_per_sheet','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par']],
     tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'💰 Cost profile', groups:[3]},{l:'🏷️ Stickers', groups:[4]}],
     o2m:{ field:'bom', model:'bom_lines', fk:'product_sku', label:'Recipe (BOM)',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ingredient_category',l:'Category',t:'text'},{n:'usable_g',l:'Grams/pack',t:'number'},{n:'pct_of_pack',l:'% of pack',t:'number'},{n:'has_bones',l:'Bones',t:'text'},{n:'method_override',l:'Method',t:'text'}] } },
+
+  custom_orders:{ label:'Custom Orders', icon:'🧑‍🍳', name:'order_ref', pk:'order_ref', special:'customorders' },
+
+  ffcalc:{ label:'Fresh Food Calculator', icon:'🧮', special:'ffcalc' },
 
   purchase_orders:{ label:'Purchase Orders', icon:'🧾', name:'po_ref', pk:'po_ref',
     status:{f:'status',stages:['open','rfq','quoted','confirmed','received','cancelled']}, cancelable:true,
     fields:[
       {n:'po_ref',l:'PO Reference',t:'text'},{n:'supplier_name',l:'Vendor',t:'rel',rel:'suppliers'},
-      {n:'order_date',l:'Order date',t:'date'},{n:'status',l:'Status',t:'select',o:['open','rfq','quoted','confirmed','received','cancelled']},
+      {n:'order_date',l:'Order date',t:'date'},{n:'expected_delivery',l:'Expected delivery',t:'date'},{n:'status',l:'Status',t:'select',o:['open','rfq','quoted','confirmed','received','cancelled']},
       {n:'created_by',l:'Created by',t:'text'},
       {n:'discount',l:'Discount ₱',t:'currency'},{n:'delivery_fee',l:'Delivery fee ₱',t:'currency'},
       {n:'payment_status',l:'Payment',t:'text',ro:true}],
@@ -622,6 +629,7 @@ async function _tagSupplierTypes(supRows){
 function openModel(model){
   if(model==='home'){ state={model:'home',view:'home',search:'',groupBy:'',recId:null}; renderSide(); renderDashboard(); return; }
   const m=MODELS[model];
+  if(model==='custom_orders') _coView='list';   // always land on the orders list from the nav
   state={model,view:m.special?'special':(m.report?'report':'list'),search:'',groupBy:(DEFAULT_GROUP[model]||''),recId:null,sel:[]}; renderSide(); route();
 }
 // Deep-links used by clickable dashboard tiles & report rows.
@@ -634,6 +642,8 @@ function route(){
   const m=MODELS[state.model];
   if(m.special){ setCrumb(); syncHash();   // special views also get a unique URL (they return early below)
     if(m.special==='mrp') return renderMRP();
+    if(m.special==='customorders') return renderCustomOrders();
+    if(m.special==='ffcalc') return renderFFCalc();
     if(m.special==='prodplan') return renderProdPlan();
     if(m.special==='reporting') return renderReporting();
     if(m.special==='users') return renderUsers();
@@ -698,7 +708,8 @@ function controlPanel(){
     ${(BULK_CFG[state.model]&&state.view==='list')?`<button class="btn sec sm" onclick="openBulkEdit()">🗂 Bulk edit</button>`:''}
     <div class="sp"></div>
     ${chips}
-    <div class="search">🔎<input id="q" placeholder="Search ${m.label}..." value="${esc(state.search)}" oninput="onSearch(this.value)"></div>
+    <div class="search">🔎<input id="q" placeholder="Search ${m.label}${['products','ingredients'].includes(state.model)?' — type keywords…':'...'}" value="${esc(state.search)}" oninput="onSearch(this.value)"></div>
+    ${(FILTERS[state.model]&&state.view==='list')?`<button class="btn sec sm ${_advCount()?'on':''}" onclick="openFilters()">🎛 Filters${_advCount()?' ('+_advCount()+')':''}</button>`:''}
     ${state.view!=='report'?gb:''}
     ${m.archivable?`<button class="btn sec sm" onclick="state.showArchived=!state.showArchived;route()">${state.showArchived?'Hide archived':'Show archived'}</button>`:''}
     ${(state.model==='purchase_orders'&&state.view==='list')?`<button class="btn sec sm ${state._poWS!==false?'on':''}" onclick="state._poWS=${state._poWS!==false?'false':'true'};route()">${state._poWS!==false?'✕ Ungroup':'⑃ Week → Status'}</button>`:''}
@@ -706,6 +717,50 @@ function controlPanel(){
 }
 let searchTimer;
 function onSearch(v){ state.search=v; clearTimeout(searchTimer); searchTimer=setTimeout(()=>route(),250); }
+/* ---- Advanced search & filters (products / ingredients) ---- */
+const FILTERS={
+  products:[ {k:'group_1',l:'Group'},{k:'group_2',l:'Subgroup'},{k:'feeding_style',l:'Feeding style'},{k:'variant',l:'Variant'} ],
+  ingredients:[ {k:'_type',l:'Type'},{k:'ingredient_group',l:'Group'},{k:'category',l:'Category'},{k:'supplier',l:'Supplier'} ]
+};
+function ingType(r){ if(isSupplyItem(r)) return /sticker|label/i.test(String(r.category||'')+' '+String(r.name||''))?'Sticker':'Supply'; return r.is_intermediate?'Processed':'Raw'; }
+function _rowFacet(model,r,k){ if(k==='_type') return ingType(r); return r[k]; }
+function _searchText(model,r){ const parts= model==='products'? [r.name,r.sku,r.group_1,r.group_2,r.feeding_style,r.variant,r.barcode] : [r.name,r.sku,r.category,r.ingredient_group,r.raw_input,r.supplier,r.supplier1,r.supplier2]; return parts.filter(Boolean).join(' ').toLowerCase(); }
+function applyAdvFilter(model,rows){
+  const terms=(state.search||'').toLowerCase().split(/\s+/).filter(Boolean);
+  const f=state.filters||{};
+  return rows.filter(r=>{
+    const t=_searchText(model,r);
+    if(terms.length && !terms.every(w=>t.includes(w))) return false;
+    for(const key of Object.keys(f)){ const vals=f[key]; if(vals&&vals.length){ const rv=_rowFacet(model,r,key); if(!vals.includes(String(rv==null?'':rv))) return false; } }
+    return true;
+  });
+}
+function _advCount(){ const f=state.filters||{}; return Object.keys(f).reduce((s,k)=>s+((f[k]||[]).length),0); }
+async function openFilters(){
+  const model=state.model; const cfg=FILTERS[model]||[];
+  let rows=[]; try{ rows=await listForModel(model); }catch(e){}
+  // Ingredients list hides supplies; mirror that so facet values reflect the visible table.
+  const visible = model==='ingredients' ? rows.filter(r=>!isSupplyItem(r)) : rows;
+  const facets=cfg.map(c=>{ const set=new Map(); visible.forEach(r=>{ const v=_rowFacet(model,r,c.k); if(v!=null&&String(v).trim()!==''){ const key=String(v); set.set(key,(set.get(key)||0)+1); } }); return {...c, values:[...set.entries()].sort((a,b)=>a[0].localeCompare(b[0]))}; }).filter(fc=>fc.values.length>=2);
+  const f=state.filters||{};
+  const body=facets.length?facets.map(fc=>`<div style="margin:0 0 14px"><div class="mini" style="font-weight:700;margin-bottom:5px">${esc(fc.l)}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">${fc.values.map(([v,n])=>{ const on=(f[fc.k]||[]).map(String).includes(v);
+      return `<label style="display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid ${on?'var(--brand,#4e7a3e)':'var(--line)'};background:${on?'#eaf3ea':'#fff'};border-radius:14px;font-size:12px;cursor:pointer">
+        <input type="checkbox" class="advcb" data-k="${esc(fc.k)}" value="${esc(v)}" ${on?'checked':''} style="margin:0"> ${esc(v)} <span style="color:var(--muted)">${n}</span></label>`; }).join('')}</div></div>`).join('')
+    : '<div class="mini" style="color:var(--muted)">No filterable facets for this list.</div>';
+  $('modal').innerHTML=`<div style="min-width:340px;max-width:560px"><h3>🎛 Filter ${esc((MODELS[model]||{}).label||model)}</h3>
+    <p class="mini">Type one or more keywords (all must match: name, SKU, group, supplier…) and tick any facets to narrow the list.</p>
+    <div class="fld"><label>Keywords</label><div class="val"><input id="advq" value="${esc(state.search||'')}" placeholder="e.g. chicken raw" style="width:100%" onkeydown="if(event.key==='Enter')applyFilters()"></div></div>
+    <div id="advBody" style="margin-top:10px;max-height:360px;overflow:auto">${body}</div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="applyFilters()">Apply</button><button class="btn sec" onclick="clearFilters()">Clear all</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+function applyFilters(){
+  state.search=(($('advq')||{}).value||'').trim();
+  const f={}; document.querySelectorAll('#advBody input.advcb:checked').forEach(cb=>{ const k=cb.getAttribute('data-k'); (f[k]=f[k]||[]).push(cb.value); });
+  state.filters=f; closeModal(); route();
+}
+function clearFilters(){ state.filters={}; state.search=''; closeModal(); route(); }
 function setGroup(f){ state.groupBy=f; document.querySelectorAll('.drop').forEach(d=>d.classList.remove('open')); route(); }
 function toggleDrop(id){ const d=$(id); document.querySelectorAll('.drop').forEach(x=>{if(x!==d)x.classList.remove('open')}); d.classList.toggle('open'); }
 function switchView(v){ if(v==='form'){ openForm(null); return; } state.view=v; route(); }
@@ -718,9 +773,9 @@ async function renderList(){
   $('content').innerHTML='<div class="empty">Loading…</div>';
   let rows;
   try{
-    if((state.model==='ingredients'||state.model==='products') && await useSecure()){
-      rows=await listForModel(state.model);   // masked source has no server search — filter client-side
-      if(state.search){ const q=state.search.toLowerCase(); rows=rows.filter(r=>String(r[m.name]||'').toLowerCase().includes(q)); }
+    if(state.model==='ingredients'||state.model==='products'){
+      rows=await listForModel(state.model);   // fetch all — advanced multi-keyword search + facet filters run client-side
+      rows=applyAdvFilter(state.model, rows);
     } else { rows=await db.list(state.model,{search:state.search}); }
   }
   catch(e){ $('content').innerHTML=`<div class="empty">⚠ ${esc(e.message)}<br><br>Check your Supabase connection / RLS.</div>`; return; }
@@ -1267,7 +1322,7 @@ const BACKUP_TABLES=[
   // item reference data
   'item_bins','item_suppliers','item_yields','item_group_options','bom_lines','raw_material_pricing','sales_momentum',
   // sales orders
-  'sales_orders','order_lines',
+  'sales_orders','order_lines','custom_orders','custom_order_lines',
   // purchasing
   'purchase_orders','po_lines','po_payments','goods_receipts','gr_lines','supplier_invoices','invoice_lines',
   // production
@@ -1580,23 +1635,46 @@ function attAdd(){   // opens a real file picker; routes the file to Drive via n
   inp.onchange=()=>{ const f=inp.files&&inp.files[0]; if(f) uploadAttach(f); inp.remove(); };
   document.body.appendChild(inp); inp.click();
 }
+// Shrink a phone photo in the browser before upload: downscale to <=1600px and re-encode as
+// JPEG ~0.82. A 5 MB photo → ~300 KB, so the upload + n8n Drive write are far faster.
+// Non-images (PDF, etc.) and tiny images pass through untouched.
+function _compressImage(f, maxDim, quality){
+  return new Promise(resolve=>{
+    if(!/^image\/(jpe?g|png|webp)$/i.test(f.type) || f.size < 400*1024){ resolve({file:f, name:f.name, type:f.type}); return; }
+    const url=URL.createObjectURL(f); const img=new Image();
+    img.onload=()=>{ try{
+      const scale=Math.min(1, (maxDim||1600)/Math.max(img.width,img.height));
+      const w=Math.max(1,Math.round(img.width*scale)), h=Math.max(1,Math.round(img.height*scale));
+      const c=document.createElement('canvas'); c.width=w; c.height=h;
+      c.getContext('2d').drawImage(img,0,0,w,h);
+      URL.revokeObjectURL(url);
+      c.toBlob(b=>{ if(b && b.size < f.size){ const nm=f.name.replace(/\.(png|webp)$/i,'.jpg'); resolve({file:b, name:nm, type:'image/jpeg'}); }
+        else resolve({file:f, name:f.name, type:f.type}); }, 'image/jpeg', quality||0.82);
+    }catch(e){ URL.revokeObjectURL(url); resolve({file:f, name:f.name, type:f.type}); } };
+    img.onerror=()=>{ URL.revokeObjectURL(url); resolve({file:f, name:f.name, type:f.type}); };
+    img.src=url;
+  });
+}
 async function uploadAttach(f){
   if(f.size>15*1024*1024){ toast('File is over 15MB — upload it to Drive directly and paste the link.',true); return attLink(f.name); }
   const a=autoCfg('file_upload'); const m=MODELS[state.model]; const ref=formRec[m.pk];
   if(!a||!a.on||!a.url){ return attLink(f.name); }   // no automation set → fall back to pasting a link
+  toast('Preparing '+f.name+'…');
+  const c=await _compressImage(f, 1600, 0.82);        // shrink photos before encoding/uploading
   const reader=new FileReader();
   reader.onload=async()=>{ const b64=String(reader.result).split(',')[1]||'';
     await postWebhook(a.url,{ model:state.model, module:state.model, ref:String(ref),
-       filename:f.name, mimetype:f.type||'application/octet-stream', data:b64, by:CURRENT_USER });
-    const at=loadAttach(); at.push({name:f.name,pending:true});
+       filename:c.name, mimetype:c.type||'application/octet-stream', data:b64, by:CURRENT_USER });
+    const at=loadAttach(); at.push({name:c.name,pending:true});
     localStorage.setItem(attachKey(),JSON.stringify(at));
-    sysLog(state.model, ref, '📎 '+CURRENT_USER+' uploaded '+f.name+' → Drive');
-    toast('Uploading '+f.name+' to Drive… the link will appear shortly'); renderForm();
+    sysLog(state.model, ref, '📎 '+CURRENT_USER+' uploaded '+c.name+' → Drive');
+    toast('Uploading '+c.name+' to Drive… the link will appear shortly'); renderForm();
     // n8n uploads to Drive, makes a shareable link, and writes it into record_attachments;
-    // pull it back so the file shows as a clickable link (no manual paste needed).
-    setTimeout(()=>{ if(state.view==='form'&&formRec[m.pk]===ref) refreshAtts(); }, 9000);
+    // pull it back so the file shows as a clickable link. Poll a few times instead of one long wait.
+    let tries=0; const poll=()=>{ tries++; if(state.view==='form'&&formRec[m.pk]===ref){ refreshAtts(); if(tries<5) setTimeout(poll, 3000); } };
+    setTimeout(poll, 3000);
   };
-  reader.readAsDataURL(f);
+  reader.readAsDataURL(c.file);
 }
 function attLink(name){ const url=prompt('Paste a Drive link for '+(name||'this file')+':')||''; if(!url) return;
   const a=loadAttach(); a.push({name:name||url,url}); localStorage.setItem(attachKey(),JSON.stringify(a)); renderForm(); }
@@ -1951,6 +2029,20 @@ async function setBin(sku,loc,bin){ loc=loc||'bulacan'; sku=String(sku); (window
   try{ if(isLive()){ await sb('item_bins?on_conflict=sku,location_code',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({sku:sku,location_code:loc,bin:bin})}); }
     else { DEMO.item_bins=(DEMO.item_bins||[]).filter(x=>!(x.sku===sku&&(x.location_code||'bulacan')===loc)); DEMO.item_bins.push({sku:sku,location_code:loc,bin:bin}); } }catch(e){} }
 function countSetBin(sku,loc,v){ setBin(sku,loc,v); }
+/* ---- Order rounding: minimum-order + whole ordering-pack multiples (#4), sticker sheets (#5) ---- */
+// Round an order qty (kg) UP to satisfy the minimum order AND land on a whole ordering-pack multiple.
+function roundOrderKg(kg, minKg, packKg){
+  kg=+kg||0; if(kg<=0) return 0; minKg=+minKg||0; packKg=+packKg||0;
+  let out=kg;
+  if(packKg>0) out=Math.ceil((out-1e-9)/packKg)*packKg;                 // whole packs
+  if(minKg>0 && out<minKg-1e-9) out=packKg>0?Math.ceil((minKg-1e-9)/packKg)*packKg:minKg;   // meet min, still whole packs
+  return Math.round(out*1000)/1000;
+}
+// Stickers are bought per printed sheet/page — round pieces UP to full sheets.
+function stickerSheets(pieces, perSheet){ pieces=+pieces||0; perSheet=+perSheet||0;
+  if(perSheet>0 && pieces>0){ const sheets=Math.ceil((pieces-1e-9)/perSheet); return {sheets, pieces:sheets*perSheet}; }
+  return {sheets:0, pieces}; }
+
 async function renderMRP(){
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderMRP()">↻ Compute</button>
@@ -1968,7 +2060,7 @@ async function renderMRP(){
     <div class="repbar"><span>Plan (week of)</span><input type="date" value="${MRPDATE}" onchange="MRPDATE=this.value">
       <button class="btn sm sec" onclick="openMRPImport()">📥 Import (xlsx / csv)</button>
       <button class="btn sm sec" onclick="mrpImport()">⬆ Paste</button>
-      <button class="btn sm sec" onclick="mrpSheetSync()">☁ Sync from Google Sheets</button></div>
+      <button class="btn sm sec" onclick="mrpSheetSync()" title="Pulls the demand table: Google-Sheet sync + locked custom orders for this plan date">☁ Sync demand (sheets + custom orders)</button></div>
     <h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3><table><thead><tr><th>Product</th><th>SKU</th><th class="num">Demand</th></tr></thead><tbody>`;
   const _demRow=p=>`<tr><td>${esc(p.name)}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpDemand['${p.sku}']=+this.value||0;renderMRP()"></td></tr>`;
   hierGroups(prods,{g1:'group_1',g2:'group_2'}).forEach(G=>{
@@ -2023,7 +2115,8 @@ async function renderMRP(){
     const base = lowStock ? (rawNeed + buf + leadBuf - oh) : 0;   // target − on hand
     const subtotal=base + manualKg*1000;
     const moq=(+it.min_order_kg||0)*1000;
-    const final=subtotal<=0?0:(moq>0?Math.ceil(subtotal/moq)*moq:subtotal);
+    // round up to satisfy the min order AND land on a whole ordering-pack multiple (#4)
+    const final=subtotal<=0?0:roundOrderKg(subtotal/1000, +it.min_order_kg||0, +it.pack_size_kg||0)*1000;
     // default supplier: the ingredient's own default, else fall back to Supplier 1 from the master (ignore "to be determined")
     const _s1=(it.supplier1||'').trim(); const defSup=(it.supplier||'').trim() || (/to be determined/i.test(_s1)?'':_s1);
     plan.push({sku:it.sku,name:it.name,rawNeed,par:buf,leadBuf,lead,oh,base,endInv,lowStock,manualKg,moq,final,remark:(mrpRemarks[it.sku]||''),supplier:defSup,price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
@@ -2031,7 +2124,7 @@ async function renderMRP(){
   plan.sort((a,b)=>b.final-a.final);
   window._mrpPlan=plan;
   let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">2 · Replenishment plan</h3>
-    <div class="hint" style="margin:0 0 8px">Raws reorder when demand outstrips stock, or ending stock is low (≤ 5 kg). Order qty = weekly need + 5 kg buffer + lead-time buffer − on hand, then ± your manual adjustment, rounded up to the min order. (Custom PAR stocking is for the sellable products.) Processed forms (deboned, ground, liver…) are rolled up into the whole-dressed / raw ingredient you actually buy. Supplier = each item's default.</div>
+    <div class="hint" style="margin:0 0 8px">Raws reorder when demand outstrips stock, or ending stock is low (≤ 5 kg). Order qty = weekly need + 5 kg buffer + lead-time buffer − on hand, then ± your manual adjustment, rounded up to the <b>min order</b> and to a whole <b>ordering pack</b> (both set per ingredient in Master Data). (Custom PAR stocking is for the sellable products.) Processed forms (deboned, ground, liver…) are rolled up into the whole-dressed / raw ingredient you actually buy. Supplier = each item's default.</div>
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
     <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num">On hand</th><th class="num">End inv</th><th class="num">+Buffer</th><th class="num">+Lead</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
   const _rowHtml=(l)=>`<tr><td>${esc(l.name)}<div class="mini">yield ${(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)}%</div>${l.remark?`<div class="mini" style="color:var(--berry)">📝 ${esc(l.remark)}</div>`:''}</td>
@@ -2143,6 +2236,7 @@ async function genRef(type,opts){ opts=opts||{}; const dd=_mmddyyyy(opts.date);
   if(type==='PO'){ return {ref:'PO-'+dd+' V'+_p2(opts.xx||1)+'.'+_p2(opts.zz||1), dd}; }
   if(type==='DR'||type==='RR'){ const it=await nextSeq(type+'-'+dd); return {ref:type+'-'+dd+' V'+_p2(it), it, dd}; }
   if(type==='PR'){ const it=await nextSeq('PR-'+dd); return {ref:'PR-'+dd+' V'+_p2(it), it, dd}; }
+  if(type==='CO'){ const it=await nextSeq('CO-'+dd); return {ref:'CO-'+dd+' V'+_p2(it), it, dd}; }
   if(type==='WI'){ const sc=(opts.scope||'ALL').toUpperCase(); const it=await nextSeq('WI-'+dd+'-'+sc); return {ref:'WI-'+dd+' ['+sc+'].V'+_p2(it), it, dd}; }
   return {ref:''};
 }
@@ -2553,15 +2647,29 @@ async function openPOConfirm(){
   await _poLoadIngPrice();
   const anySupply=lines.some(l=>isSupplyItem((window._poIngPrice._map||{})[l.ingredient_sku]||{}));
   window._poAvail=lines.map(l=>{ const req=+l.ordered_kg||0; return (l.available_kg==null||l.available_kg==='')?req:(+l.available_kg||0); });
+  // Rounding basis per line — sticker sheets for a [STICKERS] PO, else min-order + pack multiples.
+  const _isStk=_isStickerPO(formRec); const _ingMap=(window._poIngPrice&&window._poIngPrice._map)||{};
+  let _prodMap={}; if(_isStk){ try{ (await db.list('products',{})).forEach(p=>_prodMap[p.sku]=p); }catch(e){} }
+  window._poRound=lines.map((l)=>{ if(_isStk){ return {kind:'sheet', per:+((_prodMap[l.ingredient_sku]||{}).sticker_per_sheet)||0}; }
+    const it=_ingMap[l.ingredient_sku]||{}; return {kind:'pack', min:+it.min_order_kg||0, pack:+it.pack_size_kg||0}; });
+  const _anyRound=window._poRound.some(r=>(r.kind==='sheet'&&r.per>0)||(r.kind==='pack'&&(r.min>0||r.pack>0)));
   $('modal').innerHTML=`<div><h3>Issue purchase order — ${esc(formRec.po_ref)}</h3>
     <p class="mini">Order qty is set from what the vendor said they can <b>supply</b> (capped at what you requested) — trim any line if you want less. The requested qty stays locked; this order qty becomes the basis for receiving &amp; payment. Issuing sends the final PO and generates its PDF.</p>
-    ${anySupply?`<div style="margin:0 0 8px"><button class="btn sec sm" onclick="poFillHistPrice('c')">₱ Fill sticker/supply prices from history</button></div>`:''}
-    <div style="max-height:360px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Requested kg</th><th class="num">Vendor avail kg</th><th class="num">Order qty kg</th><th class="num">₱/kg</th><th></th></tr></thead><tbody>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px">
+      ${anySupply?`<button class="btn sec sm" onclick="poFillHistPrice('c')">₱ Fill sticker/supply prices from history</button>`:''}
+      ${_anyRound?`<button class="btn sec sm" onclick="poRoundAll()">⤴ Round up to ${_isStk?'whole sheets':'pack / min order'}</button>`:''}
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin:0 0 10px;padding:8px 10px;background:#f6f8f4;border-radius:8px">
+      <label class="mini">Expected delivery date&nbsp;<input id="pc_eta" type="date" value="${esc(formRec.expected_delivery||'')}" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px"></label>
+      <span class="mini" style="color:var(--muted)">When the supplier says it will arrive. A reminder fires on the day.</span>
+    </div>
+    <div style="max-height:360px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Requested</th><th class="num">Vendor avail</th><th class="num">Order qty</th><th>${_isStk?'Sheets':'Pack / min'}</th><th class="num">₱/${_isStk?'sheet-pc':'kg'}</th><th></th></tr></thead><tbody>
     ${lines.map((l,i)=>{ const req=+l.ordered_kg||0; const avail=window._poAvail[i]; const fin=Math.min(req,avail);
       return `<tr><td>${esc(ingName(l.ingredient_sku))}</td>
       <td class="num" style="color:var(--muted)">${req}</td>
       <td class="num" style="color:var(--muted)">${avail}</td>
       <td><input id="pc_q${i}" type="number" step="any" value="${fin}" oninput="poConfirmFlag(${i})" style="width:90px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td id="pc_round${i}" class="mini" style="white-space:nowrap"></td>
       <td><input id="pc_p${i}" type="number" step="any" value="${+l.price_kg||0}" style="width:86px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
       <td id="pc_flag${i}" style="font-size:12px;white-space:nowrap"></td></tr>`; }).join('')}
     </tbody></table></div>
@@ -2569,11 +2677,23 @@ async function openPOConfirm(){
   $('overlay').classList.add('on');
   lines.forEach((l,i)=>poConfirmFlag(i));
 }
-// Live order-qty-vs-available check per line.
-function poConfirmFlag(i){ const q=+($('pc_q'+i)||{}).value||0; const a=(window._poAvail&&window._poAvail[i])||0; const e=$('pc_flag'+i); if(!e)return;
-  if(q>a+0.0001){ e.innerHTML='<span style="color:var(--danger)">⚠ over avail by '+(Math.round((q-a)*100)/100)+' kg</span>'; }
-  else if(q<a-0.0001){ e.innerHTML='<span style="color:var(--muted)">'+(Math.round((a-q)*100)/100)+' kg below avail</span>'; }
-  else { e.innerHTML='<span style="color:#4e7a3e">✓ full avail</span>'; } }
+// current pack/sheet target for a confirm line, computed against the live input value.
+function poRoundTarget(i){ const info=(window._poRound||[])[i]; if(!info) return null; const cur=+($('pc_q'+i)||{}).value||0;
+  if(info.kind==='sheet'){ const s=stickerSheets(cur,info.per); return {kind:'sheet',per:info.per,cur,target:s.pieces,sheets:s.sheets}; }
+  return {kind:'pack',min:info.min,pack:info.pack,cur,target:roundOrderKg(cur,info.min,info.pack)}; }
+function poApplyRound(i){ const t=poRoundTarget(i); const el=$('pc_q'+i); if(el&&t&&t.target>0){ el.value=t.target; poConfirmFlag(i); } }
+function poRoundAll(){ (window._poRound||[]).forEach((_,i)=>poApplyRound(i)); }
+// Live order-qty-vs-available check + pack/sheet suggestion per line.
+function poConfirmFlag(i){ const q=+($('pc_q'+i)||{}).value||0; const a=(window._poAvail&&window._poAvail[i])||0; const e=$('pc_flag'+i);
+  const rc=$('pc_round'+i); if(rc){ const t=poRoundTarget(i);
+    if(!t || (t.kind==='sheet'&&!(t.per>0)) || (t.kind==='pack'&&!(t.min>0||t.pack>0))) rc.innerHTML='<span style="color:var(--muted)">—</span>';
+    else if(t.kind==='sheet'){ const need=t.target>t.cur+1e-9; rc.innerHTML=`${t.sheets} sheet(s)=${t.target}pc ${need?`<a onclick="poApplyRound(${i})" style="cursor:pointer;color:#4e7a3e">⤴</a>`:'✓'}`; }
+    else { const need=t.target>t.cur+1e-9; rc.innerHTML=`${t.pack>0?('×'+t.pack):''}${t.min>0?(' min'+t.min):''} → ${t.target} ${need?`<a onclick="poApplyRound(${i})" style="cursor:pointer;color:#4e7a3e">⤴</a>`:'✓'}`; }
+  }
+  if(!e)return;
+  if(q>a+0.0001){ e.innerHTML='<span style="color:var(--danger)">⚠ over avail by '+(Math.round((q-a)*100)/100)+'</span>'; }
+  else if(q<a-0.0001){ e.innerHTML='<span style="color:var(--muted)">'+(Math.round((a-q)*100)/100)+' below</span>'; }
+  else { e.innerHTML='<span style="color:#4e7a3e">✓ full</span>'; } }
 async function poConfirmApply(){
   const lines=formChildren||[]; const changes=[]; const overs=[];
   const updated=lines.map((l,i)=>{ const nq=+($('pc_q'+i).value)||0, np=+($('pc_p'+i).value)||0; const req=+l.ordered_kg||0, av=(window._poAvail&&window._poAvail[i])||0, op=+l.price_kg||0;
@@ -2582,10 +2702,14 @@ async function poConfirmApply(){
     // Requested (ordered_kg) stays LOCKED; the issued order qty is stored in available_kg — the basis for receiving & payment.
     return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:req, available_kg:nq, price_kg:np, received_kg:l.received_kg||0}; });
   if(overs.length) changes.push('⚠ order exceeds availability: '+overs.join('; '));
+  const eta=($('pc_eta')||{}).value||'';
   try{
     await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
     formChildren=updated; formRec.status='confirmed';
-    await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'confirmed'});
+    if(eta) formRec.expected_delivery=eta;
+    const _upd={status:'confirmed'}; if(eta) _upd.expected_delivery=eta;
+    await db.update('purchase_orders','po_ref',formRec.po_ref,_upd);
+    if(eta) changes.push('expected delivery '+eta);
     sysLog('purchase_orders',formRec.po_ref, (changes.length?('🧾 PO issued with adjustments — '+changes.join('; ')):'🧾 PO issued from quotation — qty = vendor availability')+' by '+CURRENT_USER);
     notifyRecordDone('purchase_orders', formRec.po_ref);   // issued → generate PDF → Drive → notify
     closeModal(); toast('PO issued — preparing the Send PO draft with the PDF link…'+(changes.length?' · '+changes.length+' change(s) logged':''));
@@ -2681,68 +2805,96 @@ async function openPOReceive(){
   let lines=formChildren||[];
   if(!lines.length){ try{ lines=await db.children(MODELS.purchase_orders.o2m, formRec.po_ref); formChildren=lines; }catch(e){} }
   if(!lines.length){ toast('No order lines to receive',true); return; }
-  window._poOrd=lines.map(l=>poOrderQty(l));    // basis = order qty (vendor avail), not the locked request
+  window._poOrd=lines.map(l=>poOrderQty(l));    // order qty (vendor avail)
+  window._poAlready=lines.map(l=>+l.received_kg||0);   // received so far (accumulated across batches)
   await loadBins();
   const _im={}; try{ (await listIngredients()).forEach(x=>_im[x.sku]=x); }catch(e){}
   const _expDefault=(sku)=>{ const it=_im[sku]||{}; const d=+it.shelf_life_days||0; return d>0?addDaysISO(todayISO(),d):''; };
-  // Perishable = a real food ingredient, or a supply that actually carries a shelf life. Stickers &
-  // non-perishable supplies get no expiry field.
   const _perish=(sku)=>{ const it=_im[sku]||{}; return (+it.shelf_life_days>0) || !isSupplyItem(it); };
   window._rcN=lines.length;
+  const anyPrior=lines.some(l=>(+l.received_kg||0)>0);
   $('modal').innerHTML=`<h3>Receive order — ${esc(formRec.po_ref)}</h3>
-    <p>Enter the <b>quantity actually received</b> per line, the <b>bin</b>, and (for perishables) the <b>expiry date</b>. Only what you enter posts to Bulacan stock. A <b>short</b> delivery is received at what arrived; the shortfall is flagged, logged, and raised as a variance.</p>
+    <p>Deliveries can arrive in <b>batches</b>. Enter the qty <b>received now</b> per line; it adds to what's already received. Only what you enter posts to Bulacan stock. Tick <b>Final delivery</b> to close the PO (any shortfall is then flagged as a variance).${anyPrior?' <b>This PO was already partly received.</b>':''}</p>
     <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin:0 0 10px;padding:8px 10px;background:#f6f8f4;border-radius:8px">
       <label class="mini">Set bin for all&nbsp;<input id="rc_binAll" placeholder="e.g. A-1" style="width:90px;padding:4px;border:1px solid var(--line);border-radius:5px"></label>
       <label class="mini">Set expiry for all&nbsp;<input id="rc_expAll" type="date" style="padding:4px;border:1px solid var(--line);border-radius:5px"></label>
       <button class="btn sec sm" onclick="rcFillAll()">↧ Apply to all lines</button>
-      <span class="mini" style="color:var(--muted)">handy when stickers &amp; supplies share one shelf</span>
     </div>
-    <div style="max-height:320px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Order qty</th><th class="num">Received</th><th>Bin</th><th>Expiry</th><th></th></tr></thead><tbody>
-    ${lines.map((l,i)=>`<tr><td>${esc(ingName(l.ingredient_sku))}</td>
-      <td class="num" style="color:var(--muted)">${poOrderQty(l)}</td>
-      <td><input id="rc_q${i}" type="number" step="any" value="${poOrderQty(l)}" oninput="rcFlag(${i})" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
-      <td><input id="rc_bin${i}" value="${esc(binOf(l.ingredient_sku,'bulacan'))}" placeholder="bin" style="width:76px;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
-      <td>${_perish(l.ingredient_sku)?`<input id="rc_exp${i}" type="date" value="${esc(_expDefault(l.ingredient_sku))}" style="padding:5px;border:1px solid var(--line);border-radius:5px" title="expiry date (optional)">`:'<span class="mini" style="color:var(--muted)" title="non-perishable — no expiry">—</span>'}</td>
-      <td id="rc_flag${i}" style="font-size:12px;white-space:nowrap"></td></tr>`).join('')}
+    <div style="max-height:300px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Order</th><th class="num">Already</th><th class="num">Receive now</th><th>Bin</th><th>Expiry</th><th></th></tr></thead><tbody>
+    ${lines.map((l,i)=>{ const oq=poOrderQty(l); const already=+l.received_kg||0; const remaining=Math.max(0,Math.round((oq-already)*1000)/1000);
+      return `<tr><td>${esc(ingName(l.ingredient_sku))}</td>
+      <td class="num" style="color:var(--muted)">${oq}</td>
+      <td class="num" style="color:var(--muted)">${already||'—'}</td>
+      <td><input id="rc_q${i}" type="number" step="any" value="${remaining}" oninput="rcFlag(${i})" style="width:92px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td><input id="rc_bin${i}" value="${esc(binOf(l.ingredient_sku,'bulacan'))}" placeholder="bin" style="width:72px;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td>${_perish(l.ingredient_sku)?`<input id="rc_exp${i}" type="date" value="${esc(_expDefault(l.ingredient_sku))}" style="padding:5px;border:1px solid var(--line);border-radius:5px" title="expiry date (optional)">`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
+      <td id="rc_flag${i}" style="font-size:12px;white-space:nowrap"></td></tr>`; }).join('')}
     </tbody></table></div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="poReceiveApply()">📦 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
+    <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px"><input type="checkbox" id="rc_final"> <b>Final delivery</b> — close this PO (received). Leave unticked if more batches are coming.</label>
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" onclick="poReceiveApply()">📦 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
   $('overlay').classList.add('on');
   lines.forEach((l,i)=>rcFlag(i));
 }
-// Fill every line's bin and/or expiry from the "set for all" boxes (supplies & stickers usually share one shelf).
 function rcFillAll(){ const bin=($('rc_binAll')||{}).value||''; const exp=($('rc_expAll')||{}).value||''; const n=window._rcN||0;
   for(let i=0;i<n;i++){ if(bin){ const b=$('rc_bin'+i); if(b) b.value=bin; } if(exp){ const e=$('rc_exp'+i); if(e) e.value=exp; } }
   toast('Applied to all lines'+(bin?' · bin '+bin:'')+(exp?' · expiry '+exp:'')); }
-// Live received-vs-order-qty check per line (short deliveries close at what arrived).
-function rcFlag(i){ const r=+($('rc_q'+i)||{}).value||0; const o=(window._poOrd&&window._poOrd[i])||0; const e=$('rc_flag'+i); if(!e)return;
-  if(r<o-0.0001){ e.innerHTML='<span style="color:var(--danger)">⚠ short '+(Math.round((o-r)*100)/100)+' kg</span>'; }
-  else if(r>o+0.0001){ e.innerHTML='<span style="color:var(--muted)">+'+(Math.round((r-o)*100)/100)+' kg over</span>'; }
-  else { e.innerHTML='<span style="color:#4e7a3e">✓ full</span>'; } }
+// Live check: total (already + receive now) vs order qty.
+function rcFlag(i){ const now=+($('rc_q'+i)||{}).value||0; const o=(window._poOrd&&window._poOrd[i])||0; const already=(window._poAlready&&window._poAlready[i])||0; const tot=now+already; const e=$('rc_flag'+i); if(!e)return;
+  if(tot<o-0.0001){ e.innerHTML='<span style="color:var(--earth,#b5762a)">'+(Math.round((o-tot)*100)/100)+' kg to go</span>'; }
+  else if(tot>o+0.0001){ e.innerHTML='<span style="color:var(--muted)">+'+(Math.round((tot-o)*100)/100)+' kg over</span>'; }
+  else { e.innerHTML='<span style="color:#4e7a3e">✓ complete</span>'; } }
 async function poReceiveApply(){
   if(_postLock){ toast('Still posting — please wait…',true); return; } _postLock=true;
   try{ await _poReceiveApply(); } finally{ _postLock=false; }
 }
+// Post ONLY this batch's delta to the ledger (unique per-batch note) and roll moving-avg cost by the delta.
+async function postReceiptDelta(po, deltas){
+  const secure=await useSecure();
+  const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i); let n=0, costErr=0;
+  const stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.ref_sku&&s.location_code==='bulacan'&&s.kind==='ingredient') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
+  const batchNote='PO '+po.po_ref+' R'+Date.now();   // unique per batch → no double-post guard needed
+  for(const d of deltas){ const recvKg=+d.recvKg||0; if(!(recvKg>0)) continue;
+    const isSup=/(supply|supplement)/i.test((im[d.ingredient_sku]||{}).category||'');
+    const g=isSup?recvKg:recvKg*1000, priceKg=Math.max(0,+d.priceKg||0);
+    try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:d.ingredient_sku,location_code:'bulacan',qty:g,unit_cost:(isSup?priceKg:priceKg/1000),movement_type:'receipt',note:batchNote,expiry_date:d.expiry||null}); }catch(e){ continue; }
+    if(isSup){ n++; continue; }
+    if(secure){ try{ await sb('rpc/wr_roll_cost',{method:'POST',body:JSON.stringify({p_sku:d.ingredient_sku,p_recv_kg:recvKg,p_price_kg:priceKg})}); }catch(e){ costErr++; } }
+    else { const it=im[d.ingredient_sku]; if(it){ const ohG=Math.max(0,stock[d.ingredient_sku]||0), oldAvg=+it.moving_avg_cost_kg||priceKg;
+      const newAvg=(ohG+g)>0?((ohG*oldAvg+g*priceKg)/(ohG+g)):priceKg;
+      try{ await db.update('ingredients','sku',d.ingredient_sku,{moving_avg_cost_kg:Math.round(newAvg*100)/100,last_price_kg:priceKg}); stock[d.ingredient_sku]=ohG+g; }catch(e){ costErr++; } } }
+    n++; }
+  return {n,costErr};
+}
 async function _poReceiveApply(){
-  const lines=formChildren||[]; const notes=[]; let shortG=0; const _vars=[];   // _vars → variance_log (Check 1 · PO fulfilment)
-  const updated=lines.map((l,i)=>{ const rq=+(($('rc_q'+i)||{}).value)||0; const oq=poOrderQty(l); const pr=+l.price_kg||0;
-    if(rq<oq-0.0001){ const g=oq-rq; notes.push(ingName(l.ingredient_sku)+': order '+oq+' → received '+rq+'kg (short '+(Math.round(g*100)/100)+')'); shortG+=g;
-      _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:rq,gap_qty:-g,gap_value:Math.round(g*pr*100)/100,location:'bulacan',responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+rq+' (short)'}); }
-    else if(rq>oq+0.0001){ const g=rq-oq; notes.push(ingName(l.ingredient_sku)+': order '+oq+' → received '+rq+'kg (over '+(Math.round(g*100)/100)+')');
-      _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:rq,gap_qty:g,gap_value:Math.round(g*pr*100)/100,location:'bulacan',responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+rq+' (over)'}); }
-    return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:l.available_kg, price_kg:l.price_kg, received_kg:rq}; });
-  if(shortG>0.0001) notes.push('⚠ short delivery — '+(Math.round(shortG*100)/100)+' kg not delivered (raise a new PO to fulfil the balance)');
-  window._recvExpiry={};
-  lines.forEach((l,i)=>{ const bv=($('rc_bin'+i)||{}).value; if(bv!==undefined&&bv!==null) setBin(l.ingredient_sku,'bulacan',bv);
-    const ev=($('rc_exp'+i)||{}).value; if(ev) window._recvExpiry[l.ingredient_sku]=ev; });
+  const lines=formChildren||[]; const notes=[]; const _vars=[]; const deltas=[]; window._recvExpiry={};
+  const isFinal=!!($('rc_final')||{}).checked;
+  let anyNow=false;
+  const updated=lines.map((l,i)=>{ const now=+(($('rc_q'+i)||{}).value)||0; const already=+l.received_kg||0; const oq=poOrderQty(l); const pr=+l.price_kg||0;
+    if(now>0){ anyNow=true; const ev=($('rc_exp'+i)||{}).value||null; deltas.push({ingredient_sku:l.ingredient_sku, recvKg:now, priceKg:pr, expiry:ev}); }
+    const bv=($('rc_bin'+i)||{}).value; if(bv!==undefined&&bv!==null) setBin(l.ingredient_sku,'bulacan',bv);
+    const total=Math.round((already+now)*1000)/1000;
+    if(isFinal){ const g=Math.round((oq-total)*1000)/1000;
+      if(g>0.0001){ notes.push(ingName(l.ingredient_sku)+': ordered '+oq+' → received '+total+'kg (short '+g+')');
+        _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:total,gap_qty:-g,gap_value:Math.round(g*pr*100)/100,location:'bulacan',responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+total+' (short, PO closed)'}); }
+      else if(g< -0.0001){ notes.push(ingName(l.ingredient_sku)+': ordered '+oq+' → received '+total+'kg (over '+(-g)+')');
+        _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:total,gap_qty:-g,gap_value:Math.round(-g*pr*100)/100,location:'bulacan',responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+total+' (over)'}); } }
+    return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:l.available_kg, price_kg:l.price_kg, received_kg:total}; });
+  if(!anyNow && !isFinal){ toast('Enter a quantity received, or tick Final delivery to close',true); return; }
+  // fully received on every line?
+  const complete=updated.every(u=>(+u.received_kg||0) >= poOrderQty(u)-0.0001);
+  const willClose = isFinal || complete;
   try{
     await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
-    formChildren=updated; formRec.status='received';
-    await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'received'});
-    sysLog('purchase_orders',formRec.po_ref, '📦 Received by '+CURRENT_USER+(notes.length?(' — '+notes.join('; ')):' — full quantities received'));
-    for(const v of _vars){ try{ await db.create('variance_log',v); }catch(e){} }   // log receiving variances (ordered vs received)
-    await postReceipt(formRec);
-    notifyRecordDone('purchase_orders', formRec.po_ref);   // PDF → Drive → notify
+    formChildren=updated;
+    if(deltas.length){ const res=await postReceiptDelta(formRec, deltas); }
+    formRec.status = willClose ? 'received' : 'confirmed';
+    await db.update('purchase_orders','po_ref',formRec.po_ref,{status:formRec.status});
+    const batchQty=deltas.reduce((s,d)=>s+(+d.recvKg||0),0);
+    sysLog('purchase_orders',formRec.po_ref, '📦 '+(willClose?'Final receipt':'Batch receipt')+' by '+CURRENT_USER+' — '+Math.round(batchQty*100)/100+' unit(s) this batch'+(willClose?' · PO closed':' · still open for more')+(notes.length?(' — '+notes.join('; ')):''));
+    for(const v of _vars){ try{ await db.create('variance_log',v); }catch(e){} }
+    if(willClose) notifyRecordDone('purchase_orders', formRec.po_ref);   // PDF → Drive → notify only when closed
     closeModal(); renderForm();
+    toast(willClose?'PO received & closed':'Batch received — PO still open for the next delivery');
   }catch(e){ toast(e.message,true); }
 }
 
@@ -3187,17 +3339,229 @@ document.addEventListener('keydown',e=>{
   else if(e.key==='Enter') cmdRun(cmdSel);
 });
 
+/* ==================== Custom Orders (CS quote → lock → product+BOM+demand) ==================== */
+let coRec={}, coLines=[]; let _coView='list'; let _coProd={}, _coIng=[];
+function _coHash(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))|0; } return (h>>>0).toString(36); }
+function _coRecipeKey(recipe, packG){ const norm=(recipe||[]).filter(r=>r.ingredient_sku&&+r.grams>0).map(r=>r.ingredient_sku+':'+(+r.grams)).sort().join('|'); return _coHash(norm+'@'+(+packG||0)); }
+function _coLineTotal(l){ return Math.round((+l.packs||0)*(+l.unit_price||0)*100)/100; }
+function _coSubtotal(){ return coLines.reduce((s,l)=>s+_coLineTotal(l),0); }
+function _coTotal(){ return Math.max(0,_coSubtotal()-(+coRec.discount||0)+(+coRec.delivery_fee||0)); }
+// Add/accumulate a demand row for a product SKU on a plan date (feeds Demand/MRP).
+async function coAddDemand(sku, qty, planDate){ qty=+qty||0; if(!(qty>0)||!sku) return;
+  if(isLive()){ try{ const ex=await sb('demand?select=id,qty&sku=eq.'+encodeURIComponent(sku)+'&plan_date=eq.'+encodeURIComponent(planDate));
+      if(ex&&ex.length){ await sb('demand?id=eq.'+encodeURIComponent(ex[0].id),{method:'PATCH',body:JSON.stringify({qty:(+ex[0].qty||0)+qty})}); }
+      else { await sb('demand',{method:'POST',prefer:'return=minimal',body:JSON.stringify({sku,qty,plan_date:planDate})}); } }catch(e){} }
+  else { DEMO.demand=DEMO.demand||[]; const ex=DEMO.demand.find(d=>d.sku===sku&&String(d.plan_date||'')===String(planDate||'')); if(ex) ex.qty=(+ex.qty||0)+qty; else DEMO.demand.push({sku,qty,plan_date:planDate}); } }
+
+async function renderCustomOrders(){
+  try{ (await db.list('products',{})).forEach(p=>_coProd[p.sku]=p); }catch(e){}
+  try{ _coIng=(await listIngredients()).filter(i=>!isSupplyItem(i)); }catch(e){ _coIng=[]; }
+  if(_coView==='form') return drawCOForm();
+  $('cp').innerHTML=`<div class="title">Custom Orders <span onclick="openKB('custom_orders')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <button class="btn" onclick="coNew()">＋ New quote</button>
+    <div class="sp"></div><span style="color:var(--muted)">CS quotes → lock → sellable SKU + BOM + demand</span>`;
+  let orders=[]; try{ orders=await db.list('custom_orders',{}); }catch(e){}
+  let lc={}, lt={}; try{ (await db.list('custom_order_lines',{})).forEach(l=>{ lc[l.order_ref]=(lc[l.order_ref]||0)+1; lt[l.order_ref]=(lt[l.order_ref]||0)+(+l.packs||0)*(+l.unit_price||0); }); }catch(e){}
+  orders.forEach(o=>{ o._total=Math.max(0,(lt[o.order_ref]||0)-(+o.discount||0)+(+o.delivery_fee||0)); });
+  orders.sort((a,b)=>String(b.order_date||'').localeCompare(String(a.order_date||''))||String(b.order_ref).localeCompare(String(a.order_ref)));
+  const badge=s=>`<span class="badge b-${s==='confirmed'?'confirmed':(s==='fulfilled'?'received':(s==='cancelled'?'cancelled':'open'))}">${esc(s||'quote')}</span>`;
+  let rows=orders.map(o=>`<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.needed_date||'—')}</td><td>${badge(o.status)}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td></tr>`).join('');
+  $('content').innerHTML=`<div class="repcard"><div class="hint" style="margin:0 0 8px">Create a quote, add standard products and/or custom recipes, edit freely. <b>Lock</b> turns it into a confirmed order — each custom recipe becomes its own sellable SKU + BOM, and the ordered packs flow into <b>Demand/MRP</b> for the needed week (pull them in MRP with ☁ Sync).</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th>Needed</th><th>Status</th><th class="num">Lines</th><th class="num">Total</th></tr></thead>
+    <tbody>${rows||'<tr><td colspan="6" class="empty">No custom orders yet — click ＋ New quote.</td></tr>'}</tbody></table></div>
+    <div class="pager">${orders.length} order(s)</div></div>`;
+}
+function _coOrderTotal(o){ return o&&o._total!=null?o._total:0; }
+function coNew(){ coRec={order_ref:'', customer_name:'', contact:'', order_date:todayISO(), needed_date:todayISO(), status:'quote', notes:'', discount:0, delivery_fee:0, created_by:CURRENT_USER}; coLines=[]; _coView='form'; drawCOForm(); }
+async function coOpen(refEnc){ const ref=decodeURIComponent(refEnc);
+  try{ const rows=await db.list('custom_orders',{}); coRec={...(rows.find(r=>r.order_ref===ref)||{})}; }catch(e){ coRec={}; }
+  try{ coLines=(await db.children({model:'custom_order_lines',fk:'order_ref'}, ref)).map(l=>({...l, recipe:(typeof l.recipe==='string'?_coParse(l.recipe):(l.recipe||[]))})); }catch(e){ coLines=[]; }
+  _coView='form'; drawCOForm(); }
+function _coParse(s){ try{ return JSON.parse(s)||[]; }catch(e){ return []; } }
+function coBackToList(){ _coView='list'; renderCustomOrders(); }
+function _coProdOptions(sel){ const list=Object.values(_coProd).filter(p=>p.active!==false && !p.is_custom);
+  return hierGroups(list,{g1:'group_1',g2:'group_2'}).map(G=>G.subs.map(S=>`<optgroup label="${esc(G.g1+' › '+(S.g2||''))}">`+S.items.map(p=>`<option value="${esc(p.sku)}" ${sel===p.sku?'selected':''}>${esc(p.name||p.sku)}</option>`).join('')+`</optgroup>`).join('')).join(''); }
+function drawCOForm(){
+  const locked = coRec.status==='confirmed'||coRec.status==='fulfilled'||coRec.status==='cancelled';
+  $('crumb').innerHTML=`<b>Custom Orders</b> / ${esc(coRec.order_ref||'New quote')}`;
+  $('cp').innerHTML=`<div class="title">Custom Orders</div>
+    ${!locked?`<button class="btn sec" onclick="coSave()">💾 Save quote</button><button class="wfbtn" onclick="coLock()">🔒 Lock order</button>`:''}
+    ${coRec.status==='confirmed'?`<button class="btn sec" onclick="coFulfil()">✓ Mark fulfilled</button>`:''}
+    ${!locked&&coRec.order_ref?`<button class="btn sec" onclick="coCancel()">✕ Cancel</button>`:''}
+    <button class="btn sec" onclick="coBackToList()">← Orders</button>
+    <div class="sp"></div><span style="color:var(--muted)">${locked?'locked — '+esc(coRec.status):'quote — editable'}</span>`;
+  const st=coRec.status||'quote';
+  const badge=`<span class="badge b-${st==='confirmed'?'confirmed':(st==='fulfilled'?'received':(st==='cancelled'?'cancelled':'open'))}">${esc(st)}</span>`;
+  const dis=locked?'disabled':'';
+  const lineRows=coLines.map((l,i)=>{
+    const isCustom=l.line_type==='custom';
+    const recipeN=(l.recipe||[]).filter(r=>r.ingredient_sku&&+r.grams>0).length;
+    const recipeG=(l.recipe||[]).reduce((s,r)=>s+(+r.grams||0),0);
+    const nameCell = isCustom
+      ? `<input value="${esc(l.description||'')}" ${dis} placeholder="recipe name" oninput="coLines[${i}].description=this.value" style="width:150px">
+         <div class="mini">${recipeN} ingredient(s) · ${Math.round(recipeG)} g/pack ${locked?'':`<a onclick="coEditRecipe(${i})" style="cursor:pointer;color:#4e7a3e">🧪 edit recipe</a>`}${l.product_sku?` · <code>${esc(l.product_sku)}</code>`:''}</div>`
+      : `<select ${dis} onchange="coSetProduct(${i},this.value)" style="width:200px"><option value="">— pick product —</option>${_coProdOptions(l.product_sku)}</select>${l.product_sku?`<div class="mini"><code>${esc(l.product_sku)}</code></div>`:''}`;
+    return `<tr><td>${isCustom?'🧪 custom':'📦 product'}</td><td>${nameCell}</td>
+      <td><input type="number" ${dis} value="${l.pack_size_g||''}" oninput="coLines[${i}].pack_size_g=+this.value||0" style="width:74px;text-align:right" ${isCustom?'':'title="from product"'}></td>
+      <td><input type="number" ${dis} value="${l.packs||''}" oninput="coLines[${i}].packs=+this.value||0;coToticker()" style="width:64px;text-align:right"></td>
+      <td><input type="number" ${dis} value="${l.unit_price||''}" oninput="coLines[${i}].unit_price=+this.value||0;coToticker()" style="width:80px;text-align:right"></td>
+      <td class="num" id="coLT${i}">${wpeso(_coLineTotal(l))}</td>
+      <td>${locked?'':`<span style="cursor:pointer;color:var(--danger)" onclick="coDelLine(${i})">✕</span>`}</td></tr>`;
+  }).join('');
+  $('content').innerHTML=`<div class="formwrap"><div class="sheet">
+    <div class="hd"><input class="ttl" value="${esc(coRec.order_ref||'')}" disabled placeholder="(reference set on save)"><div class="sub">Custom order ${badge}</div></div>
+    <div class="groups">
+      <div><div class="fld"><label>Customer</label><div class="val"><input ${dis} value="${esc(coRec.customer_name||'')}" oninput="coRec.customer_name=this.value" style="width:100%"></div></div>
+        <div class="fld"><label>Contact</label><div class="val"><input ${dis} value="${esc(coRec.contact||'')}" oninput="coRec.contact=this.value" style="width:100%"></div></div></div>
+      <div><div class="fld"><label>Order date</label><div class="val"><input type="date" ${dis} value="${esc(coRec.order_date||'')}" oninput="coRec.order_date=this.value"></div></div>
+        <div class="fld"><label>Needed (demand week)</label><div class="val"><input type="date" ${dis} value="${esc(coRec.needed_date||'')}" oninput="coRec.needed_date=this.value"></div></div></div>
+    </div>
+    <div class="notebook"><div class="nbtabs"><button class="on">Order lines (${coLines.length})</button></div>
+      <div class="lines"><table><thead><tr><th>Type</th><th>Item / recipe</th><th class="num">Pack g</th><th class="num">Packs</th><th class="num">₱/pack</th><th class="num">Line ₱</th><th></th></tr></thead>
+      <tbody>${lineRows||'<tr><td colspan="7" class="empty">Add a product or a custom recipe below.</td></tr>'}</tbody></table></div>
+      ${locked?'':`<div style="margin-top:8px;display:flex;gap:8px"><span class="addrow" onclick="coAddProduct()">＋ Add product</span><span class="addrow" onclick="coAddCustom()">＋ Add custom recipe</span></div>`}
+    </div>
+    <div class="groups" style="margin-top:10px">
+      <div><div class="fld"><label>Discount ₱</label><div class="val"><input type="number" ${dis} value="${coRec.discount||''}" oninput="coRec.discount=+this.value||0;coToticker()" style="width:120px"></div></div>
+        <div class="fld"><label>Delivery ₱</label><div class="val"><input type="number" ${dis} value="${coRec.delivery_fee||''}" oninput="coRec.delivery_fee=+this.value||0;coToticker()" style="width:120px"></div></div></div>
+      <div><div class="fld"><label>Notes</label><div class="val"><input ${dis} value="${esc(coRec.notes||'')}" oninput="coRec.notes=this.value" style="width:100%"></div></div>
+        <div style="text-align:right;margin-top:8px;font-size:15px">Subtotal <b id="coSub">${wpeso(_coSubtotal())}</b> · <b>Total <span id="coTot">${wpeso(_coTotal())}</span></b></div></div>
+    </div>
+  </div></div>`;
+}
+function coToticker(){ coLines.forEach((l,i)=>{ const el=$('coLT'+i); if(el) el.textContent=wpeso(_coLineTotal(l)); }); const s=$('coSub'); if(s)s.textContent=wpeso(_coSubtotal()); const t=$('coTot'); if(t)t.textContent=wpeso(_coTotal()); }
+function coAddProduct(){ coLines.push({line_type:'product', product_sku:'', description:'', recipe:[], pack_size_g:0, packs:1, unit_price:0}); drawCOForm(); }
+function coAddCustom(){ coLines.push({line_type:'custom', product_sku:'', description:'', recipe:[{ingredient_sku:'',grams:0}], pack_size_g:500, packs:1, unit_price:0}); drawCOForm(); }
+function coDelLine(i){ coLines.splice(i,1); drawCOForm(); }
+function coSetProduct(i,sku){ const l=coLines[i]; l.product_sku=sku; const p=_coProd[sku]; if(p){ l.description=p.name||sku; l.pack_size_g=+p.pack_g||l.pack_size_g||0; if(!(+l.unit_price>0)) l.unit_price=+p.sell_price||0; } drawCOForm(); }
+// ---- Recipe editor for a custom line (add/remove counter before saving) ----
+let _coEditIdx=-1, _coEditRows=[], _coEditBase=0;
+function coEditRecipe(i){ _coEditIdx=i; const l=coLines[i]; _coEditRows=(l.recipe||[]).map(r=>({...r})); if(!_coEditRows.length)_coEditRows=[{ingredient_sku:'',grams:0}];
+  _coEditBase=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; drawCoRecipe(); }
+function _coIngOptions(sel){ return hierGroups(_coIng,{g1:'ingredient_group'}).map(G=>`<optgroup label="${esc(G.g1)}">`+G.all.map(it=>`<option value="${esc(it.sku)}" ${sel===it.sku?'selected':''}>${esc(it.name)}</option>`).join('')+`</optgroup>`).join(''); }
+function drawCoRecipe(){
+  const now=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; const added=Math.max(0,now-_coEditBase), removed=Math.max(0,_coEditBase-now);
+  const totG=_coEditRows.reduce((s,r)=>s+(+r.grams||0),0); const packG=+coLines[_coEditIdx].pack_size_g||0;
+  const rows=_coEditRows.map((r,j)=>`<tr><td><select onchange="_coEditRows[${j}].ingredient_sku=this.value;drawCoRecipe()" style="width:210px"><option value="">— ingredient —</option>${_coIngOptions(r.ingredient_sku)}</select></td>
+    <td><input type="number" step="any" value="${r.grams||''}" oninput="_coEditRows[${j}].grams=+this.value||0;drawCoRecipe()" style="width:84px;text-align:right"> g</td>
+    <td><span style="cursor:pointer;color:var(--danger)" onclick="_coEditRows.splice(${j},1);drawCoRecipe()">✕</span></td></tr>`).join('');
+  $('modal').innerHTML=`<div><h3>🧪 Custom recipe — ${esc(coLines[_coEditIdx].description||'')||'(unnamed)'}</h3>
+    <p class="mini">Enter each ingredient and grams <b>per pack</b>. This becomes the sellable SKU's BOM when the order is locked. Pack size: <b>${packG||'—'} g</b>.</p>
+    <div style="max-height:320px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">g / pack</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="margin-top:8px"><span class="addrow" onclick="_coEditRows.push({ingredient_sku:'',grams:0});drawCoRecipe()">＋ Add ingredient</span></div>
+    <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px">Recipe total <b>${Math.round(totG)} g</b>${packG?` of ${packG} g pack ${Math.abs(totG-packG)<0.5?'<span style="color:#4e7a3e">✓ matches</span>':`<span style="color:var(--earth,#b5762a)">(${totG>packG?'+':''}${Math.round(totG-packG)} g vs pack)</span>`}`:''} · <b>${now}</b> ingredient(s) — <span style="color:#4e7a3e">${added} added</span>, <span style="color:var(--danger)">${removed} removed</span> since opened</div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="coSaveRecipe()">💾 Save recipe (${now})</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+function coSaveRecipe(){ const clean=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0); coLines[_coEditIdx].recipe=clean; closeModal(); drawCOForm(); toast('Recipe saved · '+clean.length+' ingredient(s)'); }
+async function coSave(){
+  if(!coLines.length){ toast('Add at least one line',true); return; }
+  if(!coRec.order_ref){ try{ coRec.order_ref=(await genRef('CO',{date:coRec.order_date})).ref; }catch(e){ coRec.order_ref='CO-'+_mmddyyyy(coRec.order_date)+'-'+String(Date.now()).slice(-4); } }
+  try{
+    const hdr={order_ref:coRec.order_ref, customer_name:coRec.customer_name||'', contact:coRec.contact||'', order_date:coRec.order_date||todayISO(), needed_date:coRec.needed_date||coRec.order_date||todayISO(), status:coRec.status||'quote', notes:coRec.notes||'', discount:+coRec.discount||0, delivery_fee:+coRec.delivery_fee||0, created_by:coRec.created_by||CURRENT_USER};
+    const exists=(await db.list('custom_orders',{})).some(o=>o.order_ref===coRec.order_ref);
+    if(exists) await db.update('custom_orders','order_ref',coRec.order_ref,hdr); else await db.create('custom_orders',hdr);
+    await _coSaveLines();
+    sysLog('custom_orders',coRec.order_ref,'📝 Quote saved ('+coLines.length+' line(s)) by '+CURRENT_USER);
+    toast('Quote saved · '+coRec.order_ref); drawCOForm();
+  }catch(e){ toast(e.message,true); }
+}
+async function _coSaveLines(){ const recs=coLines.map(l=>({order_ref:coRec.order_ref, line_type:l.line_type, product_sku:l.product_sku||null, description:l.description||'', recipe:(l.line_type==='custom'?(l.recipe||[]):null), pack_size_g:+l.pack_size_g||0, packs:+l.packs||0, unit_price:+l.unit_price||0}));
+  await db.replaceChildren({model:'custom_order_lines',fk:'order_ref'}, coRec.order_ref, recs); }
+async function coLock(){
+  if(!coLines.length){ toast('Nothing to lock',true); return; }
+  // validate
+  for(const l of coLines){ if(l.line_type==='product'){ if(!l.product_sku){ toast('Pick a product on every product line',true); return; } }
+    else { const clean=(l.recipe||[]).filter(r=>r.ingredient_sku&&+r.grams>0); if(!clean.length){ toast('Add ingredients to every custom recipe',true); return; } if(!(+l.pack_size_g>0)){ toast('Set a pack size on every custom recipe',true); return; } if(!(+l.packs>0)){ toast('Set packs on every line',true); return; } } }
+  if(!confirm('Lock this order?\n\n• Each custom recipe becomes a sellable SKU + BOM\n• '+coLines.reduce((s,l)=>s+(+l.packs||0),0)+' pack(s) go into demand for '+(coRec.needed_date||coRec.order_date)+'\n\nThe quote can no longer be edited.')) return;
+  if(!coRec.order_ref){ try{ coRec.order_ref=(await genRef('CO',{date:coRec.order_date})).ref; }catch(e){ coRec.order_ref='CO-'+_mmddyyyy(coRec.order_date)+'-'+String(Date.now()).slice(-4); } }
+  showBusy('Locking order — creating SKUs, BOMs & demand…');
+  try{
+    const existProd=new Set((await db.list('products',{})).map(p=>p.sku));
+    let made=0;
+    for(const l of coLines){
+      if(l.line_type==='custom'){
+        const recipe=(l.recipe||[]).filter(r=>r.ingredient_sku&&+r.grams>0);
+        const sku='CUST-'+_coRecipeKey(recipe,l.pack_size_g).toUpperCase();
+        l.product_sku=sku;
+        if(!existProd.has(sku)){
+          const prec={sku, group_1:'Custom Orders', group_2:(coRec.customer_name||'Custom'), family:'Custom', variant:(l.description||'Custom meal'),
+            name:(l.description||'Custom meal')+' · '+(l.pack_size_g||0)+'g', pack_g:+l.pack_size_g||0, box_size:1, status:'Active',
+            animal:'Dog', sell_price:+l.unit_price||0, shelf_life_days:4, is_custom:true, feeding_style:'Mix'};
+          try{ await db.create('products',prec); existProd.add(sku); made++;
+            const bom=recipe.map(r=>({product_sku:sku, ingredient_sku:r.ingredient_sku, usable_g:+r.grams||0}));
+            await db.replaceChildren({model:'bom_lines',fk:'product_sku'}, sku, bom);
+          }catch(e){}
+        }
+        if(!_coProd[sku]) _coProd[sku]={sku,name:prec2Name(l),group_1:'Custom Orders',group_2:coRec.customer_name||'Custom',pack_g:+l.pack_size_g||0,is_custom:true};
+      }
+      await coAddDemand(l.product_sku, +l.packs||0, coRec.needed_date||coRec.order_date||todayISO());
+    }
+    coRec.status='confirmed';
+    await coSave();   // persists lines (with product_sku) + header with status confirmed
+    await db.update('custom_orders','order_ref',coRec.order_ref,{status:'confirmed'});
+    coRec.status='confirmed';
+    sysLog('custom_orders',coRec.order_ref,'🔒 Order locked — '+made+' new custom SKU(s), demand pushed for '+(coRec.needed_date||coRec.order_date)+' by '+CURRENT_USER);
+    hideBusy(); toast('Order locked · '+made+' custom SKU(s) created · demand pushed'); drawCOForm();
+  }catch(e){ hideBusy(); toast(e.message,true); }
+}
+function prec2Name(l){ return (l.description||'Custom meal')+' · '+(l.pack_size_g||0)+'g'; }
+async function coFulfil(){ if(!confirm('Mark this order fulfilled?')) return; try{ await db.update('custom_orders','order_ref',coRec.order_ref,{status:'fulfilled'}); coRec.status='fulfilled'; sysLog('custom_orders',coRec.order_ref,'✓ Fulfilled by '+CURRENT_USER); toast('Marked fulfilled'); drawCOForm(); }catch(e){ toast(e.message,true); } }
+async function coCancel(){ if(!confirm('Cancel this quote?')) return; try{ if(coRec.order_ref&&(await db.list('custom_orders',{})).some(o=>o.order_ref===coRec.order_ref)){ await db.update('custom_orders','order_ref',coRec.order_ref,{status:'cancelled'}); } coRec.status='cancelled'; toast('Cancelled'); coBackToList(); }catch(e){ toast(e.message,true); } }
+
+/* ==================== Fresh Food Calculator (embedded) ==================== */
+// The full calculator runs isolated in an iframe; its "📤 Send order to ERP" button posts the
+// computed pack (recipe items + grams, pack size, packs, customer, price) to this window, which
+// maps ingredient names → SKUs and pre-fills a Custom Order for review + Lock.
+const FFCALC_SRC='freshfoodcalculator.html';
+function renderFFCalc(){
+  $('crumb').innerHTML='<b>Fresh Food Calculator</b>';
+  $('cp').innerHTML=`<div class="title">Fresh Food Calculator <span onclick="openKB('ffcalc')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <button class="btn sec" onclick="renderFFCalc()">↻ Reload</button>
+    <div class="sp"></div><span style="color:var(--muted)">design a custom pack → 📤 Send order to ERP</span>`;
+  $('content').innerHTML=`<div style="height:80vh;min-height:560px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff">
+      <iframe id="ffcalcFrame" src="${FFCALC_SRC}" style="width:100%;height:100%;border:0;display:block" title="Fresh Food Calculator"></iframe></div>
+    <div class="mini" style="margin-top:6px;color:var(--muted)">The calculator runs in-app. Build a pack, then click <b>📤 Send order to ERP</b> (top-right of the calculator) — it becomes a Custom Order with its recipe, ready to review &amp; Lock. If the calculator doesn't appear, make sure <code>${esc(FFCALC_SRC)}</code> is deployed alongside the app.</div>`;
+}
+// Receive an order from the embedded calculator → map names to SKUs → open a pre-filled Custom Order.
+async function ffCreateOrderFromCalc(o){
+  if(!o||!o.items||!o.items.length){ toast('The calculator sent no ingredients',true); return; }
+  let ings=[]; try{ ings=await listIngredients(); }catch(e){}
+  const norm=s=>String(s||'').trim().toLowerCase();
+  const idx={}; ings.forEach(it=>{ [it.name, it.raw_input, it.approved_alt].forEach(nm=>{ const k=norm(nm); if(k && !idx[k]) idx[k]=it.sku; }); });
+  const recipe=[]; const unmatched=[];
+  o.items.forEach(x=>{ let sku=idx[norm(x.name)]||'';
+    if(!sku){ const hit=ings.find(it=>{ const a=norm(it.name),b=norm(it.raw_input),q=norm(x.name); return a&&(a===q||a.includes(q)||q.includes(a)) || (b&&(b===q||b.includes(q))); }); if(hit) sku=hit.sku; }
+    if(!sku) unmatched.push(x.name);
+    recipe.push({ingredient_sku:sku, grams:+x.grams||0}); });
+  try{ (await db.list('products',{})).forEach(p=>_coProd[p.sku]=p); }catch(e){}
+  try{ _coIng=(await listIngredients()).filter(i=>!isSupplyItem(i)); }catch(e){}
+  const desc=[o.customer||'Custom', o.dog, o.feedingType].filter(Boolean).join(' · ');
+  coRec={order_ref:'', customer_name:o.customer||'', contact:o.dog||'', order_date:todayISO(), needed_date:todayISO(), status:'quote', discount:0, delivery_fee:0, created_by:CURRENT_USER, notes:'From Fresh Food Calculator'};
+  coLines=[{line_type:'custom', product_sku:'', description:desc||'Custom meal', recipe, pack_size_g:+o.packSize||0, packs:+o.packs||1, unit_price:+o.price||0}];
+  _coView='form'; state.model='custom_orders'; state.view='special'; renderSide(); drawCOForm();
+  if(unmatched.length){ toast(unmatched.length+' ingredient(s) need mapping: '+unmatched.slice(0,6).join(', '),true); coEditRecipe(0); }
+  else toast('Calculator order imported ('+recipe.length+' ingredient(s)) — review & Lock');
+}
+// one-time listener for calculator → ERP messages
+if(!window.__wrFFListen){ window.__wrFFListen=1; window.addEventListener('message',function(ev){ const d=ev&&ev.data; if(!d||d.source!=='wr-ffcalc'||d.type!=='create-order') return; try{ ffCreateOrderFromCalc(d.payload); }catch(e){ toast('Could not import calculator order: '+(e&&e.message||e),true); } }); }
+
 /* ============ Production Plan (bulk load from demand → draft → confirm) ============ */
 let prodPlanDate=todayISO();
 let prodPlanLines=[]; let prodRunRef='';
+let prodOutLines=[];   // standalone output (processed) ingredients to make to stock: {ingredient_sku,name,needed_kg}
 let prodTargetMap={}, prodProducedMap={};
 async function renderProdPlan(){
+  const _nSub=Object.keys(window._prodSub||{}).length;
   $('cp').innerHTML=`<div class="title">Production Plan <span onclick="openKB('production_batches')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
-    <button class="btn sec" onclick="openProcessing()">🔪 Raw → Process Logs</button>
+    <button class="btn sec" onclick="prodKitchenCart()">🛒 Kitchen cart</button>
+    <button class="btn sec" onclick="prodSubstitute()">🔁 Substitute${_nSub?' ('+_nSub+')':''}</button>
+    <button class="btn sec" onclick="prodKitchenSheet()">🖨 Kitchen sheet</button>
     <button class="btn sec" onclick="prodSaveDraft()">💾 Save draft</button>
     <button class="wfbtn" onclick="prodConfirm()">✅ Confirm production</button>
-    <div class="sp"></div><span style="color:var(--muted)">daily production · target from demand plot · remaining to make</span>`;
+    <div class="sp"></div><span style="color:var(--muted)">cart → prep sheet → substitute → confirm actuals</span>`;
   try{ window._prodAllProducts=(await db.list('products',{})).filter(p=>p.active!==false); }catch(e){ window._prodAllProducts=[]; }
+  try{ window._prodAllIngredients=await listIngredients(); }catch(e){ window._prodAllIngredients=[]; }
   await prodLoadTargets();
   drawProdPlan();
 }
@@ -3239,8 +3603,103 @@ function drawProdPlan(){
     <div style="margin-top:8px;display:flex;align-items:center;gap:8px"><span class="addrow">＋ Add product</span>
       <select id="prodAdd" onchange="prodAddLine(this.value)"><option value="">— pick a product —</option>${pickOpts}</select></div>
     <div class="pager">${prodPlanLines.length} product(s) · ${totGood} good packs this run · ${totRemain} remaining to make</div></div>`;
+  // ---- Output ingredients (make processed stock directly, no finished product) ----
+  const _allIng=window._prodAllIngredients||[];
+  const outAll=_allIng.filter(i=>i.is_intermediate);
+  const _bs={},_bn={}; _allIng.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
+  const inOut=new Set(prodOutLines.map(l=>l.ingredient_sku));
+  const outAvail=outAll.filter(i=>!inOut.has(i.sku));
+  const outPick=hierGroups(outAvail,{g1:'ingredient_group'}).map(G=>`<optgroup label="${esc(G.g1)}">`+G.all.map(i=>{ const p=_procParent(i,_bs,_bn); return `<option value="${esc(i.sku)}">${esc(i.name)}${p?' ← '+esc(p.name):''}</option>`; }).join('')+`</optgroup>`).join('');
+  h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Output ingredients</span>
+    <span style="color:var(--muted);font-size:12px">Make processed stock directly from raw (prep ahead of a run). Raw used = needed ÷ yield%. Confirm records the actuals.</span></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Output (processed) ingredient</th><th>From raw</th><th class="num">Needed qty (kg)</th><th></th></tr></thead><tbody>
+    ${prodOutLines.map((l,i)=>{ const it=_bs[l.ingredient_sku]||{}; const p=_procParent(it,_bs,_bn);
+      return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.ingredient_sku)}</code></div></td>
+      <td class="mini" style="color:var(--muted)">${p?esc(p.name):'<span style="color:var(--danger)">no raw parent</span>'}</td>
+      <td class="num"><input type="number" step="any" style="width:90px;text-align:right" value="${l.needed_kg||''}" oninput="prodOutLines[${i}].needed_kg=+this.value||0"></td>
+      <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="4" class="empty">Optional — add a processed ingredient to make to stock.</td></tr>'}
+    </tbody></table></div>
+    <div style="margin-top:8px;display:flex;align-items:center;gap:8px"><span class="addrow">＋ Add output ingredient</span>
+      <select id="prodOutAdd" onchange="prodAddOut(this.value)"><option value="">— pick an output ingredient —</option>${outPick}</select></div></div>`;
   $('content').innerHTML=h;
 }
+function prodAddOut(sku){ if(!sku)return; if(prodOutLines.some(l=>l.ingredient_sku===sku)){ drawProdPlan(); return; }
+  const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{}; prodOutLines.push({ingredient_sku:sku,name:i.name||sku,needed_kg:0}); drawProdPlan(); }
+function prodDelOut(i){ prodOutLines.splice(i,1); drawProdPlan(); }
+
+/* ---- Kitchen cart: pick products to produce (#2) ---- */
+function prodKitchenCart(){
+  const prods=(window._prodAllProducts||[]); if(!prods.length){ toast('No products loaded',true); return; }
+  const cur={}; prodPlanLines.forEach(l=>cur[l.product_sku]=+l.good_packs||0);
+  window._kcList=[]; let body='';
+  hierGroups(prods,{g1:'group_1',g2:'group_2'}).forEach(G=>{ G.subs.forEach(S=>{
+    body+=`<tr style="background:#f6f8f4"><td colspan="4" style="padding-left:10px">▸ <b>${esc(G.g1+' › '+(S.g2||''))}</b></td></tr>`;
+    S.items.forEach(p=>{ const idx=window._kcList.length; window._kcList.push(p); const rem=_prodRemain(p.sku,0); const v=cur[p.sku]!=null?cur[p.sku]:'';
+      body+=`<tr><td>${esc(p.name)}<div class="mini"><code>${esc(p.sku)}</code></div></td><td class="num mini">${prodTargetMap[p.sku]||'—'}</td><td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem||'—'}</td>
+        <td><input type="number" id="kc_${idx}" value="${v}" placeholder="${rem||0}" style="width:70px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); }); });
+  $('modal').innerHTML=`<div><h3>🛒 Kitchen cart — pick what to produce</h3>
+    <p class="mini">Enter <b>packs to produce</b> per product (blank = skip). Target &amp; remaining come from the latest demand plot. Adding builds the day's production plan; you can still fine-tune it after.</p>
+    <div style="max-height:400px;overflow:auto"><table><thead><tr><th>Product</th><th class="num">Target</th><th class="num">Remaining</th><th class="num">Produce</th></tr></thead><tbody>${body}</tbody></table></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="prodCartApply()">🛒 Add to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+function prodCartApply(){ const L=window._kcList||[]; let n=0;
+  L.forEach((p,idx)=>{ const el=$('kc_'+idx); if(!el) return; const v=el.value; if(v===''||v==null) return; const packs=+v||0;
+    let line=prodPlanLines.find(l=>l.product_sku===p.sku);
+    if(packs>0){ if(line){ line.good_packs=packs; } else { prodPlanLines.push({product_sku:p.sku,name:p.name||p.sku,planned_packs:+prodTargetMap[p.sku]||0,good_packs:packs,reject_packs:0,waste_g:0,output_lot:''}); } n++; }
+    else if(line){ prodPlanLines=prodPlanLines.filter(l=>l.product_sku!==p.sku); }
+  });
+  closeModal(); drawProdPlan(); toast(n?('Cart added · '+n+' product(s) in the plan'):'No quantities entered');
+}
+/* ---- Kitchen batch sheet: prep quantities + processing reminders (#2) ---- */
+async function prodKitchenSheet(){
+  const lines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
+  if(!lines.length){ toast('Add products with packs first (Kitchen cart)',true); return; }
+  const bm=await prodBOMMap(); const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+  const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
+  const agg={};
+  lines.forEach(l=>{ const packs=+l.good_packs||0; (bm[l.product_sku]||[]).forEach(line=>{ const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{procG:0}; a.procG+=line.processed_g*packs; }); });
+  const prep=Object.keys(agg).map(sku=>{ const it=im[sku]||{}; const y=(+it.yield_pct||100)/100||1; const procKg=agg[sku].procG/1000; const rawKg=procKg/y; const p=_procParent(it,bySku,byName);
+    return {name:it.name||sku, method:(it.processing_method||'').trim(), procKg, rawKg, yieldPct:Math.round(y*100), parent:(p&&p.name)||(it.raw_input||'—')}; }).sort((a,b)=>b.rawKg-a.rawKg);
+  const _kg=x=>(Math.round(x*100)/100).toLocaleString('en-PH');
+  const prodRows=lines.map(l=>`<tr><td>${esc(l.name||l.product_sku)}</td><td style="text-align:right">${+l.good_packs||0}</td></tr>`).join('');
+  const prepRows=prep.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.parent)}</td><td style="text-align:right">${_kg(r.rawKg)} kg</td><td style="text-align:right">${_kg(r.procKg)} kg</td><td style="text-align:right">${r.yieldPct}%</td><td>${esc(r.method)||'<i style="color:#999">— set processing method in Ingredients —</i>'}</td></tr>`).join('');
+  const recipeBlocks=lines.map(l=>{ const rows=(bm[l.product_sku]||[]).map(line=>{ const it=im[line.ingredient_sku]||{}; return `<tr><td>${esc(it.name||line.ingredient_sku)}</td><td style="text-align:right">${_kg(line.processed_g*(+l.good_packs||0)/1000)} kg</td><td>${esc((it.processing_method||'').trim())}</td></tr>`; }).join('');
+    return `<h4 style="margin:12px 0 4px">${esc(l.name||l.product_sku)} — ${+l.good_packs||0} pack(s)</h4><table class="mini2"><thead><tr><th>Processed ingredient</th><th style="text-align:right">Total</th><th>How to process</th></tr></thead><tbody>${rows}</tbody></table>`; }).join('');
+  const subNote=Object.keys(window._prodSub||{}).length?`<p style="color:#b5762a"><b>Substitutions in effect:</b> ${Object.keys(window._prodSub).map(o=>esc((im[o]||{}).name||o)+' → '+esc((im[window._prodSub[o]]||{}).name||window._prodSub[o])).join(', ')}</p>`:'';
+  const html=`<html><head><meta charset="utf-8"><title>Kitchen Batch — ${esc(prodPlanDate)}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 10px;font-size:14px;color:#555}h3{color:#2f5d33;margin:16px 0 6px}h4{color:#4e7a3e}table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}table.mini2 th{background:#eef3ea;color:#2f5d33}</style></head><body>
+    <h1>🐇 Wholesome Rabbit — Kitchen Batch Sheet</h1>
+    <h2>Production date: ${esc(prodPlanDate)} · prepared by: ____________________</h2>
+    ${subNote}
+    <h3>1 · Produce today</h3><table><thead><tr><th>Product</th><th style="text-align:right">Packs</th></tr></thead><tbody>${prodRows}</tbody></table>
+    <h3>2 · Ingredient prep — pull, process &amp; how</h3>
+    <table><thead><tr><th>Processed ingredient</th><th>From raw</th><th style="text-align:right">Raw to pull</th><th style="text-align:right">Process into</th><th style="text-align:right">Yield</th><th>How to process</th></tr></thead><tbody>${prepRows}</tbody></table>
+    <p style="color:#888;font-size:11px">Raw to pull = processed needed ÷ yield%. Process reminders come from each ingredient's "Processing method" in Master Data → Ingredients.</p>
+    <h3>3 · Per-product recipes</h3>${recipeBlocks}
+    <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · confirm the run in the app after producing to post stock &amp; yield.</p></body></html>`;
+  const w=window.open('','_pr','width=880,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; } w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
+}
+/* ---- BOM substitution for a run (#3) with add/remove counter ---- */
+async function prodSubstitute(){
+  const lines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
+  if(!lines.length){ toast('Add products with packs first',true); return; }
+  const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+  const boms=await db.list('bom_lines',{});
+  const req=[]; const seen=new Set(); lines.forEach(l=>boms.filter(b=>b.product_sku===l.product_sku).forEach(b=>{ if(!seen.has(b.ingredient_sku)){ seen.add(b.ingredient_sku); req.push(b.ingredient_sku); } }));
+  window._prodSub=window._prodSub||{};
+  const procIngs=ings.filter(i=>i.is_intermediate).sort((a,b)=>String(a.name||'').localeCompare(b.name||''));
+  const rows=req.map(sku=>{ const it=im[sku]||{}; const alt=(it.approved_alt||'').trim(); const chosen=window._prodSub[sku]||'';
+    const opts=procIngs.filter(o=>o.sku!==sku).map(o=>`<option value="${esc(o.sku)}" ${chosen===o.sku?'selected':''}>${esc(o.name)}${alt&&(o.name||'').trim().toLowerCase()===alt.toLowerCase()?' ★ approved alt':''}</option>`).join('');
+    return `<tr><td>${esc(it.name||sku)}<div class="mini"><code>${esc(sku)}</code>${alt?' · approved alt: <b>'+esc(alt)+'</b>':''}</div></td>
+      <td><select onchange="prodSetSub('${esc(sku)}',this.value)" style="width:230px"><option value="" ${!chosen?'selected':''}>— same (no change) —</option>${opts}</select></td></tr>`; }).join('');
+  $('modal').innerHTML=`<div><h3>🔁 Substitute BOM ingredients — this run</h3>
+    <p class="mini">When an ingredient is unavailable, swap it for another for <b>this production run only</b>. The recipe grams stay the same; the replacement is processed &amp; consumed instead, with its own yield &amp; cost. The finished product is unchanged.</p>
+    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Recipe ingredient</th><th>Replace with</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px"><b id="subCount">${Object.keys(window._prodSub).length}</b> substitution(s) set for this run</div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="closeModal();drawProdPlan()">✅ Apply</button><button class="btn sec" onclick="window._prodSub={};closeModal();drawProdPlan()">Clear all</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+function prodSetSub(orig,val){ window._prodSub=window._prodSub||{}; if(!val||val===orig) delete window._prodSub[orig]; else window._prodSub[orig]=val; const c=$('subCount'); if(c)c.textContent=Object.keys(window._prodSub).length; }
 function prodRemainCell(i){ const l=prodPlanLines[i]; const el=$('prem'+i); if(!el)return; const rem=_prodRemain(l.product_sku,l.good_packs); el.innerHTML=`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`; }
 function prodAddLine(sku){ if(!sku)return; if(prodPlanLines.some(l=>l.product_sku===sku)){ drawProdPlan(); return; } const p=(window._prodAllProducts||[]).find(x=>x.sku===sku)||{}; prodPlanLines.push({product_sku:sku,name:p.name||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:0,reject_packs:0,waste_g:0,output_lot:''}); drawProdPlan(); }
 function prodDelLine(i){ prodPlanLines.splice(i,1); drawProdPlan(); }
@@ -3260,36 +3719,73 @@ async function prodConfirm(){
   if(_postLock){ toast('Still posting — please wait…',true); return; }
   await openProdActuals();   // capture actual raw + processed (real yield) then post in one step
 }
-// SHORTCUT: process + produce in one confirm, capturing ACTUAL raw used and ACTUAL processed made
-// per output so real yield is recorded. Auto-posts raw→processed (processing) then processed→mix.
+// Processed on-hand (grams) at Bulacan — live reads the view, DEMO sums the ledger.
+async function _ingOhBulacanG(){ const oh={};
+  if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.kind==='ingredient'&&s.location_code==='bulacan') oh[s.ref_sku]=(oh[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} }
+  else { (DEMO.inventory_movements||[]).forEach(mv=>{ if(mv.kind==='ingredient'&&mv.location_code==='bulacan') oh[mv.ref_sku]=(oh[mv.ref_sku]||0)+(+mv.qty||0); }); }
+  return oh; }
+// Confirm production, capturing ACTUAL raw used / processed used / output created per output ingredient.
+// Processed-first: draw existing processed stock before processing raw; raw used = shortfall ÷ yield%;
+// any output created above the shortfall lands back in the processed ingredient's stock.
 async function openProdActuals(){
-  if(!prodPlanLines.some(l=>(+l.good_packs||0)>0)){ toast('Enter good packs on at least one product first',true); return; }
+  const anyProd=prodPlanLines.some(l=>(+l.good_packs||0)>0);
+  const anyOut=prodOutLines.some(l=>(+l.needed_kg||0)>0);
+  if(!anyProd && !anyOut){ toast('Enter good packs on a product, or a needed qty on an output ingredient',true); return; }
   const bm=await prodBOMMap(); const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
   const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
+  // (A) processed output needed by finished-product BOMs (aggregate grams)
   const agg={};
-  prodPlanLines.forEach(l=>{ const packs=+l.good_packs||0; if(packs<=0)return; (bm[l.product_sku]||[]).forEach(line=>{ const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{procUsed:0,rawTheo:0,costG:line.unit_cost_g}; a.procUsed+=line.processed_g*packs; a.rawTheo+=line.raw_g*packs; }); });
-  let oh={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.kind==='ingredient'&&s.location_code==='bulacan') oh[s.ref_sku]=(oh[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} }
-  window._prodAct=Object.keys(agg).map(sku=>{ const it=im[sku]||{}; const p=_procParent(it,bySku,byName);
-    return {sku, name:it.name||sku, parent:(p&&p.sku)||'', parentCostG:(+(p||{}).moving_avg_cost_kg||+(p||{}).list_price_kg||0)/1000, outCostG:agg[sku].costG||0,
-      procUsed:agg[sku].procUsed, rawTheo:agg[sku].rawTheo, rawOh:(p?(oh[p.sku]||0):0),
-      actualRawKg:Math.round(agg[sku].rawTheo/10)/100, actualMadeKg:Math.round(agg[sku].procUsed/10)/100 }; });
+  prodPlanLines.forEach(l=>{ const packs=+l.good_packs||0; if(packs<=0)return; (bm[l.product_sku]||[]).forEach(line=>{ const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{neededG:0,costG:line.unit_cost_g}; a.neededG+=line.processed_g*packs; }); });
+  const oh=await _ingOhBulacanG();
+  const _yld=(it)=>((+it.yield_pct||100)/100)||1;
+  const mk=(sku,neededG,type)=>{ const it=im[sku]||{}; const p=_procParent(it,bySku,byName); const y=_yld(it);
+    const ohG=type==='A'?Math.max(0,oh[sku]||0):0;               // standalone outputs make to stock, no processed-first draw
+    const procUsedKg=Math.round(Math.min(neededG,ohG)/10)/100;   // use existing processed first
+    const shortG=Math.max(0,neededG-ohG); const rawG=shortG/y;
+    return {sku, name:it.name||sku, type, parent:(p&&p.sku)||'', parentCostG:(+(p||{}).moving_avg_cost_kg||+(p||{}).list_price_kg||0)/1000,
+      outCostG:(type==='A'?(agg[sku]&&agg[sku].costG):((+it.price_kg_processed||+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000))||0,
+      yield:y, neededKg:Math.round(neededG/10)/100, ohKg:Math.round(ohG/10)/100,
+      procUsedKg, actualRawKg:Math.round(rawG/10)/100, actualMadeKg:Math.round(shortG/10)/100 }; };
+  const A=Object.keys(agg).map(sku=>mk(sku,agg[sku].neededG,'A'));
+  const B=prodOutLines.filter(l=>(+l.needed_kg||0)>0).map(l=>mk(l.ingredient_sku,(+l.needed_kg||0)*1000,'B'));
+  window._prodAct=A.concat(B);
   drawProdActuals();
 }
+function _paRow(x,i){
+  const yld=(+x.actualRawKg>0)?Math.round((+x.actualMadeKg/+x.actualRawKg)*1000)/10:0;
+  const excess=Math.round((((+x.procUsedKg||0)+(+x.actualMadeKg||0))-(+x.neededKg||0))*100)/100;   // (processed used + output created) − needed
+  const excCol=excess<-0.001?'var(--danger)':'var(--muted)';
+  const procCell = x.type==='A'
+    ? `<td><input type="number" step="any" value="${x.procUsedKg}" oninput="window._prodAct[${i}].procUsedKg=+this.value||0;_paSync(${i});drawProdActuals()" style="width:76px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px" title="drawn from existing processed stock (on hand ${x.ohKg} kg)"></td>`
+    : `<td class="num mini" style="color:var(--muted)">—</td>`;
+  return `<tr><td>${esc(x.name)}${x.parent?'':' <span class="mini" style="color:var(--danger)">no raw parent</span>'}</td>
+    <td class="num" style="color:var(--muted)"><b>${x.neededKg}</b>${x.type==='A'?`<div class="mini">on hand ${x.ohKg}</div>`:''}</td>
+    ${procCell}
+    <td><input type="number" step="any" value="${x.actualRawKg}" oninput="window._prodAct[${i}].actualRawKg=+this.value||0;drawProdActuals()" style="width:76px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+    <td><input type="number" step="any" value="${x.actualMadeKg}" oninput="window._prodAct[${i}].actualMadeKg=+this.value||0;drawProdActuals()" style="width:78px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+    <td class="num"><b style="color:${yld>0&&yld<70?'var(--danger)':'#4e7a3e'}">${yld?yld+'%':'—'}</b></td>
+    <td class="num mini" style="color:${excCol}">${excess?((excess>0?'+':'')+excess):'0'}</td></tr>`;
+}
+// Recompute raw + output defaults from the edited Processed-used (keeps processed-first sound).
+function _paSync(i){ const x=(window._prodAct||[])[i]; if(!x)return; const short=Math.max(0,(+x.neededKg||0)-(+x.procUsedKg||0));
+  x.actualMadeKg=Math.round(short*100)/100; x.actualRawKg=Math.round((short/(x.yield||1))*100)/100; }
 function drawProdActuals(){
-  const a=window._prodAct||[];
-  const rows=a.map((x,i)=>{ const usedKg=Math.round(x.procUsed/10)/100; const yld=(+x.actualRawKg>0)?Math.round((+x.actualMadeKg/+x.actualRawKg)*1000)/10:0;
-    const leftover=Math.round(((+x.actualMadeKg||0)-usedKg)*100)/100;
-    return `<tr><td>${esc(x.name)}${x.parent?'':' <span class="mini" style="color:var(--danger)">no raw parent</span>'}</td>
-      <td class="num" style="color:var(--muted)">${usedKg}</td>
-      <td><input type="number" step="any" value="${x.actualRawKg}" oninput="window._prodAct[${i}].actualRawKg=this.value;drawProdActuals()" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
-      <td><input type="number" step="any" value="${x.actualMadeKg}" oninput="window._prodAct[${i}].actualMadeKg=this.value;drawProdActuals()" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
-      <td class="num"><b style="color:${yld>0&&yld<70?'var(--danger)':'#4e7a3e'}">${yld?yld+'%':'—'}</b></td>
-      <td class="num mini" style="color:var(--muted)">${leftover?(leftover>0?'+':'')+leftover:'0'}</td></tr>`; }).join('');
+  const a=window._prodAct||[]; const A=a.filter(x=>x.type==='A'), B=a.filter(x=>x.type==='B');
+  const idx=(x)=>a.indexOf(x);
+  const tblHead=(withProc)=>`<thead><tr><th>Ingredient</th><th class="num">Needed qty</th>${withProc?'<th class="num">Processed used</th>':''}<th class="num">Raw used</th><th class="num">Output created</th><th class="num">Yield</th><th class="num">Excess→stock</th></tr></thead>`;
+  const aRows=A.map(x=>_paRow(x,idx(x))).join('');
   $('modal').innerHTML=`<div><h3>Confirm production — record actuals</h3>
-    <p class="mini">Enter the <b>actual raw used</b> and <b>actual processed made</b> per ingredient. The app processes raw→processed and runs the mix in one step; <b>actual yield = made ÷ raw</b>. Leftover processed (made − used) stays in the processed bin. Defaults are the recipe theory — adjust what differed.</p>
-    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Used (kg)</th><th class="num">Raw used</th><th class="num">Processed made</th><th class="num">Yield</th><th class="num">Left</th></tr></thead><tbody>
-    ${rows||'<tr><td colspan="6" class="empty">No recipe ingredients.</td></tr>'}
-    </tbody></table></div>
+    <p class="mini">Automation: existing <b>processed</b> stock is used first; only the shortfall is made from <b>raw</b> (raw used = shortfall ÷ yield%). <b>Actual yield = output created ÷ raw used.</b> Any <b>Excess→stock</b> = (processed used + output created) − needed goes back into the processed ingredient's inventory. Defaults follow this logic — override any actual that differed.</p>
+    ${A.length?`<div class="mini" style="margin:6px 0 2px;font-weight:700">For products (mix ingredients)</div>
+    <div style="max-height:230px;overflow:auto"><table>${tblHead(true)}<tbody>${aRows}</tbody></table></div>`:''}
+    ${B.length?`<div class="mini" style="margin:12px 0 2px;font-weight:700">Output ingredients (make to stock)</div>
+    <div style="max-height:200px;overflow:auto"><table>${tblHead(false)}<tbody>${B.map(x=>{ const j=idx(x); const yld=(+x.actualRawKg>0)?Math.round((+x.actualMadeKg/+x.actualRawKg)*1000)/10:0; const excess=Math.round(((+x.actualMadeKg||0)-(+x.neededKg||0))*100)/100;
+      return `<tr><td>${esc(x.name)}${x.parent?'':' <span class="mini" style="color:var(--danger)">no raw parent</span>'}</td>
+        <td class="num" style="color:var(--muted)"><b>${x.neededKg}</b></td>
+        <td><input type="number" step="any" value="${x.actualRawKg}" oninput="window._prodAct[${j}].actualRawKg=+this.value||0;drawProdActuals()" style="width:76px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+        <td><input type="number" step="any" value="${x.actualMadeKg}" oninput="window._prodAct[${j}].actualMadeKg=+this.value||0;drawProdActuals()" style="width:78px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+        <td class="num"><b style="color:${yld>0&&yld<70?'var(--danger)':'#4e7a3e'}">${yld?yld+'%':'—'}</b></td>
+        <td class="num mini" style="color:var(--muted)">${excess?((excess>0?'+':'')+excess):'0'}</td></tr>`; }).join('')}</tbody></table></div>`:''}
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="prodActualsApply()">✅ Confirm &amp; post</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   $('overlay').classList.add('on');
 }
@@ -3302,9 +3798,12 @@ async function prodActualsApply(){
     const shortRaw=Object.keys(needRaw).filter(sku=>(needRaw[sku]-(oh[sku]||0))>0.5).map(sku=>'• '+ingName(sku)+' — need '+(Math.round(needRaw[sku]/10)/100)+' kg raw, have '+(Math.round((oh[sku]||0)/10)/100)+' kg');
     if(shortRaw.length){ if(!confirm('⚠ Not enough RAW stock for:\n\n'+shortRaw.join('\n')+'\n\nProceed anyway (raw will go negative)?')) return; }
   }
+  const anyProd=prodPlanLines.some(l=>(+l.good_packs||0)>0);
   _postLock=true;
   try{
-    const recs=await prodPersist('confirmed'); if(!recs){ _postLock=false; return; }
+    let recs=[];
+    if(anyProd){ recs=await prodPersist('confirmed'); if(!recs){ _postLock=false; return; } }
+    else if(!prodRunRef){ prodRunRef=(await genRef('PR',{date:prodPlanDate})).ref; }   // output-only run
     const cm=await prodCostMap(); const bm=await prodBOMMap();
     const DEFAULT_FG_SHELF=4; const _shelfBy={}; try{ (await db.list('products',{})).forEach(p=>_shelfBy[p.sku]=+p.shelf_life_days||0); }catch(e){}
     const totProc={}; recs.forEach(r=>{ const packs=+r.good_packs||0; (bm[r.product_sku]||[]).forEach(line=>{ totProc[line.ingredient_sku]=(totProc[line.ingredient_sku]||0)+line.processed_g*packs; }); });
@@ -3329,20 +3828,23 @@ async function prodActualsApply(){
         try{ await db.create('batch_issues',{batch_ref:r.batch_ref,ingredient_sku:line.ingredient_sku,expected_raw_g:Math.round(line.raw_g*packs*100)/100,actual_raw_g:actRawB,expected_processed_g:procG,actual_processed_g:(madeB||procG),uom:'kg'}); }catch(e){}
       }
     }
-    sysLog('production_batches',prodRunRef,'✅ Production confirmed with actuals ('+recs.length+' batches) — processed+produced by '+CURRENT_USER);
-    notifyRecordDone('production_batches', prodRunRef, {batch_ref:prodRunRef,status:'confirmed',operator:CURRENT_USER,production_date:prodPlanDate}, recs);
-    toast('Confirmed · '+posted+' product(s), '+drawn+' issue(s), yield captured'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0);
-    prodRunRef=''; prodPlanLines=[]; window._prodAct=null; closeModal(); drawProdPlan();
+    const nOut=(acts.filter(x=>x.type==='B')).length;
+    sysLog('production_batches',prodRunRef,'✅ Production confirmed with actuals ('+recs.length+' product batch(es)'+(nOut?', '+nOut+' output ingredient(s)':'')+') — processed+produced by '+CURRENT_USER);
+    if(recs.length) notifyRecordDone('production_batches', prodRunRef, {batch_ref:prodRunRef,status:'confirmed',operator:CURRENT_USER,production_date:prodPlanDate}, recs);
+    toast('Confirmed · '+posted+' product(s)'+(nOut?', '+nOut+' output ingredient(s)':'')+', '+drawn+' issue(s), yield captured'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0);
+    prodRunRef=''; prodPlanLines=[]; prodOutLines=[]; window._prodAct=null; window._prodSub={}; closeModal(); drawProdPlan();
   }catch(e){ toast(e.message,true); } finally{ _postLock=false; }
 }
 // Two-bin: production consumes the PROCESSED (output) bin — each recipe line uses its usable
 // grams of that output. The RAW was already depleted earlier, at the Processing step.
 async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=await listIngredients();
-  const im={}; ings.forEach(i=>im[i.sku]=i); const m={};
-  boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100||1;
-    const procG=(+b.usable_g||0), rawG=procG/y;
+  const im={}; ings.forEach(i=>im[i.sku]=i); const m={}; const sub=window._prodSub||{};
+  boms.forEach(b=>{ let ingSku=b.ingredient_sku;
+    if(sub[ingSku]&&im[sub[ingSku]]) ingSku=sub[ingSku];        // run substitution: consume the replacement instead (#3)
+    const it=im[ingSku]||{}; const y=(+it.yield_pct||100)/100||1;
+    const procG=(+b.usable_g||0), rawG=procG/y;                 // recipe grams unchanged; yield/cost from the (sub) ingredient
     const costG=((+it.price_kg_processed||+it.moving_avg_cost_kg||+it.list_price_kg||0))/1000;   // processed cost per g
-    (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:b.ingredient_sku, processed_g:procG, raw_g:rawG, unit_cost_g:costG}); });
+    (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:ingSku, processed_g:procG, raw_g:rawG, unit_cost_g:costG}); });
   return m; }
 
 /* ============ Processing / Prep (raw → processed, the two-bin conversion) ============ */
@@ -3444,8 +3946,10 @@ function drawCountForm(){
   let lineRows=''; Object.keys(_bg1).sort((a,b)=>_gmin(_bg1[a])-_gmin(_bg1[b])).forEach(g1=>{
     lineRows+=`<tr><td colspan="6" style="background:#e7f0e9;font-weight:700;color:#2f5d33;padding:6px 8px">${esc(g1)} <span style="opacity:.55;font-weight:400">(${_bg1[g1].length})</span></td></tr>`;
     const _bg2={}; _bg1[g1].forEach(i=>{ const k=countLines[i].g2||'Other'; (_bg2[k]=_bg2[k]||[]).push(i); });
+    const _frank=i=>((countLines[i].form==='processed')?1:0);   // raw ingredient first, then processed derivatives
     Object.keys(_bg2).sort((a,b)=>_gmin(_bg2[a])-_gmin(_bg2[b])).forEach(g2=>{
-      lineRows+=`<tr><td colspan="6" style="background:#f6f8f4;font-weight:600;color:#4e7a3e;padding:4px 8px 4px 22px">▸ ${esc(g2)} <span style="opacity:.6;font-weight:400">(${_bg2[g2].length})</span></td></tr>`+_bg2[g2].map(rowFor).join('');
+      const order=_bg2[g2].slice().sort((a,b)=>_frank(a)-_frank(b)||_lr(a)-_lr(b)||String(countLines[a].name||'').localeCompare(countLines[b].name||''));
+      lineRows+=`<tr><td colspan="6" style="background:#f6f8f4;font-weight:600;color:#4e7a3e;padding:4px 8px 4px 22px">▸ ${esc(g2)} <span style="opacity:.6;font-weight:400">(${_bg2[g2].length})</span></td></tr>`+order.map(rowFor).join('');
     });
   });
   $('content').innerHTML=`<div class="formwrap"><div class="sheet">
@@ -3480,8 +3984,10 @@ function countPrintSheet(){
   Object.keys(_bg1).sort((a,b)=>_gmin(_bg1[a])-_gmin(_bg1[b])).forEach(g1=>{
     body+=`<tr class="grp1"><td colspan="5">${esc(g1)} (${_bg1[g1].length})</td></tr>`;
     const _bg2={}; _bg1[g1].forEach(l=>{ const k=l.g2||'Other'; (_bg2[k]=_bg2[k]||[]).push(l); });
+    const _fr=l=>((l.form==='processed')?1:0);   // raw ingredient first, then processed derivatives
     Object.keys(_bg2).sort((a,b)=>_gmin(_bg2[a])-_gmin(_bg2[b])).forEach(g2=>{
-      body+=`<tr class="cat"><td colspan="5">&nbsp;&nbsp;▸ ${esc(g2)} (${_bg2[g2].length})</td></tr>`+_bg2[g2].map(l=>{ const s=+l.scale||1; return `<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td>${esc(binOf(l.ref_sku,countRec.location_code))}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`; }).join('');
+      const ord=_bg2[g2].slice().sort((a,b)=>_fr(a)-_fr(b)||_lr2(a)-_lr2(b)||String(a.name||'').localeCompare(b.name||''));
+      body+=`<tr class="cat"><td colspan="5">&nbsp;&nbsp;▸ ${esc(g2)} (${_bg2[g2].length})</td></tr>`+ord.map(l=>{ const s=+l.scale||1; return `<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td>${esc(binOf(l.ref_sku,countRec.location_code))}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`; }).join('');
     });
   });
   const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.grp1 td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.cat td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:130px;border-bottom:1px solid #333}</style></head><body>
@@ -4503,24 +5009,25 @@ function _stkRowsFrom(lines, prods, ings){
       name:(p.variant||p.name||String(ing.name||'').replace(/ — Sticker$/,'')||l.ingredient_sku),
       fam:(p.family||p.feeding_style||'Other'), group_1:(p.group_1||'Other'), group_2:(p.group_2||p.family||'Other'),
       net:(p.sticker_net||''), dim:(p.sticker_dimension||''), link:(p.sticker_art_url||''),
-      sort_order:p.sort_order,
+      sort_order:p.sort_order, per_sheet:(+p.sticker_per_sheet||0),
       ordered:(+l.ordered_kg||0), received:(+l.received_kg||0) }; });
 }
 function _stkTableHTML(rows){
   let n=0, totO=0, totR=0, linked=0;
-  let h=`<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th><th class="num">Qty Ordered</th><th class="num">Qty Received</th></tr></thead><tbody>`;
+  let h=`<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th><th class="num">Qty Ordered</th><th class="num">Sheets</th><th class="num">Qty Received</th></tr></thead><tbody>`;
   hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
-    h+=`<tr style="background:#d7e7db"><td colspan="8"><b style="font-size:13.5px">${esc(G.g1)}</b></td></tr>`;
+    h+=`<tr style="background:#d7e7db"><td colspan="9"><b style="font-size:13.5px">${esc(G.g1)}</b></td></tr>`;
     G.subs.forEach(S=>{
-      h+=`<tr style="background:#eef3ea"><td colspan="8" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
+      h+=`<tr style="background:#eef3ea"><td colspan="9" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(r=>{ n++; totO+=r.ordered; totR+=r.received; if(r.link) linked++;
+        const sh=stickerSheets(r.ordered,r.per_sheet); const shTxt=r.per_sheet>0?(sh.sheets+' × '+r.per_sheet):'—';
         h+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)||'—'}</td><td><code>${esc(r.sku)}</code></td>`+
           `<td>${r.link?`<a href="${esc(r.link)}" target="_blank" rel="noopener">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>`+
-          `<td>${esc(r.dim)||'—'}</td><td class="num">${r.ordered||'—'}</td><td class="num">${r.received||'—'}</td></tr>`;
+          `<td>${esc(r.dim)||'—'}</td><td class="num">${r.ordered||'—'}</td><td class="num mini">${shTxt}</td><td class="num">${r.received||'—'}</td></tr>`;
       });
     });
   });
-  h+=`</tbody><tfoot><tr><th colspan="6" class="num">Totals</th><th class="num">${totO}</th><th class="num">${totR}</th></tr></tfoot></table></div>`;
+  h+=`</tbody><tfoot><tr><th colspan="6" class="num">Totals</th><th class="num">${totO}</th><th></th><th class="num">${totR}</th></tr></tfoot></table></div>`;
   return {html:h, n, linked, totO, totR};
 }
 function _isStickerPO(rec){ return !!rec && /\[STICKERS\]/i.test(String(rec.po_ref||'')); }
@@ -4614,7 +5121,9 @@ function mrpDoImport(){ if(!_impReport)return; const valid=_impReport.filter(d=>
   const map={}; valid.forEach(v=>{ map[v.sku]=(map[v.sku]||0)+(+v.qty||0); });
   closeModal(); applyDemandMap(map); toast('Imported '+valid.length+' demand row(s)'); }
 async function mrpSheetSync(){ const a=AUTOS.sheets_demand;
-  if(!isLive()){ toast('Connect Supabase to sync demand from your sheet. In demo, use Import / Paste.',true); return; }
+  if(!isLive()){ // demo: pull locked custom-order demand from the in-memory demand table
+    const rows=(DEMO.demand||[]).filter(r=>String(r.plan_date||'')===String(MRPDATE)); if(!rows.length){ toast('No demand rows for '+MRPDATE+' — lock a custom order for that date, or use Import / Paste.',true); return; }
+    const map={}; rows.forEach(r=>{ map[r.sku]=(map[r.sku]||0)+(+r.qty||0); }); applyDemandMap(map); toast('Pulled '+rows.length+' demand row(s) for '+MRPDATE+' (custom orders + synced)'); return; }
   // If the webhook is configured, TRIGGER n8n (reads your Google Sheet → upserts the demand table for this plan date), then pull.
   if(a&&a.on&&a.url){
     showBusy('Syncing demand from Google Sheets…');
@@ -4689,7 +5198,9 @@ const KB = {
   margin:{d:'Live gross margin per product: BOM raw cost + variable process & packaging + fees → GP% and a suggested price at your target.',h:['Edit the global rate model (per-gram utilities, labor, packaging, fees, target GM) then 💾 Save','Set each product’s Cost profile tab: deboning / butcher / sous-vide / ecobag / thermal','Tap a row to open the product; ⬆ Write total cost pushes COGS to products'],l:['Raw = BOM grams × ingredient moving-average cost (falls back to processed/list price)','Process = (electricity+water+transport) per gram + labor (plain OR deboning) ± butcher ± sous-vide','Packaging = vacuum + sticker + ecobag + thermal, pulled from Kitchen Supplies costs','Fees = (transaction+marketing) % of price; Suggested = fixed cost ÷ (1 − target − fees%)','Rates persist in Supabase (app_settings.cost_model) — shared with the whole team']},
   momentum:{d:'Reads Shopify rolling sales (30/60/90/120 days) against live stock to show what to make now vs what’s overstocked.',h:['📊 Runway view: days of stock left per product, most urgent first','🎯 Quadrant view: momentum × stock for a two-axis read','Group by family or priority; 📥 Import/paste sales; tap a row to open the product'],l:['Momentum × = recent 30-day daily rate ÷ 120-day average (>1 = accelerating)','Days of cover = current stock ÷ recent daily rate','Stockout risk = low cover + steady/rising demand; overstock = high cover + slowing','Fed hourly from the “90-120 Day Demand” sheet into the sales_momentum table']},
   supplies_reorder:{d:'Supplies below their PAR, with the quantity to reorder, ready to turn into a supplier PO.',h:['Review items below PAR (reorder = PAR − on hand)','🧾 Generate Supplies PO — one draft per supplier, ready to send','Set each supply’s PAR & reorder in Kitchen Supplies'],l:['Simple PAR rule — supplies have no recipe so they aren’t in MRP','Reorder qty is in the item’s own unit','Generated POs are confirmed and priced at the supply’s unit cost']},
-  prodplan:{d:'Plan and confirm a production run — good packs per product, then the actual raw used and processed made.',h:['Add products + Good packs (target/remaining come from the latest demand plot)','✅ Confirm production → enter actual raw / processed / live yield','🔪 Raw → Process Logs to convert raw → processed ahead of time (optional; decimals OK)'],l:['Posting deducts raw, adds processed, runs the mix and outputs finished packs','Best-before auto-stamps = production date + the product’s shelf-life days','Real yield (made ÷ raw) is recorded on the batch and drives the usage report']},
+  ffcalc:{d:'The full Fresh Food Calculator, embedded in the app — size a custom pack per pet, then push it straight into a Custom Order.',h:['Fill in the pet profile & feeding type, compute the pack (Feeding / Kitchen)','Click 📤 Send order to ERP (top-right) to import the recipe','It lands as a Custom Order — map any unmatched ingredient, then 🔒 Lock'],l:['Runs isolated in a frame so it never clashes with the ERP','Sending posts the per-pack recipe (ingredient + grams), pack size, packs, customer & price','The ERP matches ingredient names to your master SKUs; unmatched ones are flagged for you to pick']},
+  custom_orders:{d:'Customer-service quotes that lock into confirmed orders — each custom recipe becomes its own sellable SKU + BOM and flows into demand.',h:['＋ New quote → add standard products and/or custom recipes (ingredient + g/pack)','Edit freely while it is a quote; 🔒 Lock creates the SKUs + BOMs and pushes packs into demand','Pull the demand in Demand/MRP with ☁ Sync for the needed week'],l:['Each distinct custom recipe hashes to one CUST-… SKU (identical recipes reuse it)','Locking writes the order packs to the demand table keyed by the created SKU + needed date','A locked order can be marked fulfilled; cancel voids a quote']},
+  prodplan:{d:'Plan and confirm a production run — good packs per product plus any output ingredients to make, then the actual processed used / raw used / output created.',h:['Add products + Good packs, and/or add Output ingredients + Needed qty (target/remaining come from the latest demand plot)','✅ Confirm production → the popup uses existing processed stock first, then makes the shortfall from raw','Enter actual Processed used / Raw used / Output created — live yield = output ÷ raw'],l:['Posting draws processed stock first, then deducts raw + adds processed for the shortfall, runs the mix, outputs finished packs','Excess (processed used + output created − needed) returns to the processed ingredient’s stock','Best-before auto-stamps = production date + the product’s shelf-life days; real yield is recorded on the batch']},
   approvals:{d:'Review and approve bulk-edit change requests submitted by non-admin users.',h:['Open a pending request to see the exact field changes','✓ Approve & apply writes the changes','✕ Reject with a reason'],l:['Non-admin bulk edits queue here instead of writing directly','Approving applies every change atomically','Recent decisions are logged; Admin only']},
   connection:{d:'Connect the app to your Supabase project (LIVE) or run on local demo data.',h:['Paste your Supabase URL + anon key, or sign in','Green LIVE = connected; DEMO = local sample data','Sign out to switch projects'],l:['The anon key is safe in the client — RLS protects the data','Signed-in requests use your user token','Demo data lives only in this browser']},
   fieldacl:{d:'Hide or lock specific fields (like cost) per role.',h:['Pick a model and field','Set hide / read-only per role','Save — it applies on the next render'],l:['Controls what each role sees in lists and forms','Hiding cost fields also hides margin & value figures for that role','App-level control; enforce hard security with Supabase RLS']},
