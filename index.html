@@ -1614,7 +1614,9 @@ async function refreshAtts(){ const m=MODELS[state.model]; formAtts=await attsFo
 async function attDelDb(id){ try{ await sb('record_attachments?id=eq.'+id,{method:'DELETE',prefer:'return=minimal'}); }catch(e){ toast(e.message,true); return; }
   formAtts=(formAtts||[]).filter(a=>a.id!==id); toast('Attachment removed'); renderForm(); }
 function attachHtml(){
-  const folder=(typeof AUTOS!=='undefined'&&AUTOS.drive_folder&&AUTOS.drive_folder.url)?AUTOS.drive_folder.url:'';
+  let folder=(typeof AUTOS!=='undefined'&&AUTOS.drive_folder&&AUTOS.drive_folder.url)?AUTOS.drive_folder.url:'';
+  // Only show a real Google Drive folder link — never a webhook/script /exec URL pasted here by mistake.
+  if(folder && !/drive\.google\.com\/(drive\/folders|drive\/u\/\d+\/folders)/.test(folder)) folder='';
   // Supabase attachments (with clickable shareable links) first, then any local pending / manual ones not yet in the DB
   const dbA=(formAtts||[]).map(x=>({name:x.filename,url:x.drive_url,id:x.id,src:'db'}));
   const loc=loadAttach().filter(x=>!dbA.some(d=>d.name===x.name)).map((x,i)=>({name:x.name,url:x.url,pending:x.pending,idx:i,src:'loc'}));
@@ -1669,10 +1671,21 @@ async function uploadAttach(f){
     localStorage.setItem(attachKey(),JSON.stringify(at));
     sysLog(state.model, ref, '📎 '+CURRENT_USER+' uploaded '+c.name+' → Drive');
     toast('Uploading '+c.name+' to Drive… the link will appear shortly'); renderForm();
-    // n8n uploads to Drive, makes a shareable link, and writes it into record_attachments;
-    // pull it back so the file shows as a clickable link. Poll a few times instead of one long wait.
-    let tries=0; const poll=()=>{ tries++; if(state.view==='form'&&formRec[m.pk]===ref){ refreshAtts(); if(tries<5) setTimeout(poll, 3000); } };
-    setTimeout(poll, 3000);
+    // The upload webhook (Apps Script /exec or n8n) uploads to Drive, makes a shareable link, and
+    // writes it into record_attachments; poll it back so the file becomes a clickable link. If it
+    // never arrives (webhook off/misconfigured), stop polling and clear the stuck "uploading…" chip.
+    let tries=0; const MAXT=12; const poll=async()=>{ tries++;
+      if(!(state.view==='form'&&formRec[m.pk]===ref)) return;   // user navigated away
+      await refreshAtts();
+      const done=(formAtts||[]).some(a=>a.filename===c.name);   // DB link arrived?
+      if(done){ const at=loadAttach().filter(x=>x.name!==c.name||!x.pending); localStorage.setItem(attachKey(),JSON.stringify(at)); renderForm(); return; }
+      if(tries<MAXT){ setTimeout(poll, 4000); }
+      else { // give up — remove the stuck pending chip and tell the user how to recover
+        const at=loadAttach().filter(x=>!(x.name===c.name&&x.pending)); localStorage.setItem(attachKey(),JSON.stringify(at));
+        if(state.view==='form'&&formRec[m.pk]===ref) renderForm();
+        toast('Drive link didn\'t come back for '+c.name+'. Check Administration → Automations → "File upload to Drive" is ON with the correct /exec (or n8n) URL, then re-upload — or 🔗 Paste link.',true);
+      } };
+    setTimeout(poll, 3500);
   };
   reader.readAsDataURL(c.file);
 }
@@ -2664,7 +2677,7 @@ async function openPOConfirm(){
       <span class="mini" style="color:var(--muted)">When the supplier says it will arrive. A reminder fires on the day.</span>
     </div>
     <div style="max-height:360px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Requested</th><th class="num">Vendor avail</th><th class="num">Order qty</th><th>${_isStk?'Sheets':'Pack / min'}</th><th class="num">₱/${_isStk?'sheet-pc':'kg'}</th><th></th></tr></thead><tbody>
-    ${lines.map((l,i)=>{ const req=+l.ordered_kg||0; const avail=window._poAvail[i]; const fin=Math.min(req,avail);
+    ${lines.map((l,i)=>{ const req=+l.ordered_kg||0; const avail=window._poAvail[i]; const fin=avail;   // #3 order qty defaults to vendor availability
       return `<tr><td>${esc(ingName(l.ingredient_sku))}</td>
       <td class="num" style="color:var(--muted)">${req}</td>
       <td class="num" style="color:var(--muted)">${avail}</td>
@@ -2765,9 +2778,23 @@ function poPaymentsPanel(rec, lines){
       <span class="mini">Billable <b>${P(billable)}</b> · Paid <b>${P(paid)}</b> · Balance <b style="color:${bal>0.5?'var(--danger)':'#4e7a3e'}">${P(bal)}</b></span>
       ${canPay?`<button class="btn sm" onclick="openPayment()">➕ Register payment</button>`:''}
     </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin:0 0 10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12px">
+      <label>Discount ₱&nbsp;<input id="poDisc" type="number" step="any" value="${+rec.discount||0}" style="width:100px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></label>
+      <label>Delivery fee ₱&nbsp;<input id="poFee" type="number" step="any" value="${+rec.delivery_fee||0}" style="width:100px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></label>
+      <button class="btn sec sm" onclick="poUpdateCharges()">💾 Update charges</button>
+      <span class="mini" style="color:var(--muted)">Adjust anytime — even after the PO is confirmed / received.</span>
+    </div>
     ${schedHtml}
     <div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Method</th><th class="num">Amount</th><th>By</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>
   </div></div>`;
+}
+async function poUpdateCharges(){
+  const d=Math.max(0,+($('poDisc')||{}).value||0), f=Math.max(0,+($('poFee')||{}).value||0);
+  try{ await db.update('purchase_orders','po_ref',formRec.po_ref,{discount:d,delivery_fee:f});
+    formRec.discount=d; formRec.delivery_fee=f;
+    sysLog('purchase_orders',formRec.po_ref,'💵 Charges updated — discount ₱'+d+' · delivery ₱'+f+' by '+CURRENT_USER);
+    toast('Charges updated — billing recalculated'); renderForm();
+  }catch(e){ toast(e.message,true); }
 }
 function openPayment(){
   if(formIsNew){ toast('Save the PO first',true); return; }
@@ -2808,36 +2835,38 @@ async function openPOReceive(){
   window._poOrd=lines.map(l=>poOrderQty(l));    // order qty (vendor avail)
   window._poAlready=lines.map(l=>+l.received_kg||0);   // received so far (accumulated across batches)
   await loadBins();
-  const _im={}; try{ (await listIngredients()).forEach(x=>_im[x.sku]=x); }catch(e){}
-  const _expDefault=(sku)=>{ const it=_im[sku]||{}; const d=+it.shelf_life_days||0; return d>0?addDaysISO(todayISO(),d):''; };
-  const _perish=(sku)=>{ const it=_im[sku]||{}; return (+it.shelf_life_days>0) || !isSupplyItem(it); };
+  const _isSup=_isStickerPO(formRec) || /\[SUPPLIES\]/i.test(String(formRec.po_ref||''));
+  const defLoc=_isSup?'':'bulacan';   // supplies/stickers may go to Pasig — don't presume
   window._rcN=lines.length;
   const anyPrior=lines.some(l=>(+l.received_kg||0)>0);
+  const _locSel=(cur)=>['bulacan','pasig'].map(x=>`<option value="${x}" ${cur===x?'selected':''}>${x.charAt(0).toUpperCase()+x.slice(1)}</option>`).join('');
   $('modal').innerHTML=`<h3>Receive order — ${esc(formRec.po_ref)}</h3>
-    <p>Deliveries can arrive in <b>batches</b>. Enter the qty <b>received now</b> per line; it adds to what's already received. Only what you enter posts to Bulacan stock. Tick <b>Final delivery</b> to close the PO (any shortfall is then flagged as a variance).${anyPrior?' <b>This PO was already partly received.</b>':''}</p>
+    <p>Deliveries can arrive in <b>batches</b>. Choose the <b>receiving warehouse</b>, then enter the qty <b>received now</b> per line; it adds to what's already received. Only what you enter posts to that warehouse's stock. Tick <b>Final delivery</b> to close the PO (any shortfall is then flagged as a variance).${anyPrior?' <b>This PO was already partly received.</b>':''}</p>
     <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin:0 0 10px;padding:8px 10px;background:#f6f8f4;border-radius:8px">
+      <label class="mini">Receive at warehouse&nbsp;<select id="rc_loc" onchange="rcReloadBins()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">${_locSel(defLoc)}</select></label>
       <label class="mini">Set bin for all&nbsp;<input id="rc_binAll" placeholder="e.g. A-1" style="width:90px;padding:4px;border:1px solid var(--line);border-radius:5px"></label>
-      <label class="mini">Set expiry for all&nbsp;<input id="rc_expAll" type="date" style="padding:4px;border:1px solid var(--line);border-radius:5px"></label>
-      <button class="btn sec sm" onclick="rcFillAll()">↧ Apply to all lines</button>
+      <button class="btn sec sm" onclick="rcFillAll()">↧ Apply bin to all</button>
     </div>
-    <div style="max-height:300px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Order</th><th class="num">Already</th><th class="num">Receive now</th><th>Bin</th><th>Expiry</th><th></th></tr></thead><tbody>
+    <div style="max-height:320px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Order</th><th class="num">Already</th><th class="num">Receive now</th><th>Bin</th><th></th></tr></thead><tbody>
     ${lines.map((l,i)=>{ const oq=poOrderQty(l); const already=+l.received_kg||0; const remaining=Math.max(0,Math.round((oq-already)*1000)/1000);
       return `<tr><td>${esc(ingName(l.ingredient_sku))}</td>
       <td class="num" style="color:var(--muted)">${oq}</td>
       <td class="num" style="color:var(--muted)">${already||'—'}</td>
       <td><input id="rc_q${i}" type="number" step="any" value="${remaining}" oninput="rcFlag(${i})" style="width:92px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
-      <td><input id="rc_bin${i}" value="${esc(binOf(l.ingredient_sku,'bulacan'))}" placeholder="bin" style="width:72px;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
-      <td>${_perish(l.ingredient_sku)?`<input id="rc_exp${i}" type="date" value="${esc(_expDefault(l.ingredient_sku))}" style="padding:5px;border:1px solid var(--line);border-radius:5px" title="expiry date (optional)">`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
+      <td><input id="rc_bin${i}" value="${esc(binOf(l.ingredient_sku,defLoc))}" placeholder="bin" style="width:72px;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
       <td id="rc_flag${i}" style="font-size:12px;white-space:nowrap"></td></tr>`; }).join('')}
     </tbody></table></div>
     <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px"><input type="checkbox" id="rc_final"> <b>Final delivery</b> — close this PO (received). Leave unticked if more batches are coming.</label>
     <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" onclick="poReceiveApply()">📦 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
+  window._rcLines=lines;
   $('overlay').classList.add('on');
   lines.forEach((l,i)=>rcFlag(i));
 }
-function rcFillAll(){ const bin=($('rc_binAll')||{}).value||''; const exp=($('rc_expAll')||{}).value||''; const n=window._rcN||0;
-  for(let i=0;i<n;i++){ if(bin){ const b=$('rc_bin'+i); if(b) b.value=bin; } if(exp){ const e=$('rc_exp'+i); if(e) e.value=exp; } }
-  toast('Applied to all lines'+(bin?' · bin '+bin:'')+(exp?' · expiry '+exp:'')); }
+// refresh each line's bin to the chosen warehouse's bin
+function rcReloadBins(){ const loc=($('rc_loc')||{}).value||'bulacan'; (window._rcLines||[]).forEach((l,i)=>{ const b=$('rc_bin'+i); if(b) b.value=binOf(l.ingredient_sku,loc); }); }
+function rcFillAll(){ const bin=($('rc_binAll')||{}).value||''; const n=window._rcN||0;
+  for(let i=0;i<n;i++){ if(bin){ const b=$('rc_bin'+i); if(b) b.value=bin; } }
+  toast('Applied to all lines'+(bin?' · bin '+bin:'')); }
 // Live check: total (already + receive now) vs order qty.
 function rcFlag(i){ const now=+($('rc_q'+i)||{}).value||0; const o=(window._poOrd&&window._poOrd[i])||0; const already=(window._poAlready&&window._poAlready[i])||0; const tot=now+already; const e=$('rc_flag'+i); if(!e)return;
   if(tot<o-0.0001){ e.innerHTML='<span style="color:var(--earth,#b5762a)">'+(Math.round((o-tot)*100)/100)+' kg to go</span>'; }
@@ -2848,15 +2877,16 @@ async function poReceiveApply(){
   try{ await _poReceiveApply(); } finally{ _postLock=false; }
 }
 // Post ONLY this batch's delta to the ledger (unique per-batch note) and roll moving-avg cost by the delta.
-async function postReceiptDelta(po, deltas){
+async function postReceiptDelta(po, deltas, loc){
+  loc=loc||'bulacan';
   const secure=await useSecure();
   const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i); let n=0, costErr=0;
-  const stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.ref_sku&&s.location_code==='bulacan'&&s.kind==='ingredient') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
+  const stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.ref_sku&&s.location_code===loc&&s.kind==='ingredient') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
   const batchNote='PO '+po.po_ref+' R'+Date.now();   // unique per batch → no double-post guard needed
   for(const d of deltas){ const recvKg=+d.recvKg||0; if(!(recvKg>0)) continue;
     const isSup=/(supply|supplement)/i.test((im[d.ingredient_sku]||{}).category||'');
     const g=isSup?recvKg:recvKg*1000, priceKg=Math.max(0,+d.priceKg||0);
-    try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:d.ingredient_sku,location_code:'bulacan',qty:g,unit_cost:(isSup?priceKg:priceKg/1000),movement_type:'receipt',note:batchNote,expiry_date:d.expiry||null}); }catch(e){ continue; }
+    try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:d.ingredient_sku,location_code:loc,qty:g,unit_cost:(isSup?priceKg:priceKg/1000),movement_type:'receipt',note:batchNote}); }catch(e){ continue; }
     if(isSup){ n++; continue; }
     if(secure){ try{ await sb('rpc/wr_roll_cost',{method:'POST',body:JSON.stringify({p_sku:d.ingredient_sku,p_recv_kg:recvKg,p_price_kg:priceKg})}); }catch(e){ costErr++; } }
     else { const it=im[d.ingredient_sku]; if(it){ const ohG=Math.max(0,stock[d.ingredient_sku]||0), oldAvg=+it.moving_avg_cost_kg||priceKg;
@@ -2866,27 +2896,29 @@ async function postReceiptDelta(po, deltas){
   return {n,costErr};
 }
 async function _poReceiveApply(){
-  const lines=formChildren||[]; const notes=[]; const _vars=[]; const deltas=[]; window._recvExpiry={};
+  const lines=formChildren||[]; const notes=[]; const _vars=[]; const deltas=[];
   const isFinal=!!($('rc_final')||{}).checked;
+  const loc=($('rc_loc')||{}).value||'bulacan';
   let anyNow=false;
   const updated=lines.map((l,i)=>{ const now=+(($('rc_q'+i)||{}).value)||0; const already=+l.received_kg||0; const oq=poOrderQty(l); const pr=+l.price_kg||0;
-    if(now>0){ anyNow=true; const ev=($('rc_exp'+i)||{}).value||null; deltas.push({ingredient_sku:l.ingredient_sku, recvKg:now, priceKg:pr, expiry:ev}); }
-    const bv=($('rc_bin'+i)||{}).value; if(bv!==undefined&&bv!==null) setBin(l.ingredient_sku,'bulacan',bv);
+    if(now>0){ anyNow=true; deltas.push({ingredient_sku:l.ingredient_sku, recvKg:now, priceKg:pr}); }
+    const bv=($('rc_bin'+i)||{}).value; if(bv!==undefined&&bv!==null) setBin(l.ingredient_sku,loc,bv);
     const total=Math.round((already+now)*1000)/1000;
     if(isFinal){ const g=Math.round((oq-total)*1000)/1000;
       if(g>0.0001){ notes.push(ingName(l.ingredient_sku)+': ordered '+oq+' → received '+total+'kg (short '+g+')');
-        _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:total,gap_qty:-g,gap_value:Math.round(g*pr*100)/100,location:'bulacan',responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+total+' (short, PO closed)'}); }
+        _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:total,gap_qty:-g,gap_value:Math.round(g*pr*100)/100,location:loc,responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+total+' (short, PO closed)'}); }
       else if(g< -0.0001){ notes.push(ingName(l.ingredient_sku)+': ordered '+oq+' → received '+total+'kg (over '+(-g)+')');
-        _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:total,gap_qty:-g,gap_value:Math.round(-g*pr*100)/100,location:'bulacan',responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+total+' (over)'}); } }
+        _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:total,gap_qty:-g,gap_value:Math.round(-g*pr*100)/100,location:loc,responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+total+' (over)'}); } }
     return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:l.available_kg, price_kg:l.price_kg, received_kg:total}; });
   if(!anyNow && !isFinal){ toast('Enter a quantity received, or tick Final delivery to close',true); return; }
+  if(anyNow && !loc){ toast('Pick the receiving warehouse',true); return; }
   // fully received on every line?
   const complete=updated.every(u=>(+u.received_kg||0) >= poOrderQty(u)-0.0001);
   const willClose = isFinal || complete;
   try{
     await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
     formChildren=updated;
-    if(deltas.length){ const res=await postReceiptDelta(formRec, deltas); }
+    if(deltas.length){ const res=await postReceiptDelta(formRec, deltas, loc); }
     formRec.status = willClose ? 'received' : 'confirmed';
     await db.update('purchase_orders','po_ref',formRec.po_ref,{status:formRec.status});
     const batchQty=deltas.reduce((s,d)=>s+(+d.recvKg||0),0);
@@ -3360,13 +3392,16 @@ async function renderCustomOrders(){
   $('cp').innerHTML=`<div class="title">Custom Orders <span onclick="openKB('custom_orders')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="coNew()">＋ New quote</button>
     <div class="sp"></div><span style="color:var(--muted)">CS quotes → lock → sellable SKU + BOM + demand</span>`;
-  let orders=[]; try{ orders=await db.list('custom_orders',{}); }catch(e){}
-  let lc={}, lt={}; try{ (await db.list('custom_order_lines',{})).forEach(l=>{ lc[l.order_ref]=(lc[l.order_ref]||0)+1; lt[l.order_ref]=(lt[l.order_ref]||0)+(+l.packs||0)*(+l.unit_price||0); }); }catch(e){}
+  let orders=[]; let _tblErr=''; try{ orders=await db.list('custom_orders',{}); }catch(e){ _tblErr=String(e&&e.message||e); }
+  let lc={}, lt={}; try{ (await db.list('custom_order_lines',{})).forEach(l=>{ lc[l.order_ref]=(lc[l.order_ref]||0)+1; lt[l.order_ref]=(lt[l.order_ref]||0)+(+l.packs||0)*(+l.unit_price||0); }); }catch(e){ _tblErr=_tblErr||String(e&&e.message||e); }
+  window._coTblErr=_tblErr;
   orders.forEach(o=>{ o._total=Math.max(0,(lt[o.order_ref]||0)-(+o.discount||0)+(+o.delivery_fee||0)); });
   orders.sort((a,b)=>String(b.order_date||'').localeCompare(String(a.order_date||''))||String(b.order_ref).localeCompare(String(a.order_ref)));
   const badge=s=>`<span class="badge b-${s==='confirmed'?'confirmed':(s==='fulfilled'?'received':(s==='cancelled'?'cancelled':'open'))}">${esc(s||'quote')}</span>`;
   let rows=orders.map(o=>`<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.needed_date||'—')}</td><td>${badge(o.status)}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td></tr>`).join('');
-  $('content').innerHTML=`<div class="repcard"><div class="hint" style="margin:0 0 8px">Create a quote, add standard products and/or custom recipes, edit freely. <b>Lock</b> turns it into a confirmed order — each custom recipe becomes its own sellable SKU + BOM, and the ordered packs flow into <b>Demand/MRP</b> for the needed week (pull them in MRP with ☁ Sync).</div>
+  const _liveTag=`<span class="mini" style="color:var(--muted)">${isLive()?'Live · Supabase':'Demo (local only)'}</span>`;
+  const _mig = (isLive() && window._coTblErr) ? `<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ The <code>custom_orders</code> tables aren't reachable, so orders can't be saved across devices. Run <b>wr_migration_custom_orders.sql</b> in Supabase (SQL editor), then reload. <span class="mini">(${esc(window._coTblErr)})</span></div>`:'';
+  $('content').innerHTML=`<div class="repcard"><div style="display:flex;justify-content:flex-end">${_liveTag}</div>${_mig}<div class="hint" style="margin:0 0 8px">Create a quote, add standard products and/or custom recipes, edit freely. <b>Lock</b> turns it into a confirmed order — each custom recipe becomes its own sellable SKU + BOM, and the ordered packs flow into <b>Demand/MRP</b> for the needed week (pull them in MRP with ☁ Sync).</div>
     <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th>Needed</th><th>Status</th><th class="num">Lines</th><th class="num">Total</th></tr></thead>
     <tbody>${rows||'<tr><td colspan="6" class="empty">No custom orders yet — click ＋ New quote.</td></tr>'}</tbody></table></div>
     <div class="pager">${orders.length} order(s)</div></div>`;
@@ -3442,18 +3477,32 @@ function _coIngOptions(sel){ return hierGroups(_coIng,{g1:'ingredient_group'}).m
 function drawCoRecipe(){
   const now=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; const added=Math.max(0,now-_coEditBase), removed=Math.max(0,_coEditBase-now);
   const totG=_coEditRows.reduce((s,r)=>s+(+r.grams||0),0); const packG=+coLines[_coEditIdx].pack_size_g||0;
-  const rows=_coEditRows.map((r,j)=>`<tr><td><select onchange="_coEditRows[${j}].ingredient_sku=this.value;drawCoRecipe()" style="width:210px"><option value="">— ingredient —</option>${_coIngOptions(r.ingredient_sku)}</select></td>
-    <td><input type="number" step="any" value="${r.grams||''}" oninput="_coEditRows[${j}].grams=+this.value||0;drawCoRecipe()" style="width:84px;text-align:right"> g</td>
-    <td><span style="cursor:pointer;color:var(--danger)" onclick="_coEditRows.splice(${j},1);drawCoRecipe()">✕</span></td></tr>`).join('');
+  const rows=_coEditRows.map((r,j)=>{ const unm=r.src_name&&!r.ingredient_sku;
+    const srcHint=r.src_name?`<div class="mini" style="color:${unm?'var(--danger)':'var(--muted)'}">calculator: <b>${esc(r.src_name)}</b>${unm?' — pick a match':''}</div>`:'';
+    return `<tr${unm?' style="background:#fdf3f0"':''}><td><select onchange="_coEditRows[${j}].ingredient_sku=this.value;drawCoRecipe()" style="width:210px"><option value="">— ingredient —</option>${_coIngOptions(r.ingredient_sku)}</select>${srcHint}</td>
+    <td><input type="number" step="any" value="${r.grams||''}" oninput="_coEditRows[${j}].grams=+this.value||0;coRecipeTick()" style="width:84px;text-align:right"> g</td>
+    <td><span style="cursor:pointer;color:var(--danger)" onclick="_coEditRows.splice(${j},1);drawCoRecipe()">✕</span></td></tr>`; }).join('');
+  const nUnm=_coEditRows.filter(r=>r.src_name&&!r.ingredient_sku).length;
   $('modal').innerHTML=`<div><h3>🧪 Custom recipe — ${esc(coLines[_coEditIdx].description||'')||'(unnamed)'}</h3>
-    <p class="mini">Enter each ingredient and grams <b>per pack</b>. This becomes the sellable SKU's BOM when the order is locked. Pack size: <b>${packG||'—'} g</b>.</p>
+    <p class="mini">Enter each ingredient and grams <b>per pack</b>. This becomes the sellable SKU's BOM when the order is locked. Pack size: <b>${packG||'—'} g</b>.${nUnm?` <b style="color:var(--danger)">${nUnm} calculator ingredient(s) need a match</b> — pick the equivalent from your master list; the app <b>remembers it</b> for next time.`:''}</p>
     <div style="max-height:320px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">g / pack</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
     <div style="margin-top:8px"><span class="addrow" onclick="_coEditRows.push({ingredient_sku:'',grams:0});drawCoRecipe()">＋ Add ingredient</span></div>
-    <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px">Recipe total <b>${Math.round(totG)} g</b>${packG?` of ${packG} g pack ${Math.abs(totG-packG)<0.5?'<span style="color:#4e7a3e">✓ matches</span>':`<span style="color:var(--earth,#b5762a)">(${totG>packG?'+':''}${Math.round(totG-packG)} g vs pack)</span>`}`:''} · <b>${now}</b> ingredient(s) — <span style="color:#4e7a3e">${added} added</span>, <span style="color:var(--danger)">${removed} removed</span> since opened</div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="coSaveRecipe()">💾 Save recipe (${now})</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+    <div id="coRecSum" style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px">${_coRecipeSummaryHtml()}</div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" id="coRecSaveBtn" onclick="coSaveRecipe()">💾 Save recipe (${now})</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   $('overlay').classList.add('on');
 }
-function coSaveRecipe(){ const clean=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0); coLines[_coEditIdx].recipe=clean; closeModal(); drawCOForm(); toast('Recipe saved · '+clean.length+' ingredient(s)'); }
+// summary HTML (recomputed live without re-rendering rows, so focus stays put)
+function _coRecipeSummaryHtml(){
+  const now=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; const added=Math.max(0,now-_coEditBase), removed=Math.max(0,_coEditBase-now);
+  const totG=_coEditRows.reduce((s,r)=>s+(+r.grams||0),0); const packG=+((coLines[_coEditIdx]||{}).pack_size_g)||0;
+  return `Recipe total <b>${Math.round(totG)} g</b>${packG?` of ${packG} g pack ${Math.abs(totG-packG)<0.5?'<span style="color:#4e7a3e">✓ matches</span>':`<span style="color:var(--earth,#b5762a)">(${totG>packG?'+':''}${Math.round(totG-packG)} g vs pack)</span>`}`:''} · <b>${now}</b> ingredient(s) — <span style="color:#4e7a3e">${added} added</span>, <span style="color:var(--danger)">${removed} removed</span> since opened`;
+}
+function coRecipeTick(){ const s=$('coRecSum'); if(s) s.innerHTML=_coRecipeSummaryHtml(); const btn=$('coRecSaveBtn'); if(btn){ const now=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; btn.textContent='💾 Save recipe ('+now+')'; } }
+function coSaveRecipe(){ const clean=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0); coLines[_coEditIdx].recipe=clean;
+  // remember every calculator-name → SKU mapping so future imports auto-match
+  const toLearn=_coEditRows.filter(r=>r.src_name&&r.ingredient_sku);
+  if(toLearn.length){ (async()=>{ for(const r of toLearn){ await ffLearnAlias(r.src_name, r.ingredient_sku); } })(); }
+  closeModal(); drawCOForm(); toast('Recipe saved · '+clean.length+' ingredient(s)'+(toLearn.length?' · '+toLearn.length+' mapping(s) remembered':'')); }
 async function coSave(){
   if(!coLines.length){ toast('Add at least one line',true); return; }
   if(!coRec.order_ref){ try{ coRec.order_ref=(await genRef('CO',{date:coRec.order_date})).ref; }catch(e){ coRec.order_ref='CO-'+_mmddyyyy(coRec.order_date)+'-'+String(Date.now()).slice(-4); } }
@@ -3463,9 +3512,11 @@ async function coSave(){
     if(exists) await db.update('custom_orders','order_ref',coRec.order_ref,hdr); else await db.create('custom_orders',hdr);
     await _coSaveLines();
     sysLog('custom_orders',coRec.order_ref,'📝 Quote saved ('+coLines.length+' line(s)) by '+CURRENT_USER);
-    toast('Quote saved · '+coRec.order_ref); drawCOForm();
-  }catch(e){ toast(e.message,true); }
+    toast('Quote saved · '+coRec.order_ref+(isLive()?' · Supabase':' · local only')); drawCOForm();
+  }catch(e){ toast(_coErr(e),true); }
 }
+// Friendlier persistence error — the usual cause is the migration not being run.
+function _coErr(e){ const m=String((e&&e.message)||e||''); return /custom_order|relation|does not exist|schema cache|404|Not Found|PGRST/i.test(m) ? ('Save failed — is the Custom Orders migration applied? Run wr_migration_custom_orders.sql in Supabase. ('+m+')') : m; }
 async function _coSaveLines(){ const recs=coLines.map(l=>({order_ref:coRec.order_ref, line_type:l.line_type, product_sku:l.product_sku||null, description:l.description||'', recipe:(l.line_type==='custom'?(l.recipe||[]):null), pack_size_g:+l.pack_size_g||0, packs:+l.packs||0, unit_price:+l.unit_price||0}));
   await db.replaceChildren({model:'custom_order_lines',fk:'order_ref'}, coRec.order_ref, recs); }
 async function coLock(){
@@ -3502,8 +3553,8 @@ async function coLock(){
     await db.update('custom_orders','order_ref',coRec.order_ref,{status:'confirmed'});
     coRec.status='confirmed';
     sysLog('custom_orders',coRec.order_ref,'🔒 Order locked — '+made+' new custom SKU(s), demand pushed for '+(coRec.needed_date||coRec.order_date)+' by '+CURRENT_USER);
-    hideBusy(); toast('Order locked · '+made+' custom SKU(s) created · demand pushed'); drawCOForm();
-  }catch(e){ hideBusy(); toast(e.message,true); }
+    hideBusy(); toast('Order locked · '+made+' custom SKU(s) created · demand pushed'+(isLive()?' · saved to Supabase':' · local only')); drawCOForm();
+  }catch(e){ hideBusy(); toast(_coErr(e),true); }
 }
 function prec2Name(l){ return (l.description||'Custom meal')+' · '+(l.pack_size_g||0)+'g'; }
 async function coFulfil(){ if(!confirm('Mark this order fulfilled?')) return; try{ await db.update('custom_orders','order_ref',coRec.order_ref,{status:'fulfilled'}); coRec.status='fulfilled'; sysLog('custom_orders',coRec.order_ref,'✓ Fulfilled by '+CURRENT_USER); toast('Marked fulfilled'); drawCOForm(); }catch(e){ toast(e.message,true); } }
@@ -3523,17 +3574,29 @@ function renderFFCalc(){
       <iframe id="ffcalcFrame" src="${FFCALC_SRC}" style="width:100%;height:100%;border:0;display:block" title="Fresh Food Calculator"></iframe></div>
     <div class="mini" style="margin-top:6px;color:var(--muted)">The calculator runs in-app. Build a pack, then click <b>📤 Send order to ERP</b> (top-right of the calculator) — it becomes a Custom Order with its recipe, ready to review &amp; Lock. If the calculator doesn't appear, make sure <code>${esc(FFCALC_SRC)}</code> is deployed alongside the app.</div>`;
 }
+// Learned calculator-name → SKU aliases (so a mapping done once sticks forever).
+let FFCALC_ALIASES=null;
+async function loadFFAliases(){ if(FFCALC_ALIASES) return FFCALC_ALIASES; FFCALC_ALIASES={};
+  if(isLive()&&SUPA&&SUPA.token){ try{ const r=await sb("app_config?select=value&key=eq.ffcalc_aliases"); if(r&&r[0]&&r[0].value) FFCALC_ALIASES=r[0].value||{}; }catch(e){} }
+  else { try{ FFCALC_ALIASES=JSON.parse(localStorage.getItem('wr_ffcalc_aliases')||'{}'); }catch(e){ FFCALC_ALIASES={}; } }
+  return FFCALC_ALIASES; }
+async function saveFFAliases(){ try{ localStorage.setItem('wr_ffcalc_aliases',JSON.stringify(FFCALC_ALIASES||{})); }catch(e){}
+  if(isLive()&&SUPA&&SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'ffcalc_aliases',value:FFCALC_ALIASES||{}})}); }catch(e){} } }
+async function ffLearnAlias(name, sku){ if(!name||!sku) return; await loadFFAliases(); const k=String(name).trim().toLowerCase(); if(k && FFCALC_ALIASES[k]!==sku){ FFCALC_ALIASES[k]=sku; await saveFFAliases(); } }
 // Receive an order from the embedded calculator → map names to SKUs → open a pre-filled Custom Order.
 async function ffCreateOrderFromCalc(o){
   if(!o||!o.items||!o.items.length){ toast('The calculator sent no ingredients',true); return; }
   let ings=[]; try{ ings=await listIngredients(); }catch(e){}
+  await loadFFAliases(); const valid=new Set(ings.map(i=>i.sku));
   const norm=s=>String(s||'').trim().toLowerCase();
   const idx={}; ings.forEach(it=>{ [it.name, it.raw_input, it.approved_alt].forEach(nm=>{ const k=norm(nm); if(k && !idx[k]) idx[k]=it.sku; }); });
   const recipe=[]; const unmatched=[];
-  o.items.forEach(x=>{ let sku=idx[norm(x.name)]||'';
-    if(!sku){ const hit=ings.find(it=>{ const a=norm(it.name),b=norm(it.raw_input),q=norm(x.name); return a&&(a===q||a.includes(q)||q.includes(a)) || (b&&(b===q||b.includes(q))); }); if(hit) sku=hit.sku; }
+  o.items.forEach(x=>{ const q=norm(x.name); let sku='';
+    if(FFCALC_ALIASES[q] && valid.has(FFCALC_ALIASES[q])) sku=FFCALC_ALIASES[q];   // learned alias first
+    if(!sku) sku=idx[q]||'';
+    if(!sku){ const hit=ings.find(it=>{ const a=norm(it.name),bb=norm(it.raw_input); return a&&(a===q||a.includes(q)||q.includes(a)) || (bb&&(bb===q||bb.includes(q))); }); if(hit) sku=hit.sku; }
     if(!sku) unmatched.push(x.name);
-    recipe.push({ingredient_sku:sku, grams:+x.grams||0}); });
+    recipe.push({ingredient_sku:sku, grams:+x.grams||0, src_name:x.name}); });
   try{ (await db.list('products',{})).forEach(p=>_coProd[p.sku]=p); }catch(e){}
   try{ _coIng=(await listIngredients()).filter(i=>!isSupplyItem(i)); }catch(e){}
   const desc=[o.customer||'Custom', o.dog, o.feedingType].filter(Boolean).join(' · ');
@@ -3563,7 +3626,23 @@ async function renderProdPlan(){
   try{ window._prodAllProducts=(await db.list('products',{})).filter(p=>p.active!==false); }catch(e){ window._prodAllProducts=[]; }
   try{ window._prodAllIngredients=await listIngredients(); }catch(e){ window._prodAllIngredients=[]; }
   await prodLoadTargets();
+  if(!prodPlanLines.length && !prodRunRef) await prodLoadDraft();   // #8/#9 restore the saved plan (survives browser change)
   drawProdPlan();
+}
+// Load the most-recent SAVED DRAFT plan for the production date, so the plan/cart persist across browsers.
+async function prodLoadDraft(){
+  try{
+    let rows;
+    if(isLive()){ rows=await sb('production_batches?select=batch_ref,run_ref,product_sku,planned_packs,good_packs,reject_packs,waste_g,output_lot,production_date,status&status=eq.draft&production_date=eq.'+encodeURIComponent(prodPlanDate)); }
+    else { rows=(DEMO.production_batches||[]).filter(b=>b.status==='draft'&&String(b.production_date||'')===String(prodPlanDate)); }
+    if(!rows||!rows.length) return;
+    // pick the latest run for this date
+    rows.sort((a,b)=>String(b.run_ref||'').localeCompare(String(a.run_ref||'')));
+    const runRef=rows[0].run_ref; const mine=rows.filter(r=>r.run_ref===runRef);
+    const pmap={}; (window._prodAllProducts||[]).forEach(p=>pmap[p.sku]=p.name);
+    prodRunRef=runRef;
+    prodPlanLines=mine.map(r=>({product_sku:r.product_sku, name:pmap[r.product_sku]||r.product_sku, planned_packs:+r.planned_packs||0, good_packs:+r.good_packs||0, reject_packs:+r.reject_packs||0, waste_g:+r.waste_g||0, output_lot:r.output_lot||''}));
+  }catch(e){}
 }
 async function prodLoadTargets(){
   let dm={...mrpDemand}, planDate=prodPlanDate;
@@ -3600,7 +3679,7 @@ function drawProdPlan(){
       <td><input style="width:110px" value="${esc(l.output_lot||'')}" oninput="prodPlanLines[${i}].output_lot=this.value"></td>
       <td><span style="cursor:pointer;color:var(--danger)" title="Remove line" onclick="prodDelLine(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="9" class="empty">Add a product below to start the run.</td></tr>'}
     </tbody></table></div>
-    <div style="margin-top:8px;display:flex;align-items:center;gap:8px"><span class="addrow">＋ Add product</span>
+    <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><button class="btn sec sm" onclick="prodKitchenCart()">🔎 Search &amp; add</button><span class="addrow">＋ quick add</span>
       <select id="prodAdd" onchange="prodAddLine(this.value)"><option value="">— pick a product —</option>${pickOpts}</select></div>
     <div class="pager">${prodPlanLines.length} product(s) · ${totGood} good packs this run · ${totRemain} remaining to make</div></div>`;
   // ---- Output ingredients (make processed stock directly, no finished product) ----
@@ -3619,7 +3698,7 @@ function drawProdPlan(){
       <td class="num"><input type="number" step="any" style="width:90px;text-align:right" value="${l.needed_kg||''}" oninput="prodOutLines[${i}].needed_kg=+this.value||0"></td>
       <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="4" class="empty">Optional — add a processed ingredient to make to stock.</td></tr>'}
     </tbody></table></div>
-    <div style="margin-top:8px;display:flex;align-items:center;gap:8px"><span class="addrow">＋ Add output ingredient</span>
+    <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><button class="btn sec sm" onclick="prodOutPick()">🔎 Search &amp; add</button><span class="addrow">＋ quick add</span>
       <select id="prodOutAdd" onchange="prodAddOut(this.value)"><option value="">— pick an output ingredient —</option>${outPick}</select></div></div>`;
   $('content').innerHTML=h;
 }
@@ -3627,57 +3706,140 @@ function prodAddOut(sku){ if(!sku)return; if(prodOutLines.some(l=>l.ingredient_s
   const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{}; prodOutLines.push({ingredient_sku:sku,name:i.name||sku,needed_kg:0}); drawProdPlan(); }
 function prodDelOut(i){ prodOutLines.splice(i,1); drawProdPlan(); }
 
-/* ---- Kitchen cart: pick products to produce (#2) ---- */
+/* ---- Kitchen cart: searchable/filterable picker for what to produce (#2/#7/#8) ---- */
 function prodKitchenCart(){
   const prods=(window._prodAllProducts||[]); if(!prods.length){ toast('No products loaded',true); return; }
-  const cur={}; prodPlanLines.forEach(l=>cur[l.product_sku]=+l.good_packs||0);
-  window._kcList=[]; let body='';
-  hierGroups(prods,{g1:'group_1',g2:'group_2'}).forEach(G=>{ G.subs.forEach(S=>{
-    body+=`<tr style="background:#f6f8f4"><td colspan="4" style="padding-left:10px">▸ <b>${esc(G.g1+' › '+(S.g2||''))}</b></td></tr>`;
-    S.items.forEach(p=>{ const idx=window._kcList.length; window._kcList.push(p); const rem=_prodRemain(p.sku,0); const v=cur[p.sku]!=null?cur[p.sku]:'';
-      body+=`<tr><td>${esc(p.name)}<div class="mini"><code>${esc(p.sku)}</code></div></td><td class="num mini">${prodTargetMap[p.sku]||'—'}</td><td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem||'—'}</td>
-        <td><input type="number" id="kc_${idx}" value="${v}" placeholder="${rem||0}" style="width:70px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); }); });
+  window._kcQty={}; prodPlanLines.forEach(l=>{ window._kcQty[l.product_sku]=+l.good_packs||0; });   // start from the saved plan
+  window._kcQ=''; window._kcG='';
+  const groups=[...new Set(prods.map(p=>p.group_1||'—'))].sort();
   $('modal').innerHTML=`<div><h3>🛒 Kitchen cart — pick what to produce</h3>
-    <p class="mini">Enter <b>packs to produce</b> per product (blank = skip). Target &amp; remaining come from the latest demand plot. Adding builds the day's production plan; you can still fine-tune it after.</p>
-    <div style="max-height:400px;overflow:auto"><table><thead><tr><th>Product</th><th class="num">Target</th><th class="num">Remaining</th><th class="num">Produce</th></tr></thead><tbody>${body}</tbody></table></div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="prodCartApply()">🛒 Add to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
-  $('overlay').classList.add('on');
+    <p class="mini">Search &amp; filter, then enter <b>packs to produce</b> per product. It starts from the current saved plan; Apply rebuilds the day's plan. Target &amp; remaining come from the latest demand plot.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
+      <input id="kc_q" placeholder="🔎 search name / SKU / group…" oninput="window._kcQ=this.value;drawKitchenCartBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
+      <select id="kc_g" onchange="window._kcG=this.value;drawKitchenCartBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All groups</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
+    </div>
+    <div style="max-height:380px;overflow:auto"><table><thead><tr><th>Product</th><th class="num">Target</th><th class="num">Remaining</th><th class="num">Produce</th></tr></thead><tbody id="kcBody"></tbody></table></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="prodCartApply()">🛒 Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on'); drawKitchenCartBody();
 }
-function prodCartApply(){ const L=window._kcList||[]; let n=0;
-  L.forEach((p,idx)=>{ const el=$('kc_'+idx); if(!el) return; const v=el.value; if(v===''||v==null) return; const packs=+v||0;
-    let line=prodPlanLines.find(l=>l.product_sku===p.sku);
-    if(packs>0){ if(line){ line.good_packs=packs; } else { prodPlanLines.push({product_sku:p.sku,name:p.name||p.sku,planned_packs:+prodTargetMap[p.sku]||0,good_packs:packs,reject_packs:0,waste_g:0,output_lot:''}); } n++; }
-    else if(line){ prodPlanLines=prodPlanLines.filter(l=>l.product_sku!==p.sku); }
+function drawKitchenCartBody(){
+  const prods=(window._prodAllProducts||[]); const q=(window._kcQ||'').toLowerCase().split(/\s+/).filter(Boolean); const gf=window._kcG||'';
+  const match=p=>{ if(gf && (p.group_1||'—')!==gf) return false; if(!q.length) return true;
+    const t=[p.name,p.sku,p.group_1,p.group_2,p.variant,p.family].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
+  const shown=prods.filter(match); let body='';
+  hierGroups(shown,{g1:'group_1',g2:'group_2'}).forEach(G=>G.subs.forEach(S=>{
+    body+=`<tr style="background:#f6f8f4"><td colspan="4" style="padding-left:10px">▸ <b>${esc(G.g1+' › '+(S.g2||''))}</b></td></tr>`;
+    S.items.forEach(p=>{ const rem=_prodRemain(p.sku,0); const v=(window._kcQty&&window._kcQty[p.sku]!=null)?window._kcQty[p.sku]:'';
+      body+=`<tr><td>${esc(p.name)}<div class="mini"><code>${esc(p.sku)}</code></div></td><td class="num mini">${prodTargetMap[p.sku]||'—'}</td><td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem||'—'}</td>
+        <td><input type="number" value="${v}" placeholder="${rem||0}" oninput="window._kcQty['${esc(p.sku)}']=this.value===''?'':(+this.value||0)" style="width:70px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); }));
+  const el=$('kcBody'); if(el) el.innerHTML=body||'<tr><td colspan="4" class="empty">No products match.</td></tr>';
+}
+function prodCartApply(){ const q=window._kcQty||{}; let n=0;
+  Object.keys(q).forEach(sku=>{ const v=q[sku]; const packs=(v===''||v==null)?0:(+v||0); const p=(window._prodAllProducts||[]).find(x=>x.sku===sku)||{name:sku};
+    let line=prodPlanLines.find(l=>l.product_sku===sku);
+    if(packs>0){ if(line){ line.good_packs=packs; } else { prodPlanLines.push({product_sku:sku,name:p.name||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:packs,reject_packs:0,waste_g:0,output_lot:''}); } n++; }
+    else if(line){ prodPlanLines=prodPlanLines.filter(l=>l.product_sku!==sku); }
   });
-  closeModal(); drawProdPlan(); toast(n?('Cart added · '+n+' product(s) in the plan'):'No quantities entered');
+  closeModal(); drawProdPlan(); toast(n?('Cart applied · '+n+' product(s) in the plan'):'Plan cleared');
 }
-/* ---- Kitchen batch sheet: prep quantities + processing reminders (#2) ---- */
+/* ---- Searchable output-ingredient picker (#7) ---- */
+function prodOutPick(){
+  const ings=(window._prodAllIngredients||[]).filter(i=>i.is_intermediate); if(!ings.length){ toast('No output (processed) ingredients defined',true); return; }
+  window._opQty={}; prodOutLines.forEach(l=>window._opQty[l.ingredient_sku]=+l.needed_kg||0);
+  window._opQ=''; window._opG='';
+  const groups=[...new Set(ings.map(i=>i.ingredient_group||'—'))].sort();
+  $('modal').innerHTML=`<div><h3>🔎 Output ingredients — search &amp; add</h3>
+    <p class="mini">Search &amp; filter the processed ingredients to make to stock, then enter <b>needed kg</b>. Apply updates the plan's output list.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
+      <input id="op_q" placeholder="🔎 search name / SKU / group…" oninput="window._opQ=this.value;drawOutPickBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
+      <select onchange="window._opG=this.value;drawOutPickBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All groups</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
+    </div>
+    <div style="max-height:380px;overflow:auto"><table><thead><tr><th>Output ingredient</th><th>From raw</th><th class="num">Needed kg</th></tr></thead><tbody id="opBody"></tbody></table></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="prodOutApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on'); drawOutPickBody();
+}
+function drawOutPickBody(){
+  const ings=(window._prodAllIngredients||[]); const outs=ings.filter(i=>i.is_intermediate);
+  const _bs={},_bn={}; ings.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
+  const q=(window._opQ||'').toLowerCase().split(/\s+/).filter(Boolean); const gf=window._opG||'';
+  const match=i=>{ if(gf && (i.ingredient_group||'—')!==gf) return false; if(!q.length) return true;
+    const t=[i.name,i.sku,i.ingredient_group,i.raw_input,i.category].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
+  const shown=outs.filter(match); let body='';
+  hierGroups(shown,{g1:'ingredient_group'}).forEach(G=>{
+    body+=`<tr style="background:#f6f8f4"><td colspan="3" style="padding-left:10px">▸ <b>${esc(G.g1)}</b></td></tr>`;
+    G.all.forEach(i=>{ const p=_procParent(i,_bs,_bn); const v=(window._opQty&&window._opQty[i.sku]!=null)?window._opQty[i.sku]:'';
+      body+=`<tr><td>${esc(i.name)}<div class="mini"><code>${esc(i.sku)}</code></div></td><td class="mini" style="color:var(--muted)">${p?esc(p.name):'<span style="color:var(--danger)">no raw parent</span>'}</td>
+        <td><input type="number" step="any" value="${v}" oninput="window._opQty['${esc(i.sku)}']=this.value===''?'':(+this.value||0)" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); });
+  const el=$('opBody'); if(el) el.innerHTML=body||'<tr><td colspan="3" class="empty">No output ingredients match.</td></tr>';
+}
+function prodOutApply(){ const q=window._opQty||{}; let n=0;
+  Object.keys(q).forEach(sku=>{ const v=q[sku]; const kg=(v===''||v==null)?0:(+v||0); const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{name:sku};
+    let line=prodOutLines.find(l=>l.ingredient_sku===sku);
+    if(kg>0){ if(line){ line.needed_kg=kg; } else { prodOutLines.push({ingredient_sku:sku,name:i.name||sku,needed_kg:kg}); } n++; }
+    else if(line){ prodOutLines=prodOutLines.filter(l=>l.ingredient_sku!==sku); }
+  });
+  closeModal(); drawProdPlan(); toast(n?('Applied · '+n+' output ingredient(s)'):'Output list cleared');
+}
+/* ---- Kitchen batch sheet — styled like the Fresh Food Calculator's Kitchen Batch printout (#8) ---- */
+function _kbColor(cat){ const pal=['#c0392b','#8e44ad','#2980b9','#16a085','#d35400','#27ae60','#b5762a','#2c3e50']; let h=0; const s=String(cat||''); for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))|0; return pal[Math.abs(h)%pal.length]; }
 async function prodKitchenSheet(){
   const lines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
   if(!lines.length){ toast('Add products with packs first (Kitchen cart)',true); return; }
   const bm=await prodBOMMap(); const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
   const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
-  const agg={};
-  lines.forEach(l=>{ const packs=+l.good_packs||0; (bm[l.product_sku]||[]).forEach(line=>{ const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{procG:0}; a.procG+=line.processed_g*packs; }); });
-  const prep=Object.keys(agg).map(sku=>{ const it=im[sku]||{}; const y=(+it.yield_pct||100)/100||1; const procKg=agg[sku].procG/1000; const rawKg=procKg/y; const p=_procParent(it,bySku,byName);
-    return {name:it.name||sku, method:(it.processing_method||'').trim(), procKg, rawKg, yieldPct:Math.round(y*100), parent:(p&&p.name)||(it.raw_input||'—')}; }).sort((a,b)=>b.rawKg-a.rawKg);
+  const pm={}; try{ (await db.list('products',{})).forEach(p=>pm[p.sku]=p); }catch(e){}
   const _kg=x=>(Math.round(x*100)/100).toLocaleString('en-PH');
-  const prodRows=lines.map(l=>`<tr><td>${esc(l.name||l.product_sku)}</td><td style="text-align:right">${+l.good_packs||0}</td></tr>`).join('');
-  const prepRows=prep.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.parent)}</td><td style="text-align:right">${_kg(r.rawKg)} kg</td><td style="text-align:right">${_kg(r.procKg)} kg</td><td style="text-align:right">${r.yieldPct}%</td><td>${esc(r.method)||'<i style="color:#999">— set processing method in Ingredients —</i>'}</td></tr>`).join('');
-  const recipeBlocks=lines.map(l=>{ const rows=(bm[l.product_sku]||[]).map(line=>{ const it=im[line.ingredient_sku]||{}; return `<tr><td>${esc(it.name||line.ingredient_sku)}</td><td style="text-align:right">${_kg(line.processed_g*(+l.good_packs||0)/1000)} kg</td><td>${esc((it.processing_method||'').trim())}</td></tr>`; }).join('');
-    return `<h4 style="margin:12px 0 4px">${esc(l.name||l.product_sku)} — ${+l.good_packs||0} pack(s)</h4><table class="mini2"><thead><tr><th>Processed ingredient</th><th style="text-align:right">Total</th><th>How to process</th></tr></thead><tbody>${rows}</tbody></table>`; }).join('');
-  const subNote=Object.keys(window._prodSub||{}).length?`<p style="color:#b5762a"><b>Substitutions in effect:</b> ${Object.keys(window._prodSub).map(o=>esc((im[o]||{}).name||o)+' → '+esc((im[window._prodSub[o]]||{}).name||window._prodSub[o])).join(', ')}</p>`:'';
-  const html=`<html><head><meta charset="utf-8"><title>Kitchen Batch — ${esc(prodPlanDate)}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 10px;font-size:14px;color:#555}h3{color:#2f5d33;margin:16px 0 6px}h4{color:#4e7a3e}table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}table.mini2 th{background:#eef3ea;color:#2f5d33}</style></head><body>
-    <h1>🐇 Wholesome Rabbit — Kitchen Batch Sheet</h1>
-    <h2>Production date: ${esc(prodPlanDate)} · prepared by: ____________________</h2>
+  const _g=x=>Math.round(x).toLocaleString('en-PH');
+  // Per-product Kitchen Batch block (calculator style): Category | Ingredient | Per pack | Total (g) | Total (kg)
+  const productBlocks=lines.map(l=>{
+    const packs=+l.good_packs||0; const p=pm[l.product_sku]||{}; const blines=(bm[l.product_sku]||[]);
+    const perPackTot=blines.reduce((s,x)=>s+(+x.processed_g||0),0);
+    const packG=+p.pack_g||Math.round(perPackTot);
+    const batchKg=(packG*packs)/1000;
+    const byCat={}; blines.forEach(x=>{ const it=im[x.ingredient_sku]||{}; const cat=it.category||it.ingredient_group||'Other'; (byCat[cat]=byCat[cat]||[]).push({name:it.name||x.ingredient_sku, perPack:+x.processed_g||0}); });
+    let rows=''; Object.keys(byCat).forEach(cat=>{ const col=_kbColor(cat);
+      rows+=`<tr class="catrow"><td colspan="5"><span class="dot" style="background:${col}"></span>${esc(cat)}</td></tr>`;
+      byCat[cat].forEach(r=>{ const tg=r.perPack*packs; rows+=`<tr><td></td><td>${esc(r.name)}</td><td class="r">${_g(r.perPack)} g</td><td class="r b">${_g(tg)} g</td><td class="r b" style="color:#185fa5">${_kg(tg/1000)} kg</td></tr>`; }); });
+    return `<div class="kbcard">
+      <div class="kbhd"><div class="kbtitle">${esc(l.name||l.product_sku)}</div>
+        <div class="kbmeta">${p.feeding_style?esc(p.feeding_style)+' · ':''}<code>${esc(l.product_sku)}</code> · <b>${packs}</b> × ${_g(packG)}g pack</div></div>
+      <table class="kb"><thead><tr><th>Category</th><th>Ingredient</th><th class="r">Per pack</th><th class="r">Total (g)</th><th class="r">Total (kg)</th></tr></thead><tbody>${rows||'<tr><td colspan="5" style="color:#999">No recipe on this product.</td></tr>'}</tbody></table>
+      <div class="kbsum"><div class="kbpack">Mix all ingredients → Weigh <b>${_g(packG)}g per pack</b> → Seal.</div>
+        <div class="kbtiles"><div class="kbtile"><div class="v">${_g(perPackTot)}g</div><div class="l">Food / pack</div></div><div class="kbtile"><div class="v">${_g(packG)}g</div><div class="l">Per pack (total)</div></div><div class="kbtile big"><div class="v">${_kg(batchKg)}kg</div><div class="l">${packs} × ${_g(packG)}g · total batch</div></div></div></div>
+    </div>`; }).join('');
+  // Aggregate ingredient prep — raw to pull + processing reminders (ERP value-add), kept below the batches.
+  const agg={}; lines.forEach(l=>{ const packs=+l.good_packs||0; (bm[l.product_sku]||[]).forEach(line=>{ const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{procG:0}; a.procG+=line.processed_g*packs; }); });
+  const prep=Object.keys(agg).map(sku=>{ const it=im[sku]||{}; const y=(+it.yield_pct||100)/100||1; const procKg=agg[sku].procG/1000; const rawKg=procKg/y; const pp=_procParent(it,bySku,byName);
+    return {name:it.name||sku, method:(it.processing_method||'').trim(), procKg, rawKg, yieldPct:Math.round(y*100), parent:(pp&&pp.name)||(it.raw_input||'—')}; }).sort((a,b)=>b.rawKg-a.rawKg);
+  const prepRows=prep.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.parent)}</td><td class="r">${_kg(r.rawKg)} kg</td><td class="r">${_kg(r.procKg)} kg</td><td class="r">${r.yieldPct}%</td><td>${esc(r.method)||'<i style="color:#999">— set processing method in Ingredients —</i>'}</td></tr>`).join('');
+  const subNote=Object.keys(window._prodSub||{}).length?`<div class="subnote"><b>Substitutions in effect:</b> ${Object.keys(window._prodSub).map(o=>esc((im[o]||{}).name||o)+' → '+esc((im[window._prodSub[o]]||{}).name||window._prodSub[o])).join(', ')}</div>`:'';
+  const css=`@page{margin:12mm}body{font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;font-size:11px}
+    h1{color:#1a1a1a;margin:0;font-size:18px}.sub{color:#555;font-size:12px;margin:2px 0 12px}
+    .kbcard{border:2px solid #1a1a1a;border-radius:8px;padding:12px 14px;margin:0 0 16px;page-break-inside:avoid}
+    .kbhd{border-bottom:1px solid rgba(0,0,0,.15);padding-bottom:8px;margin-bottom:8px}
+    .kbtitle{font-size:18px;font-weight:800;letter-spacing:-.3px}.kbmeta{font-size:11px;color:#555;margin-top:2px}
+    table.kb{width:100%;border-collapse:collapse;font-size:11px}table.kb th{background:#1a1a1a;color:#fff;padding:5px 7px;text-align:left;font-size:9.5px;text-transform:uppercase;letter-spacing:.04em}
+    table.kb td{padding:4px 7px;border-bottom:1px solid #eee}.kb .r{text-align:right}.kb .b{font-weight:700}
+    tr.catrow td{background:#f5f4f0;font-weight:700;color:#1a1a1a}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
+    .kbsum{margin-top:10px;border:1px solid rgba(0,0,0,.15);border-radius:6px;overflow:hidden}
+    .kbpack{background:#f5f4f0;padding:8px 10px;font-weight:600;border-bottom:1px solid rgba(0,0,0,.12)}
+    .kbtiles{display:flex;gap:0}.kbtile{flex:1;padding:8px 10px;text-align:center;border-right:1px solid #eee}.kbtile:last-child{border-right:0}
+    .kbtile .v{font-size:15px;font-weight:800}.kbtile .l{font-size:9px;color:#666;text-transform:uppercase;letter-spacing:.04em}
+    .kbtile.big{background:#1a1a1a;color:#fff}.kbtile.big .l{color:#ccc}
+    h3{color:#1a1a1a;margin:18px 0 6px;font-size:13px}table.prep{width:100%;border-collapse:collapse;font-size:11px}
+    table.prep th{background:#4e7a3e;color:#fff;padding:5px 7px;text-align:left}table.prep td{padding:4px 7px;border-bottom:1px solid #eee}table.prep .r{text-align:right}
+    .subnote{background:#fdf6ec;border:1px solid #e6c98a;border-radius:6px;padding:8px 10px;margin:0 0 12px;color:#8a5a12}
+    .foot{margin-top:18px;color:#888;font-size:10px}`;
+  const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Kitchen Batch — ${esc(prodPlanDate)}</title><style>${css}</style></head><body>
+    <h1>🍳 Kitchen Batch Production</h1>
+    <div class="sub">Wholesome Rabbit · Production date <b>${esc(prodPlanDate)}</b> · prepared by: ____________________</div>
     ${subNote}
-    <h3>1 · Produce today</h3><table><thead><tr><th>Product</th><th style="text-align:right">Packs</th></tr></thead><tbody>${prodRows}</tbody></table>
-    <h3>2 · Ingredient prep — pull, process &amp; how</h3>
-    <table><thead><tr><th>Processed ingredient</th><th>From raw</th><th style="text-align:right">Raw to pull</th><th style="text-align:right">Process into</th><th style="text-align:right">Yield</th><th>How to process</th></tr></thead><tbody>${prepRows}</tbody></table>
-    <p style="color:#888;font-size:11px">Raw to pull = processed needed ÷ yield%. Process reminders come from each ingredient's "Processing method" in Master Data → Ingredients.</p>
-    <h3>3 · Per-product recipes</h3>${recipeBlocks}
-    <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · confirm the run in the app after producing to post stock &amp; yield.</p></body></html>`;
-  const w=window.open('','_pr','width=880,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; } w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
+    ${productBlocks}
+    <h3>Ingredient prep — pull, process &amp; how</h3>
+    <table class="prep"><thead><tr><th>Processed ingredient</th><th>From raw</th><th class="r">Raw to pull</th><th class="r">Process into</th><th class="r">Yield</th><th>How to process</th></tr></thead><tbody>${prepRows}</tbody></table>
+    <div class="foot">Raw to pull = processed needed ÷ yield%. Processing reminders come from each ingredient's "Processing method" (Master Data → Ingredients). Printed ${new Date().toLocaleString()} · confirm the run in the app after producing to post stock &amp; yield.</div>
+    </body></html>`;
+  const w=window.open('','_pr','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; } w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
 }
 /* ---- BOM substitution for a run (#3) with add/remove counter ---- */
 async function prodSubstitute(){
@@ -3899,6 +4061,23 @@ async function processingApply(){
 
 /* ============ Weekly Inventory (scope + auto book qty + approval) ============ */
 let countRec={}, countLines=[];
+// Strip form qualifiers to a base material name so "Beef Lungs Raw" & "Beef Lungs Processed" group together.
+function _matBase(name){ return String(name||'').replace(/\([^)]*\)/g,' ').replace(/[-–—_/]+/g,' ')
+  .replace(/\b(raw|processed|process|ground|minced|whole|wd|dressed)\b/gi,' ')
+  .replace(/\s+/g,' ').trim(); }
+// Build the set of base materials that have a processed form (so we can label raw siblings "— Raw").
+function _countProcBases(ings,bs,bn){ const s=new Set(); ings.forEach(i=>{ if(i.is_intermediate){ const p=_procParent(i,bs,bn); const base=_matBase(p?p.name:i.name)||(p?p.name:i.name); if(base) s.add(base.toLowerCase()); } }); return s; }
+// Classify one ingredient for the weekly count: supplies (incl. stickers/labels) → Kitchen Supplies;
+// food ingredients grouped by base material with raw + processed shown underneath.
+function _countIngClass(i, ctx){
+  if(isSupplyItem(i)){ return {isSup:true, g1:'Kitchen Supplies', g2:(i.category||'Supplies'), name:i.name, grank:800000, uom:(i.uom||'pcs'), scale:1, form:'supply'}; }
+  const isProc=!!i.is_intermediate; const p=isProc?_procParent(i,ctx.bs,ctx.bn):null;
+  const base=(_matBase(p?p.name:i.name)||(p?p.name:i.name)); const hasPair=ctx.procBases.has(base.toLowerCase());
+  let nm=i.name;
+  if(isProc) nm = /processed/i.test(i.name)? i.name : (i.name+' — Processed');
+  else if(hasPair) nm = /\braw\b/i.test(i.name)? i.name : (i.name+' — Raw');
+  return {isSup:false, g1:(i.category||'Ingredients'), g2:base, name:nm, grank:400000+_grank(i.category)*1000+_so(i), uom:'kg', scale:1000, form:isProc?'processed':'raw'};
+}
 async function renderCountForm(idEnc){
   const m=MODELS.count_sessions; formIsNew=!idEnc;
   if(idEnc){ const rows=await db.list('count_sessions',{}); countRec={...(rows.find(r=>String(r[m.pk])===decodeURIComponent(idEnc))||{})};
@@ -3906,15 +4085,14 @@ async function renderCountForm(idEnc){
     if(isLive()){ try{ countLines=await db.children({model:'count_lines',fk:'count_ref'}, countRec.count_ref); }catch(e){} }
     // enrich saved lines with their category (count_lines doesn't store it) for grouping/print
     try{ const ai=await db.list('ingredients',{}); const _bs={},_bn={}; ai.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
-      const im={}; ai.forEach(i=>{ const isSup=/(supply|supplement)/i.test(i.category||''); const proc=!!i.is_intermediate;
-        const mat=isSup?'Supplies':(proc?((_procParent(i,_bs,_bn)||{}).name||i.name):i.name);
-        im[i.sku]={n:i.name+(proc?' — processed':''), mat, cat:(i.category||'Ingredients'), isSup, uom:i.uom, kind:'ingredient', so:_so(i), grk:_grank(i.category)}; });
+      const ctx={bs:_bs,bn:_bn,procBases:_countProcBases(ai,_bs,_bn)};
+      const im={}; ai.forEach(i=>{ im[i.sku]={cl:_countIngClass(i,ctx), kind:'ingredient'}; });
       (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,fam:(p.family||'Other'),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),so:_so(p),kind:'product',box:(+p.box_size||1)});
       countLines.forEach(l=>{
         if(String(l.ref_sku).startsWith('STK-')){ const h=im[String(l.ref_sku).slice(4)]; l.cat=((h&&h.fam)||'Other')+' — Stickers'; l.g1=((h&&h.g1)||'Products')+' — Stickers'; l.g2=(h&&h.g2)||'Other'; l.grank=600000+((h&&h.so)||0); l.name=l.name||l.ref_sku; l.uom='pcs'; l.scale=1; }
         else { const h=im[l.ref_sku];
           if(h&&h.kind==='product'){ l.cat=h.fam||'Other'; l.g1=h.g1; l.g2=h.g2; l.grank=h.so||0; l.name=l.name||h.n; l.uom='packs'; l.scale=1; l.isProduct=true; l.box=h.box||1; }
-          else if(h){ if(h.isSup){ l.cat='Supplies'; l.g1='Kitchen Supplies'; l.g2=h.cat||'Supplies'; l.grank=800000; l.uom=h.uom||'pcs'; l.scale=1; } else { l.cat=h.mat; l.g1=h.cat||'Ingredients'; l.g2=h.mat; l.grank=400000+(h.grk||900)*1000+(h.so||0); l.uom='kg'; l.scale=1000; } l.name=l.name||h.n; }
+          else if(h&&h.cl){ const cl=h.cl; l.cat=cl.g2; l.g1=cl.g1; l.g2=cl.g2; l.grank=cl.grank; l.uom=cl.uom; l.scale=cl.scale; l.form=cl.form; l.name=cl.name; }
           else { l.cat=l.cat||'Uncategorized'; l.g1=l.cat||'Uncategorized'; l.g2='Other'; l.grank=500000; l.uom='kg'; l.scale=1000; } } });
     }catch(e){} }
   else { countRec={count_ref:'',location_code:'bulacan',count_date:todayISO(),status:'draft',scope:['All']}; countLines=[]; }
@@ -4021,12 +4199,11 @@ async function countLoad(){
   let lines=[];
   // Two-bin: count RAW and PROCESSED, grouped together under each raw material (matches the sheet).
   const _bs={}, _bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
-  const matOf=(i)=>{ if(!i.is_intermediate) return i.name; const p=_procParent(i,_bs,_bn); return (p&&p.name)||i.name; };
-  ings.slice().sort(cmpItems).forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
-    if(isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:i.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:'Supplies',catrank:_grank('Supplies'),g1:'Kitchen Supplies',g2:(i.category||'Supplies'),grank:800000,uom:(i.uom||'pcs'),scale:1,sort_order:i.sort_order}); return; }
+  const ctx={bs:_bs,bn:_bn,procBases:_countProcBases(ings,_bs,_bn)};
+  ings.slice().sort(cmpItems).forEach(i=>{ const cl=_countIngClass(i,ctx);
+    if(cl.isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:cl.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:cl.g2,catrank:_grank('Supplies'),g1:cl.g1,g2:cl.g2,grank:cl.grank,uom:cl.uom,scale:cl.scale,form:cl.form,sort_order:i.sort_order}); return; }
     if(!wantIng) return;
-    const isProc=!!i.is_intermediate; const u=countUnitFor('Ingredients');
-    lines.push({ref_sku:i.sku, name:i.name+(isProc?' — processed':''), book_qty:stock[i.sku]||0, counted_qty:'', cat:matOf(i), catrank:_grank(i.category), g1:(i.category||'Ingredients'), g2:matOf(i), grank:400000+_grank(i.category)*1000+_so(i), uom:u.uom, scale:u.scale, form:isProc?'processed':'raw', sort_order:i.sort_order}); });
+    lines.push({ref_sku:i.sku, name:cl.name, book_qty:stock[i.sku]||0, counted_qty:'', cat:cl.g2, catrank:_grank(i.category), g1:cl.g1, g2:cl.g2, grank:cl.grank, uom:cl.uom, scale:cl.scale, form:cl.form, sort_order:i.sort_order}); });
   if(wantProd) prods.slice().sort(cmpItems).forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order}));
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
   if(wantStk) prods.slice().sort(cmpItems).forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
@@ -4886,7 +5063,7 @@ function dlBlob(content,name,type){ const b=new Blob([content],{type}); const u=
 let _opRows=null, _opReport=null;
 function openOpeningImport(){ _opRows=null; _opReport=null;
   $('modal').innerHTML=`<div><h3>📥 Upload opening inventory balances</h3>
-    <p class="mini">1) Download the template (every item, pre-filled). 2) Enter the <b>qty</b> per row — ingredients raw/processed in <b>kg</b>, supplies in their <b>unit</b>, products/stickers in <b>pieces/packs</b>; set the <b>location</b> (bulacan/pasig). 3) Upload &amp; Test, then Import. Re-uploading replaces the previous opening upload.</p>
+    <p class="mini">1) Download the template — <b>4 tabs</b>: <b>Ingredients</b> (raw + processed, grouped by parent), <b>Products</b>, <b>Kitchen Supplies</b>, <b>Stickers</b>. 2) Enter the <b>qty</b> per row — ingredients in <b>kg</b>, supplies in their <b>unit</b>, products/stickers in <b>pieces</b>; set the <b>location</b> (bulacan/pasig). 3) Upload &amp; Test (all tabs are read), then Import. 🖨 Print / ⬇ Save give an identical printout. Re-uploading replaces the previous opening upload.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
       <button class="btn sec" onclick="openingDownloadTemplate()">⬇ Download template (.${typeof XLSX!=='undefined'?'xlsx':'csv'})</button>
       <input type="file" id="opFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="openingStageFile(event)">
@@ -4895,29 +5072,54 @@ function openOpeningImport(){ _opRows=null; _opReport=null;
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn sec" onclick="closeModal()">Close</button></div></div>`;
   $('overlay').classList.add('on');
 }
-async function openingDownloadTemplate(){
+// Build the 4 categorised opening lists from the master data (used by the template + prints).
+async function _openingCats(){
   const ings=await listIngredients(); const prods=(await db.list('products',{})).filter(p=>p.active!==false);
-  const rows=[];
-  ings.forEach(i=>{ const c=(i.category||'').toLowerCase(); const isSup=c.includes('supply')||c.includes('supplement');
-    if(isSup) rows.push([i.sku,i.name,'supply',(i.uom||'pcs'),'bulacan',0]);
-    else if(i.is_intermediate) rows.push([i.sku,i.name,'processed','kg','bulacan',0]);
-    else rows.push([i.sku,i.name,'raw','kg','bulacan',0]); });
-  prods.forEach(p=>{ rows.push([p.sku,p.name,'product','packs','bulacan',0]); rows.push([p.sku,p.name,'product','packs','pasig',0]); });
-  prods.forEach(p=>{ rows.push(['STK-'+p.sku,p.name+' — Sticker','sticker','pcs','pasig',0]); });
-  const aoa=[['sku','name','type','unit','location','qty'],...rows];
-  if(typeof XLSX!=='undefined'){ const ws=XLSX.utils.aoa_to_sheet(aoa); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Opening'); XLSX.writeFile(wb,'WR_opening_'+todayISO()+'.xlsx'); }
-  else { dlBlob(aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),'WR_opening_'+todayISO()+'.csv','text/csv'); }
-  toast('Template downloaded ('+rows.length+' rows)');
+  const ingRows=[], supRows=[];
+  ings.forEach(i=>{ if(isSupplyItem(i)){ supRows.push([i.sku,i.name,'supply',(i.uom||'pcs'),'bulacan',0]); }
+    else { const type=i.is_intermediate?'processed':'raw'; ingRows.push({sku:i.sku,name:i.name,type,base:(_matBase(i.name)||i.name)}); } });
+  // group ingredients by base material, RAW first then PROCESSED (Beef Lungs Raw → Beef Lungs Processed)
+  ingRows.sort((a,b)=> String(a.base).toLowerCase().localeCompare(String(b.base).toLowerCase()) || ((a.type==='processed'?1:0)-(b.type==='processed'?1:0)) || String(a.name).localeCompare(String(b.name)));
+  const ingOut=ingRows.map(r=>[r.sku, r.name+(/\b(raw|processed)\b/i.test(r.name)?'':(r.type==='processed'?' (Processed)':' (Raw)')), r.type, 'kg', 'bulacan', 0]);
+  const prodOut=[]; prods.slice().sort(cmpItems).forEach(p=>{ prodOut.push([p.sku,p.name,'product','packs','bulacan',0]); prodOut.push([p.sku,p.name,'product','packs','pasig',0]); });
+  const stkOut=[]; prods.slice().sort(cmpItems).forEach(p=>{ stkOut.push(['STK-'+p.sku,p.name+' — Sticker','sticker','pcs','bulacan',0]); stkOut.push(['STK-'+p.sku,p.name+' — Sticker','sticker','pcs','pasig',0]); });
+  return {ingredients:ingOut, products:prodOut, supplies:supRows, stickers:stkOut};
+}
+async function openingDownloadTemplate(){
+  const cats=await _openingCats();
+  const HDR=['sku','name','type','unit','location','qty'];
+  const total=cats.ingredients.length+cats.products.length+cats.supplies.length+cats.stickers.length;
+  if(typeof XLSX!=='undefined'){
+    const wb=XLSX.utils.book_new();
+    const mk=(nm,rows)=>{ const ws=XLSX.utils.aoa_to_sheet([HDR,...rows]); ws['!cols']=[{wch:34},{wch:44},{wch:12},{wch:14},{wch:12},{wch:10}]; XLSX.utils.book_append_sheet(wb,ws,nm); };
+    mk('Ingredients', cats.ingredients);      // raw + processed, grouped by parent
+    mk('Products', cats.products);
+    mk('Kitchen Supplies', cats.supplies);
+    mk('Stickers', cats.stickers);
+    XLSX.writeFile(wb,'WR_opening_'+todayISO()+'.xlsx');
+    toast('Template downloaded — 4 tabs · '+total+' rows');
+  } else { // CSV fallback: single combined sheet
+    const all=[HDR,...cats.ingredients,...cats.products,...cats.supplies,...cats.stickers];
+    dlBlob(all.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),'WR_opening_'+todayISO()+'.csv','text/csv');
+    toast('Template downloaded ('+total+' rows)');
+  }
+}
+// Parse rows from one AoA (header + data); skips section/blank rows (no sku). Returns [] if no sku/qty header.
+function _opRowsFromAoa(arr){
+  const hdr=(arr[0]||[]).map(x=>String(x).trim().toLowerCase());
+  const ci=n=>hdr.indexOf(n); const si=ci('sku'),ni=ci('name'),ui=ci('unit'),ti=ci('type'),li=ci('location'),qi=ci('qty');
+  if(si<0||qi<0) return [];
+  const rows=[]; for(let i=1;i<arr.length;i++){ const r=arr[i]; if(!r)continue; const sku=r[si]; if(sku==null||String(sku).trim()==='')continue;
+    rows.push({sku:String(sku).trim(), name:ni>=0?String(r[ni]||'').trim():'', unit:ui>=0?String(r[ui]||'').trim():'', type:ti>=0?String(r[ti]||'').trim().toLowerCase():'', location:li>=0?String(r[li]||'bulacan').trim().toLowerCase():'bulacan', qty:Number(r[qi]||0)}); }
+  return rows;
 }
 function _opParseSheet(name,data){
-  let arr;
-  if(/\.csv$/i.test(name)){ arr=String(data).split(/\r?\n/).filter(x=>x.trim()!=='').map(line=>{ const out=[]; let cur='',q=false; for(let i=0;i<line.length;i++){ const ch=line[i]; if(q){ if(ch==='"'){ if(line[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=ch; } else { if(ch===',')  {out.push(cur);cur='';} else if(ch==='"') q=true; else cur+=ch; } } out.push(cur); return out; }); }
-  else { if(typeof XLSX==='undefined') throw new Error('Spreadsheet support did not load — use a .csv file'); const wb=XLSX.read(data,{type:'binary'}); const ws=wb.Sheets[wb.SheetNames[0]]; arr=XLSX.utils.sheet_to_json(ws,{header:1}); }
-  const hdr=(arr[0]||[]).map(x=>String(x).trim().toLowerCase());
-  const ci=n=>hdr.indexOf(n); const si=ci('sku'),ti=ci('type'),li=ci('location'),qi=ci('qty');
-  if(si<0||qi<0) throw new Error('Template needs at least "sku" and "qty" columns');
-  const rows=[]; for(let i=1;i<arr.length;i++){ const r=arr[i]; if(!r)continue; const sku=r[si]; if(sku==null||String(sku).trim()==='')continue;
-    rows.push({sku:String(sku).trim(), type:ti>=0?String(r[ti]||'').trim().toLowerCase():'', location:li>=0?String(r[li]||'bulacan').trim().toLowerCase():'bulacan', qty:Number(r[qi]||0)}); }
+  if(/\.csv$/i.test(name)){ const arr=String(data).split(/\r?\n/).filter(x=>x.trim()!=='').map(line=>{ const out=[]; let cur='',q=false; for(let i=0;i<line.length;i++){ const ch=line[i]; if(q){ if(ch==='"'){ if(line[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=ch; } else { if(ch===',')  {out.push(cur);cur='';} else if(ch==='"') q=true; else cur+=ch; } } out.push(cur); return out; });
+    const rows=_opRowsFromAoa(arr); if(!rows.length) throw new Error('No "sku"/"qty" columns found'); return rows; }
+  if(typeof XLSX==='undefined') throw new Error('Spreadsheet support did not load — use a .csv file');
+  const wb=XLSX.read(data,{type:'binary'}); let rows=[];
+  wb.SheetNames.forEach(sn=>{ try{ const arr=XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1}); rows=rows.concat(_opRowsFromAoa(arr)); }catch(e){} });   // read EVERY tab (Ingredients / Products / Kitchen Supplies / Stickers)
+  if(!rows.length) throw new Error('No "sku"/"qty" rows found on any tab');
   return rows;
 }
 function openingStageFile(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader();
@@ -4935,7 +5137,50 @@ async function openingTest(){ if(!_opRows)return;
   const issues=_opReport.filter(d=>d.st!=='ok'&&d.st!=='zero (skipped)').slice(0,12);
   $('opArea').innerHTML=`<div style="margin:6px 0"><b style="color:var(--ok,#4e7a3e)">${ok} to post</b> · <b style="color:var(--danger)">${unknown} unknown/bad</b> · <span style="color:var(--muted)">${zero} zero (skipped)</span> of ${_opRows.length}</div>
     ${issues.length?`<div style="max-height:170px;overflow:auto"><table style="width:100%;font-size:12px"><thead><tr><th>SKU</th><th>Type</th><th class="num">Qty</th><th>Issue</th></tr></thead><tbody>${issues.map(d=>`<tr><td><code>${esc(d.sku)}</code></td><td>${esc(d.type)}</td><td class="num">${esc(d.qty)}</td><td style="color:var(--danger)">${esc(d.st)}</td></tr>`).join('')}</tbody></table></div>`:'<div class="hint">No errors ✅</div>'}
-    <div style="margin-top:12px"><button class="btn" onclick="openingDoImport()" ${ok?'':'disabled'} style="background:#b23b2e">✓ Post ${ok} opening balance(s)</button></div>`;
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="openingDoImport()" ${ok?'':'disabled'} style="background:#b23b2e">✓ Post ${ok} opening balance(s)</button>
+      <button class="btn sec" onclick="openingPrintSheet()">🖨 Print this sheet (PDF)</button>
+      <button class="btn sec" onclick="openingExportXlsx()">⬇ Save as Excel</button></div>`;
+}
+// Print / export the CURRENTLY UPLOADED opening sheet — identical rows to the file you loaded,
+// so the printout and the upload file always match. Groups by location then type.
+function _openingRowsForOut(){ const rows=(_opReport&&_opReport.length?_opReport:_opRows)||[]; return rows.filter(r=>r&&r.sku!=null&&String(r.sku).trim()!==''); }
+// Categorise uploaded rows into the 4 sections (Ingredients / Products / Kitchen Supplies / Stickers).
+function _opSection(r){ const t=(r.type||''); if(t==='raw'||t==='processed') return 'ingredients'; if(t==='product') return 'products'; if(t==='supply') return 'supplies'; if(t==='sticker') return 'stickers';
+  if(String(r.sku||'').startsWith('STK-')) return 'stickers'; return 'ingredients'; }
+const _OP_SECTIONS=[['ingredients','Ingredients (raw + processed)'],['products','Finished products'],['supplies','Kitchen supplies'],['stickers','Stickers']];
+function openingPrintSheet(){
+  const rows=_openingRowsForOut(); if(!rows.length){ toast('Upload & Test a file first',true); return; }
+  const groups={ingredients:[],products:[],supplies:[],stickers:[]}; rows.forEach(r=>groups[_opSection(r)].push(r));
+  let body='';
+  _OP_SECTIONS.forEach(([key,label])=>{ const rr=groups[key]; if(!rr.length) return;
+    const tot=rr.reduce((s,r)=>s+(+r.qty||0),0);
+    body+=`<tr class="sec"><td colspan="6">${esc(label)} · ${rr.length} item(s)</td></tr>`;
+    if(key==='ingredients'){ // sub-group by base material, RAW then PROCESSED
+      const byBase={}; rr.forEach(r=>{ const b=_matBase(r.name)||r.name; (byBase[b]=byBase[b]||[]).push(r); });
+      Object.keys(byBase).sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).forEach(b=>{
+        body+=`<tr class="sub"><td colspan="6">▸ ${esc(b)}</td></tr>`;
+        byBase[b].slice().sort((a,c)=>((a.type==='processed'?1:0)-(c.type==='processed'?1:0))||String(a.name).localeCompare(c.name)).forEach(r=>{ body+=_opRowHtml(r); });
+      });
+    } else { rr.slice().sort((a,c)=>String(a.location).localeCompare(c.location)||String(a.name).localeCompare(c.name)).forEach(r=>{ body+=_opRowHtml(r); }); }
+  });
+  const html=`<html><head><meta charset="utf-8"><title>Opening Balance ${esc(todayISO())}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:13px;color:#555}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.sec td{background:#e7f0e9;font-weight:800;color:#2f5d33;font-size:13px}tr.sub td{background:#f2f6ef;font-weight:700;color:#4e7a3e;padding-left:20px}</style></head><body>
+    <h1>🐇 Wholesome Rabbit — Official Opening Inventory Balance</h1>
+    <h2>As of ${esc(todayISO())} · prepared by: ____________________ · approved by: ____________________</h2>
+    <table><thead><tr><th>SKU</th><th>Name</th><th>Type</th><th>Unit</th><th>Location</th><th style="text-align:right">Qty</th></tr></thead><tbody>${body}</tbody></table>
+    <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · this printout matches the uploaded file row-for-row. Ingredients raw/processed in kg (grouped by parent), supplies in their unit, products/stickers in pieces/packs.</p></body></html>`;
+  const w=window.open('','_pr','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; } w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
+}
+function _opRowHtml(r){ return `<tr><td>${esc(r.sku)}</td><td>${esc(r.name||'')}</td><td>${esc(r.type||'')}</td><td>${esc(r.unit||'')}</td><td>${esc(r.location||'')}</td><td style="text-align:right">${esc(r.qty)}</td></tr>`; }
+function openingExportXlsx(){
+  const rows=_openingRowsForOut(); if(!rows.length){ toast('Upload & Test a file first',true); return; }
+  const HDR=['sku','name','type','unit','location','qty']; const groups={ingredients:[],products:[],supplies:[],stickers:[]}; rows.forEach(r=>groups[_opSection(r)].push(r));
+  const toAoa=rr=>rr.map(r=>[r.sku,r.name||'',r.type||'',r.unit||'',r.location||'',r.qty]);
+  if(typeof XLSX!=='undefined'){ const wb=XLSX.utils.book_new();
+    const mk=(nm,rr)=>{ if(!rr.length) return; const ws=XLSX.utils.aoa_to_sheet([HDR,...toAoa(rr)]); ws['!cols']=[{wch:34},{wch:44},{wch:12},{wch:14},{wch:12},{wch:10}]; XLSX.utils.book_append_sheet(wb,ws,nm); };
+    mk('Ingredients',groups.ingredients); mk('Products',groups.products); mk('Kitchen Supplies',groups.supplies); mk('Stickers',groups.stickers);
+    XLSX.writeFile(wb,'WR_opening_balance_'+todayISO()+'.xlsx'); }
+  else { const all=[HDR,...toAoa(rows)]; dlBlob(all.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),'WR_opening_balance_'+todayISO()+'.csv','text/csv'); }
+  toast('Opening balance saved ('+rows.length+' rows)');
 }
 async function openingDoImport(){ if(!_opReport)return;
   if(curRole&&curRole()!=='Admin'){ toast('Only an Admin can post opening balances',true); return; }
