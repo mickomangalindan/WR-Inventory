@@ -4847,6 +4847,11 @@ function loadSavedProfile(key){
         const ft=lastDailyTotal||computeLiveFoodTotal();
         if(ft>0) updateOverrideInputs(ft);
       }
+      // Hard-guarantee the weight fields survive any recompute on load (#1)
+      const _c=document.getElementById('dogWeightCurrent'), _i=document.getElementById('dogWeightIdeal');
+      if(_c && p.currentWt!=null && p.currentWt!=='') _c.value=p.currentWt;
+      if(_i && p.idealWt!=null && p.idealWt!=='') _i.value=p.idealWt;
+      if(typeof onWeightChange==='function') onWeightChange();
     }, 150);
     return true;
   }catch(e){ console.error('loadSavedProfile error:',e); return false; }

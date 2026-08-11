@@ -1606,7 +1606,21 @@ function attachKey(){ const m=MODELS[state.model]; return 'attach:'+state.model+
 function loadAttach(){ try{return JSON.parse(localStorage.getItem(attachKey())||'[]')}catch(e){return[]} }
 let formAtts=[];   // attachments from Supabase (record_attachments) — carry the shareable drive_url
 async function attsForRecord(model,ref){ if(!ref||!isLive()) return [];
-  try{ return await sb('record_attachments?select=id,filename,drive_url&model=eq.'+encodeURIComponent(model)+'&ref=eq.'+encodeURIComponent(ref)+'&order=created_at.desc'); }catch(e){ return []; } }
+  try{ const r=await sb('record_attachments?select=id,filename,drive_url&model=eq.'+encodeURIComponent(model)+'&ref=eq.'+encodeURIComponent(ref)+'&order=created_at.desc'); window._attReadErr=''; return r; }
+  catch(e){ window._attReadErr=String(e&&e.message||e); return []; } }
+// One-tap diagnosis of why an upload link isn't appearing.
+async function attCheckSetup(){
+  const a=(typeof autoCfg==='function')?autoCfg('file_upload'):null;
+  const lines=[];
+  lines.push(isLive()?'✅ Connected to Supabase':'⚠ Demo mode — uploads only work when connected to Supabase');
+  if(!a||!a.on) lines.push('❌ "File upload to Drive" automation is OFF — turn it on in Administration → Automations.');
+  else if(!a.url) lines.push('❌ File-upload URL is blank — paste your Apps Script /exec (or n8n) URL in Automations.');
+  else lines.push('✅ File-upload automation ON → '+esc(a.url.replace(/^https?:\/\//,'').slice(0,42))+'…');
+  // can the app READ record_attachments? (RLS test)
+  try{ await sb('record_attachments?select=id&limit=1'); lines.push('✅ Can read record_attachments (no RLS block).'); }
+  catch(e){ lines.push('❌ Cannot read record_attachments: '+esc(String(e.message||e))+' — run the RLS fix (wr_migration_latest.sql) so the app can read attachment links.'); }
+  toast('Upload check — see the panel'); const el=$('opDiag'); if(el){ el.style.display='block'; el.innerHTML='<b>Upload setup check</b><br>'+lines.join('<br>')+'<div class="mini" style="margin-top:6px;color:var(--muted)">The file is uploaded by the webhook (Apps Script/n8n) using the service key, then this app reads the link back from record_attachments. Both sides must work.</div>'; }
+}
 async function refreshAtts(){ const m=MODELS[state.model]; formAtts=await attsForRecord(state.model,formRec[m.pk]);
   // drop local pending rows that have now landed in Supabase (matched by filename)
   try{ const names=(formAtts||[]).map(a=>a.filename); const loc=loadAttach().filter(x=>!(x.pending&&names.includes(x.name))); localStorage.setItem(attachKey(),JSON.stringify(loc)); }catch(e){}
@@ -1626,12 +1640,15 @@ function attachHtml(){
       ? `<a href="${esc(safeUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.name)}</a>`
       : `${esc(x.name)}${x.pending?' <span class="mini">uploading…</span>':''}`;
     return `<span class="attpill">${body} <span class="x" ${del}>✕</span></span>`; };
-  return `<div class="attachbox"><h4>📎 Attachments</h4><div>${all.map(pill).join('')||'<span style="color:var(--muted)">No attachments</span>'}</div>
+  const readErr=window._attReadErr?`<div class="mini" style="color:var(--danger);margin-top:4px">⚠ Can't read attachment links from the database (${esc(window._attReadErr)}). Links won't appear until this is fixed — click 🩺 Check.</div>`:'';
+  return `<div class="attachbox"><h4>📎 Attachments</h4><div>${all.map(pill).join('')||'<span style="color:var(--muted)">No attachments</span>'}</div>${readErr}
     <div style="margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <span class="addrow" onclick="attAdd()">＋ Upload file</span>
       <span class="addrow" onclick="attLink()">🔗 Paste link</span>
       <span class="btn sm sec" onclick="refreshAtts()">↻ Refresh</span>
-      ${folder?`<a class="btn sm sec" href="${esc(safeUrl(folder))}" target="_blank" rel="noopener noreferrer">📁 Drive folder</a>`:''}</div></div>`; }
+      <span class="btn sm sec" onclick="attCheckSetup()">🩺 Check upload</span>
+      ${folder?`<a class="btn sm sec" href="${esc(safeUrl(folder))}" target="_blank" rel="noopener noreferrer">📁 Drive folder</a>`:''}</div>
+    <div id="opDiag" class="hint" style="display:none;margin-top:8px"></div></div>`; }
 function attAdd(){   // opens a real file picker; routes the file to Drive via n8n if configured
   const inp=document.createElement('input'); inp.type='file'; inp.style.display='none';
   inp.onchange=()=>{ const f=inp.files&&inp.files[0]; if(f) uploadAttach(f); inp.remove(); };
@@ -3393,12 +3410,15 @@ async function renderCustomOrders(){
     <button class="btn" onclick="coNew()">＋ New quote</button>
     <div class="sp"></div><span style="color:var(--muted)">CS quotes → lock → sellable SKU + BOM + demand</span>`;
   let orders=[]; let _tblErr=''; try{ orders=await db.list('custom_orders',{}); }catch(e){ _tblErr=String(e&&e.message||e); }
-  let lc={}, lt={}; try{ (await db.list('custom_order_lines',{})).forEach(l=>{ lc[l.order_ref]=(lc[l.order_ref]||0)+1; lt[l.order_ref]=(lt[l.order_ref]||0)+(+l.packs||0)*(+l.unit_price||0); }); }catch(e){ _tblErr=_tblErr||String(e&&e.message||e); }
+  let lc={}, lt={}, byOrder={}; try{ (await db.list('custom_order_lines',{})).forEach(l=>{ lc[l.order_ref]=(lc[l.order_ref]||0)+1; lt[l.order_ref]=(lt[l.order_ref]||0)+(+l.packs||0)*(+l.unit_price||0); if(l.product_sku){ (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); } }); }catch(e){ _tblErr=_tblErr||String(e&&e.message||e); }
   window._coTblErr=_tblErr;
+  const stock=await _coLoadStock();
+  const _ready=ref=>{ const ls=byOrder[ref]||[]; return ls.length>0 && ls.every(l=>(+l.packs||0)>0 && (+stock[l.product_sku]||0)>=(+l.packs||0)); };
   orders.forEach(o=>{ o._total=Math.max(0,(lt[o.order_ref]||0)-(+o.discount||0)+(+o.delivery_fee||0)); });
   orders.sort((a,b)=>String(b.order_date||'').localeCompare(String(a.order_date||''))||String(b.order_ref).localeCompare(String(a.order_ref)));
   const badge=s=>`<span class="badge b-${s==='confirmed'?'confirmed':(s==='fulfilled'?'received':(s==='cancelled'?'cancelled':'open'))}">${esc(s||'quote')}</span>`;
-  let rows=orders.map(o=>`<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.needed_date||'—')}</td><td>${badge(o.status)}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td></tr>`).join('');
+  const fbadge=o=>{ if(o.status!=='confirmed') return ''; return _ready(o.order_ref)?' <span class="badge b-received">ready</span>':' <span class="badge b-open">in prod</span>'; };
+  let rows=orders.map(o=>`<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.needed_date||'—')}</td><td>${badge(o.status)}${fbadge(o)}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td></tr>`).join('');
   const _liveTag=`<span class="mini" style="color:var(--muted)">${isLive()?'Live · Supabase':'Demo (local only)'}</span>`;
   const _mig = (isLive() && window._coTblErr) ? `<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ The <code>custom_orders</code> tables aren't reachable, so orders can't be saved across devices. Run <b>wr_migration_custom_orders.sql</b> in Supabase (SQL editor), then reload. <span class="mini">(${esc(window._coTblErr)})</span></div>`:'';
   $('content').innerHTML=`<div class="repcard"><div style="display:flex;justify-content:flex-end">${_liveTag}</div>${_mig}<div class="hint" style="margin:0 0 8px">Create a quote, add standard products and/or custom recipes, edit freely. <b>Lock</b> turns it into a confirmed order — each custom recipe becomes its own sellable SKU + BOM, and the ordered packs flow into <b>Demand/MRP</b> for the needed week (pull them in MRP with ☁ Sync).</div>
@@ -3411,7 +3431,36 @@ function coNew(){ coRec={order_ref:'', customer_name:'', contact:'', order_date:
 async function coOpen(refEnc){ const ref=decodeURIComponent(refEnc);
   try{ const rows=await db.list('custom_orders',{}); coRec={...(rows.find(r=>r.order_ref===ref)||{})}; }catch(e){ coRec={}; }
   try{ coLines=(await db.children({model:'custom_order_lines',fk:'order_ref'}, ref)).map(l=>({...l, recipe:(typeof l.recipe==='string'?_coParse(l.recipe):(l.recipe||[]))})); }catch(e){ coLines=[]; }
+  await _coLoadStock();
   _coView='form'; drawCOForm(); }
+// on-hand finished packs per product SKU (bulacan + pasig) — drives fulfilment tracking (#4)
+async function _coLoadStock(){ const m={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if((s.kind||'')==='product') m[s.ref_sku]=(m[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} window._coStock=m; return m; }
+// Fulfilment panel HTML + overall readiness for the open order.
+function _coFulfilHtml(){
+  const stock=window._coStock||{}; const wl=coLines.filter(l=>l.product_sku);
+  const rows=wl.map(l=>{ const ord=+l.packs||0; const made=+stock[l.product_sku]||0; const pct=ord>0?Math.min(100,Math.round(made/ord*100)):0;
+    const st=(ord>0&&made>=ord)?{t:'Ready',c:'#2f7d33'}:(made>0?{t:'In production',c:'var(--earth,#b5762a)'}:{t:'Pending',c:'var(--danger)'});
+    return `<tr><td>${esc(l.description||l.product_sku)}<div class="mini"><code>${esc(l.product_sku)}</code></div></td><td class="num">${ord}</td><td class="num">${made}</td><td><b style="color:${st.c}">${st.t}</b> <span class="mini">${pct}%</span></td></tr>`; }).join('');
+  const allReady = wl.length>0 && wl.every(l=>(+l.packs||0)>0 && (+stock[l.product_sku]||0)>=(+l.packs||0));
+  const html=`<div class="repcard" style="margin:12px 0 0"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <h3 style="margin:0">🏭 Fulfilment</h3>${allReady?'<span class="badge b-received">READY FOR DELIVERY</span>':'<span class="badge b-open">in production</span>'}
+      <span style="flex:1"></span><span class="mini">Produced = finished packs on hand · needed by <b>${esc(coRec.needed_date||'—')}</b></span>
+      ${allReady?'<button class="btn sm" onclick="coNotifyReady()">📣 Notify CS ready</button>':''}</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Item</th><th class="num">Ordered</th><th class="num">Produced</th><th>Status</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="empty">Lock the order to create its SKUs, then production output shows here.</td></tr>'}</tbody></table></div>
+    ${coRec.ready_notified?('<div class="mini" style="margin-top:6px;color:#2f7d33">📣 CS notified ready at '+esc(String(coRec.ready_notified).replace('T',' ').slice(0,16))+'</div>'):''}
+    <div class="mini" style="margin-top:6px;color:var(--muted)">The ordered packs were added to <b>Demand/MRP</b> for ${esc(coRec.needed_date||'the needed date')} on Lock — Production makes them (pull via ☁ Sync in MRP), and this panel fills as stock is produced.</div></div>`;
+  return {html, allReady};
+}
+async function coNotifyReady(){
+  try{
+    const a=(typeof autoCfg==='function')?autoCfg('record_pdf'):null;
+    const html='<h2>Custom order ready for delivery — '+esc(coRec.order_ref)+'</h2><p>Customer: '+esc(coRec.customer_name||'')+' · needed '+esc(coRec.needed_date||'')+'</p>';
+    if(a&&a.on&&a.url){ try{ await postWebhook(a.url,{model:'custom_orders',module:'custom_orders',ref:coRec.order_ref,kind:'Custom order ready for delivery',html}); }catch(e){} }
+    const ts=new Date().toISOString(); try{ await db.update('custom_orders','order_ref',coRec.order_ref,{ready_notified:ts}); }catch(e){} coRec.ready_notified=ts;
+    sysLog('custom_orders',coRec.order_ref,'📣 Ready for delivery — team notified by '+CURRENT_USER);
+    toast('Marked ready'+(a&&a.on&&a.url?' — team notified (Telegram/email)':' — turn on Administration → Automations → "Record → notify" to alert automatically')); drawCOForm();
+  }catch(e){ toast(_coErr(e),true); }
+}
 function _coParse(s){ try{ return JSON.parse(s)||[]; }catch(e){ return []; } }
 function coBackToList(){ _coView='list'; renderCustomOrders(); }
 function _coProdOptions(sel){ const list=Object.values(_coProd).filter(p=>p.active!==false && !p.is_custom);
@@ -3462,6 +3511,7 @@ function drawCOForm(){
       <div><div class="fld"><label>Notes</label><div class="val"><input ${dis} value="${esc(coRec.notes||'')}" oninput="coRec.notes=this.value" style="width:100%"></div></div>
         <div style="text-align:right;margin-top:8px;font-size:15px">Subtotal <b id="coSub">${wpeso(_coSubtotal())}</b> · <b>Total <span id="coTot">${wpeso(_coTotal())}</span></b></div></div>
     </div>
+    ${locked?_coFulfilHtml().html:''}
   </div></div>`;
 }
 function coToticker(){ coLines.forEach((l,i)=>{ const el=$('coLT'+i); if(el) el.textContent=wpeso(_coLineTotal(l)); }); const s=$('coSub'); if(s)s.textContent=wpeso(_coSubtotal()); const t=$('coTot'); if(t)t.textContent=wpeso(_coTotal()); }
@@ -3495,7 +3545,12 @@ function drawCoRecipe(){
 function _coRecipeSummaryHtml(){
   const now=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; const added=Math.max(0,now-_coEditBase), removed=Math.max(0,_coEditBase-now);
   const totG=_coEditRows.reduce((s,r)=>s+(+r.grams||0),0); const packG=+((coLines[_coEditIdx]||{}).pack_size_g)||0;
-  return `Recipe total <b>${Math.round(totG)} g</b>${packG?` of ${packG} g pack ${Math.abs(totG-packG)<0.5?'<span style="color:#4e7a3e">✓ matches</span>':`<span style="color:var(--earth,#b5762a)">(${totG>packG?'+':''}${Math.round(totG-packG)} g vs pack)</span>`}`:''} · <b>${now}</b> ingredient(s) — <span style="color:#4e7a3e">${added} added</span>, <span style="color:var(--danger)">${removed} removed</span> since opened`;
+  // #2 duplicate check — does this exact recipe already exist as a custom SKU?
+  const clean=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0);
+  let dupHtml='';
+  if(clean.length && packG>0){ const sku='CUST-'+_coRecipeKey(clean,packG).toUpperCase(); const dup=_coProd[sku];
+    if(dup) dupHtml=`<div style="margin-top:6px;color:#2f7d33">♻ This exact recipe already exists as <b>${esc(dup.name||sku)}</b> (<code>${esc(sku)}</code>) — locking will <b>reuse</b> it, no duplicate SKU is created.</div>`; }
+  return `Recipe total <b>${Math.round(totG)} g</b>${packG?` of ${packG} g pack ${Math.abs(totG-packG)<0.5?'<span style="color:#4e7a3e">✓ matches</span>':`<span style="color:var(--earth,#b5762a)">(${totG>packG?'+':''}${Math.round(totG-packG)} g vs pack)</span>`}`:''} · <b>${now}</b> ingredient(s) — <span style="color:#4e7a3e">${added} added</span>, <span style="color:var(--danger)">${removed} removed</span> since opened${dupHtml}`;
 }
 function coRecipeTick(){ const s=$('coRecSum'); if(s) s.innerHTML=_coRecipeSummaryHtml(); const btn=$('coRecSaveBtn'); if(btn){ const now=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; btn.textContent='💾 Save recipe ('+now+')'; } }
 function coSaveRecipe(){ const clean=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0); coLines[_coEditIdx].recipe=clean;
