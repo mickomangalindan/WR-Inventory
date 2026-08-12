@@ -5277,10 +5277,11 @@ let _impRows=null, _impReport=null;
 function dlBlob(content,name,type){ const b=new Blob([content],{type}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u); }
 
 /* ===== Opening-balance uploader (Data Cleanser) ===== */
-let _opRows=null, _opReport=null;
+let _opRows=null, _opReport=null, _opLoc='bulacan';
 function openOpeningImport(){ _opRows=null; _opReport=null;
   $('modal').innerHTML=`<div><h3>📥 Upload opening inventory balances</h3>
-    <p class="mini">1) Download the template — <b>4 tabs</b> (<b>Ingredients</b>, <b>Products</b>, <b>Kitchen Supplies</b>, <b>Stickers</b>), grouped exactly like the Weekly Count sheet: category → base material, with each item's <b>raw + processed</b> together. 🖨 Print template gives the same layout on paper to hand-write on. 2) Enter the <b>qty</b> per row — ingredients in <b>kg</b>, supplies in their <b>unit</b>, products/stickers in <b>pieces</b>; set the <b>location</b> (bulacan/pasig). 3) Upload &amp; Test (all tabs are read), then Import. Re-uploading replaces the previous opening upload.</p>
+    <p class="mini">Pick the <b>location</b> you're uploading for, then: 1) Download the template — <b>4 tabs</b> (<b>Ingredients</b>, <b>Products</b>, <b>Kitchen Supplies</b>, <b>Stickers</b>), grouped like the Weekly Count sheet: category → base material, each item's <b>raw + processed</b> together. 🖨 Print template gives the same layout on paper. 2) Enter the <b>qty</b> per row — ingredients in <b>kg</b>, supplies in their <b>unit</b>, products/stickers in <b>pieces</b>. 3) Upload &amp; Test, then Import. Everything posts to the location you chose here. Re-uploading replaces the previous opening upload <i>for that location</i>.</p>
+    <div class="fld" style="margin:10px 0"><label>Location</label><div class="val"><select id="opLocSel" onchange="_opLoc=this.value">${['bulacan','pasig'].map(l=>`<option value="${l}" ${_opLoc===l?'selected':''}>${l}</option>`).join('')}</select></div></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
       <button class="btn sec" onclick="openingDownloadTemplate()">⬇ Download template (.${typeof XLSX!=='undefined'?'xlsx':'csv'})</button>
       <button class="btn sec" onclick="openingTemplatePrint()">🖨 Print template</button>
@@ -5295,18 +5296,19 @@ function openOpeningImport(){ _opRows=null; _opReport=null;
 // so the printout and the Excel tabs group identically: category → base material → raw + processed
 // together (raw inherits its processed sibling's category). If `uploaded` rows are given, each
 // line's qty is filled from them (matched by sku+location); otherwise qty is left blank.
-async function _openingSections(uploaded){
+async function _openingSections(uploaded, loc){
+  loc=(loc==='pasig'?'pasig':'bulacan');
   const ings=await listIngredients(); const prods=(await db.list('products',{})).filter(p=>p.active!==false);
   const food=ings.filter(i=>!isSupplyItem(i)), sup=ings.filter(isSupplyItem);
   const _bs={},_bn={}; food.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
   const _pm=_countProcMaps(food,_bs,_bn); const ctx={bs:_bs,bn:_bn,procBases:_pm.bases,procCat:_pm.catByBase};
-  const uq={}; if(uploaded) uploaded.forEach(r=>{ uq[(String(r.sku).trim()+'|'+(r.location||'bulacan')).toLowerCase()]=r.qty; });
-  const q=(sku,loc)=>{ if(!uploaded) return ''; const v=uq[(String(sku).trim()+'|'+loc).toLowerCase()]; return (v==null||v==='')?'':v; };
-  const ingLines=food.map(i=>{ const c=_countIngClass(i,ctx); return {sku:i.sku,name:c.name,type:c.form,unit:'kg',location:'bulacan',qty:q(i.sku,'bulacan'),g1:c.g1,g2:c.g2,grank:c.grank,form:c.form}; });
-  const supLines=sup.map(i=>({sku:i.sku,name:i.name,type:'supply',unit:(i.uom||'pcs'),location:'bulacan',qty:q(i.sku,'bulacan'),g1:'Kitchen Supplies',g2:(i.category||'Supplies'),grank:_grank(i.category||'Supplies')*1000+_so(i),form:'supply'}));
-  const prodLines=[],stkLines=[]; prods.slice().sort(cmpItems).forEach(p=>{ ['bulacan','pasig'].forEach((loc,k)=>{
-    prodLines.push({sku:p.sku,name:p.name,type:'product',unit:'packs',location:loc,qty:q(p.sku,loc),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p)*10+k,form:''});
-    stkLines.push({sku:'STK-'+p.sku,name:p.name+' — Sticker',type:'sticker',unit:'pcs',location:loc,qty:q('STK-'+p.sku,loc),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p)*10+k,form:''}); }); });
+  const uq={}; if(uploaded) uploaded.forEach(r=>{ uq[String(r.sku).trim().toLowerCase()]=r.qty; });   // one location per upload → match by sku
+  const q=(sku)=>{ if(!uploaded) return ''; const v=uq[String(sku).trim().toLowerCase()]; return (v==null||v==='')?'':v; };
+  const ingLines=food.map(i=>{ const c=_countIngClass(i,ctx); return {sku:i.sku,name:c.name,type:c.form,unit:'kg',location:loc,qty:q(i.sku),g1:c.g1,g2:c.g2,grank:c.grank,form:c.form}; });
+  const supLines=sup.map(i=>({sku:i.sku,name:i.name,type:'supply',unit:(i.uom||'pcs'),location:loc,qty:q(i.sku),g1:'Kitchen Supplies',g2:(i.category||'Supplies'),grank:_grank(i.category||'Supplies')*1000+_so(i),form:'supply'}));
+  const prodLines=[],stkLines=[]; prods.slice().sort(cmpItems).forEach(p=>{
+    prodLines.push({sku:p.sku,name:p.name,type:'product',unit:'packs',location:loc,qty:q(p.sku),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),form:''});
+    stkLines.push({sku:'STK-'+p.sku,name:p.name+' — Sticker',type:'sticker',unit:'pcs',location:loc,qty:q('STK-'+p.sku),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),form:''}); });
   return {ingredients:ingLines, products:prodLines, supplies:supLines, stickers:stkLines};
 }
 const _OPHDR=['sku','name','type','unit','location','qty'];
@@ -5325,31 +5327,36 @@ function _openingWriteCsv(S, fname){ const all=[_OPHDR.slice()];
   _openingTabs(S).forEach(([nm,lines])=>{ all.push(['','═══ '+nm+' ═══','','','','']); _openingAoa(lines,false).forEach(r=>all.push(r)); });
   dlBlob(all.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),fname,'text/csv'); }
 async function openingDownloadTemplate(){
-  const S=await _openingSections(null); const total=S.ingredients.length+S.products.length+S.supplies.length+S.stickers.length;
-  if(typeof XLSX!=='undefined'){ _openingWriteXlsx(S,'WR_opening_'+todayISO()+'.xlsx'); toast('Template downloaded — 4 tabs · '+total+' rows'); }
-  else { _openingWriteCsv(S,'WR_opening_'+todayISO()+'.csv'); toast('Template downloaded ('+total+' rows)'); }
+  const S=await _openingSections(null,_opLoc); const total=S.ingredients.length+S.products.length+S.supplies.length+S.stickers.length;
+  const suffix='_'+_opLoc+'_'+todayISO();
+  if(typeof XLSX!=='undefined'){ _openingWriteXlsx(S,'WR_opening'+suffix+'.xlsx'); toast('Template downloaded ('+_opLoc+') — 4 tabs · '+total+' rows'); }
+  else { _openingWriteCsv(S,'WR_opening'+suffix+'.csv'); toast('Template downloaded ('+_opLoc+') — '+total+' rows'); }
 }
-// Printable version of the SAME template — matches the Excel tab-for-tab. blank=true leaves the
-// qty column empty to hand-write; blank=false shows the uploaded quantities.
-function _openingSecHtml(label, lines, blank){
-  let body=`<tr class="sec"><td colspan="6">${esc(label)} · ${lines.length} item(s)</td></tr>`;
+// Printable template — ONE section (its own table) per Excel tab, each starting on a new page,
+// so the printout is divided into 4 just like the 4 tabs. blank=true leaves the qty column empty
+// to hand-write; blank=false shows the uploaded quantities.
+function _openingSecRows(lines, blank){ let body='';
   _renderRows(lines).forEach(r=>{
-    if(r.type==='g1'){ body+=`<tr class="grp"><td colspan="6">${esc(r.label)} (${r.count})</td></tr>`; return; }
-    if(r.type==='g2'){ body+=`<tr class="sub"><td colspan="6">&nbsp;&nbsp;▸ ${esc(r.label)} (${r.count})</td></tr>`; return; }
-    const l=r.l; body+=`<tr><td>${esc(l.sku)}</td><td>${esc(l.name)}</td><td>${esc(l.type)}</td><td>${esc(l.unit)}</td><td>${esc(l.location)}</td><td class="qt">${blank?'':esc(l.qty)}</td></tr>`; });
+    if(r.type==='g1'){ body+=`<tr class="grp"><td colspan="5">${esc(r.label)} (${r.count})</td></tr>`; return; }
+    if(r.type==='g2'){ body+=`<tr class="sub"><td colspan="5">&nbsp;&nbsp;▸ ${esc(r.label)} (${r.count})</td></tr>`; return; }
+    const l=r.l; body+=`<tr><td>${esc(l.sku)}</td><td>${esc(l.name)}</td><td>${esc(l.type)}</td><td>${esc(l.unit)}</td><td class="qt">${blank?'':esc(l.qty)}</td></tr>`; });
   return body; }
+function _openingSecTable(label, lines, blank, first){ if(!lines.length) return '';
+  return `<div class="sect" style="${first?'':'page-break-before:always'}"><h3>${esc(label)} <span class="cnt">${lines.length} item(s)</span></h3>
+    <table><thead><tr><th>SKU</th><th>Name</th><th>Type</th><th>Unit</th><th style="text-align:right">Qty</th></tr></thead><tbody>${_openingSecRows(lines,blank)}</tbody></table></div>`; }
 function _openingPrintDoc(S, blank, title){
-  const body=[['Ingredients (raw + processed)',S.ingredients],['Finished products',S.products],['Kitchen supplies',S.supplies],['Stickers',S.stickers]]
-    .map(([lbl,lines])=>lines.length?_openingSecHtml(lbl,lines,blank):'').join('');
-  return `<html><head><meta charset="utf-8"><title>${esc(title)}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:13px;color:#555}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.sec td{background:#dfeadd;font-weight:800;color:#274d2b;font-size:13px}tr.grp td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.sub td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.qt{width:120px;border-bottom:1px solid #333;text-align:right}</style></head><body>
+  const loc=(S.ingredients[0]||S.products[0]||{}).location||_opLoc;
+  const secs=[['Ingredients (raw + processed)',S.ingredients],['Finished products',S.products],['Kitchen supplies',S.supplies],['Stickers',S.stickers]];
+  const body=secs.map(([lbl,lines],i)=>_openingSecTable(lbl,lines,blank,i===0)).join('');
+  return `<html><head><meta charset="utf-8"><title>${esc(title)}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 14px;font-size:13px;color:#555}h3{color:#2f5d33;margin:0 0 8px;font-size:15px;border-bottom:2px solid #4e7a3e;padding-bottom:4px}h3 .cnt{font-weight:400;color:#888;font-size:12px}.sect{margin-bottom:18px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.grp td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.sub td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.qt{width:130px;border-bottom:1px solid #333;text-align:right}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Official Opening Inventory Balance</h1>
-    <h2>As of ${esc(todayISO())} · prepared by: ____________________ · approved by: ____________________</h2>
-    <table><thead><tr><th>SKU</th><th>Name</th><th>Type</th><th>Unit</th><th>Location</th><th style="text-align:right">Qty</th></tr></thead><tbody>${body}</tbody></table>
-    <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · ${blank?'write the opening quantity in the right column, then enter it in the Excel template and upload.':'this printout matches the uploaded file row-for-row.'} Ingredients raw/processed in kg (grouped by category), supplies in their unit, products/stickers in pieces/packs.</p></body></html>`;
+    <h2>Location: <b>${esc(String(loc).toUpperCase())}</b> · As of ${esc(todayISO())} · prepared by: ____________________ · approved by: ____________________</h2>
+    ${body}
+    <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · ${blank?'write the opening quantity in the right column, then enter it in the Excel template and upload.':'this printout matches the uploaded file row-for-row.'} Ingredients raw/processed in kg (grouped by category), supplies in their unit, products/stickers in pieces/packs. Everything posts to <b>${esc(String(loc).toUpperCase())}</b>.</p></body></html>`;
 }
 async function openingTemplatePrint(){ const w=window.open('','_pr','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; }
-  try{ w.document.write('<p style="font-family:Arial;padding:20px">Preparing template…</p>'); const S=await _openingSections(null);
-    w.document.open(); w.document.write(_openingPrintDoc(S,true,'Opening Balance Template')); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+  try{ w.document.write('<p style="font-family:Arial;padding:20px">Preparing template…</p>'); const S=await _openingSections(null,_opLoc);
+    w.document.open(); w.document.write(_openingPrintDoc(S,true,'Opening Balance Template — '+_opLoc)); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
   catch(e){ toast(e.message,true); try{w.close();}catch(_){} } }
 // Parse rows from one AoA (header + data); skips section/blank rows (no sku). Returns [] if no sku/qty header.
 function _opRowsFromAoa(arr){
@@ -5357,7 +5364,7 @@ function _opRowsFromAoa(arr){
   const ci=n=>hdr.indexOf(n); const si=ci('sku'),ni=ci('name'),ui=ci('unit'),ti=ci('type'),li=ci('location'),qi=ci('qty');
   if(si<0||qi<0) return [];
   const rows=[]; for(let i=1;i<arr.length;i++){ const r=arr[i]; if(!r)continue; const sku=r[si]; if(sku==null||String(sku).trim()==='')continue;
-    rows.push({sku:String(sku).trim(), name:ni>=0?String(r[ni]||'').trim():'', unit:ui>=0?String(r[ui]||'').trim():'', type:ti>=0?String(r[ti]||'').trim().toLowerCase():'', location:li>=0?String(r[li]||'bulacan').trim().toLowerCase():'bulacan', qty:Number(r[qi]||0)}); }
+    rows.push({sku:String(sku).trim(), name:ni>=0?String(r[ni]||'').trim():'', unit:ui>=0?String(r[ui]||'').trim():'', type:ti>=0?String(r[ti]||'').trim().toLowerCase():'', location:li>=0?String(r[li]||_opLoc).trim().toLowerCase():_opLoc, qty:Number(r[qi]||0)}); }
   return rows;
 }
 function _opParseSheet(name,data){
@@ -5393,27 +5400,28 @@ async function openingTest(){ if(!_opRows)return;
 function _openingRowsForOut(){ const rows=(_opReport&&_opReport.length?_opReport:_opRows)||[]; return rows.filter(r=>r&&r.sku!=null&&String(r.sku).trim()!==''); }
 async function openingPrintSheet(){ const rows=_openingRowsForOut(); if(!rows.length){ toast('Upload & Test a file first',true); return; }
   const w=window.open('','_pr','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; }
-  try{ w.document.write('<p style="font-family:Arial;padding:20px">Preparing sheet…</p>'); const S=await _openingSections(rows);
-    w.document.open(); w.document.write(_openingPrintDoc(S,false,'Opening Balance '+todayISO())); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+  try{ w.document.write('<p style="font-family:Arial;padding:20px">Preparing sheet…</p>'); const S=await _openingSections(rows,_opLoc);
+    w.document.open(); w.document.write(_openingPrintDoc(S,false,'Opening Balance '+_opLoc+' '+todayISO())); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
   catch(e){ toast(e.message,true); try{w.close();}catch(_){} } }
 async function openingExportXlsx(){ const rows=_openingRowsForOut(); if(!rows.length){ toast('Upload & Test a file first',true); return; }
-  const S=await _openingSections(rows);
-  if(typeof XLSX!=='undefined'){ _openingWriteXlsx(S,'WR_opening_balance_'+todayISO()+'.xlsx'); }
-  else { _openingWriteCsv(S,'WR_opening_balance_'+todayISO()+'.csv'); }
-  toast('Opening balance saved — 4 tabs');
+  const S=await _openingSections(rows,_opLoc); const suffix='_'+_opLoc+'_'+todayISO();
+  if(typeof XLSX!=='undefined'){ _openingWriteXlsx(S,'WR_opening_balance'+suffix+'.xlsx'); }
+  else { _openingWriteCsv(S,'WR_opening_balance'+suffix+'.csv'); }
+  toast('Opening balance saved ('+_opLoc+') — 4 tabs');
 }
 async function openingDoImport(){ if(!_opReport)return;
   if(curRole&&curRole()!=='Admin'){ toast('Only an Admin can post opening balances',true); return; }
   const valid=_opReport.filter(d=>d.st==='ok');
   if(!valid.length){ toast('Nothing to post',true); return; }
   if(_postLock){ toast('Still posting…',true); return; } _postLock=true;
-  const note='Opening upload '+todayISO();
+  const upLoc=(_opLoc==='pasig'?'pasig':'bulacan');
+  const note='Opening upload '+upLoc+' '+todayISO();
   try{
-    // replace the previous opening upload (idempotent) — leaves other opening seeds intact
-    if(isLive()){ try{ await sb('inventory_movements?note=like.Opening%20upload*',{method:'DELETE',prefer:'return=minimal'}); }catch(e){} }
-    else { DEMO.inventory_movements=(DEMO.inventory_movements||[]).filter(m=>!String(m.note||'').startsWith('Opening upload')); }
+    // replace the previous opening upload FOR THIS LOCATION only — leaves the other site's opening intact
+    if(isLive()){ try{ await sb('inventory_movements?note=like.Opening%20upload*&location_code=eq.'+upLoc,{method:'DELETE',prefer:'return=minimal'}); }catch(e){} }
+    else { DEMO.inventory_movements=(DEMO.inventory_movements||[]).filter(m=>!(String(m.note||'').startsWith('Opening upload')&&m.location_code===upLoc)); }
     let posted=0,fail=0;
-    for(const r of valid){ const qty=+r.qty||0; const loc=(r.location==='pasig'?'pasig':'bulacan'); const type=r.type||'';
+    for(const r of valid){ const qty=+r.qty||0; const loc=upLoc; const type=r.type||'';
       try{
         if(type==='sticker'){ const psku=String(r.sku).replace(/^STK-/,''); await db.update('products','sku',psku,{['sticker_'+loc+'_on_hand']:qty}); posted++; continue; }
         if(type==='product'){ await db.create('inventory_movements',{kind:'product',ref_sku:r.sku,location_code:loc,qty:qty,unit_cost:0,movement_type:'opening',note}); posted++; continue; }
