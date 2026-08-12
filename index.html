@@ -302,7 +302,7 @@
 /* ============================ CONFIG / METADATA ============================ */
 const MODULES = [
   {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
-  {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc']},
+  {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc','ffprofiles']},
   {id:'plan',   label:'Planning',    items:['mrp']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
@@ -405,6 +405,8 @@ const MODELS = {
   custom_orders:{ label:'Custom Orders', icon:'🧑‍🍳', name:'order_ref', pk:'order_ref', special:'customorders' },
 
   ffcalc:{ label:'Fresh Food Calculator', icon:'🧮', special:'ffcalc' },
+
+  ffprofiles:{ label:'Calculator Profiles', icon:'🐾', special:'ffprofiles' },
 
   purchase_orders:{ label:'Purchase Orders', icon:'🧾', name:'po_ref', pk:'po_ref',
     status:{f:'status',stages:['open','rfq','quoted','confirmed','received','cancelled']}, cancelable:true,
@@ -644,6 +646,7 @@ function route(){
     if(m.special==='mrp') return renderMRP();
     if(m.special==='customorders') return renderCustomOrders();
     if(m.special==='ffcalc') return renderFFCalc();
+    if(m.special==='ffprofiles') return renderFFProfiles();
     if(m.special==='prodplan') return renderProdPlan();
     if(m.special==='reporting') return renderReporting();
     if(m.special==='users') return renderUsers();
@@ -3629,6 +3632,40 @@ function renderFFCalc(){
       <iframe id="ffcalcFrame" src="${FFCALC_SRC}" style="width:100%;height:100%;border:0;display:block" title="Fresh Food Calculator"></iframe></div>
     <div class="mini" style="margin-top:6px;color:var(--muted)">The calculator runs in-app. Build a pack, then click <b>📤 Send order to ERP</b> (top-right of the calculator) — it becomes a Custom Order with its recipe, ready to review &amp; Lock. If the calculator doesn't appear, make sure <code>${esc(FFCALC_SRC)}</code> is deployed alongside the app.</div>`;
 }
+// Native browser for the shared Fresh Food Calculator profiles (ffcalc_profiles), so CS can
+// find a repeat customer without opening the calculator. Read-only; jump into the calculator to edit.
+const _FT_LBL={raw:'BARF Raw',cookable:'BARF Cookable',sousVide:'Gently Cooked'};
+async function renderFFProfiles(){
+  $('crumb').innerHTML='<b>Calculator Profiles</b>';
+  $('cp').innerHTML=`<div class="title">Calculator Profiles <span onclick="openKB('ffprofiles')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <button class="btn sec" onclick="renderFFProfiles()">↻ Refresh</button>
+    <button class="btn sec" onclick="openModel('ffcalc')">🧮 Open calculator</button>
+    <div class="sp"></div><span style="color:var(--muted)">saved calculator customers · shared across devices</span>`;
+  let rows=[]; window._ffProfErr='';
+  if(isLive()){ try{ rows=await sb('ffcalc_profiles?select=key,kind,cust,dog,payload,updated_at&order=updated_at.desc&limit=2000'); }catch(e){ window._ffProfErr=String(e&&e.message||e); } }
+  else { window._ffProfErr='Connect to Supabase to see shared calculator profiles.'; }
+  window._ffProf=(rows||[]).map(r=>{ const p=r.payload||{}; return {key:r.key, kind:r.kind||(String(r.key).indexOf('wr_md_')===0?'md':'nc'), cust:r.cust||p.custName||'', dog:r.dog||p.dogName||'',
+    ft:_FT_LBL[p.feedingType]||p.feedingType||'', pack:(p.packSize||p.customPackGrams||''), packs:(p.numPacks||p.customNumPacks||''), updated:r.updated_at||p.savedAt||''}; });
+  _ffProfDraw();
+}
+function _ffProfDraw(){
+  const err=window._ffProfErr; const all=window._ffProf||[];
+  if(err){ $('content').innerHTML=`<div class="repcard"><div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:10px 12px;color:var(--danger);font-size:12.5px">⚠ ${esc(err)}${/relation|does not exist|schema cache|PGRST|404/i.test(err)?' — run <b>wr_ffcalc_profiles.sql</b> in Supabase, then have the team click ☁ Sync in the calculator to seed profiles.':''}</div></div>`; return; }
+  const q=((($('ffpq')||{}).value)||'').toLowerCase().split(/\s+/).filter(Boolean);
+  const rows=all.filter(r=>{ if(!q.length) return true; const t=(r.cust+' '+r.dog+' '+r.ft).toLowerCase(); return q.every(w=>t.includes(w)); });
+  const fmtDate=s=>{ if(!s) return '—'; try{ return new Date(s).toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}); }catch(e){ return String(s).slice(0,10); } };
+  const body=rows.map(r=>`<tr><td>${esc(r.cust||'—')}</td><td>${esc(r.dog||'—')}</td><td>${r.kind==='md'?'🐾🐾 multi':'🐾 single'}</td><td>${esc(r.ft||'—')}</td><td class="num">${r.pack?esc(r.pack)+'g':'—'}${r.packs?' × '+esc(r.packs):''}</td><td>${esc(fmtDate(r.updated))}</td></tr>`).join('');
+  $('content').innerHTML=`<div class="repcard">
+    <div style="display:flex;gap:8px;align-items:center;margin:0 0 8px;flex-wrap:wrap">
+      <input id="ffpq" value="${esc(q.join(' '))}" placeholder="🔎 search customer / dog / feeding type…" oninput="_ffProfDraw()" style="flex:1;min-width:200px;padding:7px 9px;border:1px solid var(--line);border-radius:6px">
+      <span class="mini" style="color:var(--muted)">${all.length} saved profile(s)</span>
+    </div>
+    <div class="hint" style="margin:0 0 8px">These are the calculator's saved customers, shared through Supabase. To build a pack for one, open the <b>🧮 Fresh Food Calculator</b> and pick them from its <i>Load saved profile</i> list, then 📤 Send order to ERP.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Customer</th><th>Pet</th><th>Type</th><th>Feeding</th><th class="num">Pack</th><th>Updated</th></tr></thead>
+    <tbody>${body||'<tr><td colspan="6" class="empty">No profiles yet — have the team click ☁ Sync in the calculator to seed them.</td></tr>'}</tbody></table></div>
+    <div class="pager">${rows.length} shown</div></div>`;
+  const el=$('ffpq'); if(el){ el.focus(); const v=el.value; el.value=''; el.value=v; }   // keep focus/caret on re-render
+}
 // Learned calculator-name → SKU aliases (so a mapping done once sticks forever).
 let FFCALC_ALIASES=null;
 async function loadFFAliases(){ if(FFCALC_ALIASES) return FFCALC_ALIASES; FFCALC_ALIASES={};
@@ -3931,11 +3968,69 @@ async function prodPersist(status){
   } else { DEMO.production_batches=(DEMO.production_batches||[]).filter(b=>b.run_ref!==prodRunRef).concat(recs); }
   return recs;
 }
-async function prodSaveDraft(){ const r=await prodPersist('draft'); if(r){ sysLog('production_batches',prodRunRef,'📝 Draft production plan saved ('+r.length+' batches) by '+CURRENT_USER); toast('Draft saved · '+prodRunRef); drawProdPlan(); } }
+async function prodSaveDraft(){ const r=await prodPersist('draft'); if(r){ sysLog('production_batches',prodRunRef,'📝 Draft production plan saved ('+r.length+' batches) by '+CURRENT_USER); drawProdPlan();
+  let sh=[]; try{ sh=await _prodShortages(); }catch(e){}
+  if(sh.length){ _prodShortWarn(sh, 'Draft saved · '+prodRunRef); } else { toast('Draft saved · '+prodRunRef+' · ✓ stock covers the run'); }
+} }
+// Check the plan's ingredient needs against stock using PROCESSED-FIRST-THEN-RAW coverage.
+// Honours any substitutions already set (prodBOMMap applies them). Returns the short items.
+async function _prodShortages(){
+  const prodLines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
+  const outLines=prodOutLines.filter(l=>(+l.needed_kg||0)>0);
+  if(!prodLines.length && !outLines.length) return [];
+  const bm=await prodBOMMap(); const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+  const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
+  const oh=await _ingOhBulacanG();   // processed & raw on-hand (grams) at Bulacan
+  const need={};
+  prodLines.forEach(l=>{ const packs=+l.good_packs||0; (bm[l.product_sku]||[]).forEach(line=>{ need[line.ingredient_sku]=(need[line.ingredient_sku]||0)+line.processed_g*packs; }); });
+  outLines.forEach(l=>{ const sub=(window._prodSub||{})[l.ingredient_sku]; const sku=(sub&&im[sub])?sub:l.ingredient_sku; need[sku]=(need[sku]||0)+(+l.needed_kg||0)*1000; });
+  const out=[];
+  Object.keys(need).forEach(sku=>{ const it=im[sku]||{}; const y=(+it.yield_pct||100)/100||1; const p=_procParent(it,bySku,byName);
+    const neededG=need[sku]; const ohProc=Math.max(0,oh[sku]||0); const ohRaw=p?Math.max(0,oh[p.sku]||0):0;
+    const canMakeG=ohProc + ohRaw*y;                       // processed first, then raw → processed at yield
+    const shortG=neededG-canMakeG;
+    if(shortG>1) out.push({sku, name:it.name||sku, neededKg:Math.round(neededG/10)/100, procKg:Math.round(ohProc/10)/100, rawKg:Math.round(ohRaw/10)/100, canMakeKg:Math.round(canMakeG/10)/100, shortKg:Math.round(shortG/10)/100, parent:(p&&p.name)||'', hasParent:!!p, yieldPct:Math.round(y*100)});
+  });
+  return out.sort((a,b)=>b.shortKg-a.shortKg);
+}
+function _prodShortWarn(sh, headline){
+  const rows=sh.map(s=>`<tr><td>${esc(s.name)}<div class="mini"><code>${esc(s.sku)}</code></div></td>
+    <td class="num">${s.neededKg}</td><td class="num">${s.canMakeKg}</td><td class="num" style="color:var(--danger)"><b>${s.shortKg}</b></td>
+    <td class="mini">${s.hasParent?('processed '+s.procKg+' + raw '+s.rawKg+' @'+s.yieldPct+'%'):'<span style="color:var(--danger)">no raw parent set</span>'}</td></tr>`).join('');
+  $('modal').innerHTML=`<div><h3>⚠ Ingredient shortages — replacements needed</h3>
+    <p class="mini">${esc(headline)}. Using <b>processed stock first, then raw</b>, these ingredient(s) can't fully cover this run. Set a <b>replacement</b> (Substitute) for them, or receive / prep more before you confirm. The finished products are unchanged.</p>
+    <div style="max-height:300px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Needed kg</th><th class="num">Can make kg</th><th class="num">Short kg</th><th>Available now</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="closeModal();prodSubstitute()">🔁 Set replacements</button><button class="btn sec" onclick="closeModal()">OK — I'll handle it</button></div></div>`;
+  $('overlay').classList.add('on');
+}
 async function prodConfirm(){
   if(_postLock){ toast('Still posting — please wait…',true); return; }
-  await openProdActuals();   // capture actual raw + processed (real yield) then post in one step
+  if(!prodPlanLines.some(l=>(+l.good_packs||0)>0) && !prodOutLines.some(l=>(+l.needed_kg||0)>0)){ toast('Enter good packs on a product, or a needed qty on an output ingredient',true); return; }
+  // Step 1 — check stock (processed-first, then raw) and let them set replacements for anything short.
+  let sh=[]; try{ sh=await _prodShortages(); }catch(e){}
+  if(sh.length){ await drawPreConfirmSub(); return; }
+  await openProdActuals();   // Step 2 — capture actuals & post
 }
+// Pre-confirm: show short ingredients + a Replace-with dropdown for each, then continue to actuals.
+async function drawPreConfirmSub(){
+  const sh=await _prodShortages();
+  if(!sh.length){ closeModal(); await openProdActuals(); return; }   // all resolved → proceed
+  const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+  const procIngs=ings.filter(i=>i.is_intermediate).sort((a,b)=>String(a.name||'').localeCompare(b.name||''));
+  window._prodSub=window._prodSub||{};
+  const rows=sh.map(s=>{ const it=im[s.sku]||{}; const alt=(it.approved_alt||'').trim(); const chosen=window._prodSub[s.sku]||'';
+    const opts=procIngs.filter(o=>o.sku!==s.sku).map(o=>`<option value="${esc(o.sku)}" ${chosen===o.sku?'selected':''}>${esc(o.name)}${alt&&(o.name||'').trim().toLowerCase()===alt.toLowerCase()?' ★ approved alt':''}</option>`).join('');
+    return `<tr><td>${esc(s.name)}<div class="mini"><span style="color:var(--danger)">short ${s.shortKg} kg</span> · need ${s.neededKg}, can make ${s.canMakeKg}${alt?' · approved alt: <b>'+esc(alt)+'</b>':''}</div></td>
+      <td><select onchange="prodPreSetSub('${esc(s.sku)}',this.value)" style="width:230px"><option value="" ${!chosen?'selected':''}>— keep &amp; make what we can —</option>${opts}</select></td></tr>`; }).join('');
+  const nSub=Object.keys(window._prodSub).length;
+  $('modal').innerHTML=`<div><h3>⚠ Before confirming — ${sh.length} ingredient(s) short</h3>
+    <p class="mini">Using <b>processed stock first, then raw</b>, these can't fully cover the run. Pick a <b>replacement</b> for any you want to swap (it's consumed instead, at its own yield &amp; cost — the finished product is unchanged), or leave as-is and the run will make what stock allows. You can still confirm either way.</p>
+    <div style="max-height:300px;overflow:auto"><table><thead><tr><th>Short ingredient</th><th>Replace with</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="margin-top:8px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px"><b id="preSubCount">${nSub}</b> replacement(s) set for this run</div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="drawPreConfirmSub()">↻ Re-check stock</button><button class="wfbtn" onclick="closeModal();openProdActuals()">✅ Continue to confirm</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+async function prodPreSetSub(orig,val){ prodSetSub(orig,val); await drawPreConfirmSub(); }   // set + re-check live
 // Processed on-hand (grams) at Bulacan — live reads the view, DEMO sums the ledger.
 async function _ingOhBulacanG(){ const oh={};
   if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.kind==='ingredient'&&s.location_code==='bulacan') oh[s.ref_sku]=(oh[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} }
@@ -5498,6 +5593,7 @@ const KB = {
   margin:{d:'Live gross margin per product: BOM raw cost + variable process & packaging + fees → GP% and a suggested price at your target.',h:['Edit the global rate model (per-gram utilities, labor, packaging, fees, target GM) then 💾 Save','Set each product’s Cost profile tab: deboning / butcher / sous-vide / ecobag / thermal','Tap a row to open the product; ⬆ Write total cost pushes COGS to products'],l:['Raw = BOM grams × ingredient moving-average cost (falls back to processed/list price)','Process = (electricity+water+transport) per gram + labor (plain OR deboning) ± butcher ± sous-vide','Packaging = vacuum + sticker + ecobag + thermal, pulled from Kitchen Supplies costs','Fees = (transaction+marketing) % of price; Suggested = fixed cost ÷ (1 − target − fees%)','Rates persist in Supabase (app_settings.cost_model) — shared with the whole team']},
   momentum:{d:'Reads Shopify rolling sales (30/60/90/120 days) against live stock to show what to make now vs what’s overstocked.',h:['📊 Runway view: days of stock left per product, most urgent first','🎯 Quadrant view: momentum × stock for a two-axis read','Group by family or priority; 📥 Import/paste sales; tap a row to open the product'],l:['Momentum × = recent 30-day daily rate ÷ 120-day average (>1 = accelerating)','Days of cover = current stock ÷ recent daily rate','Stockout risk = low cover + steady/rising demand; overstock = high cover + slowing','Fed hourly from the “90-120 Day Demand” sheet into the sales_momentum table']},
   supplies_reorder:{d:'Supplies below their PAR, with the quantity to reorder, ready to turn into a supplier PO.',h:['Review items below PAR (reorder = PAR − on hand)','🧾 Generate Supplies PO — one draft per supplier, ready to send','Set each supply’s PAR & reorder in Kitchen Supplies'],l:['Simple PAR rule — supplies have no recipe so they aren’t in MRP','Reorder qty is in the item’s own unit','Generated POs are confirmed and priced at the supply’s unit cost']},
+  ffprofiles:{d:'A searchable list of the Fresh Food Calculator’s saved customers, shared across devices via Supabase.',h:['Search by customer, pet, or feeding type','Open the 🧮 Calculator to build a pack for one (Load saved profile there)','Profiles sync from the calculator’s ☁ Sync'],l:['Reads the ffcalc_profiles table (run wr_ffcalc_profiles.sql once)','Each calculator save pushes here; the calculator pulls on load','Read-only here — edit in the calculator']},
   ffcalc:{d:'The full Fresh Food Calculator, embedded in the app — size a custom pack per pet, then push it straight into a Custom Order.',h:['Fill in the pet profile & feeding type, compute the pack (Feeding / Kitchen)','Click 📤 Send order to ERP (top-right) to import the recipe','It lands as a Custom Order — map any unmatched ingredient, then 🔒 Lock'],l:['Runs isolated in a frame so it never clashes with the ERP','Sending posts the per-pack recipe (ingredient + grams), pack size, packs, customer & price','The ERP matches ingredient names to your master SKUs; unmatched ones are flagged for you to pick']},
   custom_orders:{d:'Customer-service quotes that lock into confirmed orders — each custom recipe becomes its own sellable SKU + BOM and flows into demand.',h:['＋ New quote → add standard products and/or custom recipes (ingredient + g/pack)','Edit freely while it is a quote; 🔒 Lock creates the SKUs + BOMs and pushes packs into demand','Pull the demand in Demand/MRP with ☁ Sync for the needed week'],l:['Each distinct custom recipe hashes to one CUST-… SKU (identical recipes reuse it)','Locking writes the order packs to the demand table keyed by the created SKU + needed date','A locked order can be marked fulfilled; cancel voids a quote']},
   prodplan:{d:'Plan and confirm a production run — good packs per product plus any output ingredients to make, then the actual processed used / raw used / output created.',h:['Add products + Good packs, and/or add Output ingredients + Needed qty (target/remaining come from the latest demand plot)','✅ Confirm production → the popup uses existing processed stock first, then makes the shortfall from raw','Enter actual Processed used / Raw used / Output created — live yield = output ÷ raw'],l:['Posting draws processed stock first, then deducts raw + adds processed for the shortfall, runs the mix, outputs finished packs','Excess (processed used + output created − needed) returns to the processed ingredient’s stock','Best-before auto-stamps = production date + the product’s shelf-life days; real yield is recorded on the batch']},

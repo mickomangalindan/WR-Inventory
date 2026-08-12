@@ -276,6 +276,8 @@
       style="padding:8px 14px;font-size:13px;font-weight:500;border:1.5px solid #27ae60;border-radius:8px;background:#fff;color:#27ae60;cursor:pointer">✦ New</button>
     <button onclick="ncDeleteProfile()"
       style="padding:8px 14px;font-size:13px;font-weight:500;border:1.5px solid #c0392b;border-radius:8px;background:#fff;color:#c0392b;cursor:pointer">🗑 Delete</button>
+    <button id="ff-sync-btn" onclick="ffSyncNow()"
+      style="padding:8px 14px;font-size:13px;font-weight:500;border:1.5px solid #185fa5;border-radius:8px;background:#fff;color:#185fa5;cursor:pointer" title="Sync saved profiles with the shared Supabase (all devices)">☁ Sync</button>
   </div>
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:1rem">
     <input id="nc-save-note" type="text" placeholder="Save note (optional) — e.g. weight updated, added rabbit"
@@ -4889,6 +4891,47 @@ function ncProfileKey(custName, dogName){
   return 'wr_nc_profile_'+slug;
 }
 
+/* ===================== Supabase profile sync (shared across devices) =====================
+ * Saved profiles live in each browser's localStorage; this pushes/pulls them to a shared
+ * Supabase table (ffcalc_profiles) so the whole team sees the same list on any device.
+ * Run wr_ffcalc_profiles.sql in Supabase once. Paste the anon key on first ☁ Sync.
+ */
+const FFSYNC = { url:'https://nzormnscflumffbekwvz.supabase.co', key:'sb_publishable_RCEzggZQ-97pIybHBhWAsg_CiQQn9GX' };
+function ffSupaCfg(){ try{ const s=JSON.parse(localStorage.getItem('wr_ffcalc_supa')||'null'); if(s&&s.url&&s.key) return s; }catch(e){} return (FFSYNC.url&&FFSYNC.key)?{url:FFSYNC.url,key:FFSYNC.key}:null; }
+function ffSyncOn(){ return !!ffSupaCfg(); }
+async function ffSupaFetch(path, opts){ const c=ffSupaCfg(); if(!c) throw new Error('Cloud sync not set up'); opts=opts||{};
+  const r=await fetch(c.url+'/rest/v1/'+path, {...opts, headers:{apikey:c.key, Authorization:'Bearer '+c.key, 'Content-Type':'application/json', ...(opts.headers||{})}});
+  if(!r.ok) throw new Error('Supabase '+r.status+': '+(await r.text()).slice(0,160));
+  const t=await r.text(); return t?JSON.parse(t):[]; }
+async function ffSyncPush(key, payload){ if(!ffSyncOn()||!key||!payload) return; try{
+  await ffSupaFetch('ffcalc_profiles?on_conflict=key', {method:'POST', headers:{Prefer:'resolution=merge-duplicates,return=minimal'},
+    body:JSON.stringify({ key, kind:key.indexOf('wr_md_')===0?'md':'nc', cust:(payload.custName||''), dog:(payload.dogName||''), payload, updated_at:new Date().toISOString() })}); }catch(e){ console.warn('ffSyncPush',e); } }
+// Pull every cloud profile into localStorage; cloud replaces local only when strictly newer.
+async function ffSyncPullAll(){ if(!ffSyncOn()) return 0; let rows=[]; try{ rows=await ffSupaFetch('ffcalc_profiles?select=key,payload,updated_at&order=updated_at.desc'); }catch(e){ console.warn('ffSyncPull',e); return -1; }
+  let n=0; (rows||[]).forEach(r=>{ if(!r.key||!r.payload) return; try{
+    const localRaw=localStorage.getItem(r.key);
+    if(localRaw){ const loc=JSON.parse(localRaw); if(new Date(loc.savedAt||0) >= new Date((r.payload&&r.payload.savedAt)||r.updated_at||0)) return; }
+    localStorage.setItem(r.key, JSON.stringify(r.payload)); n++; }catch(e){} });
+  return n; }
+// Push every local profile up (used on manual sync / first-time seed).
+async function ffSyncPushAll(){ if(!ffSyncOn()) return 0; let n=0;
+  for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(!k) continue; if(k.indexOf('wr_nc_profile_')!==0 && k.indexOf('wr_md_profile_')!==0) continue;
+    try{ const p=JSON.parse(localStorage.getItem(k)); if(p&&(p.custName||p.dogName)){ await ffSyncPush(k,p); n++; } }catch(e){} }
+  return n; }
+function _ffRefreshDropdowns(){ try{ ncPopulateSavedProfiles(); }catch(e){} try{ if(typeof mdPopulateSavedProfiles==='function') mdPopulateSavedProfiles(); }catch(e){} }
+async function ffSyncNow(){
+  if(!ffSyncOn()){
+    const key=prompt('Paste your Supabase anon key to enable shared profile sync (one-time per browser).\nProject URL is already set ('+FFSYNC.url+').');
+    if(!key) return; localStorage.setItem('wr_ffcalc_supa', JSON.stringify({url:FFSYNC.url, key:key.trim()}));
+  }
+  const btn=document.getElementById('ff-sync-btn'); const t0=btn?btn.textContent:''; if(btn){ btn.textContent='☁ Syncing…'; btn.disabled=true; }
+  try{ const up=await ffSyncPushAll(); const down=await ffSyncPullAll(); _ffRefreshDropdowns();
+    if(down<0){ if(typeof showSaveIndicator==='function') showSaveIndicator('⚠ Sync failed — check the anon key / that wr_ffcalc_profiles.sql was run','orange'); }
+    else if(typeof showSaveIndicator==='function') showSaveIndicator('☁ Synced — '+up+' up, '+down+' new down'); }
+  catch(e){ if(typeof showSaveIndicator==='function') showSaveIndicator('⚠ Sync error: '+e.message,'orange'); }
+  finally{ if(btn){ btn.textContent=t0||'☁ Sync'; btn.disabled=false; } }
+}
+
 function ncPopulateSavedProfiles(){
   const sel=document.getElementById('nc-saved-profiles');
   if(!sel) return;
@@ -5004,7 +5047,8 @@ function ncSaveProfile(){
     if(sel) sel.value=key;
     const noteEl=document.getElementById('nc-save-note'); if(noteEl) noteEl.value='';
     const n=payload.saveNote;
-    showSaveIndicator('✅ Profile saved — '+custName+' / '+dogName+(n?' · '+n:''));
+    if(ffSyncOn()) ffSyncPush(key, payload);   // shared cloud copy
+    showSaveIndicator('✅ Profile saved — '+custName+' / '+dogName+(n?' · '+n:'')+(ffSyncOn()?' · ☁ synced':''));
   }catch(e){ alert('Could not save: '+e.message); }
 }
 
@@ -5109,6 +5153,11 @@ function ncLoadProfile(key){
         const ft=lastDailyTotal||computeLiveFoodTotal();
         if(ft>0) updateOverrideInputs(ft);
       }
+      // Hard-guarantee the weight fields survive the post-load recompute (#1)
+      const _c=document.getElementById('dogWeightCurrent'), _i=document.getElementById('dogWeightIdeal');
+      if(_c && p.dogWeightCurrent!=null && p.dogWeightCurrent!=='') _c.value=p.dogWeightCurrent;
+      if(_i && p.dogWeightIdeal!=null && p.dogWeightIdeal!=='') _i.value=p.dogWeightIdeal;
+      if(typeof onWeightChange==='function') onWeightChange();
     }, 150);
 
     showSaveIndicator('📂 Loaded — '+p.custName+' / '+p.dogName);
@@ -5244,6 +5293,8 @@ document.addEventListener('DOMContentLoaded',()=>{
     });
   }catch(e){}
   try{ ncPopulateSavedProfiles(); }catch(e){}
+  // Pull shared profiles from Supabase on load, then refresh the dropdowns.
+  try{ if(typeof ffSyncOn==='function' && ffSyncOn()){ ffSyncPullAll().then(n=>{ if(n>0) _ffRefreshDropdowns(); }); } }catch(e){}
 });
 document.addEventListener('DOMContentLoaded', ()=>{ setTimeout(()=>{ try{ triggerStartupCheck(); }catch(e){console.warn('Startup check error:',e);} },300); });
 
@@ -9291,7 +9342,8 @@ function mdSaveProfile(silent=false){
     const sel = document.getElementById('md-saved-profiles');
     if(sel) sel.value = key;
     const noteEl=document.getElementById('md-save-note'); if(noteEl&&!silent) noteEl.value='';
-    if(!silent) showSaveIndicator('✅ Profile saved'+(mdSaveNote?' · '+mdSaveNote:''));
+    if(typeof ffSyncOn==='function' && ffSyncOn()) ffSyncPush(key, payload);   // shared cloud copy
+    if(!silent) showSaveIndicator('✅ Profile saved'+(mdSaveNote?' · '+mdSaveNote:'')+((typeof ffSyncOn==='function'&&ffSyncOn())?' · ☁ synced':''));
     else showSaveIndicator('🔒 Locked & saved');
   } catch(e) {
     if(!silent) alert('Could not save: '+e.message);
