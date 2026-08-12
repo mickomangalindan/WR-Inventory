@@ -4215,18 +4215,28 @@ let countRec={}, countLines=[];
 function _matBase(name){ return String(name||'').replace(/\([^)]*\)/g,' ').replace(/[-–—_/]+/g,' ')
   .replace(/\b(raw|processed|process|ground|minced|whole|wd|dressed)\b/gi,' ')
   .replace(/\s+/g,' ').trim(); }
-// Build the set of base materials that have a processed form (so we can label raw siblings "— Raw").
-function _countProcBases(ings,bs,bn){ const s=new Set(); ings.forEach(i=>{ if(i.is_intermediate){ const p=_procParent(i,bs,bn); const base=_matBase(p?p.name:i.name)||(p?p.name:i.name); if(base) s.add(base.toLowerCase()); } }); return s; }
+// Build the set of base materials that have a processed form (so we can label raw siblings "— Raw"),
+// and a base→category map from the processed items. Raw ingredients in the master all carry the
+// generic category "Raw Material", so a raw item inherits its processed sibling's real food
+// category (Muscle Meat, Organ Meat, …) — that keeps raw + processed of the same base together.
+function _countProcBases(ings,bs,bn){ const m=_countProcMaps(ings,bs,bn); return m.bases; }
+function _countProcMaps(ings,bs,bn){ const bases=new Set(), catByBase={};
+  ings.forEach(i=>{ if(i.is_intermediate){ const p=_procParent(i,bs,bn); const base=_matBase(p?p.name:i.name)||(p?p.name:i.name);
+    if(base){ const k=base.toLowerCase(); bases.add(k); if(i.category && !catByBase[k]) catByBase[k]=i.category; } } });
+  return {bases,catByBase}; }
 // Classify one ingredient for the weekly count: supplies (incl. stickers/labels) → Kitchen Supplies;
 // food ingredients grouped by base material with raw + processed shown underneath.
 function _countIngClass(i, ctx){
   if(isSupplyItem(i)){ return {isSup:true, g1:'Kitchen Supplies', g2:(i.category||'Supplies'), name:i.name, grank:800000, uom:(i.uom||'pcs'), scale:1, form:'supply'}; }
   const isProc=!!i.is_intermediate; const p=isProc?_procParent(i,ctx.bs,ctx.bn):null;
-  const base=(_matBase(p?p.name:i.name)||(p?p.name:i.name)); const hasPair=ctx.procBases.has(base.toLowerCase());
+  const base=(_matBase(p?p.name:i.name)||(p?p.name:i.name)); const bk=base.toLowerCase(); const hasPair=ctx.procBases.has(bk);
+  // Raw items inherit the processed sibling's category so both land under the same group.
+  const inheritedCat=(!isProc && ctx.procCat && ctx.procCat[bk]) ? ctx.procCat[bk] : null;
+  const cat=inheritedCat||i.category||'Ingredients';
   let nm=i.name;
   if(isProc) nm = /processed/i.test(i.name)? i.name : (i.name+' — Processed');
   else if(hasPair) nm = /\braw\b/i.test(i.name)? i.name : (i.name+' — Raw');
-  return {isSup:false, g1:(i.category||'Ingredients'), g2:base, name:nm, grank:400000+_grank(i.category)*1000+_so(i), uom:'kg', scale:1000, form:isProc?'processed':'raw'};
+  return {isSup:false, g1:cat, g2:base, name:nm, grank:400000+_grank(cat)*1000+_so(i), uom:'kg', scale:1000, form:isProc?'processed':'raw'};
 }
 async function renderCountForm(idEnc){
   const m=MODELS.count_sessions; formIsNew=!idEnc;
@@ -4235,7 +4245,7 @@ async function renderCountForm(idEnc){
     if(isLive()){ try{ countLines=await db.children({model:'count_lines',fk:'count_ref'}, countRec.count_ref); }catch(e){} }
     // enrich saved lines with their category (count_lines doesn't store it) for grouping/print
     try{ const ai=await db.list('ingredients',{}); const _bs={},_bn={}; ai.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
-      const ctx={bs:_bs,bn:_bn,procBases:_countProcBases(ai,_bs,_bn)};
+      const _pm=_countProcMaps(ai,_bs,_bn); const ctx={bs:_bs,bn:_bn,procBases:_pm.bases,procCat:_pm.catByBase};
       const im={}; ai.forEach(i=>{ im[i.sku]={cl:_countIngClass(i,ctx), kind:'ingredient'}; });
       (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,fam:(p.family||'Other'),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),so:_so(p),kind:'product',box:(+p.box_size||1)});
       countLines.forEach(l=>{
@@ -4298,6 +4308,8 @@ function drawCountForm(){
     ${!approved?`<button class="wfbtn" onclick="countApprove()">✔ Approve &amp; post</button>`:'<span class="badge b-received">Approved — posted to stock</span>'}
     ${!approved?`<button class="btn sec" onclick="countFillBook()">＝ Fill counted with book qty</button>`:''}
     <button class="btn sec" onclick="countPrintSheet()">🖨 Print count sheet</button>
+    <button class="btn sec" onclick="countExportTemplate()">⬇ Excel template</button>
+    ${!approved?`<button class="btn sec" onclick="document.getElementById('countUpFile').click()">⬆ Upload counts</button><input id="countUpFile" type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="countStageCounts(event)">`:''}
     <button class="btn sec" onclick="state.view=\'list\';route()">Back</button>
     <span style="flex:1"></span><span style="color:var(--muted)">${isLive()?'Live':'Demo'}</span>
   </div></div>`;
@@ -4305,18 +4317,10 @@ function drawCountForm(){
 // Printable physical-count sheet: grouped by category, sorted, with a blank column to write counts.
 function countPrintSheet(){
   if(!countLines.length){ toast('Load items first',true); return; }
-  const _lr2=l=>l.grank==null?500000:l.grank;
-  const _bg1={}; countLines.slice().sort((a,b)=>_lr2(a)-_lr2(b)||String(a.name||'').localeCompare(b.name||'')).forEach(l=>{ const k=l.g1||l.cat||'Other'; (_bg1[k]=_bg1[k]||[]).push(l); });
-  const _gmin=arr=>Math.min(...arr.map(_lr2));
-  let body='';
-  Object.keys(_bg1).sort((a,b)=>_gmin(_bg1[a])-_gmin(_bg1[b])).forEach(g1=>{
-    body+=`<tr class="grp1"><td colspan="5">${esc(g1)} (${_bg1[g1].length})</td></tr>`;
-    const _bg2={}; _bg1[g1].forEach(l=>{ const k=l.g2||'Other'; (_bg2[k]=_bg2[k]||[]).push(l); });
-    const _fr=l=>((l.form==='processed')?1:0);   // raw ingredient first, then processed derivatives
-    Object.keys(_bg2).sort((a,b)=>_gmin(_bg2[a])-_gmin(_bg2[b])).forEach(g2=>{
-      const ord=_bg2[g2].slice().sort((a,b)=>_fr(a)-_fr(b)||_lr2(a)-_lr2(b)||String(a.name||'').localeCompare(b.name||''));
-      body+=`<tr class="cat"><td colspan="5">&nbsp;&nbsp;▸ ${esc(g2)} (${_bg2[g2].length})</td></tr>`+ord.map(l=>{ const s=+l.scale||1; return `<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td>${esc(binOf(l.ref_sku,countRec.location_code))}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`; }).join('');
-    });
+  let body=''; _countRenderRows().forEach(r=>{
+    if(r.type==='g1'){ body+=`<tr class="grp1"><td colspan="5">${esc(r.label)} (${r.count})</td></tr>`; return; }
+    if(r.type==='g2'){ body+=`<tr class="cat"><td colspan="5">&nbsp;&nbsp;▸ ${esc(r.label)} (${r.count})</td></tr>`; return; }
+    const l=r.l, s=+l.scale||1; body+=`<tr><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td>${esc(binOf(l.ref_sku,countRec.location_code))}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`;
   });
   const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.grp1 td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.cat td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:130px;border-bottom:1px solid #333}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Weekly Count Sheet</h1>
@@ -4325,6 +4329,69 @@ function countPrintSheet(){
     <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · write the physical count in the right column, then enter it in the app.</p></body></html>`;
   const w=window.open('','_pr','width=840,height=980'); if(!w){toast('Allow pop-ups to print',true);return;} w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
 }
+// ONE ordered sequence of render rows (group header / subgroup header / item) from any list of
+// lines {g1,g2,grank,form,name}. Shared by the weekly count AND the opening-balance sheet so their
+// printout and Excel are identical line-for-line (row N in the PDF == row N in the Excel).
+function _renderRows(lines){ const _lr2=l=>l.grank==null?500000:l.grank; const _gmin=arr=>Math.min(...arr.map(_lr2));
+  const _bg1={}; lines.slice().sort((a,b)=>_lr2(a)-_lr2(b)||String(a.name||'').localeCompare(b.name||'')).forEach(l=>{ const k=l.g1||l.cat||'Other'; (_bg1[k]=_bg1[k]||[]).push(l); });
+  const out=[]; Object.keys(_bg1).sort((a,b)=>_gmin(_bg1[a])-_gmin(_bg1[b])).forEach(g1=>{
+    out.push({type:'g1',label:g1,count:_bg1[g1].length});
+    const _bg2={}; _bg1[g1].forEach(l=>{ const k=l.g2||'Other'; (_bg2[k]=_bg2[k]||[]).push(l); });
+    const _fr=l=>((l.form==='processed')?1:0);
+    Object.keys(_bg2).sort((a,b)=>_gmin(_bg2[a])-_gmin(_bg2[b])).forEach(g2=>{
+      out.push({type:'g2',label:g2,count:_bg2[g2].length});
+      _bg2[g2].slice().sort((a,b)=>_fr(a)-_fr(b)||_lr2(a)-_lr2(b)||String(a.name||'').localeCompare(b.name||'')).forEach(l=>out.push({type:'item',l})); });
+  }); return out; }
+function _countRenderRows(){ return _renderRows(countLines); }
+// Download the count sheet as Excel (or CSV) — IDENTICAL rows/order to the printout (same section
+// header rows, same items), with a blank "Counted" column. Fill Counted, re-upload, and it fills
+// the Counted column back in the app (matched by SKU; section rows have no SKU and are ignored).
+function countExportTemplate(){
+  if(!countLines.length){ toast('Load items first',true); return; }
+  const HDR=['Item','SKU','Bin','Book qty','Counted'];
+  const rows=[]; _countRenderRows().forEach(r=>{
+    if(r.type==='g1'){ rows.push([r.label+' ('+r.count+')','','','','']); return; }
+    if(r.type==='g2'){ rows.push(['▸ '+r.label+' ('+r.count+')','','','','']); return; }
+    const l=r.l, s=+l.scale||1; const bk=l.book_qty!=null?(num(Math.round((+l.book_qty/s)*1e4)/1e4)+(l.uom?' '+l.uom:'')):'';
+    rows.push([(l.name||l.ref_sku), l.ref_sku, binOf(l.ref_sku,countRec.location_code), bk, '']); });
+  const base='WR_count_'+((countRec.count_ref||todayISO()).replace(/[^\w.-]+/g,'_'));
+  if(typeof XLSX!=='undefined'){ const wb=XLSX.utils.book_new(); const ws=XLSX.utils.aoa_to_sheet([HDR,...rows]);
+    ws['!cols']=[{wch:44},{wch:32},{wch:12},{wch:12},{wch:12}]; XLSX.utils.book_append_sheet(wb,ws,'Count');
+    XLSX.writeFile(wb,base+'.xlsx'); toast('Template downloaded — matches the printout row-for-row'); }
+  else { const all=[HDR,...rows]; dlBlob(all.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),base+'.csv','text/csv'); toast('Template downloaded (CSV) — matches the printout'); }
+}
+// Parse an uploaded template AoA → [{sku, counted}] using the 'sku' + 'counted' (or 'count'/'qty') columns.
+function _countRowsFromAoa(arr){
+  const hdr=(arr[0]||[]).map(x=>String(x).trim().toLowerCase()); const ci=n=>hdr.indexOf(n);
+  const si=ci('sku'); let qi=ci('counted'); if(qi<0)qi=ci('count'); if(qi<0)qi=ci('counted qty'); if(qi<0)qi=ci('counted_qty'); if(qi<0)qi=ci('qty');
+  if(si<0||qi<0) return [];
+  const rows=[]; for(let i=1;i<arr.length;i++){ const r=arr[i]; if(!r)continue; const sku=r[si]; if(sku==null||String(sku).trim()==='')continue;
+    const raw=r[qi]; if(raw==null||String(raw).trim()==='')continue; const q=Number(raw); if(isNaN(q))continue;
+    rows.push({sku:String(sku).trim(), counted:q}); }
+  return rows;
+}
+function _countParseUpload(name,data){
+  if(/\.csv$/i.test(name)){ const arr=String(data).split(/\r?\n/).filter(x=>x.trim()!=='').map(line=>{ const out=[]; let cur='',q=false; for(let i=0;i<line.length;i++){ const ch=line[i]; if(q){ if(ch==='"'){ if(line[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=ch; } else { if(ch===','){out.push(cur);cur='';} else if(ch==='"') q=true; else cur+=ch; } } out.push(cur); return out; });
+    const rows=_countRowsFromAoa(arr); if(!rows.length) throw new Error('No "sku"/"counted" columns found'); return rows; }
+  if(typeof XLSX==='undefined') throw new Error('Spreadsheet support did not load — use a .csv file');
+  const wb=XLSX.read(data,{type:'binary'}); let rows=[];
+  wb.SheetNames.forEach(sn=>{ try{ rows=rows.concat(_countRowsFromAoa(XLSX.utils.sheet_to_json(wb.Sheets[sn],{header:1}))); }catch(e){} });
+  if(!rows.length) throw new Error('No "sku"/"counted" rows found on any tab');
+  return rows;
+}
+// Read the uploaded filled template and fill the Counted column (matched by SKU).
+function countStageCounts(e){ const f=e.target.files[0]; if(!f)return; if(countRec.status==='approved'){ toast('Count is approved — read-only',true); return; }
+  if(!countLines.length){ toast('Load items first, then upload',true); e.target.value=''; return; }
+  const rd=new FileReader();
+  rd.onload=()=>{ try{ const rows=_countParseUpload(f.name,rd.result);
+      const idx={}; countLines.forEach((l,i)=>{ idx[String(l.ref_sku).trim().toLowerCase()]=i; });
+      let filled=0, unknown=0; const miss=[];
+      rows.forEach(r=>{ const i=idx[String(r.sku).trim().toLowerCase()]; if(i==null){ unknown++; if(miss.length<8)miss.push(r.sku); return; }
+        const s=+countLines[i].scale||1; countLines[i].counted_qty=(s!==1?(+r.counted*s):+r.counted); filled++; });
+      drawCountForm();
+      toast('Uploaded '+f.name+' → filled '+filled+' counted'+(unknown?(' · '+unknown+' unknown SKU'+(miss.length?' ('+miss.join(', ')+(unknown>miss.length?'…':'')+')':'')):''), unknown>0);
+    } catch(err){ toast('Could not read file: '+err.message,true); } finally{ e.target.value=''; } };
+  if(/\.csv$/i.test(f.name)) rd.readAsText(f); else rd.readAsBinaryString(f); }
 // Counted input is in the line's display unit — store back in the canonical (grams) value.
 function countSetCnt(i,v){ const s=+countLines[i].scale||1; countLines[i].counted_qty=(v===''||v==null)?'':(s!==1?(+v*s):+v); countVar(i); }
 // Product case pack: boxes + loose packs → total packs (counted_qty).
@@ -4349,7 +4416,7 @@ async function countLoad(){
   let lines=[];
   // Two-bin: count RAW and PROCESSED, grouped together under each raw material (matches the sheet).
   const _bs={}, _bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
-  const ctx={bs:_bs,bn:_bn,procBases:_countProcBases(ings,_bs,_bn)};
+  const _pm=_countProcMaps(ings,_bs,_bn); const ctx={bs:_bs,bn:_bn,procBases:_pm.bases,procCat:_pm.catByBase};
   ings.slice().sort(cmpItems).forEach(i=>{ const cl=_countIngClass(i,ctx);
     if(cl.isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:cl.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:cl.g2,catrank:_grank('Supplies'),g1:cl.g1,g2:cl.g2,grank:cl.grank,uom:cl.uom,scale:cl.scale,form:cl.form,sort_order:i.sort_order}); return; }
     if(!wantIng) return;
@@ -5213,47 +5280,77 @@ function dlBlob(content,name,type){ const b=new Blob([content],{type}); const u=
 let _opRows=null, _opReport=null;
 function openOpeningImport(){ _opRows=null; _opReport=null;
   $('modal').innerHTML=`<div><h3>📥 Upload opening inventory balances</h3>
-    <p class="mini">1) Download the template — <b>4 tabs</b>: <b>Ingredients</b> (raw + processed, grouped by parent), <b>Products</b>, <b>Kitchen Supplies</b>, <b>Stickers</b>. 2) Enter the <b>qty</b> per row — ingredients in <b>kg</b>, supplies in their <b>unit</b>, products/stickers in <b>pieces</b>; set the <b>location</b> (bulacan/pasig). 3) Upload &amp; Test (all tabs are read), then Import. 🖨 Print / ⬇ Save give an identical printout. Re-uploading replaces the previous opening upload.</p>
+    <p class="mini">1) Download the template — <b>4 tabs</b> (<b>Ingredients</b>, <b>Products</b>, <b>Kitchen Supplies</b>, <b>Stickers</b>), grouped exactly like the Weekly Count sheet: category → base material, with each item's <b>raw + processed</b> together. 🖨 Print template gives the same layout on paper to hand-write on. 2) Enter the <b>qty</b> per row — ingredients in <b>kg</b>, supplies in their <b>unit</b>, products/stickers in <b>pieces</b>; set the <b>location</b> (bulacan/pasig). 3) Upload &amp; Test (all tabs are read), then Import. Re-uploading replaces the previous opening upload.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
       <button class="btn sec" onclick="openingDownloadTemplate()">⬇ Download template (.${typeof XLSX!=='undefined'?'xlsx':'csv'})</button>
+      <button class="btn sec" onclick="openingTemplatePrint()">🖨 Print template</button>
       <input type="file" id="opFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="openingStageFile(event)">
       <button class="btn sec" onclick="document.getElementById('opFile').click()">📄 Choose file</button></div>
     <div id="opArea" class="hint" style="margin-top:6px">No file chosen yet.</div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn sec" onclick="closeModal()">Close</button></div></div>`;
   $('overlay').classList.add('on');
 }
-// Build the 4 categorised opening lists from the master data (used by the template + prints).
-async function _openingCats(){
+// ---- Opening balance: "updated template" — same grouping as the Weekly Count sheet ----
+// Build the 4 categorised opening line-lists from master data. Each line carries g1/g2/grank/form
+// so the printout and the Excel tabs group identically: category → base material → raw + processed
+// together (raw inherits its processed sibling's category). If `uploaded` rows are given, each
+// line's qty is filled from them (matched by sku+location); otherwise qty is left blank.
+async function _openingSections(uploaded){
   const ings=await listIngredients(); const prods=(await db.list('products',{})).filter(p=>p.active!==false);
-  const ingRows=[], supRows=[];
-  ings.forEach(i=>{ if(isSupplyItem(i)){ supRows.push([i.sku,i.name,'supply',(i.uom||'pcs'),'bulacan',0]); }
-    else { const type=i.is_intermediate?'processed':'raw'; ingRows.push({sku:i.sku,name:i.name,type,base:(_matBase(i.name)||i.name)}); } });
-  // group ingredients by base material, RAW first then PROCESSED (Beef Lungs Raw → Beef Lungs Processed)
-  ingRows.sort((a,b)=> String(a.base).toLowerCase().localeCompare(String(b.base).toLowerCase()) || ((a.type==='processed'?1:0)-(b.type==='processed'?1:0)) || String(a.name).localeCompare(String(b.name)));
-  const ingOut=ingRows.map(r=>[r.sku, r.name+(/\b(raw|processed)\b/i.test(r.name)?'':(r.type==='processed'?' (Processed)':' (Raw)')), r.type, 'kg', 'bulacan', 0]);
-  const prodOut=[]; prods.slice().sort(cmpItems).forEach(p=>{ prodOut.push([p.sku,p.name,'product','packs','bulacan',0]); prodOut.push([p.sku,p.name,'product','packs','pasig',0]); });
-  const stkOut=[]; prods.slice().sort(cmpItems).forEach(p=>{ stkOut.push(['STK-'+p.sku,p.name+' — Sticker','sticker','pcs','bulacan',0]); stkOut.push(['STK-'+p.sku,p.name+' — Sticker','sticker','pcs','pasig',0]); });
-  return {ingredients:ingOut, products:prodOut, supplies:supRows, stickers:stkOut};
+  const food=ings.filter(i=>!isSupplyItem(i)), sup=ings.filter(isSupplyItem);
+  const _bs={},_bn={}; food.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
+  const _pm=_countProcMaps(food,_bs,_bn); const ctx={bs:_bs,bn:_bn,procBases:_pm.bases,procCat:_pm.catByBase};
+  const uq={}; if(uploaded) uploaded.forEach(r=>{ uq[(String(r.sku).trim()+'|'+(r.location||'bulacan')).toLowerCase()]=r.qty; });
+  const q=(sku,loc)=>{ if(!uploaded) return ''; const v=uq[(String(sku).trim()+'|'+loc).toLowerCase()]; return (v==null||v==='')?'':v; };
+  const ingLines=food.map(i=>{ const c=_countIngClass(i,ctx); return {sku:i.sku,name:c.name,type:c.form,unit:'kg',location:'bulacan',qty:q(i.sku,'bulacan'),g1:c.g1,g2:c.g2,grank:c.grank,form:c.form}; });
+  const supLines=sup.map(i=>({sku:i.sku,name:i.name,type:'supply',unit:(i.uom||'pcs'),location:'bulacan',qty:q(i.sku,'bulacan'),g1:'Kitchen Supplies',g2:(i.category||'Supplies'),grank:_grank(i.category||'Supplies')*1000+_so(i),form:'supply'}));
+  const prodLines=[],stkLines=[]; prods.slice().sort(cmpItems).forEach(p=>{ ['bulacan','pasig'].forEach((loc,k)=>{
+    prodLines.push({sku:p.sku,name:p.name,type:'product',unit:'packs',location:loc,qty:q(p.sku,loc),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p)*10+k,form:''});
+    stkLines.push({sku:'STK-'+p.sku,name:p.name+' — Sticker',type:'sticker',unit:'pcs',location:loc,qty:q('STK-'+p.sku,loc),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p)*10+k,form:''}); }); });
+  return {ingredients:ingLines, products:prodLines, supplies:supLines, stickers:stkLines};
 }
+const _OPHDR=['sku','name','type','unit','location','qty'];
+// Render one section's lines to an AoA: optional header row, then section/subgroup header rows
+// (blank SKU cell → the importer's parser skips them) + item rows.
+function _openingAoa(lines, withHdr){ const out=[]; if(withHdr!==false) out.push(_OPHDR.slice());
+  _renderRows(lines).forEach(r=>{ if(r.type==='g1'){ out.push(['',r.label+' ('+r.count+')','','','','']); return; }
+    if(r.type==='g2'){ out.push(['','  ▸ '+r.label+' ('+r.count+')','','','','']); return; }
+    const l=r.l; out.push([l.sku,l.name,l.type,l.unit,l.location,(l.qty===''||l.qty==null)?'':l.qty]); });
+  return out; }
+function _openingTabs(S){ return [['Ingredients',S.ingredients],['Products',S.products],['Kitchen Supplies',S.supplies],['Stickers',S.stickers]]; }
+function _openingWriteXlsx(S, fname){ const wb=XLSX.utils.book_new();
+  _openingTabs(S).forEach(([nm,lines])=>{ const ws=XLSX.utils.aoa_to_sheet(_openingAoa(lines)); ws['!cols']=[{wch:34},{wch:46},{wch:12},{wch:12},{wch:12},{wch:10}]; XLSX.utils.book_append_sheet(wb,ws,nm); });
+  XLSX.writeFile(wb,fname); }
+function _openingWriteCsv(S, fname){ const all=[_OPHDR.slice()];
+  _openingTabs(S).forEach(([nm,lines])=>{ all.push(['','═══ '+nm+' ═══','','','','']); _openingAoa(lines,false).forEach(r=>all.push(r)); });
+  dlBlob(all.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),fname,'text/csv'); }
 async function openingDownloadTemplate(){
-  const cats=await _openingCats();
-  const HDR=['sku','name','type','unit','location','qty'];
-  const total=cats.ingredients.length+cats.products.length+cats.supplies.length+cats.stickers.length;
-  if(typeof XLSX!=='undefined'){
-    const wb=XLSX.utils.book_new();
-    const mk=(nm,rows)=>{ const ws=XLSX.utils.aoa_to_sheet([HDR,...rows]); ws['!cols']=[{wch:34},{wch:44},{wch:12},{wch:14},{wch:12},{wch:10}]; XLSX.utils.book_append_sheet(wb,ws,nm); };
-    mk('Ingredients', cats.ingredients);      // raw + processed, grouped by parent
-    mk('Products', cats.products);
-    mk('Kitchen Supplies', cats.supplies);
-    mk('Stickers', cats.stickers);
-    XLSX.writeFile(wb,'WR_opening_'+todayISO()+'.xlsx');
-    toast('Template downloaded — 4 tabs · '+total+' rows');
-  } else { // CSV fallback: single combined sheet
-    const all=[HDR,...cats.ingredients,...cats.products,...cats.supplies,...cats.stickers];
-    dlBlob(all.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),'WR_opening_'+todayISO()+'.csv','text/csv');
-    toast('Template downloaded ('+total+' rows)');
-  }
+  const S=await _openingSections(null); const total=S.ingredients.length+S.products.length+S.supplies.length+S.stickers.length;
+  if(typeof XLSX!=='undefined'){ _openingWriteXlsx(S,'WR_opening_'+todayISO()+'.xlsx'); toast('Template downloaded — 4 tabs · '+total+' rows'); }
+  else { _openingWriteCsv(S,'WR_opening_'+todayISO()+'.csv'); toast('Template downloaded ('+total+' rows)'); }
 }
+// Printable version of the SAME template — matches the Excel tab-for-tab. blank=true leaves the
+// qty column empty to hand-write; blank=false shows the uploaded quantities.
+function _openingSecHtml(label, lines, blank){
+  let body=`<tr class="sec"><td colspan="6">${esc(label)} · ${lines.length} item(s)</td></tr>`;
+  _renderRows(lines).forEach(r=>{
+    if(r.type==='g1'){ body+=`<tr class="grp"><td colspan="6">${esc(r.label)} (${r.count})</td></tr>`; return; }
+    if(r.type==='g2'){ body+=`<tr class="sub"><td colspan="6">&nbsp;&nbsp;▸ ${esc(r.label)} (${r.count})</td></tr>`; return; }
+    const l=r.l; body+=`<tr><td>${esc(l.sku)}</td><td>${esc(l.name)}</td><td>${esc(l.type)}</td><td>${esc(l.unit)}</td><td>${esc(l.location)}</td><td class="qt">${blank?'':esc(l.qty)}</td></tr>`; });
+  return body; }
+function _openingPrintDoc(S, blank, title){
+  const body=[['Ingredients (raw + processed)',S.ingredients],['Finished products',S.products],['Kitchen supplies',S.supplies],['Stickers',S.stickers]]
+    .map(([lbl,lines])=>lines.length?_openingSecHtml(lbl,lines,blank):'').join('');
+  return `<html><head><meta charset="utf-8"><title>${esc(title)}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:13px;color:#555}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.sec td{background:#dfeadd;font-weight:800;color:#274d2b;font-size:13px}tr.grp td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.sub td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.qt{width:120px;border-bottom:1px solid #333;text-align:right}</style></head><body>
+    <h1>🐇 Wholesome Rabbit — Official Opening Inventory Balance</h1>
+    <h2>As of ${esc(todayISO())} · prepared by: ____________________ · approved by: ____________________</h2>
+    <table><thead><tr><th>SKU</th><th>Name</th><th>Type</th><th>Unit</th><th>Location</th><th style="text-align:right">Qty</th></tr></thead><tbody>${body}</tbody></table>
+    <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · ${blank?'write the opening quantity in the right column, then enter it in the Excel template and upload.':'this printout matches the uploaded file row-for-row.'} Ingredients raw/processed in kg (grouped by category), supplies in their unit, products/stickers in pieces/packs.</p></body></html>`;
+}
+async function openingTemplatePrint(){ const w=window.open('','_pr','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  try{ w.document.write('<p style="font-family:Arial;padding:20px">Preparing template…</p>'); const S=await _openingSections(null);
+    w.document.open(); w.document.write(_openingPrintDoc(S,true,'Opening Balance Template')); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+  catch(e){ toast(e.message,true); try{w.close();}catch(_){} } }
 // Parse rows from one AoA (header + data); skips section/blank rows (no sku). Returns [] if no sku/qty header.
 function _opRowsFromAoa(arr){
   const hdr=(arr[0]||[]).map(x=>String(x).trim().toLowerCase());
@@ -5291,46 +5388,19 @@ async function openingTest(){ if(!_opRows)return;
       <button class="btn sec" onclick="openingPrintSheet()">🖨 Print this sheet (PDF)</button>
       <button class="btn sec" onclick="openingExportXlsx()">⬇ Save as Excel</button></div>`;
 }
-// Print / export the CURRENTLY UPLOADED opening sheet — identical rows to the file you loaded,
-// so the printout and the upload file always match. Groups by location then type.
+// Print / export the CURRENTLY UPLOADED opening sheet — same grouped template as the download,
+// with the uploaded quantities filled in, so the printout and the Excel always match.
 function _openingRowsForOut(){ const rows=(_opReport&&_opReport.length?_opReport:_opRows)||[]; return rows.filter(r=>r&&r.sku!=null&&String(r.sku).trim()!==''); }
-// Categorise uploaded rows into the 4 sections (Ingredients / Products / Kitchen Supplies / Stickers).
-function _opSection(r){ const t=(r.type||''); if(t==='raw'||t==='processed') return 'ingredients'; if(t==='product') return 'products'; if(t==='supply') return 'supplies'; if(t==='sticker') return 'stickers';
-  if(String(r.sku||'').startsWith('STK-')) return 'stickers'; return 'ingredients'; }
-const _OP_SECTIONS=[['ingredients','Ingredients (raw + processed)'],['products','Finished products'],['supplies','Kitchen supplies'],['stickers','Stickers']];
-function openingPrintSheet(){
-  const rows=_openingRowsForOut(); if(!rows.length){ toast('Upload & Test a file first',true); return; }
-  const groups={ingredients:[],products:[],supplies:[],stickers:[]}; rows.forEach(r=>groups[_opSection(r)].push(r));
-  let body='';
-  _OP_SECTIONS.forEach(([key,label])=>{ const rr=groups[key]; if(!rr.length) return;
-    const tot=rr.reduce((s,r)=>s+(+r.qty||0),0);
-    body+=`<tr class="sec"><td colspan="6">${esc(label)} · ${rr.length} item(s)</td></tr>`;
-    if(key==='ingredients'){ // sub-group by base material, RAW then PROCESSED
-      const byBase={}; rr.forEach(r=>{ const b=_matBase(r.name)||r.name; (byBase[b]=byBase[b]||[]).push(r); });
-      Object.keys(byBase).sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).forEach(b=>{
-        body+=`<tr class="sub"><td colspan="6">▸ ${esc(b)}</td></tr>`;
-        byBase[b].slice().sort((a,c)=>((a.type==='processed'?1:0)-(c.type==='processed'?1:0))||String(a.name).localeCompare(c.name)).forEach(r=>{ body+=_opRowHtml(r); });
-      });
-    } else { rr.slice().sort((a,c)=>String(a.location).localeCompare(c.location)||String(a.name).localeCompare(c.name)).forEach(r=>{ body+=_opRowHtml(r); }); }
-  });
-  const html=`<html><head><meta charset="utf-8"><title>Opening Balance ${esc(todayISO())}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:13px;color:#555}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.sec td{background:#e7f0e9;font-weight:800;color:#2f5d33;font-size:13px}tr.sub td{background:#f2f6ef;font-weight:700;color:#4e7a3e;padding-left:20px}</style></head><body>
-    <h1>🐇 Wholesome Rabbit — Official Opening Inventory Balance</h1>
-    <h2>As of ${esc(todayISO())} · prepared by: ____________________ · approved by: ____________________</h2>
-    <table><thead><tr><th>SKU</th><th>Name</th><th>Type</th><th>Unit</th><th>Location</th><th style="text-align:right">Qty</th></tr></thead><tbody>${body}</tbody></table>
-    <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · this printout matches the uploaded file row-for-row. Ingredients raw/processed in kg (grouped by parent), supplies in their unit, products/stickers in pieces/packs.</p></body></html>`;
-  const w=window.open('','_pr','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; } w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
-}
-function _opRowHtml(r){ return `<tr><td>${esc(r.sku)}</td><td>${esc(r.name||'')}</td><td>${esc(r.type||'')}</td><td>${esc(r.unit||'')}</td><td>${esc(r.location||'')}</td><td style="text-align:right">${esc(r.qty)}</td></tr>`; }
-function openingExportXlsx(){
-  const rows=_openingRowsForOut(); if(!rows.length){ toast('Upload & Test a file first',true); return; }
-  const HDR=['sku','name','type','unit','location','qty']; const groups={ingredients:[],products:[],supplies:[],stickers:[]}; rows.forEach(r=>groups[_opSection(r)].push(r));
-  const toAoa=rr=>rr.map(r=>[r.sku,r.name||'',r.type||'',r.unit||'',r.location||'',r.qty]);
-  if(typeof XLSX!=='undefined'){ const wb=XLSX.utils.book_new();
-    const mk=(nm,rr)=>{ if(!rr.length) return; const ws=XLSX.utils.aoa_to_sheet([HDR,...toAoa(rr)]); ws['!cols']=[{wch:34},{wch:44},{wch:12},{wch:14},{wch:12},{wch:10}]; XLSX.utils.book_append_sheet(wb,ws,nm); };
-    mk('Ingredients',groups.ingredients); mk('Products',groups.products); mk('Kitchen Supplies',groups.supplies); mk('Stickers',groups.stickers);
-    XLSX.writeFile(wb,'WR_opening_balance_'+todayISO()+'.xlsx'); }
-  else { const all=[HDR,...toAoa(rows)]; dlBlob(all.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),'WR_opening_balance_'+todayISO()+'.csv','text/csv'); }
-  toast('Opening balance saved ('+rows.length+' rows)');
+async function openingPrintSheet(){ const rows=_openingRowsForOut(); if(!rows.length){ toast('Upload & Test a file first',true); return; }
+  const w=window.open('','_pr','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  try{ w.document.write('<p style="font-family:Arial;padding:20px">Preparing sheet…</p>'); const S=await _openingSections(rows);
+    w.document.open(); w.document.write(_openingPrintDoc(S,false,'Opening Balance '+todayISO())); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+  catch(e){ toast(e.message,true); try{w.close();}catch(_){} } }
+async function openingExportXlsx(){ const rows=_openingRowsForOut(); if(!rows.length){ toast('Upload & Test a file first',true); return; }
+  const S=await _openingSections(rows);
+  if(typeof XLSX!=='undefined'){ _openingWriteXlsx(S,'WR_opening_balance_'+todayISO()+'.xlsx'); }
+  else { _openingWriteCsv(S,'WR_opening_balance_'+todayISO()+'.csv'); }
+  toast('Opening balance saved — 4 tabs');
 }
 async function openingDoImport(){ if(!_opReport)return;
   if(curRole&&curRole()!=='Admin'){ toast('Only an Admin can post opening balances',true); return; }
