@@ -4267,27 +4267,28 @@ function drawCountForm(){
   const scopeHtml=scopes.map(s=>`<label class="sck"><input type="checkbox" ${sc.includes(s)?'checked':''} ${approved?'disabled':''} onchange="countScope('${s}',this.checked)"> ${s}</label>`).join('');
   // 3-level grouping (Group › Subgroup › Item), ordered by each line's grank.
   const _lr=i=>countLines[i].grank==null?500000:countLines[i].grank;
-  const rowFor=(i)=>{ const l=countLines[i]; const s=+l.scale||1;
+  const rowFor=(i,n)=>{ const l=countLines[i]; const s=+l.scale||1;
+    const noCell=`<td class="num" style="color:var(--muted)">${n}</td>`;
     const bookD=l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):'—';
     const varc=(l.counted_qty!==''&&l.counted_qty!=null)?(((+l.counted_qty)-(+l.book_qty||0))/s):null;
     const varCell=`<td class="num" id="cv${i}" style="color:${varc&&Math.abs(varc)>0.001?'var(--danger)':'var(--muted)'}">${varc==null?'':num(Math.round(varc*100)/100)}</td>`;
     // Products with a case pack: enter boxes + loose packs → total packs.
     if(l.isProduct && (+l.box||1)>1){ const box=+l.box||1; const tot=(l.counted_qty===''||l.counted_qty==null)?null:+l.counted_qty;
       const bx=(l._boxes!=null&&l._boxes!=='')?l._boxes:(tot!=null?Math.floor(tot/box):''); const lo=(l._loose!=null&&l._loose!=='')?l._loose:(tot!=null?(tot-Math.floor(tot/box)*box):'');
-      return `<tr><td>${esc(l.name||l.ref_sku)}<div class="mini">${box}/box</div></td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td>
+      return `<tr>${noCell}<td>${esc(l.name||l.ref_sku)}<div class="mini">${box}/box</div></td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td>
         <td class="num" style="white-space:nowrap"><input type="number" step="1" value="${bx}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},this.value,null)" style="width:46px;text-align:right" title="boxes"> box ×${box} + <input type="number" step="1" value="${lo}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},null,this.value)" style="width:46px;text-align:right" title="loose packs"> loose</td>${varCell}</tr>`; }
     const cntD=(l.counted_qty==null||l.counted_qty==='')?'':(Math.round((+l.counted_qty/s)*1e6)/1e6);
-    return `<tr><td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td>${varCell}</tr>`; };
+    return `<tr>${noCell}<td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td>${varCell}</tr>`; };
   const _idx=countLines.map((l,i)=>i).sort((a,b)=>_lr(a)-_lr(b)||String(countLines[a].name||'').localeCompare(countLines[b].name||''));
   const _bg1={}; _idx.forEach(i=>{ const k=countLines[i].g1||countLines[i].cat||'Other'; (_bg1[k]=_bg1[k]||[]).push(i); });
   const _gmin=arr=>Math.min(...arr.map(_lr));
-  let lineRows=''; Object.keys(_bg1).sort((a,b)=>_gmin(_bg1[a])-_gmin(_bg1[b])).forEach(g1=>{
-    lineRows+=`<tr><td colspan="6" style="background:#e7f0e9;font-weight:700;color:#2f5d33;padding:6px 8px">${esc(g1)} <span style="opacity:.55;font-weight:400">(${_bg1[g1].length})</span></td></tr>`;
+  let lineRows='', _no=0; Object.keys(_bg1).sort((a,b)=>_gmin(_bg1[a])-_gmin(_bg1[b])).forEach(g1=>{
+    lineRows+=`<tr><td colspan="7" style="background:#e7f0e9;font-weight:700;color:#2f5d33;padding:6px 8px">${esc(g1)} <span style="opacity:.55;font-weight:400">(${_bg1[g1].length})</span></td></tr>`;
     const _bg2={}; _bg1[g1].forEach(i=>{ const k=countLines[i].g2||'Other'; (_bg2[k]=_bg2[k]||[]).push(i); });
     const _frank=i=>((countLines[i].form==='processed')?1:0);   // raw ingredient first, then processed derivatives
     Object.keys(_bg2).sort((a,b)=>_gmin(_bg2[a])-_gmin(_bg2[b])).forEach(g2=>{
       const order=_bg2[g2].slice().sort((a,b)=>_frank(a)-_frank(b)||_lr(a)-_lr(b)||String(countLines[a].name||'').localeCompare(countLines[b].name||''));
-      lineRows+=`<tr><td colspan="6" style="background:#f6f8f4;font-weight:600;color:#4e7a3e;padding:4px 8px 4px 22px">▸ ${esc(g2)} <span style="opacity:.6;font-weight:400">(${_bg2[g2].length})</span></td></tr>`+order.map(rowFor).join('');
+      lineRows+=`<tr><td colspan="7" style="background:#f6f8f4;font-weight:600;color:#4e7a3e;padding:4px 8px 4px 22px">▸ ${esc(g2)} <span style="opacity:.6;font-weight:400">(${_bg2[g2].length})</span></td></tr>`+order.map(i=>rowFor(i,++_no)).join('');
     });
   });
   $('content').innerHTML=`<div class="formwrap"><div class="sheet">
@@ -4300,8 +4301,8 @@ function drawCountForm(){
         ${!approved?`<div style="margin-top:10px"><button class="btn sec" onclick="countLoad()">⬇ Load items</button></div>`:''}</div>
     </div>
     <div class="notebook"><div class="nbtabs"><button class="on">Count Lines (${countLines.length})</button></div>
-      <div class="lines"><table><thead><tr><th>Item</th><th>SKU</th><th>Bin</th><th class="num">Book qty</th><th class="num">Counted</th><th class="num">Variance</th></tr></thead>
-      <tbody>${lineRows||'<tr><td colspan="6" class="empty">Pick a scope and Load items.</td></tr>'}</tbody></table></div></div>
+      <div class="lines"><table><thead><tr><th class="num">#</th><th>Item</th><th>SKU</th><th>Bin</th><th class="num">Book qty</th><th class="num">Counted</th><th class="num">Variance</th></tr></thead>
+      <tbody>${lineRows||'<tr><td colspan="7" class="empty">Pick a scope and Load items.</td></tr>'}</tbody></table></div></div>
   </div>
   <div class="formbar">
     ${!approved?`<button class="btn" onclick="countSave()">💾 Save draft</button>`:''}
