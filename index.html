@@ -308,6 +308,7 @@ const MODULES = [
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
   {id:'analytics', label:'Analytics', items:['reporting','margin','momentum']},
+  {id:'help',   label:'Help', items:['guides']},
   {id:'admin',  label:'Administration', items:['connection','users','approvals','fieldacl','refs','automations','notif','studio','selftest','cleanser']},
 ];
 const MODELS = {
@@ -492,6 +493,7 @@ const MODELS = {
   momentum:{ label:'Sales Momentum', icon:'🚀', special:'momentum' },
   automations:{ label:'Automations', icon:'⚡', special:'automations' },
   selftest:{ label:'System Check', icon:'🩺', special:'selftest' },
+  guides:{ label:'Guides', icon:'📘', special:'guides' },
 };
 
 /* ============================ DATA LAYER ============================ */
@@ -657,6 +659,7 @@ function route(){
     if(m.special==='refs') return renderRefs();
     if(m.special==='notif') return renderNotif();
     if(m.special==='cleanser') return renderCleanser();
+    if(m.special==='guides') return renderGuides();
     if(m.special==='supplies_reorder') return renderSuppliesReorder();
     if(m.special==='sticker_po') return renderStickerPO();
     if(m.special==='approvals') return renderApprovals();
@@ -3623,6 +3626,24 @@ async function coCancel(){ if(!confirm('Cancel this quote?')) return; try{ if(co
 // computed pack (recipe items + grams, pack size, packs, customer, price) to this window, which
 // maps ingredient names → SKUs and pre-fills a Custom Order for review + Lock.
 const FFCALC_SRC='freshfoodcalculator.html';
+// In-app user guides — embedded like the calculator (iframe to files deployed alongside the app,
+// in a /guides folder). Add more entries here as you write more manuals.
+const GUIDES=[
+  {key:'wi', label:'📋 Weekly Inventory',            src:'guides/wr-weekly-inventory.html'},
+  {key:'wf', label:'🔄 Operating Workflow & Playbooks', src:'guides/wr-operating-workflow.html'}
+];
+let _guideKey='wi';
+function setGuide(k){ _guideKey=k; renderGuides(); }
+function renderGuides(){
+  const g=GUIDES.find(x=>x.key===_guideKey)||GUIDES[0];
+  $('crumb').innerHTML='<b>Guides</b> / '+esc(g.label.replace(/^[^\w]+/,''));
+  $('cp').innerHTML=`<div class="title">Guides</div>
+    ${GUIDES.map(x=>`<button class="btn ${x.key===_guideKey?'':'sec'}" onclick="setGuide('${x.key}')">${x.label}</button>`).join(' ')}
+    <div class="sp"></div><a class="btn sec" href="${esc(g.src)}" target="_blank" rel="noopener noreferrer">↗ Open in new tab</a>`;
+  $('content').innerHTML=`<div style="height:82vh;min-height:560px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff">
+      <iframe id="guideFrame" src="${esc(g.src)}" style="width:100%;height:100%;border:0;display:block" title="${esc(g.label)}"></iframe></div>
+    <div class="mini" style="margin-top:6px;color:var(--muted)">Step-by-step manuals with screenshots. If a guide doesn't appear, make sure the <code>guides/</code> folder (with <code>${esc(g.src.split('/').pop())}</code>) is deployed alongside the app.</div>`;
+}
 function renderFFCalc(){
   $('crumb').innerHTML='<b>Fresh Food Calculator</b>';
   $('cp').innerHTML=`<div class="title">Fresh Food Calculator <span onclick="openKB('ffcalc')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
