@@ -3955,6 +3955,158 @@ async function ffImportRun(){
   renderFFProfiles();
 }
 
+/* ===== Production Request workbook → BOM =====
+   The kitchen's "Production Request" .xlsx holds the real recipe per customer: one tab per
+   customer, one "Mix N" block per product inside. These tabs are hand-made and inconsistent —
+   the parser below was proven against all 65 tabs (88 mixes, 86 balancing to their stated pack
+   size; the 2 that don't are sheet errors, and are flagged rather than silently used).
+
+   This is a BETTER source than a calculator profile: a profile stores category choices and the
+   app derives grams from BARF ratios, whereas this workbook is what the kitchen actually weighs.
+   When both exist for an order, the workbook wins. */
+const _prMixRe   = /^\s*mix\s*#?\s*(\d+)\s*[:\-]?\s*(.*)$/i;
+const _prTotalRe = /^\s*(total|total grams|grand total)\s*$/i;
+const _prSkipRe  = /^\s*(ingredient|kitchen sheet|variant|weight|portion|grams?|mix\s*#|qty|number of packs)\s*$/i;
+function _prNum(v){ if(typeof v==='number' && isFinite(v)) return v;
+  if(typeof v==='string'){ const n=parseFloat(v.replace(/,/g,'').trim()); return isFinite(n)&&/^[-\d.,\s]+$/.test(v)?n:null; }
+  return null; }
+function _prBanners(aoa){ const out=[];
+  aoa.forEach((row,r)=>(row||[]).forEach((v,c)=>{ if(typeof v==='string'){ const m=_prMixRe.exec(v);
+    if(m) out.push({r,c,no:+m[1],label:(m[2]||'').trim()}); } }));
+  return out; }
+/* The label is the LAST text cell BEFORE the first number in the row. That single rule handles
+   every layout seen: it steps over the "Mix 1" banner and the "GC PORK" variant column, over the
+   "Kitchen Sheet" marker, and picks up the ingredient sitting beside the mix name in column A. */
+function _prReadBlock(aoa, r0, c0, rEnd, cEnd){
+  const lines=[]; let packSize=null; const packsSeen=[];
+  for(let r=r0; r<Math.min(rEnd, aoa.length); r++){
+    const row=aoa[r]||[]; const win=[];
+    for(let c=c0; c<Math.min(cEnd, row.length); c++) win.push([c,row[c]]);
+    let firstNumC=null; for(const [c,v] of win){ if(_prNum(v)!==null){ firstNumC=c; break; } }
+    const strs=win.filter(([c,v])=>typeof v==='string' && v.trim() && (firstNumC===null||c<firstNumC));
+    const label=strs.length?String(strs[strs.length-1][1]).trim():null;
+    const labC =strs.length?strs[strs.length-1][0]:null;
+    const nums=win.filter(([,v])=>_prNum(v)!==null).map(([c,v])=>[c,_prNum(v)]);
+    if(label && _prTotalRe.test(label)){
+      if(!lines.length) continue;                 // a header row ending in "Total", not the end
+      if(nums.length) packSize=nums[0][1];
+      break;
+    }
+    if(!label){ if(nums.length && packSize===null && lines.length){ packSize=nums[0][1]; break; } continue; }
+    if(_prSkipRe.test(label) || _prMixRe.test(label)) continue;
+    const after=nums.filter(([c])=>labC===null||c>labC).map(([,n])=>n);
+    if(!after.length || after[0]<=0) continue;
+    const g=after[0];
+    const p=(after.length>1 && after[1]>0 && after[1]===Math.round(after[1]) && after[1]<10000)?after[1]:null;
+    lines.push({name:label, grams:g, packs:p});
+    if(p) packsSeen.push(p);
+  }
+  let packs=null;
+  if(packsSeen.length){ const cnt={}; packsSeen.forEach(x=>cnt[x]=(cnt[x]||0)+1);
+    packs=+Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a])[0]; }
+  if(packSize===null && lines.length) packSize=Math.round(lines.reduce((s,l)=>s+l.grams,0)*100)/100;
+  return {lines, pack_size_g:packSize, packs};
+}
+function _prParseSheet(aoa){
+  const banners=_prBanners(aoa); if(!banners.length) return [];
+  const byRow={}; banners.forEach(b=>(byRow[b.r]=byRow[b.r]||[]).push(b));
+  const rows=Object.keys(byRow).map(Number).sort((a,b)=>a-b);
+  const ncols=aoa.reduce((m,r)=>Math.max(m,(r||[]).length),0);
+  const out=[];
+  rows.forEach((r,i)=>{
+    const grp=byRow[r].slice().sort((a,b)=>a.c-b.c);
+    const rEnd=(i+1<rows.length)?rows[i+1]:aoa.length;
+    grp.forEach((b,j)=>{
+      const cEnd=(j+1<grp.length)?grp[j+1].c:ncols;
+      const blk=_prReadBlock(aoa,b.r,b.c,rEnd,cEnd);
+      if(blk.lines.length){
+        const sum=Math.round(blk.lines.reduce((s,l)=>s+l.grams,0)*100)/100;
+        // A retail pack is grams, not kilos. A "pack size" in the tens of thousands means the
+        // block's total row is a BATCH figure, or the banner was a stray word on a master tab
+        // (the WR sheet yields a phantom 185 kg mix). Flag it — never silently drop or use it.
+        const suspect = !(blk.pack_size_g>0 && blk.pack_size_g<=5000) || blk.lines.length<2;
+        out.push({mix:b.no, label:b.label, ...blk, sum, suspect,
+                  balances:!!(blk.pack_size_g && Math.abs(sum-blk.pack_size_g)<1.5) && !suspect});
+      }
+    });
+  });
+  return out;
+}
+/* Read the whole workbook into {sheetName: [mix,…]} using SheetJS, which the app always loads. */
+function prLoadPick(){
+  if(typeof XLSX==='undefined'){ toast('The spreadsheet library did not load — check your connection and reload',true); return; }
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.xlsx,.xlsm,.xls'; inp.style.display='none';
+  inp.onchange=()=>{ const f=inp.files&&inp.files[0]; if(f) prLoadRead(f); inp.remove(); };
+  document.body.appendChild(inp); inp.click();
+}
+function prLoadRead(f){
+  const r=new FileReader();
+  r.onload=()=>{
+    let wb; try{ wb=XLSX.read(new Uint8Array(r.result),{type:'array'}); }
+    catch(e){ toast('Could not read that workbook: '+(e&&e.message||e),true); return; }
+    const book={}; let mixes=0, flagged=0;
+    wb.SheetNames.forEach(n=>{
+      try{
+        const aoa=XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,raw:true,defval:null});
+        const ms=_prParseSheet(aoa);
+        if(ms.length){ book[n]=ms; mixes+=ms.length; flagged+=ms.filter(m=>!m.balances).length; }
+      }catch(e){}
+    });
+    window._prBook=book; window._prBookName=f.name;
+    toast('Loaded '+Object.keys(book).length+' customer tab(s) · '+mixes+' mix(es)'+(flagged?(' · '+flagged+' do not balance'):''));
+    if(window._coImp){ _coImpResolve().then(()=>_coImpDraw()); }
+    const el=$('prStatus'); if(el) el.innerHTML=_prStatusHtml();
+  };
+  r.readAsArrayBuffer(f);
+}
+function _prStatusHtml(){
+  const bk=window._prBook;
+  if(!bk) return '<span class="mini" style="color:var(--muted)">No workbook loaded — recipes will come from the saved calculator profiles only.</span>';
+  const tabs=Object.keys(bk); const mixes=tabs.reduce((s,t)=>s+bk[t].length,0);
+  const sus=tabs.reduce((s,t)=>s+bk[t].filter(m=>m.suspect).length,0);
+  const bad=tabs.reduce((s,t)=>s+bk[t].filter(m=>!m.balances&&!m.suspect).length,0);
+  return `<span class="mini">📗 <b>${esc(window._prBookName||'workbook')}</b> · ${tabs.length} tab(s) · ${mixes} mix(es)`
+    + (bad?` · <span style="color:var(--warn)">${bad} don't sum to their stated pack size</span>`:'')
+    + (sus?` · <span style="color:var(--muted)">${sus} look like batch totals, not pack recipes — ignored unless you pick them</span>`:'')
+    + (!bad&&!sus?' · all balance':'')
+    + `</span>`;
+}
+/* Find the customer's tab, then the mix that fits the order. A tab whose name starts with
+   "New " or "Do not use" is handled by preferring the newest-looking name on a tie. */
+function _prFindTab(cust){
+  const bk=window._prBook; if(!bk) return null;
+  const n=_coNorm(cust); if(!n) return null;
+  const nt=n.split(' ').filter(Boolean);
+  let best=null;
+  Object.keys(bk).forEach(tab=>{
+    const t=_coNorm(tab); if(!t || /^(do ?nt|dont|do not) use/.test(t)) return;
+    const tt=t.split(' ').filter(Boolean);
+    const shared=nt.filter(w=>tt.includes(w));
+    const solid=shared.filter(w=>w.length>=4);
+    if(!solid.length) return;
+    let score = (t===n)?3 : (shared.length===nt.length?2 : (solid.length>=2?2:1));
+    if(/^new /.test(t)) score+=0.5;                    // "New Marienette Marquez" supersedes the old tab
+    if(!best || score>best.score) best={tab, score};
+  });
+  return best;
+}
+function _prPickMix(mixes, packG, packs, mixNo){
+  if(!mixes||!mixes.length) return -1;
+  let bi=-1, bs=-1, bd=Infinity;
+  mixes.forEach((m,i)=>{
+    let s=0;
+    if(mixNo && +m.mix===+mixNo) s+=3;   // the request named the mix — trust it above all
+    if(packG && m.pack_size_g && Math.abs(m.pack_size_g-packG)<=Math.max(1.5,packG*0.01)) s+=2;
+    if(packs && m.packs && +m.packs===+packs) s+=2;
+    if(!m.balances) s-=1;
+    if(m.suspect) s-=3;                  // a batch-total or phantom block can never win
+    // Clemence's Mix 3 (225 g) and Mix 4 (225.2 g) both fit 60 packs — break the tie on the
+    // closer pack size so a first-listed near-match can't win over the exact one.
+    const d=(packG&&m.pack_size_g)?Math.abs(m.pack_size_g-packG):Infinity;
+    if(s>bs || (s===bs && d<bd)){ bs=s; bd=d; bi=i; }
+  });
+  return bs>=2 ? bi : -1;      // need at least a pack-size or pack-count agreement
+}
 /* ===== Custom Orders: paste-in importer =====
    Paste rows straight out of the order-tracking sheet (Date of Entry, Customer, Request,
    Status, Expected delivery). Each row becomes a draft quote with the pack size and pack
@@ -3964,6 +4116,11 @@ async function ffImportRun(){
 function coImportOpen(){
   $('modal').innerHTML=`<div><h3>📥 Import custom orders from the sheet</h3>
     <p class="mini">Copy the rows out of your order sheet (including the header row) and paste them below — tab-separated straight from Google Sheets works. Each row becomes a <b>draft quote</b>; nothing is locked and no demand is created until you open and lock it.</p>
+    <div style="background:#f7f6f2;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 10px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn sec sm" onclick="prLoadPick()">📗 Load Production Request workbook</button>
+        <span class="mini" style="color:var(--muted)">optional — gives each order its real kitchen recipe instead of one derived from the calculator profile</span></div>
+      <div id="prStatus" style="margin-top:6px"></div></div>
     <textarea id="coImpTxt" rows="7" placeholder="Date of Entry&#9;Customer Name&#9;Request&#9;Status&#9;Expected Delivery&#10;August 12&#9;Alayne Chan&#9;Raw Quail Mix 350g x 42 packs&#9;&#9;August 22" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid var(--line);border-radius:6px;font-family:ui-monospace,Menlo,monospace;font-size:12px"></textarea>
     <div style="display:flex;gap:8px;margin-top:10px"><button class="btn" onclick="coImportParse()">Preview rows →</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>
     <div id="coImpOut" style="margin-top:12px"></div></div>`;
@@ -3992,7 +4149,9 @@ function _coParseReq(req){
   let packs=0; const mp=t.match(/(?:^|[\s(:•\-])[x×]\s*(\d+)\b/i) || t.match(/(\d+)\s*(?:packs?|sets?|pcs?)\b/i);
   if(mp) packs=+mp[1];
   const cooked=/gently\s*cook|sous\s*vide|cookable|cooked/i.test(t);
-  return {pack_size_g:g, packs, cooked, desc:t};
+  // "Mix 4: Duck + Buffalo…" names the exact block in the Production Request tab.
+  const mm=t.match(/\bmix\s*#?\s*(\d+)/i); const mixNo=mm?+mm[1]:null;
+  return {pack_size_g:g, packs, cooked, mixNo, desc:t};
 }
 const _coNorm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
 // Match a sheet customer name against the saved calculator profiles. Exact → contains →
@@ -4054,7 +4213,25 @@ async function _coImpResolve(){
   const rows=window._coImp||[];
   for(const r of rows){
     if(r.sel===undefined) r.sel=(r.matches[0] && r.matches[0].score>=2) ? 0 : -1;
-    r.recipe=[]; r.unmatched=[]; r.recipeErr='';
+    r.recipe=[]; r.unmatched=[]; r.recipeErr=''; r.src='';
+    // --- 1st choice: the kitchen's Production Request workbook (what they actually weigh) ---
+    r.prTab=_prFindTab(r.cust); r.prMixes=(r.prTab && window._prBook)?window._prBook[r.prTab.tab]:null;
+    if(r.prMixes && r.prMixes.length){
+      if(r.prSel===undefined) r.prSel=_prPickMix(r.prMixes, r.pack_size_g, r.packs, r.mixNo);
+      if(r.prSel>=0){
+        const mx=r.prMixes[r.prSel];
+        const scale=(r.pack_size_g && mx.pack_size_g)?(r.pack_size_g/mx.pack_size_g):1;
+        const items=mx.lines.map(l=>({name:l.name, grams:Math.round(l.grams*scale*100)/100}));
+        const mapped=await _ffMapItems(items);
+        r.recipe=mapped.recipe; r.unmatched=mapped.unmatched;
+        r.src='workbook'; r.srcLabel=r.prTab.tab+' · Mix '+mx.mix+(mx.label?' ('+mx.label+')':'');
+        if(!r.pack_size_g && mx.pack_size_g) r.pack_size_g=mx.pack_size_g;
+        if(!r.packs && mx.packs) r.packs=mx.packs;
+        if(!mx.balances) r.recipeErr='workbook mix does not sum to its stated pack size — check the sheet';
+        continue;
+      }
+    }
+    // --- fallback: derive from the saved calculator profile ---
     const m=(r.sel>=0)?r.matches[r.sel]:null;
     if(!m){ continue; }
     const pay=m.p.payload || (m.p.raw&&m.p.raw.payload) || null;
@@ -4065,8 +4242,11 @@ async function _coImpResolve(){
     if(!items.length){ r.recipeErr='profile has no ingredients'; continue; }
     const mapped=await _ffMapItems(items);
     r.recipe=mapped.recipe; r.unmatched=mapped.unmatched;
+    r.src='profile'; r.srcLabel=m.p.cust+(m.p.dog?' · '+m.p.dog:'');
   }
 }
+function coImpPickMix(i,v){ const r=(window._coImp||[])[i]; if(!r) return; r.prSel=+v;
+  _coImpResolve().then(()=>_coImpDraw()); }
 function coImpPick(i,v){ const r=(window._coImp||[])[i]; if(!r) return; r.sel=+v;
   _coImpResolve().then(()=>_coImpDraw()); }
 // Load profiles without repainting the screen (the importer may be opened from Custom Orders).
@@ -4087,10 +4267,18 @@ function _coImpDraw(){
       ? `<select onchange="coImpPick(${r.i},this.value)" style="max-width:230px;padding:4px;border:1px solid var(--line);border-radius:5px">${opts}</select>
          <div class="mini" style="color:var(--muted);margin-top:3px">${r.sel>=0&&best?conf(best)+(best.p.pack?' saved '+esc(best.p.pack)+'g':'')+(best.p.ft?' · '+esc(best.p.ft):''):'not applied'}</div>`
       : '<span class="mini" style="color:var(--warn)">no saved profile — CS builds the recipe</span>';
-    const rcell = r.recipeErr ? `<span class="mini" style="color:var(--warn)">${esc(r.recipeErr)}</span>`
+    const srcTag = r.src==='workbook' ? '<span class="tagf tagf-proc">workbook</span>'
+                 : (r.src==='profile' ? '<span class="tagf tagf-raw">profile</span>' : '');
+    const mixSel = (r.prMixes&&r.prMixes.length)
+      ? `<div style="margin-top:3px"><select onchange="coImpPickMix(${r.i},this.value)" style="max-width:210px;padding:3px;border:1px solid var(--line);border-radius:5px;font-size:11px">
+          <option value="-1" ${r.prSel<0?'selected':''}>— don't use the workbook —</option>
+          ${r.prMixes.map((m,j)=>`<option value="${j}" ${r.prSel===j?'selected':''}>Mix ${m.mix}${m.label?' '+esc(m.label):''} · ${m.pack_size_g}g × ${m.packs||'?'}${m.suspect?' (batch?)':(m.balances?'':' ⚠')}</option>`).join('')}
+        </select></div>` : '';
+    const rcell = r.recipeErr && !(r.recipe&&r.recipe.length) ? `<span class="mini" style="color:var(--warn)">${esc(r.recipeErr)}</span>`
       : (r.recipe&&r.recipe.length
-          ? `<b>${r.recipe.length}</b> ingredient(s)<div class="mini" style="color:${r.unmatched.length?'var(--warn)':'var(--muted)'}">${r.unmatched.length?(r.unmatched.length+' need SKU mapping'):'all mapped to SKUs'}</div>`
-          : '<span class="mini" style="color:var(--muted)">—</span>');
+          ? `${srcTag}<b>${r.recipe.length}</b> ingredient(s)<div class="mini" style="color:${r.unmatched.length?'var(--warn)':'var(--muted)'}">${esc(r.srcLabel||'')}</div>
+             <div class="mini" style="color:${r.unmatched.length?'var(--warn)':'var(--muted)'}">${r.unmatched.length?(r.unmatched.length+' need SKU mapping'):'all mapped to SKUs'}${r.recipeErr?' · ⚠ '+esc(r.recipeErr):''}</div>${mixSel}`
+          : '<span class="mini" style="color:var(--muted)">—</span>'+mixSel);
     return `<tr><td><input type="checkbox" ${r.on?'checked':''} onchange="window._coImp[${r.i}].on=this.checked"></td>
       <td>${esc(r.cust||'—')}<div class="mini" style="color:var(--muted)">${esc(r.date||'')}</div></td>
       <td style="max-width:230px">${esc(r.req).replace(/\n/g,'<br>')}</td>
@@ -4118,8 +4306,11 @@ async function coImportRun(){
     try{
       let ref=''; try{ ref=(await genRef('CO',{date:todayISO()})).ref; }catch(e){ ref='CO-'+_mmddyyyy(todayISO())+'-'+String(Date.now()).slice(-4)+made.length; }
       const best=(r.sel>=0)?r.matches[r.sel]:null;
+      const srcNote = r.src==='workbook' ? ('Recipe from the Production Request workbook: '+r.srcLabel)
+                    : (r.src==='profile' ? ('Recipe from saved calculator profile: '+r.srcLabel+(best?' ('+best.why+')':''))
+                    : 'No recipe source matched — build the recipe here');
       const note=['Imported from the order sheet'+(r.date?(' · entry '+r.date):''),
-                  best?('Recipe from saved calculator profile: '+best.p.cust+(best.p.dog?' · '+best.p.dog:'')+' ('+best.why+')'):'No saved calculator profile applied — build the recipe here',
+                  srcNote,
                   (r.recipe&&r.recipe.length)?('Expanded to '+r.recipe.length+' ingredient(s) at '+(r.pack_size_g||0)+'g/pack'+(r.unmatched.length?(' · '+r.unmatched.length+' still need a SKU: '+r.unmatched.join(', ')):'')):'',
                   r.cooked?'Requested gently cooked / sous vide':''].filter(Boolean).join('\n');
       const hdr={order_ref:ref, customer_name:r.cust||'', contact:'', order_date:todayISO(),
