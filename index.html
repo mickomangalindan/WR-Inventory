@@ -73,6 +73,11 @@
   .pager{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:9px 14px;color:#6b6b77;font-size:12.5px}
   .pager button{background:none;border:1px solid #ccc;border-radius:4px;padding:3px 8px;cursor:pointer}
   .badge{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:14px}
+  /* Form tags — "Processed" / "Raw" markers on ingredient pickers (Production Plan). */
+  .tagf{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;
+        padding:1px 6px;border-radius:4px;vertical-align:1px;margin-right:5px}
+  .tagf-proc{background:#dbeddb;color:#1e6b2e}
+  .tagf-raw{background:#f0ece3;color:#7a6432}
   .b-open{background:#eef0f6;color:#40506b}.b-received{background:#dbeddb;color:#1e6b2e}
   .b-invoiced{background:#fbe6cf;color:#8a5a12}.b-closed{background:#e5e5ea;color:#555}
   .b-true{background:#dbeddb;color:#1e6b2e}.b-false{background:#f3e3e0;color:#9a3b2e}
@@ -153,6 +158,12 @@
   /* form 2-col with chatter */
   .formcols{display:grid;grid-template-columns:1fr 320px;gap:16px;align-items:start}
   @media(max-width:900px){.formcols{grid-template-columns:1fr}}
+  /* Weekly count keeps its wide line table and gains the proof/notes rail beside it. */
+  .formcols-count{max-width:1340px;display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;align-items:start}
+  .formcols-count>.sheet,.formcols-count>.formbar{grid-column:1;min-width:0}
+  .formcols-count>.sidecol{grid-column:2;grid-row:1 / span 2}
+  @media(max-width:900px){.formcols-count{grid-template-columns:1fr}
+    .formcols-count>.sidecol{grid-column:1;grid-row:auto}}
   .chatter{background:#fbfaf6;border:1px solid var(--line);border-radius:8px;padding:12px 14px}
   .chatter h4{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
   .chatter .cbtns{display:flex;gap:6px;margin-bottom:8px}
@@ -271,20 +282,142 @@
 .wrdash .hint{color:var(--wmuted);font-size:12.5px}
 @media(max-width:900px){.wrdash .k6{grid-template-columns:repeat(2,1fr)}.wrdash .c2{grid-template-columns:1fr}.wrdash .bar-lab{width:110px}}
 
+/* =====================================================================
+   MOBILE / TABLET — managers and approvers work from a phone.
+   Desktop (>900px) is untouched: every rule below is inside a media query.
+   Three moves: the sidebar becomes an off-canvas drawer, every wide table
+   scrolls inside its card instead of clipping, and record lists collapse
+   into label:value cards. Nothing changes what the app does.
+   ===================================================================== */
+.navtog{display:none;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:6px;
+        font-size:17px;line-height:1;padding:6px 10px;cursor:pointer;flex-shrink:0}
+.navscrim{display:none;position:fixed;inset:46px 0 0 0;background:rgba(20,24,18,.45);z-index:45}
+.navscrim.on{display:block}
+
+@media(max-width:900px){
+  /* --- top bar: one line, no wrapping --- */
+  .topbar{gap:8px;padding:0 8px}
+  .navtog{display:block}
+  .topbar .brand{font-size:13px;white-space:nowrap}
+  .topbar .crumb{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34vw}
+  .topbar button{padding:6px 9px}
+  #userBox{max-width:38vw;overflow:hidden}
+  #userBox select{max-width:96px}
+
+  /* --- sidebar becomes an off-canvas drawer --- */
+  .app{position:relative}
+  .side{position:fixed;top:46px;bottom:0;left:0;width:250px;z-index:50;
+        transform:translateX(-100%);transition:transform .22s ease;
+        box-shadow:2px 0 14px rgba(0,0,0,.18);-webkit-overflow-scrolling:touch}
+  .side.open{transform:translateX(0)}
+  .side .mi{padding:11px 16px;font-size:14px}      /* thumb-sized rows */
+  .main{width:100%}
+
+  /* --- control panel: a single scrollable strip, never a tall stack --- */
+  .cp{flex-wrap:nowrap;overflow-x:auto;gap:8px;padding:8px 10px;scrollbar-width:none}
+  .cp::-webkit-scrollbar{display:none}
+  .cp>*{flex-shrink:0}
+  .cp .title{font-size:15px}
+  .cp .sp{display:none}
+  .search{min-width:170px}
+
+  /* --- nothing clips: wide tables scroll inside their own card --- */
+  .content{padding:10px}
+  .listcard,.repcard,.sheet{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .repcard{padding:12px}
+  .lines,.notebook{margin-left:0;margin-right:0}
+  .lines table{min-width:640px}
+
+  /* --- forms: label above value, full-width inputs --- */
+  .formwrap{max-width:100%}
+  .groups{padding:12px 14px;gap:2px}
+  .fld{flex-direction:column;align-items:stretch;gap:3px}
+  .fld label{width:auto;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700}
+  .fld .val input,.fld .val select,.fld .val textarea{width:100%}
+  .sheet .hd{padding-left:14px;padding-right:14px}
+  .formbar{flex-wrap:nowrap;overflow-x:auto;padding:9px 10px;gap:8px;scrollbar-width:none}
+  .formbar::-webkit-scrollbar{display:none}
+  .formbar>*{flex-shrink:0}
+
+  /* --- modals fill the screen --- */
+  .modal{width:100%;max-width:100%;min-width:0;max-height:92vh;border-radius:12px 12px 0 0;padding:14px}
+  #overlay{align-items:flex-end}
+
+  /* --- touch targets --- */
+  .btn,.btn.sec{padding:9px 14px;font-size:13px}
+  .btn.sm{padding:7px 11px}
+  input,select,textarea{font-size:16px}   /* 16px stops iOS zooming on focus */
+  tbody td{padding:11px 12px}
+}
+
+@media(max-width:700px){
+  /* --- record lists become cards: each row is a stack of label : value --- */
+  .listcard table.mcards{min-width:0}
+  .listcard table.mcards thead{display:none}
+  .listcard table.mcards,.listcard table.mcards tbody,.listcard table.mcards tr{display:block;width:100%}
+  .listcard table.mcards tr{background:#fff;border:1px solid var(--line);border-radius:10px;
+      margin:0 0 8px;padding:4px 12px 8px}
+  .listcard table.mcards tr.grp{background:#f6f5f8;border-color:#e6e2ee;padding:8px 12px;margin-top:12px}
+  .listcard table.mcards tr.grp td{padding:0;border:none}
+  .listcard table.mcards td{display:flex;justify-content:space-between;align-items:baseline;gap:14px;
+      padding:5px 0;border:none;border-bottom:1px dashed var(--line2);text-align:left}
+  .listcard table.mcards td:last-child{border-bottom:none}
+  .listcard table.mcards td.num{text-align:left}
+  .listcard table.mcards td[data-l]::before{content:attr(data-l);color:var(--muted);font-size:11px;
+      text-transform:uppercase;letter-spacing:.04em;font-weight:700;flex-shrink:0}
+  /* the first data column is the card's title — no label, no indent */
+  .listcard table.mcards td.mtitle{font-weight:700;font-size:14.5px;padding:8px 0 6px !important;
+      display:block;border-bottom:1px solid var(--line2)}
+  .listcard table.mcards td.mtitle::before{display:none}
+  /* bulk-select checkbox floats top-right of the card instead of taking a whole row */
+  .listcard table.mcards tr{position:relative}
+  .listcard table.mcards td.bcb{position:absolute;top:8px;right:10px;padding:0;border:none;display:block}
+  .listcard table.mcards td.bcb+td.mtitle{padding-right:30px !important}
+  /* group headers stay one line: title plus whatever subtotals exist */
+  .listcard table.mcards tr.grp{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+  .listcard table.mcards tr.grp td{display:inline;border:none;padding:0;font-size:13px}
+  .listcard table.mcards tr.grp td::before{display:none}
+  .listcard table.mcards tr.grp td.mtitle{font-size:13.5px;border:none;padding:0 !important;display:inline}
+  .listcard table.mcards tfoot tr{display:flex;flex-wrap:wrap;gap:4px 12px;background:#faf9f4}
+  .listcard table.mcards tfoot td{display:inline;border:none;padding:0}
+  .listcard table.mcards tfoot td::before{display:none}
+  .listcard .pager{justify-content:space-between;padding:8px 4px}
+  .kpirow{grid-template-columns:1fr 1fr;gap:10px}
+  .kpi{padding:12px 13px}.kpi .v{font-size:21px}
+  .wrdash .k6{grid-template-columns:1fr 1fr}
+}
+
+@media(max-width:430px){
+  .topbar .bfull{display:none}          /* 🐇 ERP only */
+  /* keep KPIs two-up so a phone shows the whole scorecard in one screen */
+  .kpi .v{font-size:19px}
+  .wrdash .kpi .v{font-size:19px}
+  .wrdash .card{padding:12px 13px}
+}
+
+/* Coarse pointers (touch) get bigger hit areas even on wide tablets. */
+@media(pointer:coarse){
+  .side .mi{min-height:42px}
+  .btn,.vswitch button,.pager button{min-height:38px}
+  .attpill .x,.chip .x{padding:4px}
+}
+
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 <div class="topbar">
-  <div class="brand">🐇 Wholesome Rabbit <span style="opacity:.6;font-weight:400">ERP</span></div>
+  <button class="navtog" id="navTog" aria-label="Menu" aria-expanded="false" onclick="toggleNav()">☰</button>
+  <div class="brand"><span class="bmark">🐇</span> <span class="bfull">Wholesome Rabbit </span><span style="opacity:.6;font-weight:400">ERP</span></div>
   <div class="crumb" id="crumb"></div>
   <div class="sp"></div>
   <span id="userBox" style="display:flex;align-items:center;gap:6px;font-size:12px"></span>
   <span class="mode demo" id="modeTag">DEMO</span>
   <button id="mbell" class="mbell" title="Mentions" onclick="openMentions()">🔔</button>
-  <button onclick="openKB()">❔ Guide</button>
+  <button class="guidebtn" onclick="openKB()">❔ <span class="bfull">Guide</span></button>
 </div>
 <div class="app">
+  <div class="navscrim" id="navScrim" onclick="toggleNav(false)"></div>
   <div class="side" id="side"></div>
   <div class="main">
     <div class="cp" id="cp"></div>
@@ -525,6 +658,18 @@ async function sbAuth(email,password){
     headers:{apikey:SUPA.key,'Content-Type':'application/json'},body:JSON.stringify({email,password})});
   const j=await r.json(); if(!r.ok) throw new Error(j.error_description||j.msg||j.error||'sign-in failed'); return j;
 }
+/* ---- Column masking (wr_column_masking.sql) ----
+   That migration REVOKEs select on the cost/price columns of ingredients & products from
+   `authenticated` and `anon`, and exposes them through role-gated *_secure views. Postgres
+   denies `SELECT *` when ANY referenced column is revoked, so once it is applied every read
+   of the base table fails — for Admin too, because the app's roles only exist inside wr_role().
+   Routing it here, in the db layer, covers all ~44 call sites at once instead of one by one.
+   Writes are unaffected by the revoke (it is SELECT-only) EXCEPT that PostgREST's default
+   `return=representation` needs SELECT on the returned columns — so masked writes switch to
+   `return=minimal` and echo back the record we sent. */
+const MASKED_TABLES=['ingredients','products'];
+async function _readRel(T){ return (MASKED_TABLES.includes(T) && await useSecure()) ? T+'_secure' : T; }
+async function _maskedWrite(T){ return MASKED_TABLES.includes(T) && await useSecure(); }
 const db = {
   async list(model, {search,groupBy,page,per}={}){
     const m=MODELS[model]||{};   // child models (bom_lines, po_lines) have no top-level entry
@@ -533,7 +678,7 @@ const db = {
       let q='?select=*';
       if(search && m.name) q+='&'+m.name+'=ilike.*'+encodeURIComponent(search)+'*';
       q+='&limit='+(per||1000);
-      return await sb(T+q);
+      return await sb((await _readRel(T))+q);
     } else {
       let rows=[...(DEMO[T]||[])];
       if(search && m.name) rows=rows.filter(r=>String(r[m.name]||'').toLowerCase().includes(search.toLowerCase()));
@@ -546,12 +691,18 @@ const db = {
   },
   async create(model, rec){
     const T=(MODELS[model]&&MODELS[model].srcTable)||model;
-    if(isLive()) return (await sb(T, {method:'POST', body:JSON.stringify(rec)}))[0];
+    if(isLive()){
+      if(await _maskedWrite(T)){ await sb(T,{method:'POST',prefer:'return=minimal',body:JSON.stringify(rec)}); return {...rec}; }
+      return (await sb(T, {method:'POST', body:JSON.stringify(rec)}))[0];
+    }
     DEMO[T]=DEMO[T]||[]; rec.id=rec.id||('loc'+Date.now()+Math.floor(Math.random()*999)); DEMO[T].push(rec); return rec;
   },
   async update(model, pk, pkval, rec){
     const T=(MODELS[model]&&MODELS[model].srcTable)||model;
-    if(isLive()) return (await sb(T+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'PATCH', body:JSON.stringify(rec)}))[0];
+    if(isLive()){
+      if(await _maskedWrite(T)){ await sb(T+'?'+pk+'=eq.'+encodeURIComponent(pkval),{method:'PATCH',prefer:'return=minimal',body:JSON.stringify(rec)}); return {...rec}; }
+      return (await sb(T+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'PATCH', body:JSON.stringify(rec)}))[0];
+    }
     const arr=DEMO[T]=DEMO[T]||[]; const i=arr.findIndex(r=>r[pk]===pkval); if(i>=0){arr[i]={...arr[i],...rec}; return arr[i];} return rec;
   },
   async del(model, pk, pkval){
@@ -630,7 +781,18 @@ async function _tagSupplierTypes(supRows){
     if(!cnts){ r.sells_type='— unassigned'; return; }
     const keys=Object.keys(cnts).sort((a,b)=>cnts[b]-cnts[a]); r.sells_type=keys[0]; });
 }
+/* Off-canvas sidebar for phones/tablets (≤900px). Desktop ignores it — the drawer
+   classes have no effect above the breakpoint, where .side is a static column. */
+function toggleNav(force){
+  const s=$('side'), sc=$('navScrim'), t=$('navTog'); if(!s) return;
+  const open = (force===undefined) ? !s.classList.contains('open') : !!force;
+  s.classList.toggle('open', open);
+  if(sc) sc.classList.toggle('on', open);
+  if(t) t.setAttribute('aria-expanded', String(open));
+}
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') toggleNav(false); });
 function openModel(model){
+  toggleNav(false);            // picking a module closes the drawer behind it
   if(model==='home'){ state={model:'home',view:'home',search:'',groupBy:'',recId:null}; renderSide(); renderDashboard(); return; }
   const m=MODELS[model];
   if(model==='custom_orders') _coView='list';   // always land on the orders list from the nav
@@ -807,15 +969,17 @@ async function renderList(){
       cols.push({n:'_total_qty',l:'Total kg',t:'number'},{n:'_total_val',l:'Est. value',t:'currency'});
     }catch(e){}
   }
-  const bcb=r=>`<td onclick="event.stopPropagation()"><input type="checkbox" class="selcb" ${(state.sel||[]).includes(String(r[m.pk]))?'checked':''} onclick="toggleSel('${encodeURIComponent(r[m.pk])}',this.checked)"></td>`;
-  const cell=(f,r)=>{
+  const bcb=r=>`<td class="bcb" onclick="event.stopPropagation()"><input type="checkbox" class="selcb" ${(state.sel||[]).includes(String(r[m.pk]))?'checked':''} onclick="toggleSel('${encodeURIComponent(r[m.pk])}',this.checked)"></td>`;
+  const cell=(f,r,ci)=>{
     let v=r[f.n];
-    if(f.t==='formula'){ const val=evalF(f.expr,r); return `<td class="num">${isNaN(+val)?esc(val):num(Math.round(+val*100)/100)}</td>`; }
-    if(f.t==='currency') return `<td class="num">${fmt(v)}</td>`;
-    if(f.t==='number') return `<td class="num">${v==null?'':num(v)}</td>`;
-    if(f.t==='bool') return `<td style="text-align:center">${v?'<span title="Yes" style="color:#2f7d33;font-weight:800">✓</span>':'<span title="No" style="color:#cbcbcb">–</span>'}</td>`;
-    if(f.n==='status') return `<td><span class="badge b-${v}">${esc(v)}</span></td>`;
-    return `<td>${esc(v)}</td>`;
+    // ≤700px card layout: data-l is the row label, .mtitle is the card heading
+    const L=` data-l="${esc(f.l)}"${ci===0?' class="mtitle"':''}`;
+    if(f.t==='formula'){ const val=evalF(f.expr,r); return `<td class="num"${L}>${isNaN(+val)?esc(val):num(Math.round(+val*100)/100)}</td>`; }
+    if(f.t==='currency') return `<td class="num"${L}>${fmt(v)}</td>`;
+    if(f.t==='number') return `<td class="num"${L}>${v==null?'':num(v)}</td>`;
+    if(f.t==='bool') return `<td style="text-align:center"${L}>${v?'<span title="Yes" style="color:#2f7d33;font-weight:800">✓</span>':'<span title="No" style="color:#cbcbcb">–</span>'}</td>`;
+    if(f.n==='status') return `<td${L}><span class="badge b-${v}">${esc(v)}</span></td>`;
+    return `<td${L}>${esc(v)}</td>`;
   };
   const numCols=cols.filter(f=>['currency','number'].includes(f.t));
   const sumOf=(arr,f)=>arr.reduce((s,r)=>s+(+r[f.n]||0),0);
@@ -830,7 +994,7 @@ async function renderList(){
       const gs={}; wr.forEach(r=>{ const s=r.status==null?'—':r.status; (gs[s]=gs[s]||[]).push(r); });
       Object.keys(gs).sort().forEach(st=>{ const sr=gs[st];
         body+=`<tr class="grp" style="background:#faf9f4">${bulk?'<td></td>':''}<td style="padding-left:24px">▸ <span class="badge b-${esc(st)}">${esc(st)}</span> <span style="opacity:.6;font-weight:400">(${sr.length})</span></td>${numSub(sr).slice(1).join('')}</tr>`;
-        sr.forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map(f=>cell(f,r)).join('')}</tr>`; });
+        sr.forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map((f,ci)=>cell(f,r,ci)).join('')}</tr>`; });
       });
     });
   } else if(HIER[state.model] && state.groupBy){
@@ -841,21 +1005,21 @@ async function renderList(){
       G.subs.forEach(S=>{
         const twoLevel = S.g2==null; const pad = twoLevel?20:32;
         if(!twoLevel) body+=`<tr class="grp">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td style="padding-left:20px">▸ ${esc(S.g2)} <span style="opacity:.6;font-weight:400">(${S.items.length})</span></td>`; return numCols.includes(f)?sumCell(f,sumOf(S.items,f)):'<td></td>'; }).join('')+`</tr>`;
-        S.items.forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map((f,idx)=>idx===0?`<td style="padding-left:${pad}px">${cell(f,r).replace(/^<td[^>]*>/,'').replace(/<\/td>$/,'')}</td>`:cell(f,r)).join('')}</tr>`; });
+        S.items.forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map((f,idx)=>idx===0?`<td class="mtitle" data-l="${esc(f.l)}" style="padding-left:${pad}px">${cell(f,r,0).replace(/^<td[^>]*>/,'').replace(/<\/td>$/,'')}</td>`:cell(f,r,idx)).join('')}</tr>`; });
       });
     });
   } else if(state.groupBy){
     const g={}; rows.forEach(r=>{const k=r[state.groupBy]==null?'—':r[state.groupBy]; (g[k]=g[k]||[]).push(r);});
     Object.keys(g).sort(cmpGroupKeys).forEach(k=>{
       body+=`<tr class="grp">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td>▸ ${esc(k)} <span style="opacity:.6;font-weight:400">(${g[k].length})</span></td>`; return numCols.includes(f)?sumCell(f,sumOf(g[k],f)):'<td></td>'; }).join('')+`</tr>`;
-      g[k].forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map(f=>cell(f,r)).join('')}</tr>`; });
+      g[k].forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map((f,ci)=>cell(f,r,ci)).join('')}</tr>`; });
     });
   } else {
-    body=rows.map(r=>`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map(f=>cell(f,r)).join('')}</tr>`).join('');
+    body=rows.map(r=>`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map((f,ci)=>cell(f,r,ci)).join('')}</tr>`).join('');
   }
   const foot = numCols.length&&rows.length? `<tfoot><tr style="background:#faf9f4">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td style="font-weight:700">Total · ${rows.length}</td>`; return numCols.includes(f)?sumCell(f,sumOf(rows,f)):'<td></td>'; }).join('')+`</tr></tfoot>`:'';
   $('content').innerHTML = `<div id="bulkbar" class="bulkbar" style="display:none"></div><div class="listcard">
-    <table><thead><tr>${bulk?'<th style="width:34px"><input type="checkbox" onclick="selAll(this.checked)"></th>':''}${cols.map(f=>`<th class="${['currency','number'].includes(f.t)?'num':''}">${f.l}</th>`).join('')}</tr></thead>
+    <table class="mcards"><thead><tr>${bulk?'<th style="width:34px"><input type="checkbox" onclick="selAll(this.checked)"></th>':''}${cols.map(f=>`<th class="${['currency','number'].includes(f.t)?'num':''}">${f.l}</th>`).join('')}</tr></thead>
     <tbody>${body||`<tr><td colspan="${cols.length+(bulk?1:0)}" class="empty">No records</td></tr>`}</tbody>${foot}</table>
     <div class="pager">${rows.length} record${rows.length!==1?'s':''}</div></div>`;
   bulkBar();
@@ -908,6 +1072,15 @@ async function openForm(idEnc){
 async function renderForm(){
   controlPanel();
   const m=MODELS[state.model]; const r=formRec;
+  // Modules with their own form renderer (the weekly count) come through here on every
+  // re-render — attachment upload, note post, hash route. Reload their proof trail and
+  // hand off, instead of drawing the generic record sheet over the top of them.
+  if(m.customForm==='count'){
+    formRec=countRec;
+    formNotes = formIsNew ? [] : await notesForRecord(state.model, countRec[m.pk]);
+    formAtts  = formIsNew ? [] : await attsForRecord(state.model, countRec[m.pk]);
+    return drawCountForm();
+  }
   setCrumb(formIsNew?'New':(r[m.name]||r[m.pk]||'New'));
   formNotes = formIsNew ? [] : await notesForRecord(state.model, formRec[m.pk]);
   formAtts  = formIsNew ? [] : await attsForRecord(state.model, formRec[m.pk]);
@@ -1260,7 +1433,7 @@ function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.em
   try{ Object.keys(localStorage).forEach(k=>{ if(/^chatter:/.test(k)||/^attach:/.test(k)||k==='wr_notes') localStorage.removeItem(k); }); }catch(e){}
   updateMode(); renderSide();
   if(REQUIRE_AUTH && isLive()){ closeModal(); showGate('Signed out.'); } else { toast('Signed out (anon)'); openSettings(); } }
-function closeModal(){ $('overlay').classList.remove('on'); }
+function closeModal(){ $('overlay').classList.remove('on'); window._attCtx=null; }
 /* Blocking "please wait" overlay with a spinner — for multi-step actions (e.g. creating many POs). */
 function showBusy(msg){
   if(!document.getElementById('wrSpinCss')){ const s=document.createElement('style'); s.id='wrSpinCss';
@@ -1282,16 +1455,20 @@ function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live
 
 /* ===== Data Cleanser (Administration → Data Cleanser) ===== */
 // Wipe transactional data (test / day-1 play) while KEEPING all master data.
+/* `models` = the MODELS keys whose notes/activities/attachments belong to this group.
+   Wiping a group also clears them, so the Apps Script activity reminder can never
+   nag about a deleted record again (that was the phantom-notification bug). */
 const CLEANSE_GROUPS = [
-  {key:'purch',  label:'Purchase orders (+ receipts & invoices)', tables:[['gr_lines','id'],['goods_receipts','gr_ref'],['invoice_lines','id'],['supplier_invoices','invoice_ref'],['po_lines','id'],['purchase_orders','po_ref']]},
-  {key:'deliv',  label:'Deliveries & sales orders',                tables:[['delivery_lines','id'],['deliveries','delivery_ref'],['order_lines','id'],['sales_orders','order_ref']]},
-  {key:'count',  label:'Weekly inventory counts',                  tables:[['count_lines','id'],['count_sessions','count_ref']]},
-  {key:'prod',   label:'Production batches',                       tables:[['batch_issues','id'],['production_batches','batch_ref']]},
-  {key:'trans',  label:'Internal transfers',                       tables:[['transfer_lines','id'],['transfers','transfer_ref']]},
-  {key:'mov',    label:'Inventory movements (the stock ledger)',   tables:[['inventory_movements','id']]},
-  {key:'var',    label:'Variances',                                tables:[['variance_log','id']]},
+  {key:'purch',  label:'Purchase orders (+ receipts & invoices)', models:['purchase_orders'], tables:[['gr_lines','id'],['goods_receipts','gr_ref'],['invoice_lines','id'],['supplier_invoices','invoice_ref'],['po_lines','id'],['purchase_orders','po_ref']]},
+  {key:'deliv',  label:'Deliveries & sales orders',                models:['deliveries','sales_orders'], tables:[['delivery_lines','id'],['deliveries','delivery_ref'],['order_lines','id'],['sales_orders','order_ref']]},
+  {key:'count',  label:'Weekly inventory counts',                  models:['count_sessions'], tables:[['count_lines','id'],['count_sessions','count_ref']]},
+  {key:'prod',   label:'Production batches',                       models:['production_batches'], tables:[['batch_issues','id'],['production_batches','batch_ref']]},
+  {key:'trans',  label:'Internal transfers',                       models:['transfers'], tables:[['transfer_lines','id'],['transfers','transfer_ref']]},
+  {key:'mov',    label:'Inventory movements (the stock ledger)',   models:['inventory_movements'], tables:[['inventory_movements','id']]},
+  {key:'var',    label:'Variances',                                models:['variance_log'], tables:[['variance_log','id']]},
   {key:'demand', label:'Demand plots & synced demand',             tables:[['mrp_plan_lines','id'],['mrp_plans','id'],['demand','id']]},
-  {key:'refs',   label:'Reset reference counters (DP/PO/DR/RR/PR → 01)', tables:[['ref_counters','key']]}
+  {key:'refs',   label:'Reset reference counters (DP/PO/DR/RR/PR → 01)', tables:[['ref_counters','key']]},
+  {key:'notes',  label:'ALL notes, activities & attachments (every record)', tables:[['record_notes','id'],['record_attachments','id']]}
 ];
 let cleanseSel={};
 function renderCleanser(){
@@ -1342,7 +1519,7 @@ const BACKUP_TABLES=[
   'saved_reports','record_notes','record_attachments','bulk_change_requests','activity_log'];
 async function exportBackup(){
   toast('Building backup…'); const dump={_meta:{app:'WR ERP',exported_by:CURRENT_USER,live:isLive()}};
-  for(const t of BACKUP_TABLES){ try{ dump[t]=isLive()? await sb(t+'?select=*') : (DEMO[t]||[]); }catch(e){ dump[t]={error:String(e.message||e)}; } }
+  for(const t of BACKUP_TABLES){ try{ dump[t]=isLive()? await sb((await _readRel(t))+'?select=*') : (DEMO[t]||[]); }catch(e){ dump[t]={error:String(e.message||e)}; } }
   const blob=new Blob([JSON.stringify(dump,null,1)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download='wr-erp-backup-'+todayISO()+'.json'; document.body.appendChild(a); a.click(); a.remove();
@@ -1416,6 +1593,17 @@ async function runCleanse(){
   for(const g of groups){ for(const [t,pk] of g.tables){
     try{ if(isLive()){ await sb(t+'?'+pk+'=not.is.null',{method:'DELETE',prefer:'return=minimal'}); } else { DEMO[t]=[]; } done++; }
     catch(e){ errs.push(t); } } }
+  // Clear the notes/activities/attachments that belonged to the wiped records, so the
+  // Apps Script reminder can't keep firing at documents that no longer exist.
+  const noteModels=[...new Set(groups.flatMap(g=>g.models||[]))];
+  if(noteModels.length && !cleanseSel.notes){
+    const filt='model=in.('+noteModels.map(m=>encodeURIComponent(m)).join(',')+')';
+    for(const t of ['record_notes','record_attachments']){
+      try{ if(isLive()){ await sb(t+'?'+filt,{method:'DELETE',prefer:'return=minimal'}); } else { DEMO[t]=(DEMO[t]||[]).filter(r=>!noteModels.includes(r.model)); } done++; }
+      catch(e){ errs.push(t); }
+    }
+    try{ localStorage.removeItem('wr_notes'); Object.keys(localStorage).forEach(k=>{ if(/^attach:/.test(k) && noteModels.includes(k.split(':')[1])) localStorage.removeItem(k); }); }catch(e){}
+  }
   if(cleanseSel.demand){ localStorage.removeItem('wr_mrp_plans'); mrpDemand={}; mrpManual={}; mrpRemarks={}; window._mrpPlan=null; mrpPlanCache=[]; }
   if(cleanseSel.refs){ localStorage.removeItem('wr_refseq'); }
   if(cleanseSel.prod){ prodPlanLines=[]; prodRunRef=''; }
@@ -1607,8 +1795,16 @@ function sysLog(model,pk,text){ if(!pk)return; const key='chatter:'+model+':'+pk
   // Durable, shared audit trail: mirror to Supabase (append-only). Fire-and-forget so it never blocks the UI.
   if(isLive()){ try{ sb('activity_log',{method:'POST',prefer:'return=minimal',body:JSON.stringify({actor:CURRENT_USER,model:model,record_pk:String(pk),event:text})}).catch(()=>{}); }catch(e){} } }
 
-/* attachments (link-based → Google Drive; live uploads flow through n8n) */
-function attachKey(){ const m=MODELS[state.model]; return 'attach:'+state.model+':'+(formRec[m.pk]||'new'); }
+/* attachments (link-based → Google Drive; live uploads flow through n8n)
+   The whole subsystem normally targets the open record (state.model + formRec[pk]).
+   Screens that aren't a record form — the Opening Balance uploader — set
+   window._attCtx = {model, ref, rerender} to borrow it for their own target.
+   Always clear it again (closeModal does) or the next record form will write
+   its attachments to the wrong place. */
+function _attTarget(){ if(window._attCtx&&window._attCtx.ref) return {model:window._attCtx.model, ref:window._attCtx.ref};
+  const m=MODELS[state.model]||{}; return {model:state.model, ref:(formRec&&m.pk)?formRec[m.pk]:null}; }
+function _attRerender(){ if(window._attCtx&&typeof window._attCtx.rerender==='function') return window._attCtx.rerender(); return renderForm(); }
+function attachKey(){ const t=_attTarget(); return 'attach:'+t.model+':'+(t.ref||'new'); }
 function loadAttach(){ try{return JSON.parse(localStorage.getItem(attachKey())||'[]')}catch(e){return[]} }
 let formAtts=[];   // attachments from Supabase (record_attachments) — carry the shareable drive_url
 async function attsForRecord(model,ref){ if(!ref||!isLive()) return [];
@@ -1627,12 +1823,12 @@ async function attCheckSetup(){
   catch(e){ lines.push('❌ Cannot read record_attachments: '+esc(String(e.message||e))+' — run the RLS fix (wr_migration_latest.sql) so the app can read attachment links.'); }
   toast('Upload check — see the panel'); const el=$('opDiag'); if(el){ el.style.display='block'; el.innerHTML='<b>Upload setup check</b><br>'+lines.join('<br>')+'<div class="mini" style="margin-top:6px;color:var(--muted)">The file is uploaded by the webhook (Apps Script/n8n) using the service key, then this app reads the link back from record_attachments. Both sides must work.</div>'; }
 }
-async function refreshAtts(){ const m=MODELS[state.model]; formAtts=await attsForRecord(state.model,formRec[m.pk]);
+async function refreshAtts(){ const t=_attTarget(); formAtts=await attsForRecord(t.model,t.ref);
   // drop local pending rows that have now landed in Supabase (matched by filename)
   try{ const names=(formAtts||[]).map(a=>a.filename); const loc=loadAttach().filter(x=>!(x.pending&&names.includes(x.name))); localStorage.setItem(attachKey(),JSON.stringify(loc)); }catch(e){}
-  renderForm(); }
+  _attRerender(); }
 async function attDelDb(id){ try{ await sb('record_attachments?id=eq.'+id,{method:'DELETE',prefer:'return=minimal'}); }catch(e){ toast(e.message,true); return; }
-  formAtts=(formAtts||[]).filter(a=>a.id!==id); toast('Attachment removed'); renderForm(); }
+  formAtts=(formAtts||[]).filter(a=>a.id!==id); toast('Attachment removed'); _attRerender(); }
 function attachHtml(){
   let folder=(typeof AUTOS!=='undefined'&&AUTOS.drive_folder&&AUTOS.drive_folder.url)?AUTOS.drive_folder.url:'';
   // Only show a real Google Drive folder link — never a webhook/script /exec URL pasted here by mistake.
@@ -1682,30 +1878,30 @@ function _compressImage(f, maxDim, quality){
 }
 async function uploadAttach(f){
   if(f.size>15*1024*1024){ toast('File is over 15MB — upload it to Drive directly and paste the link.',true); return attLink(f.name); }
-  const a=autoCfg('file_upload'); const m=MODELS[state.model]; const ref=formRec[m.pk];
+  const a=autoCfg('file_upload'); const t=_attTarget(); const ref=t.ref;
   if(!a||!a.on||!a.url){ return attLink(f.name); }   // no automation set → fall back to pasting a link
   toast('Preparing '+f.name+'…');
   const c=await _compressImage(f, 1600, 0.82);        // shrink photos before encoding/uploading
   const reader=new FileReader();
   reader.onload=async()=>{ const b64=String(reader.result).split(',')[1]||'';
-    await postWebhook(a.url,{ model:state.model, module:state.model, ref:String(ref),
+    await postWebhook(a.url,{ model:t.model, module:t.model, ref:String(ref),
        filename:c.name, mimetype:c.type||'application/octet-stream', data:b64, by:CURRENT_USER });
     const at=loadAttach(); at.push({name:c.name,pending:true});
     localStorage.setItem(attachKey(),JSON.stringify(at));
-    sysLog(state.model, ref, '📎 '+CURRENT_USER+' uploaded '+c.name+' → Drive');
-    toast('Uploading '+c.name+' to Drive… the link will appear shortly'); renderForm();
+    sysLog(t.model, ref, '📎 '+CURRENT_USER+' uploaded '+c.name+' → Drive');
+    toast('Uploading '+c.name+' to Drive… the link will appear shortly'); _attRerender();
     // The upload webhook (Apps Script /exec or n8n) uploads to Drive, makes a shareable link, and
     // writes it into record_attachments; poll it back so the file becomes a clickable link. If it
     // never arrives (webhook off/misconfigured), stop polling and clear the stuck "uploading…" chip.
     let tries=0; const MAXT=12; const poll=async()=>{ tries++;
-      if(!(state.view==='form'&&formRec[m.pk]===ref)) return;   // user navigated away
+      if(_attTarget().ref!==ref) return;   // user navigated away / switched target
       await refreshAtts();
       const done=(formAtts||[]).some(a=>a.filename===c.name);   // DB link arrived?
-      if(done){ const at=loadAttach().filter(x=>x.name!==c.name||!x.pending); localStorage.setItem(attachKey(),JSON.stringify(at)); renderForm(); return; }
+      if(done){ const at=loadAttach().filter(x=>x.name!==c.name||!x.pending); localStorage.setItem(attachKey(),JSON.stringify(at)); _attRerender(); return; }
       if(tries<MAXT){ setTimeout(poll, 4000); }
       else { // give up — remove the stuck pending chip and tell the user how to recover
         const at=loadAttach().filter(x=>!(x.name===c.name&&x.pending)); localStorage.setItem(attachKey(),JSON.stringify(at));
-        if(state.view==='form'&&formRec[m.pk]===ref) renderForm();
+        if(_attTarget().ref===ref) _attRerender();
         toast('Drive link didn\'t come back for '+c.name+'. Check Administration → Automations → "File upload to Drive" is ON with the correct /exec (or n8n) URL, then re-upload — or 🔗 Paste link.',true);
       } };
     setTimeout(poll, 3500);
@@ -1713,8 +1909,8 @@ async function uploadAttach(f){
   reader.readAsDataURL(c.file);
 }
 function attLink(name){ const url=prompt('Paste a Drive link for '+(name||'this file')+':')||''; if(!url) return;
-  const a=loadAttach(); a.push({name:name||url,url}); localStorage.setItem(attachKey(),JSON.stringify(a)); renderForm(); }
-function attDel(i){ const a=loadAttach(); a.splice(i,1); localStorage.setItem(attachKey(),JSON.stringify(a)); renderForm(); }
+  const a=loadAttach(); a.push({name:name||url,url}); localStorage.setItem(attachKey(),JSON.stringify(a)); _attRerender(); }
+function attDel(i){ const a=loadAttach(); a.splice(i,1); localStorage.setItem(attachKey(),JSON.stringify(a)); _attRerender(); }
 
 /* print */
 // Build the printable/PDF HTML for a record (shared by Print and the PDF automation).
@@ -2567,7 +2763,9 @@ async function movementExists(note){                  // has this source already
 }
 /* ---- Column masking: use the role-gated *_secure views + definer RPCs when they exist ---- */
 let _secureViews;                                     // undefined = not yet probed
-async function useSecure(){ if(!isLive())return false; if(_secureViews===undefined){ try{ await sb('ingredients_secure?select=sku&limit=1'); _secureViews=true; }catch(e){ _secureViews=false; } } return _secureViews; }
+async function useSecure(){ if(!isLive())return false;
+  if(_secureViews===undefined){ try{ await sb('ingredients_secure?select=sku&limit=1'); _secureViews=true; }catch(e){ _secureViews=false; } }
+  return _secureViews; }
 async function listIngredients(){ if(await useSecure()){ try{ return await sb('ingredients_secure?select=*&limit=2000'); }catch(e){} } return await db.list('ingredients',{}); }
 async function listForModel(model){ if(await useSecure()){ if(model==='ingredients'){ try{ return await sb('ingredients_secure?select=*&limit=2000'); }catch(e){} } if(model==='products'){ try{ return await sb('products_secure?select=*&limit=2000'); }catch(e){} } } return await db.list(model,{}); }
 // Receiving a PO adds raw stock at Bulacan and updates moving-average cost.
@@ -3228,7 +3426,7 @@ async function allOpenNotes(){
   return a.filter(n=>!n.resolved).sort((x,y)=>String(y.created_at||'').localeCompare(String(x.created_at||'')));
 }
 function mentionChips(){ return userNames().filter(n=>n!==CURRENT_USER).map(n=>`<span class="mchip" onclick="mentionInsert('${esc(n).replace(/'/g,"\\'")}')">@${esc(n)}</span>`).join(''); }
-function mentionInsert(name){ const inp=$('noteInput'); if(inp){ const s=inp.value.replace(/\s+$/,''); inp.value=(s?s+' ':'')+'@'+name+' '; inp.focus(); } }
+function mentionInsert(name){ const inp=$('noteInput')||$('obNoteInput'); if(inp){ const s=inp.value.replace(/\s+$/,''); inp.value=(s?s+' ':'')+'@'+name+' '; inp.focus(); } }
 function noteBodyHtml(body){ let h=esc(body); userNames().forEach(n=>{ const re=new RegExp('@'+n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'); h=h.replace(re,'<span class="ment">@'+esc(n)+'</span>'); }); return h; }
 /* ---- Activities (scheduled call/to-do/email/meeting) live in record_notes ---- */
 const ACT_TYPES=[['todo','✅','To-do'],['call','📞','Call'],['email','✉️','Email'],['meeting','👥','Meeting']];
@@ -3414,6 +3612,7 @@ async function renderCustomOrders(){
   if(_coView==='form') return drawCOForm();
   $('cp').innerHTML=`<div class="title">Custom Orders <span onclick="openKB('custom_orders')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="coNew()">＋ New quote</button>
+    <button class="btn sec" onclick="coImportOpen()">📥 Import from sheet</button>
     <div class="sp"></div><span style="color:var(--muted)">CS quotes → lock → sellable SKU + BOM + demand</span>`;
   let orders=[]; let _tblErr=''; try{ orders=await db.list('custom_orders',{}); }catch(e){ _tblErr=String(e&&e.message||e); }
   let lc={}, lt={}, byOrder={}; try{ (await db.list('custom_order_lines',{})).forEach(l=>{ lc[l.order_ref]=(lc[l.order_ref]||0)+1; lt[l.order_ref]=(lt[l.order_ref]||0)+(+l.packs||0)*(+l.unit_price||0); if(l.product_sku){ (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); } }); }catch(e){ _tblErr=_tblErr||String(e&&e.message||e); }
@@ -3660,13 +3859,14 @@ async function renderFFProfiles(){
   $('crumb').innerHTML='<b>Calculator Profiles</b>';
   $('cp').innerHTML=`<div class="title">Calculator Profiles <span onclick="openKB('ffprofiles')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn sec" onclick="renderFFProfiles()">↻ Refresh</button>
+    <button class="btn sec" onclick="ffImportPick()">📥 Import backup (JSON)</button>
     <button class="btn sec" onclick="openModel('ffcalc')">🧮 Open calculator</button>
     <div class="sp"></div><span style="color:var(--muted)">saved calculator customers · shared across devices</span>`;
   let rows=[]; window._ffProfErr='';
   if(isLive()){ try{ rows=await sb('ffcalc_profiles?select=key,kind,cust,dog,payload,updated_at&order=updated_at.desc&limit=2000'); }catch(e){ window._ffProfErr=String(e&&e.message||e); } }
   else { window._ffProfErr='Connect to Supabase to see shared calculator profiles.'; }
   window._ffProf=(rows||[]).map(r=>{ const p=r.payload||{}; return {key:r.key, kind:r.kind||(String(r.key).indexOf('wr_md_')===0?'md':'nc'), cust:r.cust||p.custName||'', dog:r.dog||p.dogName||'',
-    ft:_FT_LBL[p.feedingType]||p.feedingType||'', pack:(p.packSize||p.customPackGrams||''), packs:(p.numPacks||p.customNumPacks||''), updated:r.updated_at||p.savedAt||''}; });
+    ft:_FT_LBL[p.feedingType]||p.feedingType||'', pack:(p.packSize||p.customPackGrams||''), packs:(p.numPacks||p.customNumPacks||''), updated:r.updated_at||p.savedAt||'', payload:p}; });
   _ffProfDraw();
 }
 function _ffProfDraw(){
@@ -3687,6 +3887,339 @@ function _ffProfDraw(){
     <div class="pager">${rows.length} shown</div></div>`;
   const el=$('ffpq'); if(el){ el.focus(); const v=el.value; el.value=''; el.value=v; }   // keep focus/caret on re-render
 }
+/* ===== Calculator profiles: import a backup JSON =====
+   The calculator exports {format:'wr_calculator_profile_backup', profiles:{single_pet,multi_pet}}.
+   This restores it into ffcalc_profiles so the whole team sees the profiles on every device —
+   the same table the calculator's ☁ Sync reads and writes. Upsert on `key`, so re-importing
+   the same backup updates rather than duplicates. */
+function ffImportPick(){
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.json,application/json'; inp.style.display='none';
+  inp.onchange=()=>{ const f=inp.files&&inp.files[0]; if(f) ffImportRead(f); inp.remove(); };
+  document.body.appendChild(inp); inp.click();
+}
+// Flatten a backup file into ffcalc_profiles rows. Tolerates both the wrapped backup shape
+// and a bare {single_pet:{},multi_pet:{}} object.
+function _ffFlatten(j){
+  const src=(j&&j.profiles)||j||{}; const out=[];
+  const take=(bucket,kind)=>{ const o=src[bucket]||{}; Object.keys(o).forEach(k=>{ const p=o[k]||{};
+    const dogs=Array.isArray(p.dogs)?p.dogs.map(d=>d&&(d.name||d.dogName)).filter(Boolean):[];
+    out.push({ key:p.key||k, kind, cust:p.custName||p.customerName||'',
+      dog:p.dogName||(dogs.length?dogs.join(', '):''), payload:p, updated_at:p.savedAt||null,
+      pets:dogs.length||1 }); }); };
+  take('single_pet','nc'); take('multi_pet','md');
+  return out;
+}
+function ffImportRead(f){
+  const r=new FileReader();
+  r.onload=()=>{
+    let j; try{ j=JSON.parse(String(r.result)); }catch(e){ toast('That file is not valid JSON',true); return; }
+    const rows=_ffFlatten(j);
+    if(!rows.length){ toast('No profiles found in that file',true); return; }
+    window._ffImp=rows;
+    const nc=rows.filter(x=>x.kind==='nc').length, md=rows.length-nc;
+    const dup=rows.length-new Set(rows.map(x=>x.key)).size;
+    const preview=rows.slice(0,12).map(x=>`<tr><td>${esc(x.cust||'—')}</td><td>${esc(x.dog||'—')}</td><td>${x.kind==='md'?'🐾🐾 multi ('+x.pets+')':'🐾 single'}</td><td class="mini">${esc(String(x.updated_at||'').slice(0,10))}</td></tr>`).join('');
+    $('modal').innerHTML=`<div><h3>📥 Import calculator profiles</h3>
+      <p class="mini">From <b>${esc(f.name)}</b>${j&&j.exported_at?' · exported '+esc(String(j.exported_at).slice(0,10)):''}. Profiles are matched on their <code>key</code>, so importing the same backup twice updates instead of duplicating.</p>
+      <div class="kpirow" style="margin:10px 0"><div class="kpi"><div class="l">Single pet</div><div class="v">${nc}</div></div>
+        <div class="kpi"><div class="l">Multi pet</div><div class="v">${md}</div></div>
+        <div class="kpi"><div class="l">Total</div><div class="v">${rows.length}</div></div></div>
+      ${dup?`<div class="hint" style="color:var(--warn)">⚠ ${dup} duplicate key(s) inside the file — the last one wins.</div>`:''}
+      ${isLive()?'':'<div class="hint" style="color:var(--warn)">⚠ Demo mode — these will be held locally only. Connect to Supabase to share them with the team.</div>'}
+      <div style="max-height:260px;overflow:auto;margin-top:8px"><table><thead><tr><th>Customer</th><th>Pet</th><th>Type</th><th>Saved</th></tr></thead><tbody>${preview}</tbody></table></div>
+      ${rows.length>12?`<div class="mini" style="color:var(--muted);margin-top:6px">…and ${rows.length-12} more.</div>`:''}
+      <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="ffImportRun()">📥 Import ${rows.length} profile(s)</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+    $('overlay').classList.add('on');
+  };
+  r.readAsText(f);
+}
+async function ffImportRun(){
+  const rows=window._ffImp||[]; if(!rows.length) return;
+  if(!isLive()){
+    try{ const cur=JSON.parse(localStorage.getItem('wr_ffcalc_local')||'{}'); rows.forEach(x=>cur[x.key]=x); localStorage.setItem('wr_ffcalc_local',JSON.stringify(cur)); }catch(e){}
+    closeModal(); toast('Held '+rows.length+' profile(s) locally — connect to Supabase to share them'); return;
+  }
+  showBusy('Importing '+rows.length+' profile(s)…');
+  let ok=0; const errs=[];
+  const CHUNK=40;   // PostgREST is happy with bulk upserts; chunk so one bad row can't sink it all
+  for(let i=0;i<rows.length;i+=CHUNK){
+    const batch=rows.slice(i,i+CHUNK).map(x=>({key:x.key, kind:x.kind, cust:x.cust, dog:x.dog, payload:x.payload,
+      updated_at:x.updated_at||new Date().toISOString()}));
+    try{ await sb('ffcalc_profiles?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify(batch)}); ok+=batch.length; }
+    catch(e){ errs.push(String(e&&e.message||e).slice(0,120)); }
+  }
+  hideBusy(); closeModal();
+  sysLog('ffprofiles','import','📥 '+CURRENT_USER+' imported '+ok+' calculator profile(s)');
+  if(errs.length) toast('Imported '+ok+' of '+rows.length+' · '+errs.length+' batch error(s): '+errs[0],true);
+  else toast('Imported '+ok+' profile(s)');
+  renderFFProfiles();
+}
+
+/* ===== Custom Orders: paste-in importer =====
+   Paste rows straight out of the order-tracking sheet (Date of Entry, Customer, Request,
+   Status, Expected delivery). Each row becomes a draft quote with the pack size and pack
+   count parsed out of the free-text request, and the customer matched against the saved
+   calculator profiles so CS can load the recipe instead of retyping it. Nothing is created
+   until you tick the rows and press Create — and every row lands as a `quote`, never locked. */
+function coImportOpen(){
+  $('modal').innerHTML=`<div><h3>📥 Import custom orders from the sheet</h3>
+    <p class="mini">Copy the rows out of your order sheet (including the header row) and paste them below — tab-separated straight from Google Sheets works. Each row becomes a <b>draft quote</b>; nothing is locked and no demand is created until you open and lock it.</p>
+    <textarea id="coImpTxt" rows="7" placeholder="Date of Entry&#9;Customer Name&#9;Request&#9;Status&#9;Expected Delivery&#10;August 12&#9;Alayne Chan&#9;Raw Quail Mix 350g x 42 packs&#9;&#9;August 22" style="width:100%;box-sizing:border-box;padding:9px;border:1px solid var(--line);border-radius:6px;font-family:ui-monospace,Menlo,monospace;font-size:12px"></textarea>
+    <div style="display:flex;gap:8px;margin-top:10px"><button class="btn" onclick="coImportParse()">Preview rows →</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>
+    <div id="coImpOut" style="margin-top:12px"></div></div>`;
+  $('overlay').classList.add('on');
+}
+// Split pasted text into records. Handles Sheets' quoting of multi-line cells.
+function _coSplitRows(txt){
+  const rows=[]; let row=[], cell='', q=false;
+  for(let i=0;i<txt.length;i++){ const c=txt[i];
+    if(q){ if(c==='"'){ if(txt[i+1]==='"'){ cell+='"'; i++; } else q=false; } else cell+=c; continue; }
+    if(c==='"'){ q=true; continue; }
+    if(c==='\t'){ row.push(cell); cell=''; continue; }
+    if(c==='\r'){ continue; }
+    if(c==='\n'){ row.push(cell); rows.push(row); row=[]; cell=''; continue; }
+    cell+=c; }
+  row.push(cell); rows.push(row);
+  return rows.filter(r=>r.some(c=>String(c).trim()!==''));
+}
+// Pull pack size and pack count out of "Raw Quail Mix 350g x 42 packs" / "Mix 4 … 1kg x 28 packs".
+function _coParseReq(req){
+  const t=String(req||'').replace(/\s+/g,' ').trim();
+  let g=0; const mg=t.match(/(\d+(?:\.\d+)?)\s*(kgs?|grams?|gr?|g)\b/i);
+  if(mg){ const n=+mg[1]; g=/^k/i.test(mg[2])?Math.round(n*1000):Math.round(n); }
+  // The multiplier must be a standalone "x"/"×" — otherwise the x inside "Mix 4" wins
+  // and a 60-pack order reads as 4.
+  let packs=0; const mp=t.match(/(?:^|[\s(:•\-])[x×]\s*(\d+)\b/i) || t.match(/(\d+)\s*(?:packs?|sets?|pcs?)\b/i);
+  if(mp) packs=+mp[1];
+  const cooked=/gently\s*cook|sous\s*vide|cookable|cooked/i.test(t);
+  return {pack_size_g:g, packs, cooked, desc:t};
+}
+const _coNorm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+// Match a sheet customer name against the saved calculator profiles. Exact → contains →
+// shared-token. Returns the candidates with a confidence label so a human decides, because
+// "Alayne Chan · Sardines 305g" may or may not be the recipe behind "Raw Quail Mix".
+function _coMatchProfiles(name){
+  const all=window._ffProf||[]; const n=_coNorm(name); if(!n||n.length<3) return [];
+  const nt=n.split(' ').filter(Boolean);
+  const scored=all.map(p=>{
+    const c=_coNorm(p.cust); if(!c||c.length<3) return null;      // "A", "Sy" etc. are test rows
+    if(c===n) return {p, score:3, why:'exact name'};
+    // A profile name often carries a suffix: "Teps Perez - Duck Mix". Compare token sets and
+    // insist on at least one substantial shared token, so a stray initial can't match everybody.
+    const ct=c.split(' ').filter(Boolean);
+    const shared=nt.filter(w=>ct.includes(w));
+    const solid=shared.filter(w=>w.length>=4);
+    if(!solid.length) return null;
+    if(shared.length===nt.length) return {p, score:2, why:'all name parts match'};
+    if(solid.length>=2) return {p, score:2, why:'surname + given name'};
+    return {p, score:1, why:'only "'+solid[0]+'" matches'};
+  }).filter(Boolean);
+  scored.sort((a,b)=>b.score-a.score||String(a.p.cust).length-String(b.p.cust).length);
+  return scored.slice(0,4);
+}
+async function coImportParse(){
+  const txt=(($('coImpTxt')||{}).value)||'';
+  if(!txt.trim()){ toast('Paste the rows first',true); return; }
+  if(!(window._ffProf||[]).length && isLive()){ try{ await renderFFProfilesQuiet(); }catch(e){} }
+  const rows=_coSplitRows(txt);
+  // header detection: a row mentioning both a customer column and a request/order column
+  let hdr=null, start=0;
+  const h0=rows[0].map(_coNorm);
+  if(h0.some(c=>/customer|client|name/.test(c)) && h0.some(c=>/request|order|item|description/.test(c))){ hdr=h0; start=1; }
+  const idxOf=(...pats)=>{ if(!hdr) return -1; for(const p of pats){ const i=hdr.findIndex(c=>p.test(c)); if(i>=0) return i; } return -1; };
+  const iDate=hdr?idxOf(/date of entry/,/^date/,/entry/):0;
+  const iCust=hdr?idxOf(/customer/,/client/,/^name/):1;
+  const iReq =hdr?idxOf(/request/,/order/,/item/,/description/):2;
+  const iDue =hdr?idxOf(/expected|deliver|needed|due/):-1;
+  const out=[];
+  for(let r=start;r<rows.length;r++){
+    const row=rows[r];
+    const cust=String(row[iCust>=0?iCust:1]||'').trim();
+    const req =String(row[iReq >=0?iReq :2]||'').trim();
+    if(!cust && !req) continue;
+    if(/^please see/i.test(req) && !cust) continue;
+    const parsed=_coParseReq(req);
+    out.push({ i:out.length, on:true, date:String(row[iDate>=0?iDate:0]||'').trim(), cust, req,
+      due:iDue>=0?String(row[iDue]||'').trim():'', ...parsed, matches:_coMatchProfiles(cust) });
+  }
+  window._coImp=out;
+  await _coImpResolve();
+  _coImpDraw();
+}
+/* For every row, expand the chosen saved profile into a real recipe at that ORDER's pack size
+   and map the names to ERP SKUs. This is what makes the imported quote usable — CS gets the
+   recipe, not just a pointer to a profile. Auto-picks the best match at "likely" or better;
+   a weak match is offered but never applied on its own. */
+async function _coImpResolve(){
+  const rows=window._coImp||[];
+  for(const r of rows){
+    if(r.sel===undefined) r.sel=(r.matches[0] && r.matches[0].score>=2) ? 0 : -1;
+    r.recipe=[]; r.unmatched=[]; r.recipeErr='';
+    const m=(r.sel>=0)?r.matches[r.sel]:null;
+    if(!m){ continue; }
+    const pay=m.p.payload || (m.p.raw&&m.p.raw.payload) || null;
+    if(!pay){ r.recipeErr='profile payload not loaded'; continue; }
+    const packG=+r.pack_size_g||+pay.packSize||+pay.customPackGrams||0;
+    if(!(packG>0)){ r.recipeErr='no pack size to scale the recipe to'; continue; }
+    const items=_ffProfileRecipe(pay, packG);
+    if(!items.length){ r.recipeErr='profile has no ingredients'; continue; }
+    const mapped=await _ffMapItems(items);
+    r.recipe=mapped.recipe; r.unmatched=mapped.unmatched;
+  }
+}
+function coImpPick(i,v){ const r=(window._coImp||[])[i]; if(!r) return; r.sel=+v;
+  _coImpResolve().then(()=>_coImpDraw()); }
+// Load profiles without repainting the screen (the importer may be opened from Custom Orders).
+async function renderFFProfilesQuiet(){
+  if(!isLive()) return; let rows=[];
+  try{ rows=await sb('ffcalc_profiles?select=key,kind,cust,dog,payload,updated_at&order=updated_at.desc&limit=2000'); }catch(e){ return; }
+  window._ffProf=(rows||[]).map(r=>{ const p=r.payload||{}; return {key:r.key, kind:r.kind||'nc', cust:r.cust||p.custName||'', dog:r.dog||p.dogName||'',
+    ft:_FT_LBL[p.feedingType]||p.feedingType||'', pack:(p.packSize||p.customPackGrams||''), packs:(p.numPacks||p.customNumPacks||''), updated:r.updated_at||p.savedAt||'', payload:p}; });
+}
+function _coImpDraw(){
+  const rows=window._coImp||[]; const el=$('coImpOut'); if(!el) return;
+  const conf=m=>m.score>=3?'<span class="badge b-received">strong</span>':(m.score===2?'<span class="badge b-invoiced">likely</span>':'<span class="badge b-open">weak</span>');
+  const body=rows.map(r=>{
+    const opts=[`<option value="-1" ${r.sel<0?'selected':''}>— no profile (CS builds it) —</option>`]
+      .concat(r.matches.map((m,j)=>`<option value="${j}" ${r.sel===j?'selected':''}>${esc(m.p.cust)}${m.p.dog?' · '+esc(m.p.dog):''} — ${esc(m.why)}</option>`)).join('');
+    const best=r.matches[r.sel>=0?r.sel:0];
+    const mcell=r.matches.length
+      ? `<select onchange="coImpPick(${r.i},this.value)" style="max-width:230px;padding:4px;border:1px solid var(--line);border-radius:5px">${opts}</select>
+         <div class="mini" style="color:var(--muted);margin-top:3px">${r.sel>=0&&best?conf(best)+(best.p.pack?' saved '+esc(best.p.pack)+'g':'')+(best.p.ft?' · '+esc(best.p.ft):''):'not applied'}</div>`
+      : '<span class="mini" style="color:var(--warn)">no saved profile — CS builds the recipe</span>';
+    const rcell = r.recipeErr ? `<span class="mini" style="color:var(--warn)">${esc(r.recipeErr)}</span>`
+      : (r.recipe&&r.recipe.length
+          ? `<b>${r.recipe.length}</b> ingredient(s)<div class="mini" style="color:${r.unmatched.length?'var(--warn)':'var(--muted)'}">${r.unmatched.length?(r.unmatched.length+' need SKU mapping'):'all mapped to SKUs'}</div>`
+          : '<span class="mini" style="color:var(--muted)">—</span>');
+    return `<tr><td><input type="checkbox" ${r.on?'checked':''} onchange="window._coImp[${r.i}].on=this.checked"></td>
+      <td>${esc(r.cust||'—')}<div class="mini" style="color:var(--muted)">${esc(r.date||'')}</div></td>
+      <td style="max-width:230px">${esc(r.req).replace(/\n/g,'<br>')}</td>
+      <td class="num">${r.pack_size_g?num(r.pack_size_g)+' g':'<span style="color:var(--warn)">?</span>'}</td>
+      <td class="num">${r.packs?num(r.packs):'<span style="color:var(--warn)">?</span>'}</td>
+      <td>${mcell}</td><td>${rcell}</td></tr>`; }).join('');
+  const on=rows.filter(r=>r.on).length;
+  const noSpec=rows.filter(r=>r.on&&(!r.pack_size_g||!r.packs)).length;
+  const withR=rows.filter(r=>r.on&&r.recipe&&r.recipe.length).length;
+  const needMap=rows.filter(r=>r.on&&r.unmatched&&r.unmatched.length).length;
+  el.innerHTML=`<div class="hint" style="margin-bottom:8px">Pack size and pack count are read out of the request text; the recipe is expanded from the saved profile using the calculator's own BARF ratios, scaled to <b>this order's</b> pack size. Anything marked <b style="color:var(--warn)">?</b> couldn't be read — the quote is still created, you just set it on the form.</div>
+    <div style="max-height:300px;overflow:auto"><table><thead><tr><th style="width:28px"></th><th>Customer</th><th>Request</th><th class="num">Pack</th><th class="num">Packs</th><th>Saved profile</th><th>Recipe</th></tr></thead><tbody>${body}</tbody></table></div>
+    <div class="mini" style="margin-top:6px;color:var(--muted)">${withR} of ${on} selected row(s) come in with a recipe attached.</div>
+    ${needMap?`<div class="hint" style="color:var(--warn);margin-top:4px">⚠ ${needMap} row(s) have ingredients with no matching SKU — open the line's recipe editor to map them once and it's remembered.</div>`:''}
+    ${noSpec?`<div class="hint" style="color:var(--warn);margin-top:4px">⚠ ${noSpec} selected row(s) have no readable pack size or count.</div>`:''}
+    <div style="display:flex;gap:8px;margin-top:12px;align-items:center"><button class="btn" onclick="coImportRun()">✅ Create ${on} draft quote(s)</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button><span class="mini" style="color:var(--muted)">created as <b>quote</b> — nothing enters demand until you lock each one</span></div>`;
+}
+async function coImportRun(){
+  const rows=(window._coImp||[]).filter(r=>r.on);
+  if(!rows.length){ toast('Tick at least one row',true); return; }
+  showBusy('Creating '+rows.length+' quote(s)…');
+  const made=[], errs=[];
+  for(const r of rows){
+    try{
+      let ref=''; try{ ref=(await genRef('CO',{date:todayISO()})).ref; }catch(e){ ref='CO-'+_mmddyyyy(todayISO())+'-'+String(Date.now()).slice(-4)+made.length; }
+      const best=(r.sel>=0)?r.matches[r.sel]:null;
+      const note=['Imported from the order sheet'+(r.date?(' · entry '+r.date):''),
+                  best?('Recipe from saved calculator profile: '+best.p.cust+(best.p.dog?' · '+best.p.dog:'')+' ('+best.why+')'):'No saved calculator profile applied — build the recipe here',
+                  (r.recipe&&r.recipe.length)?('Expanded to '+r.recipe.length+' ingredient(s) at '+(r.pack_size_g||0)+'g/pack'+(r.unmatched.length?(' · '+r.unmatched.length+' still need a SKU: '+r.unmatched.join(', ')):'')):'',
+                  r.cooked?'Requested gently cooked / sous vide':''].filter(Boolean).join('\n');
+      const hdr={order_ref:ref, customer_name:r.cust||'', contact:'', order_date:todayISO(),
+                 needed_date:_coDueISO(r.due)||todayISO(), status:'quote', notes:note,
+                 discount:0, delivery_fee:0, created_by:CURRENT_USER};
+      await db.create('custom_orders',hdr);
+      await db.replaceChildren({model:'custom_order_lines',fk:'order_ref'}, ref, [{
+        order_ref:ref, line_type:'custom', product_sku:null, description:r.desc||r.req,
+        recipe:(r.recipe||[]), pack_size_g:+r.pack_size_g||0, packs:+r.packs||0, unit_price:0 }]);
+      sysLog('custom_orders',ref,'📥 Imported from the order sheet by '+CURRENT_USER);
+      made.push(ref);
+    }catch(e){ errs.push((r.cust||'row')+': '+String(e&&e.message||e).slice(0,90)); }
+  }
+  hideBusy(); closeModal();
+  if(errs.length) toast('Created '+made.length+' · '+errs.length+' failed — '+errs[0], true);
+  else toast('Created '+made.length+' draft quote(s) — open each one to add the recipe, then Lock');
+  _coView='list'; renderCustomOrders();
+}
+// "August 22" / "Aug 22" / "2026-08-22" → ISO, assuming the current year when none is given.
+function _coDueISO(s){
+  const t=String(s||'').trim(); if(!t) return '';
+  if(/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  const d=new Date(t+(/\d{4}/.test(t)?'':(' '+new Date().getFullYear())));
+  if(isNaN(d.getTime())) return '';
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
+/* ===== Expand a saved calculator profile into an ERP recipe =====
+   A profile stores the chosen ingredient NAMES per category plus dailyGrams — not grams per
+   ingredient. The calculator derives grams from the BARF ratios at load time, so we mirror that
+   here exactly (freshfoodcalculator.html → BASE_RATIOS / computeRatios / the per-category split),
+   then scale to the ORDER's pack size, because bom_lines.usable_g is grams per pack. */
+const FF_BASE_RATIOS={
+  raw:     {muscle:.45,bones:.10,organ:.25,liver:.05,secreting:.05,veggies:.07,seeds:.02,fruit:.01},
+  cookable:{muscle:.55,organ:.25,liver:.05,secreting:.05,veggies:.07,seeds:.02,fruit:.01},
+  sousVide:{muscle:.55,organ:.25,liver:.05,secreting:.05,veggies:.07,seeds:.02,fruit:.01}
+};
+function _ffRatios(feedingType, excludedCats){
+  const base=FF_BASE_RATIOS[feedingType]||FF_BASE_RATIOS.cookable;
+  const r={...base}; const ex=excludedCats||{}; let muscleBonus=0;
+  const lv=!!ex.liver, sc=!!ex.secreting;
+  if(lv&&!sc){ r.secreting=(r.secreting||0)+(r.liver||0); r.liver=0; }
+  else if(!lv&&sc){ r.liver=(r.liver||0)+(r.secreting||0); r.secreting=0; }
+  else if(lv&&sc){ muscleBonus+=(r.liver||0)+(r.secreting||0); r.liver=0; r.secreting=0; }
+  ['organ','veggies','seeds','fruit'].forEach(c=>{ if(ex[c]&&r[c]!==undefined){ muscleBonus+=r[c]; r[c]=0; } });
+  if(ex.bones&&r.bones!==undefined){ muscleBonus+=r.bones; r.bones=0; }
+  r.muscle=(r.muscle||0)+muscleBonus;
+  return r;
+}
+/* Returns [{name,cat,grams}] for ONE pack of `packG` grams. Mirrors the calculator's
+   "split the category % evenly across the chosen items", including its two redistribution
+   rules: an empty secreting list gives its % to liver and vice versa; every other empty
+   category gives its % to muscle. */
+function _ffProfileRecipe(payload, packG){
+  const p=payload||{}; const total=+packG||0; if(!(total>0)) return [];
+  const pick=(p.ingredients&&typeof p.ingredients==='object')?p.ingredients:p;   // multi-pet nests them
+  const ratios=_ffRatios(p.feedingType, p.excludedCats);
+  const rows=[]; let toMuscle=0, toLiver=0, toSecreting=0;
+  const CATS=['bones','organ','liver','secreting','veggies','seeds','fruit'];
+  CATS.forEach(cat=>{
+    const pct=ratios[cat]||0; if(!pct) return;
+    const sel=(pick[cat]||[]).filter(Boolean);
+    if(!sel.length){ if(cat==='secreting') toLiver+=pct; else if(cat==='liver') toSecreting+=pct; else toMuscle+=pct; return; }
+    const per=(total*pct)/sel.length;
+    sel.forEach(item=>rows.push({name:item, cat, grams:per}));
+  });
+  if(toLiver>0){ const lr=rows.filter(r=>r.cat==='liver'); if(lr.length){ const e=(total*toLiver)/lr.length; lr.forEach(r=>r.grams+=e); } else toMuscle+=toLiver; }
+  if(toSecreting>0){ const sr=rows.filter(r=>r.cat==='secreting'); if(sr.length){ const e=(total*toSecreting)/sr.length; sr.forEach(r=>r.grams+=e); } else toMuscle+=toSecreting; }
+  const mus=(pick.muscle||[]).filter(Boolean);
+  const mpct=(ratios.muscle||0)+toMuscle;
+  if(mus.length && mpct>0){ const per=(total*mpct)/mus.length; mus.forEach(item=>rows.unshift({name:item, cat:'muscle', grams:per})); }
+  return rows.filter(r=>r.grams>0).map(r=>({...r, grams:Math.round(r.grams*10)/10}));
+}
+/* Map calculator ingredient NAMES to ERP SKUs. Same resolution order the calculator import
+   uses: learned alias → exact name → fuzzy contains. Returns {recipe, unmatched}. */
+async function _ffMapItems(items){
+  let ings=[]; try{ ings=await listIngredients(); }catch(e){}
+  await loadFFAliases(); const valid=new Set(ings.map(i=>i.sku));
+  const norm=s=>String(s||'').trim().toLowerCase();
+  const idx={}; ings.forEach(it=>{ [it.name,it.raw_input,it.approved_alt].forEach(nm=>{ const k=norm(nm); if(k&&!idx[k]) idx[k]=it.sku; }); });
+  const recipe=[], unmatched=[];
+  (items||[]).forEach(x=>{
+    const q=norm(x.name); let sku='';
+    if(FFCALC_ALIASES[q] && valid.has(FFCALC_ALIASES[q])) sku=FFCALC_ALIASES[q];
+    if(!sku) sku=idx[q]||'';
+    if(!sku){ const bare=q.replace(/\([^)]*\)/g,' ').replace(/\s+/g,' ').trim();   // "Broccoli (Precooked)" → "broccoli"
+      // Fold plurals so the calculator's "Strawberry" finds the master's "Strawberries".
+      const sing=w=>String(w||'').replace(/ies\b/g,'y').replace(/([^s])s\b/g,'$1');
+      const bs=sing(bare);
+      const hit=ings.find(it=>{ const a=norm(it.name), b=norm(it.raw_input);
+        return (a&&(a===bare||a.includes(bare)||bare.includes(a))) || (b&&(b===bare||b.includes(bare))); })
+        || ings.find(it=>{ const a=sing(norm(it.name)), b=sing(norm(it.raw_input));
+        return (a&&(a===bs||a.includes(bs)||bs.includes(a))) || (b&&(b===bs||b.includes(bs))); });
+      if(hit) sku=hit.sku; }
+    if(!sku) unmatched.push(x.name);
+    recipe.push({ingredient_sku:sku, grams:+x.grams||0, src_name:x.name});
+  });
+  return {recipe, unmatched};
+}
+
 // Learned calculator-name → SKU aliases (so a mapping done once sticks forever).
 let FFCALC_ALIASES=null;
 async function loadFFAliases(){ if(FFCALC_ALIASES) return FFCALC_ALIASES; FFCALC_ALIASES={};
@@ -3800,18 +4333,23 @@ function drawProdPlan(){
   const outAll=_allIng.filter(i=>i.is_intermediate);
   const _bs={},_bn={}; _allIng.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
   const inOut=new Set(prodOutLines.map(l=>l.ingredient_sku));
-  const outAvail=outAll.filter(i=>!inOut.has(i.sku));
-  const outPick=hierGroups(outAvail,{g1:'ingredient_group'}).map(G=>`<optgroup label="${esc(G.g1)}">`+G.all.map(i=>{ const p=_procParent(i,_bs,_bn); return `<option value="${esc(i.sku)}">${esc(i.name)}${p?' ← '+esc(p.name):''}</option>`; }).join('')+`</optgroup>`).join('');
+  const outAvail=_outIngRows(_allIng, outAll.filter(i=>!inOut.has(i.sku)));
+  // Grouped exactly like the weekly count: Category → base material.
+  const outPick=hierGroups(outAvail,{g1:'_g1',g2:'_g2'}).map(G=>`<optgroup label="${esc(G.g1)}">`+
+    G.subs.map(S=>S.items.map(i=>{ // don't repeat the base material when the item name already says it
+      const pre=(S.g2 && !String(i._nm||'').toLowerCase().includes(String(S.g2).toLowerCase()))?esc(S.g2)+' › ':'';
+      return `<option value="${esc(i.sku)}">${pre}Processed: ${esc(i._nm)}${i._raw?'  ·  Raw: '+esc(i._raw):''}</option>`; }).join('')).join('')+`</optgroup>`).join('');
+  const outRows=_outIngRows(_allIng, prodOutLines.map(l=>_bs[l.ingredient_sku]||{sku:l.ingredient_sku,name:l.name}));
   h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Output ingredients</span>
     <span style="color:var(--muted);font-size:12px">Make processed stock directly from raw (prep ahead of a run). Raw used = needed ÷ yield%. Confirm records the actuals.</span></div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Output (processed) ingredient</th><th>From raw</th><th class="num">Needed qty (kg)</th><th></th></tr></thead><tbody>
-    ${prodOutLines.map((l,i)=>{ const it=_bs[l.ingredient_sku]||{}; const p=_procParent(it,_bs,_bn);
-      return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.ingredient_sku)}</code></div></td>
-      <td class="mini" style="color:var(--muted)">${p?esc(p.name):'<span style="color:var(--danger)">no raw parent</span>'}</td>
+    <div style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Needed qty (kg)</th><th></th></tr></thead><tbody>
+    ${prodOutLines.map((l,i)=>{ const r=outRows[i]||{};
+      return `<tr><td><span class="tagf tagf-proc">Processed</span> ${esc(r._nm||l.name)}<div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''} · <code>${esc(l.ingredient_sku)}</code></div></td>
+      <td class="mini">${r._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(r._raw)}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
       <td class="num"><input type="number" step="any" style="width:90px;text-align:right" value="${l.needed_kg||''}" oninput="prodOutLines[${i}].needed_kg=+this.value||0"></td>
       <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="4" class="empty">Optional — add a processed ingredient to make to stock.</td></tr>'}
     </tbody></table></div>
-    <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><button class="btn sec sm" onclick="prodOutPick()">🔎 Search &amp; add</button><span class="addrow">＋ quick add</span>
+    <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button><span class="addrow">＋ quick add</span>
       <select id="prodOutAdd" onchange="prodAddOut(this.value)"><option value="">— pick an output ingredient —</option>${outPick}</select></div></div>`;
   $('content').innerHTML=h;
 }
@@ -3860,29 +4398,32 @@ function prodOutPick(){
   const ings=(window._prodAllIngredients||[]).filter(i=>i.is_intermediate); if(!ings.length){ toast('No output (processed) ingredients defined',true); return; }
   window._opQty={}; prodOutLines.forEach(l=>window._opQty[l.ingredient_sku]=+l.needed_kg||0);
   window._opQ=''; window._opG='';
-  const groups=[...new Set(ings.map(i=>i.ingredient_group||'—'))].sort();
-  $('modal').innerHTML=`<div><h3>🔎 Output ingredients — search &amp; add</h3>
-    <p class="mini">Search &amp; filter the processed ingredients to make to stock, then enter <b>needed kg</b>. Apply updates the plan's output list.</p>
+  const groups=[...new Set(_outIngRows(window._prodAllIngredients||[],ings).map(i=>i._g1||'—'))].sort();
+  $('modal').innerHTML=`<div><h3>🔎 Output ingredients — browse &amp; add</h3>
+    <p class="mini">Grouped by <b>category → base material</b>, the same way the weekly count sheet reads. Enter <b>needed kg</b> against any row; Apply updates the plan's output list.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
-      <input id="op_q" placeholder="🔎 search name / SKU / group…" oninput="window._opQ=this.value;drawOutPickBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
-      <select onchange="window._opG=this.value;drawOutPickBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All groups</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
+      <input id="op_q" placeholder="🔎 search name / SKU / raw parent…" oninput="window._opQ=this.value;drawOutPickBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
+      <select onchange="window._opG=this.value;drawOutPickBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All categories</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
     </div>
-    <div style="max-height:380px;overflow:auto"><table><thead><tr><th>Output ingredient</th><th>From raw</th><th class="num">Needed kg</th></tr></thead><tbody id="opBody"></tbody></table></div>
+    <div style="max-height:380px;overflow:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Needed kg</th></tr></thead><tbody id="opBody"></tbody></table></div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="prodOutApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   $('overlay').classList.add('on'); drawOutPickBody();
 }
 function drawOutPickBody(){
-  const ings=(window._prodAllIngredients||[]); const outs=ings.filter(i=>i.is_intermediate);
-  const _bs={},_bn={}; ings.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
+  const ings=(window._prodAllIngredients||[]);
+  const rows=_outIngRows(ings, ings.filter(i=>i.is_intermediate));
   const q=(window._opQ||'').toLowerCase().split(/\s+/).filter(Boolean); const gf=window._opG||'';
-  const match=i=>{ if(gf && (i.ingredient_group||'—')!==gf) return false; if(!q.length) return true;
-    const t=[i.name,i.sku,i.ingredient_group,i.raw_input,i.category].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
-  const shown=outs.filter(match); let body='';
-  hierGroups(shown,{g1:'ingredient_group'}).forEach(G=>{
-    body+=`<tr style="background:#f6f8f4"><td colspan="3" style="padding-left:10px">▸ <b>${esc(G.g1)}</b></td></tr>`;
-    G.all.forEach(i=>{ const p=_procParent(i,_bs,_bn); const v=(window._opQty&&window._opQty[i.sku]!=null)?window._opQty[i.sku]:'';
-      body+=`<tr><td>${esc(i.name)}<div class="mini"><code>${esc(i.sku)}</code></div></td><td class="mini" style="color:var(--muted)">${p?esc(p.name):'<span style="color:var(--danger)">no raw parent</span>'}</td>
-        <td><input type="number" step="any" value="${v}" oninput="window._opQty['${esc(i.sku)}']=this.value===''?'':(+this.value||0)" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); });
+  const match=i=>{ if(gf && (i._g1||'—')!==gf) return false; if(!q.length) return true;
+    const t=[i._nm,i.name,i.sku,i._g1,i._g2,i._raw,i.raw_input,i.category].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
+  const shown=rows.filter(match); let body='';
+  hierGroups(shown,{g1:'_g1',g2:'_g2'}).forEach(G=>{
+    body+=`<tr class="grp"><td colspan="3" style="padding-left:10px">▸ <b>${esc(G.g1)}</b></td></tr>`;
+    G.subs.forEach(S=>{
+      if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="3" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
+      S.items.forEach(i=>{ const v=(window._opQty&&window._opQty[i.sku]!=null)?window._opQty[i.sku]:'';
+        body+=`<tr><td style="padding-left:26px"><span class="tagf tagf-proc">Processed</span> ${esc(i._nm)}<div class="mini" style="color:var(--muted)"><code>${esc(i.sku)}</code>${i.yield_pct?' · yield '+esc(i.yield_pct)+'%':''}</div></td>
+          <td class="mini">${i._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(i._raw)}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
+          <td><input type="number" step="any" value="${v}" oninput="window._opQty['${esc(i.sku)}']=this.value===''?'':(+this.value||0)" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); }); });
   const el=$('opBody'); if(el) el.innerHTML=body||'<tr><td colspan="3" class="empty">No output ingredients match.</td></tr>';
 }
 function prodOutApply(){ const q=window._opQty||{}; let n=0;
@@ -3894,7 +4435,17 @@ function prodOutApply(){ const q=window._opQty||{}; let n=0;
   closeModal(); drawProdPlan(); toast(n?('Applied · '+n+' output ingredient(s)'):'Output list cleared');
 }
 /* ---- Kitchen batch sheet — styled like the Fresh Food Calculator's Kitchen Batch printout (#8) ---- */
-function _kbColor(cat){ const pal=['#c0392b','#8e44ad','#2980b9','#16a085','#d35400','#27ae60','#b5762a','#2c3e50']; let h=0; const s=String(cat||''); for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))|0; return pal[Math.abs(h)%pal.length]; }
+/* Category colours lifted from the Kitchen Production Dashboard so the printed sheet and the
+   dashboard read as one document. Unknown categories fall back to the old stable hash. */
+const KB_PALETTE=[[/muscle\s*meat|^meat/i,'#1D9E75'],[/oily|sardine|mackerel/i,'#0E7C9D'],
+  [/muscle\s*organ|organ(?!.*secre)/i,'#7F77DD'],[/bone/i,'#D85A30'],[/liver/i,'#BA7517'],
+  [/secret/i,'#D4537E'],[/veg/i,'#639922'],[/seed/i,'#888780'],[/fruit|berr/i,'#E24B4A'],
+  [/fish/i,'#0E7C9D'],[/supplement|eggshell/i,'#7b6fe0'],[/supply|supplies|packag|sticker/i,'#5C5C5C']];
+function _kbColor(cat){ const s=String(cat||'');
+  for(const [re,c] of KB_PALETTE) if(re.test(s)) return c;
+  const pal=['#c0392b','#8e44ad','#2980b9','#16a085','#d35400','#27ae60','#b5762a','#2c3e50'];
+  let h=0; for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))|0; return pal[Math.abs(h)%pal.length]; }
+const _kbIsBone=c=>/bone/i.test(String(c||''));
 async function prodKitchenSheet(){
   const lines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
   if(!lines.length){ toast('Add products with packs first (Kitchen cart)',true); return; }
@@ -3904,21 +4455,72 @@ async function prodKitchenSheet(){
   const _kg=x=>(Math.round(x*100)/100).toLocaleString('en-PH');
   const _g=x=>Math.round(x).toLocaleString('en-PH');
   // Per-product Kitchen Batch block (calculator style): Category | Ingredient | Per pack | Total (g) | Total (kg)
+  // ---- Cover summary (page 1 of the Kitchen Production Dashboard layout) ----
+  let dayPacks=0, dayKg=0;
+  const summaryRows=lines.map(l=>{
+    const packs=+l.good_packs||0; const p=pm[l.product_sku]||{};
+    const perPackTot=(bm[l.product_sku]||[]).reduce((s,x)=>s+(+x.processed_g||0),0);
+    const packG=+p.pack_g||Math.round(perPackTot);
+    dayPacks+=packs; dayKg+=(packG*packs)/1000;
+    return `<tr><td class="mix">${esc(l.name||l.product_sku)}</td><td class="num">${packs}</td><td class="num">${_g(packG)} g</td></tr>`;
+  }).join('');
+  const fillLines=n=>Array.from({length:n},()=>'<div class="line"></div>').join('');
+  const cover=`<div class="cover">
+    <div class="cover-title"><h1>Wholesome Rabbit — Daily Production Sheet</h1>
+      <div class="meta">${esc(_kbLongDate(prodPlanDate))}</div></div>
+    <div class="cover-sec"><h3>Today's Production Summary</h3>
+      <table class="day-summary"><thead><tr><th>Mix</th><th class="num">Pack Qty</th><th class="num">Pack Size</th></tr></thead>
+      <tbody>${summaryRows}</tbody></table>
+      <div class="day-totals">
+        <div class="day-total-card"><div class="lbl">Total Packs (All Products)</div><div class="val">${_g(dayPacks)}</div></div>
+        <div class="day-total-card"><div class="lbl">Grand Total for the Day</div><div class="val">${_kg(dayKg)} kg</div></div></div></div>
+    <div class="cover-sec"><h3>Team &amp; Sign-Off</h3>
+      <div class="cover-2col">
+        <div>${['Generated by','Date / time','Shift lead / supervisor','Verified / checked by']
+          .map(x=>`<div class="cover-fill-row"><span>${x}</span><div class="line"></div></div>`).join('')}</div>
+        <div><div class="cover-fill-row" style="align-items:flex-start"><span>Team on duty today</span>
+          <div style="flex:1">${fillLines(5)}</div></div></div></div></div>
+    <div class="cover-sec"><h3>Notes / Reminders</h3><div class="note-lines">${fillLines(5)}</div></div>
+  </div>`;
+
+  // ---- One block per mix: ingredients with the category colour key, then its own tracking box ----
   const productBlocks=lines.map(l=>{
     const packs=+l.good_packs||0; const p=pm[l.product_sku]||{}; const blines=(bm[l.product_sku]||[]);
     const perPackTot=blines.reduce((s,x)=>s+(+x.processed_g||0),0);
     const packG=+p.pack_g||Math.round(perPackTot);
     const batchKg=(packG*packs)/1000;
-    const byCat={}; blines.forEach(x=>{ const it=im[x.ingredient_sku]||{}; const cat=it.category||it.ingredient_group||'Other'; (byCat[cat]=byCat[cat]||[]).push({name:it.name||x.ingredient_sku, perPack:+x.processed_g||0}); });
-    let rows=''; Object.keys(byCat).forEach(cat=>{ const col=_kbColor(cat);
-      rows+=`<tr class="catrow"><td colspan="5"><span class="dot" style="background:${col}"></span>${esc(cat)}</td></tr>`;
-      byCat[cat].forEach(r=>{ const tg=r.perPack*packs; rows+=`<tr><td></td><td>${esc(r.name)}</td><td class="r">${_g(r.perPack)} g</td><td class="r b">${_g(tg)} g</td><td class="r b" style="color:#185fa5">${_kg(tg/1000)} kg</td></tr>`; }); });
-    return `<div class="kbcard">
-      <div class="kbhd"><div class="kbtitle">${esc(l.name||l.product_sku)}</div>
-        <div class="kbmeta">${p.feeding_style?esc(p.feeding_style)+' · ':''}<code>${esc(l.product_sku)}</code> · <b>${packs}</b> × ${_g(packG)}g pack</div></div>
-      <table class="kb"><thead><tr><th>Category</th><th>Ingredient</th><th class="r">Per pack</th><th class="r">Total (g)</th><th class="r">Total (kg)</th></tr></thead><tbody>${rows||'<tr><td colspan="5" style="color:#999">No recipe on this product.</td></tr>'}</tbody></table>
-      <div class="kbsum"><div class="kbpack">Mix all ingredients → Weigh <b>${_g(packG)}g per pack</b> → Seal.</div>
-        <div class="kbtiles"><div class="kbtile"><div class="v">${_g(perPackTot)}g</div><div class="l">Food / pack</div></div><div class="kbtile"><div class="v">${_g(packG)}g</div><div class="l">Per pack (total)</div></div><div class="kbtile big"><div class="v">${_kg(batchKg)}kg</div><div class="l">${packs} × ${_g(packG)}g · total batch</div></div></div></div>
+    const cats=[];
+    const rows=blines.slice().sort((a,b)=>(+b.processed_g||0)-(+a.processed_g||0)).map(x=>{
+      const it=im[x.ingredient_sku]||{}; const cat=it.category||it.ingredient_group||'Other';
+      if(!cats.includes(cat)) cats.push(cat);
+      const col=_kbColor(cat); const per=+x.processed_g||0; const tot=per*packs;
+      return `<tr><td><span class="ingred-name"><span class="dot" style="background:${col}"></span>${esc(it.name||x.ingredient_sku)}${_kbIsBone(cat)?'<span class="bone-flag">🦴 BONE</span>':''}</span>
+        <div class="ingred-note">${esc(cat)}${it.processing_method?' · '+esc(it.processing_method):''}</div></td>
+        <td class="num">${_g(per)} g</td><td class="num b">${_g(tot)} g</td><td class="num b" style="color:#185fa5">${_kg(tot/1000)} kg</td></tr>`;
+    }).join('');
+    const legend=cats.map(c=>`<span class="legend-item"><span class="dot" style="background:${_kbColor(c)}"></span>${esc(c)}</span>`).join('');
+    return `<div class="mix-block">
+      <div class="mix-title">${esc(l.name||l.product_sku)}</div>
+      <div class="mix-sub"><b>${packs} packs</b> × ${_g(packG)} g planned${p.feeding_style?' · '+esc(p.feeding_style):''}<span class="sku-badge">${esc(l.product_sku)}</span></div>
+      <table class="ingred"><thead><tr><th>Ingredient</th><th class="num">Per Pack</th><th class="num">Total Needed</th><th class="num">kg</th></tr></thead>
+        <tbody>${rows||'<tr><td colspan="4" style="color:#999">No recipe on this product.</td></tr>'}</tbody>
+        <tfoot>
+          <tr class="totals-row"><td>Total per pack</td><td class="num">${_g(perPackTot)} g</td><td class="num">—</td><td class="num">—</td></tr>
+          <tr class="totals-row"><td>Total — all ${packs} packs</td><td class="num">—</td><td class="num">${_g(packG*packs)} g</td><td class="num">${_kg(batchKg)} kg</td></tr>
+        </tfoot></table>
+      <div class="ingred-legend"><h3>Color Key</h3><div class="legend-items">${legend}</div></div>
+      <div class="kbsum"><div class="kbpack">Mix all ingredients → Weigh <b>${_g(packG)} g per pack</b> → Seal → Label.</div>
+        <div class="kbtiles">
+          <div class="kbtile"><div class="v">${_g(perPackTot)}g</div><div class="l">Food / pack</div></div>
+          <div class="kbtile"><div class="v">${_g(packG)}g</div><div class="l">Per pack (total)</div></div>
+          <div class="kbtile big"><div class="v">${_kg(batchKg)}kg</div><div class="l">${packs} × ${_g(packG)}g · total batch</div></div></div></div>
+      <div class="tracking-block"><h3>Pagsubaybay sa Produksyon</h3>
+        <div class="tracking-2col">
+          <div>${['Oras ng simula','Oras ng tapos','Naghalo (pangalan)','Timbang ng batch (kg)']
+            .map(x=>`<div class="track-row"><span>${x}</span><div class="fill-line"></div></div>`).join('')}</div>
+          <div>${['Packs na natapos','Reject / waste (g)','Lot / best-before','Tsinek ni (QC)']
+            .map(x=>`<div class="track-row"><span>${x}</span><div class="fill-line"></div></div>`).join('')}</div>
+        </div></div>
     </div>`; }).join('');
   // Aggregate ingredient prep — raw to pull + processing reminders (ERP value-add), kept below the batches.
   const agg={}; lines.forEach(l=>{ const packs=+l.good_packs||0; (bm[l.product_sku]||[]).forEach(line=>{ const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{procG:0}; a.procG+=line.processed_g*packs; }); });
@@ -3926,34 +4528,99 @@ async function prodKitchenSheet(){
     return {name:it.name||sku, method:(it.processing_method||'').trim(), procKg, rawKg, yieldPct:Math.round(y*100), parent:(pp&&pp.name)||(it.raw_input||'—')}; }).sort((a,b)=>b.rawKg-a.rawKg);
   const prepRows=prep.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.parent)}</td><td class="r">${_kg(r.rawKg)} kg</td><td class="r">${_kg(r.procKg)} kg</td><td class="r">${r.yieldPct}%</td><td>${esc(r.method)||'<i style="color:#999">— set processing method in Ingredients —</i>'}</td></tr>`).join('');
   const subNote=Object.keys(window._prodSub||{}).length?`<div class="subnote"><b>Substitutions in effect:</b> ${Object.keys(window._prodSub).map(o=>esc((im[o]||{}).name||o)+' → '+esc((im[window._prodSub[o]]||{}).name||window._prodSub[o])).join(', ')}</div>`:'';
-  const css=`@page{margin:12mm}body{font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;font-size:11px}
-    h1{color:#1a1a1a;margin:0;font-size:18px}.sub{color:#555;font-size:12px;margin:2px 0 12px}
-    .kbcard{border:2px solid #1a1a1a;border-radius:8px;padding:12px 14px;margin:0 0 16px;page-break-inside:avoid}
-    .kbhd{border-bottom:1px solid rgba(0,0,0,.15);padding-bottom:8px;margin-bottom:8px}
-    .kbtitle{font-size:18px;font-weight:800;letter-spacing:-.3px}.kbmeta{font-size:11px;color:#555;margin-top:2px}
-    table.kb{width:100%;border-collapse:collapse;font-size:11px}table.kb th{background:#1a1a1a;color:#fff;padding:5px 7px;text-align:left;font-size:9.5px;text-transform:uppercase;letter-spacing:.04em}
-    table.kb td{padding:4px 7px;border-bottom:1px solid #eee}.kb .r{text-align:right}.kb .b{font-weight:700}
-    tr.catrow td{background:#f5f4f0;font-weight:700;color:#1a1a1a}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
-    .kbsum{margin-top:10px;border:1px solid rgba(0,0,0,.15);border-radius:6px;overflow:hidden}
-    .kbpack{background:#f5f4f0;padding:8px 10px;font-weight:600;border-bottom:1px solid rgba(0,0,0,.12)}
-    .kbtiles{display:flex;gap:0}.kbtile{flex:1;padding:8px 10px;text-align:center;border-right:1px solid #eee}.kbtile:last-child{border-right:0}
-    .kbtile .v{font-size:15px;font-weight:800}.kbtile .l{font-size:9px;color:#666;text-transform:uppercase;letter-spacing:.04em}
-    .kbtile.big{background:#1a1a1a;color:#fff}.kbtile.big .l{color:#ccc}
-    h3{color:#1a1a1a;margin:18px 0 6px;font-size:13px}table.prep{width:100%;border-collapse:collapse;font-size:11px}
-    table.prep th{background:#4e7a3e;color:#fff;padding:5px 7px;text-align:left}table.prep td{padding:4px 7px;border-bottom:1px solid #eee}table.prep .r{text-align:right}
+  const css=`@page{margin:12mm}
+    :root{--ink:#1f1d1a;--sub:#6b675f;--line:#e3e0d8;--accent:#1D9E75}
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,Helvetica,sans-serif;color:var(--ink);font-size:11px;margin:0}
+    h1{margin:0;font-size:20px;letter-spacing:-.2px}
+    h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--sub)}
+    .num,.r{text-align:right}.b{font-weight:700}
+    /* ---- cover ---- */
+    .cover{page-break-after:always}
+    .cover-title{border-bottom:3px solid var(--ink);padding-bottom:10px;margin-bottom:18px}
+    .cover-title .meta{color:var(--sub);font-size:12px;margin-top:4px}
+    .cover-sec{margin-bottom:22px}
+    table.day-summary{width:100%;border-collapse:collapse;font-size:11.5px}
+    table.day-summary th{background:var(--ink);color:#fff;padding:6px 9px;text-align:left;font-size:9.5px;text-transform:uppercase;letter-spacing:.05em}
+    table.day-summary th.num{text-align:right}
+    table.day-summary td{padding:6px 9px;border-bottom:1px solid var(--line)}
+    table.day-summary td.mix{font-weight:600}
+    .day-totals{display:flex;gap:12px;margin-top:12px}
+    .day-total-card{flex:1;border:2px solid var(--ink);border-radius:8px;padding:10px 12px}
+    .day-total-card .lbl{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--sub)}
+    .day-total-card .val{font-size:22px;font-weight:800;margin-top:3px}
+    .cover-2col{display:flex;gap:28px}.cover-2col>div{flex:1}
+    .cover-fill-row{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+    .cover-fill-row span{width:150px;color:var(--sub);font-size:10.5px;flex-shrink:0}
+    .line{flex:1;border-bottom:1px solid #b9b5aa;height:15px}
+    .note-lines>div{border-bottom:1px solid #b9b5aa;height:22px}
+    /* ---- one block per mix ---- */
+    .mix-block{border:2px solid var(--ink);border-radius:10px;padding:14px 16px;margin:0 0 16px;page-break-inside:avoid}
+    .mix-title{font-size:17px;font-weight:800;letter-spacing:-.3px}
+    .mix-sub{font-size:11px;color:var(--sub);margin:2px 0 10px}
+    .sku-badge{display:inline-block;background:#f0eee7;border:1px solid var(--line);border-radius:4px;
+      padding:1px 6px;margin-left:8px;font-family:ui-monospace,Menlo,monospace;font-size:9.5px;color:var(--ink)}
+    table.ingred{width:100%;border-collapse:collapse;font-size:11px}
+    table.ingred th{background:var(--ink);color:#fff;padding:5px 8px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em}
+    table.ingred th.num{text-align:right}
+    table.ingred td{padding:5px 8px;border-bottom:1px solid #eeece5;vertical-align:top}
+    .ingred-name{font-weight:600}
+    .ingred-note{font-size:9px;color:var(--sub);margin-top:1px}
+    .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
+    .bone-flag{display:inline-block;background:#fbe7df;color:#a8360f;border-radius:4px;padding:0 5px;margin-left:6px;font-size:8.5px;font-weight:800}
+    tr.totals-row td{background:#f7f6f2;font-weight:700;border-top:1px solid var(--ink)}
+    .ingred-legend{margin-top:10px}
+    .legend-items{display:flex;flex-wrap:wrap;gap:10px 16px}
+    .legend-item{font-size:9.5px;color:var(--sub)}
+    .kbsum{margin-top:10px;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+    .kbpack{background:#f7f6f2;padding:8px 10px;font-weight:600;border-bottom:1px solid var(--line)}
+    .kbtiles{display:flex}.kbtile{flex:1;padding:8px 10px;text-align:center;border-right:1px solid var(--line)}
+    .kbtile:last-child{border-right:0}.kbtile .v{font-size:15px;font-weight:800}
+    .kbtile .l{font-size:8.5px;color:var(--sub);text-transform:uppercase;letter-spacing:.05em}
+    .kbtile.big{background:var(--ink);color:#fff}.kbtile.big .l{color:#bdb9b0}
+    /* ---- tracking / sign-off ---- */
+    .tracking-block{margin-top:12px;border-top:1px dashed #c9c5ba;padding-top:10px}
+    .tracking-2col{display:flex;gap:24px}.tracking-2col>div{flex:1}
+    .track-row{display:flex;align-items:center;gap:8px;margin-bottom:13px}
+    .track-row span{width:120px;font-size:10px;color:var(--sub);flex-shrink:0}
+    .fill-line{flex:1;border-bottom:1px solid #b9b5aa;height:14px}
+    /* ---- prep list ---- */
+    table.prep{width:100%;border-collapse:collapse;font-size:11px}
+    table.prep th{background:var(--accent);color:#fff;padding:6px 8px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:.05em}
+    table.prep td{padding:5px 8px;border-bottom:1px solid #eeece5}
+    .section{margin-top:22px;page-break-inside:avoid}
     .subnote{background:#fdf6ec;border:1px solid #e6c98a;border-radius:6px;padding:8px 10px;margin:0 0 12px;color:#8a5a12}
-    .foot{margin-top:18px;color:#888;font-size:10px}`;
-  const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Kitchen Batch — ${esc(prodPlanDate)}</title><style>${css}</style></head><body>
-    <h1>🍳 Kitchen Batch Production</h1>
-    <div class="sub">Wholesome Rabbit · Production date <b>${esc(prodPlanDate)}</b> · prepared by: ____________________</div>
+    .paalala{background:#f7f6f2;border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+    .paalala ul{margin:6px 0 0;padding-left:18px}.paalala li{margin-bottom:4px}
+    .foot{margin-top:18px;color:#8d8a82;font-size:9.5px;border-top:1px solid var(--line);padding-top:8px}`;
+  const paalala=prep.filter(r=>r.method).map(r=>`<li><b>${esc(r.name)}</b> — ${esc(r.method)}</li>`).join('')
+    || '<li>Walang nakatakdang <i>processing method</i> sa Master Data → Ingredients.</li>';
+  const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Kitchen Production Sheet — ${esc(prodPlanDate)}</title><style>${css}</style></head><body>
+    ${cover}
     ${subNote}
     ${productBlocks}
-    <h3>Ingredient prep — pull, process &amp; how</h3>
-    <table class="prep"><thead><tr><th>Processed ingredient</th><th>From raw</th><th class="r">Raw to pull</th><th class="r">Process into</th><th class="r">Yield</th><th>How to process</th></tr></thead><tbody>${prepRows}</tbody></table>
-    <div class="foot">Raw to pull = processed needed ÷ yield%. Processing reminders come from each ingredient's "Processing method" (Master Data → Ingredients). Printed ${new Date().toLocaleString()} · confirm the run in the app after producing to post stock &amp; yield.</div>
+    <div class="section"><h3>Combined Shopping / Prep List</h3>
+      <table class="prep"><thead><tr><th>Processed ingredient</th><th>From raw</th><th class="r">Raw to pull</th><th class="r">Process into</th><th class="r">Yield</th><th>How to process</th></tr></thead>
+      <tbody>${prepRows||'<tr><td colspan="6" style="color:#999">Nothing to prep.</td></tr>'}</tbody></table></div>
+    <div class="section paalala"><h3>Mga Paalala sa Paghahanda</h3>
+      <ul>${paalala}</ul>
+      <div style="font-size:10px;color:#6b675f;margin-top:8px">Raw to pull = kailangang processed ÷ yield%. Timbangin ang bawat sangkap bago ihalo. Iwasang paghaluin ang hilaw at prosesong kagamitan.</div></div>
+    <div class="section"><h3>Packaging</h3>
+      <div class="tracking-2col">
+        <div>${['Packs na ginamit','Sticker / label','Sealer setting'].map(x=>`<div class="track-row"><span>${x}</span><div class="fill-line"></div></div>`).join('')}</div>
+        <div>${['Nag-pack (pangalan)','Oras ng pack','Nag-check'].map(x=>`<div class="track-row"><span>${x}</span><div class="fill-line"></div></div>`).join('')}</div></div></div>
+    <div class="section"><h3>Mga Tala</h3><div class="note-lines">${fillLines(4)}</div></div>
+    <div class="section"><h3>Pangkalahatang Sign-Off (Araw ng Produksyon)</h3>
+      <div class="cover-2col">
+        <div>${['Production lead','Petsa / oras'].map(x=>`<div class="cover-fill-row"><span>${x}</span><div class="line"></div></div>`).join('')}</div>
+        <div>${['QC / verified by','Petsa / oras'].map(x=>`<div class="cover-fill-row"><span>${x}</span><div class="line"></div></div>`).join('')}</div></div></div>
+    <div class="foot">Printed ${new Date().toLocaleString()} · Wholesome Rabbit ERP. Confirm the run in the app after producing so stock, raw draw-down and yield are posted.</div>
     </body></html>`;
   const w=window.open('','_pr','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; } w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
 }
+/* "2026-08-14" → "Friday, August 14, 2026" for the sheet's cover. */
+function _kbLongDate(d){ try{ const t=new Date(String(d)+'T00:00:00'); if(isNaN(t.getTime())) return String(d||'');
+  return t.toLocaleDateString(undefined,{weekday:'long',year:'numeric',month:'long',day:'numeric'}); }catch(e){ return String(d||''); } }
+
 /* ---- BOM substitution for a run (#3) with add/remove counter ---- */
 async function prodSubstitute(){
   const lines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
@@ -4187,6 +4854,22 @@ async function openProcessing(){
   if(!(window._procLines&&window._procLines.length)) window._procLines=[{sku:'',kg:''}];
   drawProcessing();
 }
+/* Shared classification for every "pick a processed (output) ingredient" surface, so the
+   Production Plan groups exactly like the weekly count: Category → base material, with the
+   raw parent alongside. Returns decorated rows carrying _g1 / _g2 / _nm / _raw for hierGroups. */
+function _outIngCtx(ings){
+  const bs={}, bn={}; (ings||[]).forEach(i=>{ bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm) bn[nm]=i; });
+  const pm=_countProcMaps(ings||[],bs,bn);
+  return {bs, bn, ctx:{bs, bn, procBases:pm.bases, procCat:pm.catByBase}};
+}
+function _outIngRows(ings, list){
+  const {bs,bn,ctx}=_outIngCtx(ings);
+  return (list||[]).map(i=>{ const cl=_countIngClass(i,ctx); const p=_procParent(i,bs,bn);
+    return {...i, _g1:cl.g1, _g2:cl.g2, _nm:_outName(i,cl), _raw:p?p.name:'', _grank:cl.grank}; });
+}
+/* "Rabbit Ground Whole (w/ organs) — Processed" reads better here as just the item name;
+   the "Processed:" / "Raw:" labels live in the two columns instead. */
+function _outName(i,cl){ return String(cl&&cl.name||i.name||i.sku).replace(/\s+—\s+Processed$/i,'').trim(); }
 function _procParent(it,bySku,byName){ if(!it) return null;
   const bySrc=it.source_sku&&bySku[it.source_sku]?bySku[it.source_sku]:null;
   const ri=(it.raw_input||'').trim().toLowerCase(); const byRi=(ri&&byName[ri]&&byName[ri].sku!==it.sku)?byName[ri]:null;
@@ -4278,6 +4961,11 @@ async function renderCountForm(idEnc){
     }catch(e){} }
   else { countRec={count_ref:'',location_code:'bulacan',count_date:todayISO(),status:'draft',scope:['All']}; countLines=[]; }
   await loadBins();
+  // Proof trail — attachments, messages and @mentions hang off the count session itself
+  // (model 'count_sessions', ref = count_ref), same store as every other record.
+  formRec=countRec; formTab=0;
+  formNotes = formIsNew ? [] : await notesForRecord('count_sessions', countRec.count_ref);
+  formAtts  = formIsNew ? [] : await attsForRecord('count_sessions', countRec.count_ref);
   drawCountForm();
 }
 function drawCountForm(){
@@ -4324,6 +5012,7 @@ function drawCountForm(){
     <div class="notebook"><div class="nbtabs"><button class="on">Count Lines (${countLines.length})</button></div>
       <div class="lines"><table><thead><tr><th class="num">#</th><th>Item</th><th>SKU</th><th>Bin</th><th class="num">Book qty</th><th class="num">Counted</th><th class="num">Variance</th></tr></thead>
       <tbody>${lineRows||'<tr><td colspan="7" class="empty">Pick a scope and Load items.</td></tr>'}</tbody></table></div></div>
+    ${!formIsNew?`<div style="padding:4px 22px 14px">${attachHtml()}<div class="hint" style="margin-top:8px">📸 Attach the signed count sheet, shelf photos, or the scale readout here — they stay with ${esc(countRec.count_ref||'this count')} as the proof behind every variance it posts.</div></div>`:''}
   </div>
   <div class="formbar">
     ${!approved?`<button class="btn" onclick="countSave()">💾 Save draft</button>`:''}
@@ -4334,7 +5023,9 @@ function drawCountForm(){
     ${!approved?`<button class="btn sec" onclick="document.getElementById('countUpFile').click()">⬆ Upload counts</button><input id="countUpFile" type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="countStageCounts(event)">`:''}
     <button class="btn sec" onclick="state.view=\'list\';route()">Back</button>
     <span style="flex:1"></span><span style="color:var(--muted)">${isLive()?'Live':'Demo'}</span>
-  </div></div>`;
+  </div>${formIsNew?'':`<div class="sidecol">${notesPanelHtml()}</div>`}</div>`;
+  // Two-column layout only once the session exists — a new count has nothing to hang notes on.
+  const wrap=$('content').firstElementChild; if(wrap && !formIsNew) wrap.classList.add('formcols-count');
 }
 // Printable physical-count sheet as a styled PDF (fixed header, page "X of Y", item #, section
 // grouping). Falls back to the browser print dialog if the PDF library can't load.
@@ -4480,6 +5171,8 @@ async function countSave(){
       DEMO.count_lines=(DEMO.count_lines||[]).filter(r=>r.count_ref!==countRec.count_ref).concat(countLines.map(l=>({count_ref:countRec.count_ref,...l})));
     }
     sysLog('count_sessions',countRec.count_ref,'📝 Draft saved by '+CURRENT_USER); toast('Saved draft');
+    // The session now exists, so the proof rail (attachments + messages) can attach to it.
+    if(formIsNew){ formIsNew=false; formRec=countRec; await renderForm(); }
   }catch(e){ toast(e.message,true); }
 }
 async function countApprove(){
@@ -5379,16 +6072,58 @@ let _opRows=null, _opReport=null, _opLoc='bulacan';
 function openOpeningImport(){ _opRows=null; _opReport=null;
   $('modal').innerHTML=`<div><h3>📥 Upload opening inventory balances</h3>
     <p class="mini">Pick the <b>location</b> you're uploading for, then: 1) Download the <b>styled 4-tab Excel</b> (Ingredients, Products, Kitchen Supplies, Stickers) or the <b>4 PDFs</b> (one per section, fixed header + page numbers + item #), grouped like the Weekly Count sheet: category → base material, each item's <b>raw + processed</b> together. 2) Enter the <b>qty</b> per row — ingredients in <b>kg</b>, supplies in their <b>unit</b>, products/stickers in <b>pieces</b>. 3) Upload &amp; Test, then Import. Everything posts to the location you chose here. Re-uploading replaces the previous opening upload <i>for that location</i>.</p>
-    <div class="fld" style="margin:10px 0"><label>Location</label><div class="val"><select id="opLocSel" onchange="_opLoc=this.value">${['bulacan','pasig'].map(l=>`<option value="${l}" ${_opLoc===l?'selected':''}>${l}</option>`).join('')}</select></div></div>
+    <div class="fld" style="margin:10px 0"><label>Location</label><div class="val"><select id="opLocSel" onchange="_opLoc=this.value;obProofLoad()">${['bulacan','pasig'].map(l=>`<option value="${l}" ${_opLoc===l?'selected':''}>${l}</option>`).join('')}</select></div></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
       <button class="btn sec" onclick="openingDownloadTemplate()">⬇ Excel template (4 tabs)</button>
       <button class="btn sec" onclick="openingTemplatePrint()">🖨 PDF template (4 files)</button>
       <input type="file" id="opFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="openingStageFile(event)">
       <button class="btn sec" onclick="document.getElementById('opFile').click()">📄 Choose file</button></div>
     <div id="opArea" class="hint" style="margin-top:6px">No file chosen yet.</div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn sec" onclick="closeModal()">Close</button></div></div>`;
+    <div id="obProof" style="margin-top:14px"></div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn sec" onclick="obClose()">Close</button></div></div>`;
   $('overlay').classList.add('on');
+  obProofLoad();
 }
+/* ---- Opening balance: proof trail (attachments + messages/@mentions) ----
+   An opening upload has no row of its own, so its proof hangs off a stable synthetic
+   reference — model 'opening_balance', ref 'OB-<LOCATION>' — in the same
+   record_attachments / record_notes tables every other record uses. One per location,
+   which matches the "one location per upload, re-upload replaces" rule. */
+function obRef(){ return 'OB-'+String(_opLoc||'bulacan').toUpperCase(); }
+async function obProofLoad(){
+  window._attCtx={model:'opening_balance', ref:obRef(), rerender:drawObProof};
+  formAtts=await attsForRecord('opening_balance', obRef());
+  window._obNotes=await notesForRecord('opening_balance', obRef());
+  drawObProof();
+}
+function drawObProof(){
+  const el=$('obProof'); if(!el) return;
+  const notes=(window._obNotes||[]).filter(n=>n.kind!=='activity');
+  const list=notes.map(n=>`<div class="nmsg ${n.resolved?'done':''}"><div class="nhd"><b>${esc(n.author||'—')}</b>${(n.mentions&&n.mentions.length)?` <span class="tm">→ @${n.mentions.map(esc).join(', @')}</span>`:''}<span style="flex:1"></span><span class="tm">${esc(String(n.created_at||'').slice(0,16).replace('T',' '))}</span></div>
+      <div class="bd">${noteBodyHtml(n.body||'')}</div></div>`).join('')||'<div class="nmsg" style="color:var(--muted)">No notes yet.</div>';
+  el.innerHTML=`<div style="border-top:1px solid var(--line);padding-top:12px">
+    <h4 style="margin:0 0 4px">🧾 Proof for this opening balance <span class="mini" style="font-weight:400;color:var(--muted)">· ${esc(obRef())}</span></h4>
+    <div class="hint" style="margin-bottom:8px">Attach the signed opening sheet, the source spreadsheet and stock photos, and leave a note saying who counted and when. It stays on <code>${esc(obRef())}</code> — re-uploading the balances does not clear it.</div>
+    ${attachHtml()}
+    <div class="ncompose" style="margin-top:10px"><textarea id="obNoteInput" rows="2" placeholder="Who counted this, when, and anything unusual… use @name to notify a teammate"></textarea>
+      <div class="mchips">${mentionChips()}</div>
+      <button class="btn sm" onclick="obNotePost()">Post note</button></div>
+    <div style="margin-top:8px">${list}</div></div>`;
+}
+async function obNotePost(){
+  const inp=$('obNoteInput'); if(!inp) return; const body=(inp.value||'').trim();
+  if(!body){ toast('Write a note first',true); return; }
+  const ref=obRef(), mentions=parseMentions(body);
+  try{
+    if(isLive()){ await sb('record_notes',{method:'POST',prefer:'return=minimal',body:JSON.stringify({model:'opening_balance',record_pk:ref,body,author:CURRENT_USER,mentions,resolved:false})}); }
+    else { const a=JSON.parse(localStorage.getItem('wr_notes')||'[]'); a.push({id:'n'+Date.now()+Math.floor(Math.random()*999),model:'opening_balance',record_pk:ref,body,author:CURRENT_USER,mentions,resolved:false,created_at:new Date().toISOString()}); localStorage.setItem('wr_notes',JSON.stringify(a)); }
+    sysLog('opening_balance',ref,'💬 '+CURRENT_USER+' noted on the opening balance'+(mentions.length?(' — mentioned @'+mentions.join(', @')):''));
+    inp.value=''; window._obNotes=await notesForRecord('opening_balance',ref); drawObProof();
+    toast('Note posted'+(mentions.length?' · '+mentions.length+' mentioned':''));
+  }catch(e){ toast(e.message,true); }
+}
+/* Release the borrowed attachment context so the next record form targets itself again. */
+function obClose(){ window._attCtx=null; formAtts=[]; closeModal(); }
 // ---- Opening balance: "updated template" — same grouping as the Weekly Count sheet ----
 // Build the 4 categorised opening line-lists from master data. Each line carries g1/g2/grank/form
 // so the printout and the Excel tabs group identically: category → base material → raw + processed
