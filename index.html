@@ -2377,23 +2377,71 @@ async function renderMRP(){
   Object.keys(coAll).forEach(s=>{ if((+mrpDemand[s]||0)!==coAll[s].packs) coPend[s]=coAll[s].packs; });
   window._mrpCoPend=coPend;
   const nCoPend=Object.keys(coPend).length;
+  const _pName={}; prods.forEach(p=>{ _pName[p.sku]=p.name||p.sku; });
+
+  /* ---- Custom orders get their own section -------------------------------
+     They were rows 130-odd deep in a list of 135 products, so nobody saw them
+     and nobody could tell WHICH order a CUST- SKU belonged to. They are a
+     different kind of demand — one named customer, a due date, an order
+     reference — so they are planned in their own card, above the catalogue,
+     and taken out of the SKU table below to remove the double entry point. */
+  const coSkus=Object.keys(coAll);
+  let dh='';
+  if(coSkus.length){
+    const totPacks=coSkus.reduce((s,k)=>s+coAll[k].packs,0);
+    const inPlan=coSkus.filter(k=>(+mrpDemand[k]||0)>0).length;
+    const orders=[]; coSkus.forEach(k=>coAll[k].orders.forEach(o=>{ if(!orders.includes(o.ref)) orders.push(o.ref); }));
+    const rows=coSkus.sort((a,b)=>String(coAll[a].needed||'9999').localeCompare(String(coAll[b].needed||'9999'))).map(sku=>{
+      const c=coAll[sku]; const inD=+mrpDemand[sku]||0;
+      const late=c.needed && c.needed<todayISO();
+      const state = inD>=c.packs ? '<span class="badge b-received">in the plan</span>'
+                  : (inD>0 ? '<span class="badge b-invoiced">part in plan</span>'
+                           : '<span class="badge b-open">not in the plan</span>');
+      return `<tr>
+        <td>${esc(c.orders.map(o=>o.customer).filter((v,i,a)=>a.indexOf(v)===i).join(', ')||'—')}
+          <div class="mini" style="color:var(--muted)">${esc(c.orders.map(o=>o.ref).join(', '))}</div></td>
+        <td>${esc(_pName[sku]||sku)}<div class="mini"><code>${esc(sku)}</code></div></td>
+        <td class="mini" style="white-space:nowrap;${late?'color:var(--danger);font-weight:700':''}">${esc(c.needed||'—')}${late?' · overdue':''}</td>
+        <td class="num"><b>${c.packs}</b></td>
+        <td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${mrpDemand[sku]||''}" onchange="mrpDemand['${sku}']=+this.value||0;renderMRP()"></td>
+        <td>${state}</td></tr>`; }).join('');
+    dh+=`<div class="repcard" style="border-left:4px solid var(--berry)">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <h3 style="margin:0">🧑‍🍳 Custom orders — ${orders.length} order(s), ${totPacks} pack(s)</h3>
+        ${nCoPend?`<button class="btn sm" onclick="mrpPullCustom()">＋ Add all to the plan</button>`:'<span class="badge b-received">all in the plan</span>'}
+      </div>
+      <div class="hint" style="margin:6px 0 8px">Every <b>locked</b> order that still owes packs, <b>whatever week it is scheduled for</b> — once an order is locked the packs have to be made. Ordered is what the customer bought; In plan is what this MRP run will make. They are kept out of the catalogue table below so there is only one place to set them.</div>
+      <div style="overflow-x:auto"><table><thead><tr><th>Customer / order</th><th>Product</th><th>Needed</th><th class="num">Ordered</th><th class="num">In plan</th><th>Status</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <div class="pager">${inPlan} of ${coSkus.length} custom SKU(s) in this plan</div></div>`;
+  }
+
+  if(!coSkus.length){
+    const d=await coDemandDiag().catch(()=>({rows:[],err:'',counted:0}));
+    if(d.err || d.rows.length){
+      dh+=`<div class="repcard" style="border-left:4px solid #e0b400">
+        <h3 style="margin:0 0 6px">🧑‍🍳 Custom orders — none are in this run</h3>
+        ${d.err?`<div class="mini" style="color:var(--danger);margin-bottom:6px">Could not read the custom-order tables: ${esc(d.err)}</div>`:''}
+        <div class="hint" style="margin:0 0 8px">An order reaches the demand run only when it is <b>locked</b> (past Draft, not cancelled, not completed) and its lines carry a <b>CUST- SKU with packs</b>. Here is where each one stands.</div>
+        <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th>Needed</th><th>Status</th><th class="num">Lines</th><th class="num">With SKU</th><th class="num">Packs</th><th>Why it is not counted</th></tr></thead>
+        <tbody>${d.rows.map(r=>`<tr><td><code>${esc(r.ref)}</code></td><td>${esc(r.customer||'—')}</td><td class="mini">${esc(r.needed||'—')}</td>
+          <td>${coStatBadge(r.status)}</td><td class="num">${r.lines}</td><td class="num">${r.withSku}</td><td class="num">${r.packs||'—'}</td>
+          <td class="mini" style="color:${r.reason?'var(--danger)':'#4e7a3e'}">${esc(r.reason||'counted')}</td></tr>`).join('')
+          ||'<tr><td colspan="8" class="empty">No custom orders exist yet.</td></tr>'}</tbody></table></div></div>`;
+    }
+  }
   // demand card
-  let dh=`<div class="repcard">
+  dh+=`<div class="repcard"${(coSkus.length||1)?' style="margin-top:14px"':''}>
     <div class="repbar"><span>Plan (week of)</span><input type="date" value="${MRPDATE}" onchange="MRPDATE=this.value">
       <button class="btn sm sec" onclick="openMRPImport()">📥 Import (xlsx / csv)</button>
       <button class="btn sm sec" onclick="mrpImport()">⬆ Paste</button>
       <button class="btn sm sec" onclick="mrpSheetSync()" title="Pulls the demand table for this plan date, plus every locked custom order regardless of its scheduled date">☁ Sync demand (sheets + custom orders)</button></div>`;
-  if(nCoPend) dh+=`<div style="margin:8px 0;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px">
-      <b>${nCoPend} locked custom-order SKU(s)</b> still owe packs and are not in the demand below
-      (${Object.keys(coPend).slice(0,4).map(s=>esc(s)+' × '+coPend[s]).join(', ')}${nCoPend>4?', …':''}).
-      <button class="btn sm" style="margin-left:8px" onclick="mrpPullCustom()">Pull them in</button></div>`;
   dh+=`<h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3>
-    <div class="hint" style="margin:0 0 6px">Locked custom orders are included whatever their scheduled date — once an order is locked the packs have to be made. The needed date is shown beside each so you can see what is urgent.</div>
     <table><thead><tr><th>Product</th><th>SKU</th><th class="num">Demand</th></tr></thead><tbody>`;
-  const _demRow=p=>{ const co=coAll[p.sku];
-    const tag=co?` <span class="mini" style="color:var(--berry)">· custom order${co.needed?' · needed '+esc(co.needed):''} · ${co.packs} pack(s)</span>`:'';
-    return `<tr><td>${esc(p.name)}${tag}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="any" inputmode="decimal" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpDemand['${p.sku}']=+this.value||0;renderMRP()"></td></tr>`; };
-  hierGroups(prods,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+  const _demRow=p=>`<tr><td>${esc(p.name)}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="any" inputmode="decimal" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpDemand['${p.sku}']=+this.value||0;renderMRP()"></td></tr>`;
+  // custom-order SKUs are planned in the card above, not here
+  const catalogue=prods.filter(p=>!coAll[p.sku]);
+  hierGroups(catalogue,{g1:'group_1',g2:'group_2'}).forEach(G=>{
     dh+=`<tr style="background:#e7f0e9"><td colspan="3"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
     G.subs.forEach(S=>{ dh+=`<tr style="background:#f6f8f4"><td colspan="3" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(_demRow).join(''); });
   });
@@ -3766,6 +3814,32 @@ async function coOpenDemand(){
 // Flat {sku: packs} for the demand map.
 async function coOpenDemandMap(){ const m=await coOpenDemand(); const out={};
   Object.keys(m).forEach(s=>{ out[s]=m[s].packs; }); return out; }
+
+/* Why is the custom-order section empty? There are only four reasons an order
+   fails to reach the demand run, and guessing between them from a screenshot is
+   hopeless — so the app says which one it is, per order. */
+async function coDemandDiag(){
+  let orders=[], lines=[], err='';
+  try{ orders=await db.list('custom_orders',{}); }catch(e){ err=String(e&&e.message||e); }
+  try{ lines=await db.list('custom_order_lines',{}); }catch(e){ err=err||String(e&&e.message||e); }
+  const byOrder={}; (lines||[]).forEach(l=>{ (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
+  const rows=(orders||[]).map(o=>{
+    const ls=byOrder[o.order_ref]||[];
+    const withSku=ls.filter(l=>l.product_sku);
+    const packs=withSku.reduce((s,l)=>s+(+l.packs||0),0);
+    const st=coStat(o.status);
+    let reason='';
+    if(st==='draft')          reason='Still a Draft — open it and press 🔒 Lock.';
+    else if(st==='cancelled') reason='Cancelled.';
+    else if(st==='completed') reason='Completed — every pack already produced.';
+    else if(!ls.length)       reason='No order lines at all.';
+    else if(!withSku.length)  reason='Lines have no product SKU — it was never locked, so no CUST- SKU was created.';
+    else if(!(packs>0))       reason='Lines have a SKU but zero packs.';
+    return {ref:o.order_ref, customer:o.customer_name||'', status:st, label:coStatLabel(o.status),
+            needed:String(o.needed_date||'').slice(0,10), lines:ls.length, withSku:withSku.length, packs, reason};
+  }).sort((a,b)=>String(a.needed||'9999').localeCompare(String(b.needed||'9999')));
+  return {rows, err, counted:rows.filter(r=>!r.reason).length};
+}
 
 /* Recompute every custom order's status from what is actually true, and persist
    the ones that moved. Called when the Custom Orders list renders, after a demand
