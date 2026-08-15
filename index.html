@@ -122,7 +122,14 @@
   /* modal */
   .overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;align-items:center;justify-content:center;z-index:100}
   .overlay.on{display:flex}
-  .modal{background:#fff;border-radius:10px;padding:22px 24px;max-width:min(780px,94vw);width:auto;min-width:min(460px,92vw);max-height:88vh;overflow:auto}
+  /* A pop-out should show its content, not hide it behind a second scrollbar.
+     The modal is the ONLY scroller; inner tables grow and the action bar sticks
+     to the bottom so Confirm is always reachable without hunting for it. */
+  .modal{background:#fff;border-radius:10px;padding:22px 24px;max-width:min(820px,94vw);width:auto;min-width:min(460px,92vw);max-height:92vh;overflow:auto;position:relative}
+  .modal.wide{max-width:min(1240px,97vw)}
+  .modal .mscroll{max-height:none !important;overflow:visible !important}
+  .modal .mfoot{position:sticky;bottom:-22px;background:#fff;padding:12px 0 2px;margin-top:14px;
+                border-top:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap;z-index:2}
   .modal h3{margin:0 0 4px}
   .modal p{color:var(--muted);font-size:12.5px;margin:0 0 14px}
   .modal label{display:block;font-weight:600;font-size:12.5px;margin:10px 0 4px}
@@ -343,7 +350,8 @@
   .formbar>*{flex-shrink:0}
 
   /* --- modals fill the screen --- */
-  .modal{width:100%;max-width:100%;min-width:0;max-height:92vh;border-radius:12px 12px 0 0;padding:14px}
+  .modal, .modal.wide{width:100%;max-width:100%;min-width:0;max-height:92vh;border-radius:12px 12px 0 0;padding:14px}
+  .modal .mfoot{bottom:-14px}
   #overlay{align-items:flex-end}
 
   /* --- touch targets --- */
@@ -526,7 +534,7 @@ const MODELS = {
       {n:'cost_debone',l:'Labor: with deboning',t:'bool'},{n:'cost_butcher',l:'Add butcher charge',t:'bool'},
       {n:'cost_sousvide',l:'Sous-vide',t:'bool'},{n:'cost_ecobag',l:'Ecobag',t:'bool'},{n:'cost_thermal',l:'Thermal pouch',t:'bool'},
       {n:'sticker_net',l:'Sticker — net weight',t:'text'},{n:'sticker_dimension',l:'Sticker — dimension',t:'text'},
-      {n:'sticker_art_url',l:'Sticker — artwork link',t:'text'},{n:'sticker_supplier',l:'Sticker — supplier',t:'text'},
+      {n:'sticker_art_url',l:'Sticker — artwork link',t:'url'},{n:'sticker_supplier',l:'Sticker — supplier',t:'text'},
       {n:'sticker_per_sheet',l:'Stickers per sheet/page',t:'number'},
       {n:'sticker_bulacan_on_hand',l:'Labels — Bulacan on hand',t:'number'},{n:'sticker_bulacan_par',l:'Labels — Bulacan PAR',t:'number'},
       {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'},
@@ -1106,9 +1114,17 @@ async function renderForm(){
     if(f.t==='select') return `<select onchange="fSet('${f.n}',this.value)" ${dis}>${(f.o||[]).map(o=>`<option ${v===o?'selected':''}>${o}</option>`).join('')}</select>`;
     if(f.t==='rel'){ const opts=relCache[f.rel]||[]; return `<select onchange="fSet('${f.n}',this.value)" ${dis}><option value="">—</option>${relOptsHTML(opts,v)}</select>`; }
     if(f.t==='date') return `<input type="date" value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
+    /* A URL field rendered as a bare text box looks like a dead string — you cannot
+       tell it is a link, and you certainly cannot open it. Keep it editable, but put
+       a real anchor next to it. */
+    if(f.t==='url'){ const u=safeUrl(v); const ok=v&&u!=='#';
+      return `<div style="display:flex;gap:6px;align-items:center;width:100%">
+        <input style="flex:1;min-width:0" placeholder="https://…" value="${esc(v)}" oninput="fSet('${f.n}',this.value);_urlChip('${f.n}',this.value)" ${dis}>
+        <span id="urlchip_${f.n}">${ok?`<a class="btn sm sec" href="${esc(u)}" target="_blank" rel="noopener noreferrer">Open ↗</a>`:'<span class="mini" style="color:var(--muted);white-space:nowrap">no link</span>'}</span></div>`; }
     if(f.t==='currency'||f.t==='number') return `<input type="number" step="any" value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
     return `<input value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
   };
+  window._fieldInput=fieldInput;
   const gcol=(col)=>`<div>${col.map(fn=>{const f=m.fields.find(x=>x.n===fn); if(!f||faMode(f)==='hide')return''; return `<div class="fld"><label>${f.l}${faMode(f)==='read'?' <span style="opacity:.5;font-size:10px">read-only</span>':''}</label><div class="val">${fieldInput(f)}</div></div>`;}).join('')}</div>`;
   const grpHtml = m.groups.map(gcol).join('');
   const fullHtml = (m.full||[]).map(fn=>{const f=m.fields.find(x=>x.n===fn); if(!f||faMode(f)==='hide')return''; return `<div class="fld" style="align-items:flex-start"><label>${f.l}</label><div class="val">${fieldInput(f)}</div></div>`;}).join('');
@@ -1436,7 +1452,11 @@ function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.em
   try{ Object.keys(localStorage).forEach(k=>{ if(/^chatter:/.test(k)||/^attach:/.test(k)||k==='wr_notes') localStorage.removeItem(k); }); }catch(e){}
   updateMode(); renderSide();
   if(REQUIRE_AUTH && isLive()){ closeModal(); showGate('Signed out.'); } else { toast('Signed out (anon)'); openSettings(); } }
-function closeModal(){ $('overlay').classList.remove('on'); window._attCtx=null; }
+function modalWide(on){ const m=$('modal'); if(m) m.classList.toggle('wide',!!on); }
+function _urlChip(field,val){ const el=$('urlchip_'+field); if(!el) return; const u=safeUrl(val);
+  el.innerHTML=(val&&u!=='#')?`<a class="btn sm sec" href="${esc(u)}" target="_blank" rel="noopener noreferrer">Open ↗</a>`
+                             :'<span class="mini" style="color:var(--muted);white-space:nowrap">no link</span>'; }
+function closeModal(){ modalWide(false); $('overlay').classList.remove('on'); window._attCtx=null; }
 /* Blocking "please wait" overlay with a spinner — for multi-step actions (e.g. creating many POs). */
 function showBusy(msg){
   if(!document.getElementById('wrSpinCss')){ const s=document.createElement('style'); s.id='wrSpinCss';
@@ -1607,7 +1627,7 @@ async function runCleanse(){
     }
     try{ localStorage.removeItem('wr_notes'); Object.keys(localStorage).forEach(k=>{ if(/^attach:/.test(k) && noteModels.includes(k.split(':')[1])) localStorage.removeItem(k); }); }catch(e){}
   }
-  if(cleanseSel.demand){ localStorage.removeItem('wr_mrp_plans'); mrpDemand={}; mrpManual={}; mrpRemarks={}; window._mrpPlan=null; mrpPlanCache=[]; }
+  if(cleanseSel.demand){ localStorage.removeItem('wr_mrp_plans'); mrpDemand={}; mrpManual={}; mrpRemarks={}; mrpAdd={}; window._mrpPlan=null; mrpPlanCache=[]; }
   if(cleanseSel.refs){ localStorage.removeItem('wr_refseq'); }
   if(cleanseSel.prod){ prodPlanLines=[]; prodRunRef=''; }
   sysLog('cleanser','wipe','🧹 Cleansed '+done+' table(s): '+groups.map(g=>g.key).join(', ')+' by '+CURRENT_USER);
@@ -2305,6 +2325,9 @@ async function rejectReq(id){
 
 /* MRP / Demand planning */
 let mrpDemand={}, mrpManual={}, mrpRemarks={};
+/* Items put on the order by hand — see the ingredients loop in renderMRP.
+   {sku: qty in the item's own unit}. Supplies count in units, food in kg. */
+let mrpAdd={};
 function kgf(g){ return (g/1000).toFixed(2); }
 // Local (Philippines) calendar date — NOT UTC. toISOString() is UTC, so before 08:00 PH it
 // still reads the previous day; use Asia/Manila so "today" matches the user's clock.
@@ -2335,7 +2358,7 @@ function stickerSheets(pieces, perSheet){ pieces=+pieces||0; perSheet=+perSheet|
 async function renderMRP(){
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderMRP()">↻ Compute</button>
-    <button class="btn sec" onclick="saveMRPPlan()">💾 Save plan</button>
+    <button class="btn sec" onclick="saveMRPPlan()" title="Saving locks this week's demand — the Production Plan only takes targets from a saved (locked) plot">💾 Save plan (locks demand)</button>
     <button class="btn sec" onclick="renderDemandHistory()">📚 History</button>
     <button class="btn sec" onclick="openPlanLocs()">⚙ Planning locations</button>
     <button class="wfbtn" onclick="generatePOsFromMRP()">🧾 Generate Draft POs</button>
@@ -2348,6 +2371,7 @@ async function renderMRP(){
   let stock={};
   if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(!planCountsLoc(s.location_code)) return; stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
   else { (DEMO.inventory_movements||[]).forEach(mv=>{ if(mv.kind!=='ingredient'||!planCountsLoc(mv.location_code)) return; stock[mv.ref_sku]=(stock[mv.ref_sku]||0)+(+mv.qty||0); }); }
+  window._mrpStock=stock;
   /* SCHEDULED INCOMING — bought but not yet received. Without this the plan
      re-orders what is already on its way. A PO counts as on-order once it is
      'confirmed' (issued to the supplier) and stops counting the moment it is
@@ -2479,8 +2503,16 @@ async function renderMRP(){
   //   restore the small reorder buffer.
   const RAW_REORDER_G = 5000;   // reorder point for raw ingredients: 5 kg
   const plan=[];
-  ings.forEach(it=>{ if(it.is_intermediate) return;   // only the purchasable (WD / raw) ingredients get ordered
-    if(isSupplyItem(it)) return;   // Kitchen Supplies & stickers reorder in their own module (PAR in units), not the raw-material MRP
+  /* mrpAdd holds items the buyer put on the order by hand — anything in the master
+     that the demand roll-up did not surface: a supply, a processed form bought in
+     rather than made, a raw with healthy stock you want to top up anyway. The
+     quantity is in the ITEM'S OWN unit (kg for food, the uom for supplies), which
+     is why the row carries `unit` from here on. */
+  ings.forEach(it=>{
+    const added=+mrpAdd[it.sku]||0;
+    const sup=isSupplyItem(it);
+    if(it.is_intermediate && !added) return;   // processed forms are made, not bought — unless asked for by name
+    if(sup && !added) return;                  // supplies reorder on PAR in their own module — unless asked for by name
     const rawNeed=need[it.sku]||0;   // already as-purchased — processed forms have been rolled up into this one
     const lead=+it.lead_time_days||0, oh=stock[it.sku]||0;
     const inc=onOrder[it.sku]||0;                            // confirmed POs not yet received
@@ -2489,17 +2521,22 @@ async function renderMRP(){
     // trigger: demand exceeds what is on hand PLUS what is already coming
     const lowStock = (endInv < 0) || (endInv <= RAW_REORDER_G && (rawNeed>0 || avail>0));
     const manualKg=+mrpManual[it.sku]||0;
-    if(!lowStock && manualKg<=0) return;                     // healthy stock and no manual add → nothing to order
+    if(!lowStock && manualKg<=0 && added<=0) return;          // healthy stock, nothing added → nothing to order
     const leadBuf=rawNeed*(lead/7);                          // consumption during lead time
     const buf = lowStock ? RAW_REORDER_G : 0;                // restore the reorder buffer when we do reorder
     const base = lowStock ? (rawNeed + buf + leadBuf - avail) : 0;   // target − (on hand + on order)
     const subtotal=base + manualKg*1000;
     const moq=(+it.min_order_kg||0)*1000;
     // round up to satisfy the min order AND land on a whole ordering-pack multiple (#4)
-    const final=subtotal<=0?0:roundOrderKg(subtotal/1000, +it.min_order_kg||0, +it.pack_size_kg||0)*1000;
+    let final=subtotal<=0?0:roundOrderKg(subtotal/1000, +it.min_order_kg||0, +it.pack_size_kg||0)*1000;
+    // A supply is counted in whole units, not grams, and is never rounded to a pack size.
+    if(sup) final=added;
+    else if(added>0) final=final + added*1000;
     // default supplier: the ingredient's own default, else fall back to Supplier 1 from the master (ignore "to be determined")
     const _s1=(it.supplier1||'').trim(); const defSup=(it.supplier||'').trim() || (/to be determined/i.test(_s1)?'':_s1);
-    plan.push({sku:it.sku,name:it.name,rawNeed,par:buf,leadBuf,lead,oh,inc,eta:(onOrderEta[it.sku]||''),base,endInv,lowStock,manualKg,moq,final,remark:(mrpRemarks[it.sku]||''),supplier:defSup,price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
+    plan.push({sku:it.sku,name:it.name,rawNeed,par:buf,leadBuf,lead,oh,inc,eta:(onOrderEta[it.sku]||''),base,endInv,lowStock,manualKg,moq,final,
+      added, unit:(sup?(it.uom||'units'):'kg'), isSupply:sup, isProcessed:!!it.is_intermediate,
+      remark:(mrpRemarks[it.sku]||''),supplier:defSup,price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
   });
   plan.sort((a,b)=>b.final-a.final);
   window._mrpPlan=plan;
@@ -2507,12 +2544,15 @@ async function renderMRP(){
     <div class="hint" style="margin:0 0 8px">Raws reorder when demand outstrips <b>stock + what is already on order</b>, or ending stock is low (≤ 5 kg). <b>On order</b> = confirmed POs not yet received, so you don't re-buy a shipment that is already coming; it drops out the moment you receive it. Order qty = weekly need + 5 kg buffer + lead-time buffer − on hand − on order, then ± your manual adjustment, rounded up to the <b>min order</b> and to a whole <b>ordering pack</b> (both set per ingredient in Master Data). (Custom PAR stocking is for the sellable products.) Processed forms (deboned, ground, liver…) are rolled up into the whole-dressed / raw ingredient you actually buy. Supplier = each item's default.</div>
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
     <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num">On hand</th><th class="num">On order</th><th class="num">End inv</th><th class="num">+Buffer</th><th class="num">+Lead</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
-  const _rowHtml=(l)=>`<tr><td>${esc(l.name)}<div class="mini">yield ${(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)}%</div>${l.remark?`<div class="mini" style="color:var(--berry)">📝 ${esc(l.remark)}</div>`:''}</td>
+  const _rowHtml=(l)=>`<tr><td>${esc(l.name)}
+    ${l.isSupply?'<span class="tagf" style="background:#e8e6df;color:#57544c">supply</span>':(l.isProcessed?'<span class="tagf tagf-proc">processed</span>':'')}
+    <div class="mini">${l.isSupply?('per '+esc(l.unit)):('yield '+(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)+'%')}</div>${l.remark?`<div class="mini" style="color:var(--berry)">📝 ${esc(l.remark)}</div>`:''}</td>
     <td class="num">${kgf(l.rawNeed)}</td><td class="num">${kgf(l.oh)}</td>
     <td class="num" style="${(+l.inc||0)>0?'color:#1e6b2e;font-weight:600':'color:var(--muted)'}" title="${l.eta?('earliest expected '+esc(l.eta)):'confirmed POs not yet received'}">${(+l.inc||0)>0?kgf(l.inc)+(l.eta?`<div class="mini" style="font-weight:400">eta ${esc(l.eta)}</div>`:''):'—'}</td>
     <td class="num" style="${(+l.endInv||0)<RAW_REORDER_G?'color:var(--danger);font-weight:600':''}">${kgf(l.endInv)}</td><td class="num">${kgf(l.par)}</td><td class="num">${kgf(l.leadBuf)}</td><td class="num">${kgf(Math.max(0,l.base))}</td>
     <td class="num"><input type="number" step="any" style="width:74px;text-align:right" value="${l.manualKg||''}" onchange="mrpManual['${l.sku}']=+this.value||0;renderMRP()"></td>
-    <td class="num">${l.moq?kgf(l.moq):'—'}</td><td class="num"><b style="color:var(--berry)">${l.final>0?kgf(l.final):'—'}</b></td>
+    <td class="num">${l.moq?kgf(l.moq):'—'}</td>
+    <td class="num"><b style="color:var(--berry)">${l.final>0?(l.isSupply?(l.final+' '+esc(l.unit)):kgf(l.final)):'—'}</b>${l.added>0?`<div class="mini" style="color:var(--muted)">incl. ${l.added} added by hand <span class="x" style="cursor:pointer;color:var(--danger)" onclick="mrpAddSet('${esc(l.sku)}',0)">✕</span></div>`:''}</td>
     <td>${l.lead?l.orderBy:'—'}</td><td>${esc(l.supplier)||'<span class="mini">set default</span>'}</td></tr>`;
   // group the plan per supplier (matches how POs are generated), with a per-supplier subtotal + total kg
   const _bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no default supplier — set one)'; (_bySup[s]=_bySup[s]||[]).push(l); });
@@ -2524,9 +2564,12 @@ async function renderMRP(){
     rh+=`<tr><td colspan="12" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">🏭 ${esc(sup)} <span style="opacity:.6;font-weight:400">— ${sItems.length} item(s) · <b>${kgf(sKg)} kg</b> · est. ₱${Math.round(sVal).toLocaleString('en-PH')}${minTag}</span></td></tr>`;
     arr.sort((a,b)=>b.final-a.final).forEach(l=>{ rh+=_rowHtml(l); });
   });
-  if(!plan.length) rh+=`<tr><td colspan="12" class="empty">Enter demand above — raws reorder when demand outstrips stock or ending stock drops to ~5 kg.</td></tr>`;
+  if(!plan.length) rh+=`<tr><td colspan="12" class="empty">Enter demand above — raws reorder when demand outstrips stock or ending stock drops to ~5 kg. Or use <b>＋ Add item to order</b> to put something on the order yourself.</td></tr>`;
   const toBuy=plan.filter(l=>l.final>0); const totVal=toBuy.reduce((s,l)=>s+(l.final/1000)*l.price,0); const totKg=_supKg(plan);
-  rh+=`</tbody></table></div><div class="pager">${toBuy.length} item(s) · ${kgf(totKg)} kg total · est. ₱${Math.round(totVal).toLocaleString('en-PH')}</div></div>`;
+  rh+=`</tbody></table></div>
+    <div style="margin-top:8px"><button class="btn sec sm" onclick="mrpAddOpen()">＋ Add item to order</button>
+      <span class="mini" style="color:var(--muted);margin-left:8px">anything in the master — raw, processed or a kitchen supply — even when the demand roll-up did not ask for it</span></div>
+    <div class="pager">${toBuy.length} item(s) · ${kgf(totKg)} kg total · est. ₱${Math.round(totVal).toLocaleString('en-PH')}</div></div>`;
   // ---- 3 · Minimum order qty analysis -------------------------------------
   rh+=mrpMinOrderCard(_bySup,supMin,_supKg);
   rh+=savedPlansHtml();
@@ -2568,6 +2611,71 @@ function mrpMinOrderCard(bySup, supMin, supKgFn){
   return t;
 }
 // Top up a supplier to its minimum: land the extra qty in the line's MANUAL field and record the remark.
+/* ---- Put anything on the order by hand ---------------------------------------
+   The replenishment plan only surfaces what the demand roll-up asked for, and only
+   for purchasable raws. That leaves no way to order a kitchen supply here, to buy in
+   a processed form you would normally make, or to top up a raw whose stock is fine.
+   This picker covers every item in the master, grouped the same way as the count. */
+function mrpAddSet(sku,qty){ qty=+qty||0; if(qty>0) mrpAdd[sku]=qty; else delete mrpAdd[sku]; renderMRP(); }
+async function mrpAddOpen(){
+  let ings=[]; try{ ings=await listIngredients(); }catch(e){}
+  if(!ings.length){ toast('No master items loaded',true); return; }
+  window._maSel={...mrpAdd}; window._maQ=''; window._maKind='';
+  $('modal').innerHTML=`<div><h3>＋ Add an item to the order</h3>
+    <p class="mini">Anything in the master, whether or not the demand roll-up asked for it. Quantity is in the item's <b>own unit</b> — kilos for food, the stated unit for a supply. What you enter is <b>added on top</b> of whatever the plan already calculated for that item.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
+      <input id="ma_q" placeholder="🔎 search name / SKU / category…" oninput="window._maQ=this.value;drawMrpAddBody()" style="flex:1;min-width:200px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
+      <select onchange="window._maKind=this.value;drawMrpAddBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px">
+        <option value="">All types</option><option value="raw">Raw (purchasable)</option><option value="proc">Processed</option><option value="sup">Kitchen supplies</option></select>
+    </div>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Item</th><th>Type</th><th class="num">On hand</th><th class="num">Add</th><th>Unit</th></tr></thead><tbody id="maBody"></tbody></table></div>
+    <div class="mfoot"><button class="btn" onclick="mrpAddApply()">✅ Add to the order</button><button class="btn sec" onclick="closeModal()">Cancel</button>
+      <span style="flex:1"></span><span class="mini" id="maCount" style="align-self:center;color:var(--muted)"></span></div></div>`;
+  window._maIngs=ings;
+  modalWide(true); $('overlay').classList.add('on'); drawMrpAddBody();
+}
+function drawMrpAddBody(){
+  const ings=window._maIngs||[];
+  const kindOf=i=>isSupplyItem(i)?'sup':(i.is_intermediate?'proc':'raw');
+  const q=(window._maQ||'').toLowerCase().split(/\s+/).filter(Boolean);
+  const kf=window._maKind||'';
+  const stock=window._mrpStock||{};
+  const list=ings.filter(i=>{
+    if(kf && kindOf(i)!==kf) return false;
+    if(!q.length) return true;
+    const t=[i.name,i.sku,i.category,i.raw_input,i.uom].filter(Boolean).join(' ').toLowerCase();
+    return q.every(w=>t.includes(w));
+  });
+  const rows=_outIngRows(ings,list);
+  let body='';
+  hierGroups(rows,{g1:'_g1',g2:'_g2'}).forEach(G=>{
+    body+=`<tr class="grp"><td colspan="5" style="padding-left:10px"><b>${esc(G.g1)}</b></td></tr>`;
+    G.subs.forEach(S=>{
+      if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="5" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
+      S.items.forEach(i=>{
+        const k=kindOf(i); const unit=(k==='sup')?(i.uom||'units'):'kg';
+        const oh=(k==='sup')?(+stock[i.sku]||0):Math.round((+stock[i.sku]||0)/10)/100;
+        const v=(window._maSel&&window._maSel[i.sku]!=null)?window._maSel[i.sku]:'';
+        const tag=k==='sup'?'<span class="tagf" style="background:#e8e6df;color:#57544c">supply</span>'
+                :(k==='proc'?'<span class="tagf tagf-proc">processed</span>':'<span class="tagf tagf-raw">raw</span>');
+        body+=`<tr><td style="padding-left:26px">${esc(i._nm||i.name)}<div class="mini"><code>${esc(i.sku)}</code></div></td>
+          <td>${tag}</td><td class="num mini">${oh||'—'}</td>
+          <td><input type="number" step="any" inputmode="decimal" value="${v}" oninput="window._maSel['${esc(i.sku)}']=this.value===''?'':(+this.value||0);_maCount()" style="width:84px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+          <td class="mini">${esc(unit)}</td></tr>`;
+      });
+    });
+  });
+  const el=$('maBody'); if(el) el.innerHTML=body||'<tr><td colspan="5" class="empty">Nothing matches.</td></tr>';
+  _maCount();
+}
+function _maCount(){ const sel=window._maSel||{}; const n=Object.keys(sel).filter(k=>+sel[k]>0).length;
+  const el=$('maCount'); if(el) el.textContent=n?(n+' item(s) selected'):''; }
+function mrpAddApply(){
+  const sel=window._maSel||{}; let n=0;
+  Object.keys(sel).forEach(sku=>{ const q=+sel[sku]||0; if(q>0){ mrpAdd[sku]=q; n++; } else delete mrpAdd[sku]; });
+  closeModal(); renderMRP();
+  toast(n?('Added '+n+' item(s) to the order'):'Nothing added');
+}
 function mrpQualifySet(sku,newManualKg,addedKg){
   mrpManual[sku]=+newManualKg||0;
   mrpRemarks[sku]='Added '+(+addedKg).toFixed(2)+' to qualify to minimum order qty';
@@ -2651,7 +2759,9 @@ async function confirmSaveMRPPlan(hasExisting){
   if(hasExisting){ const c=document.getElementById('ovConfirm'); if(!c||!c.checked){ toast('Tick the override confirmation to proceed',true); return; } }
   closeModal();
   const g=await genRef('DP',{category:'RAW',date:MRPDATE}); window._mrpDPit=g.it;
-  const data={ref:g.ref,demand:{...mrpDemand},manual:{...mrpManual},remarks:{...mrpRemarks},by:CURRENT_USER,saved_at:new Date().toISOString(),
+  // Saving a plot LOCKS this week's demand — the Production Plan will only take a
+  // target from a locked plot, never from what is being typed on this screen.
+  const data={ref:g.ref,locked:true,demand:{...mrpDemand},manual:{...mrpManual},add:{...mrpAdd},remarks:{...mrpRemarks},by:CURRENT_USER,saved_at:new Date().toISOString(),
     lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
   try{
     if(isLive()){
@@ -2671,7 +2781,7 @@ async function confirmSaveMRPPlan(hasExisting){
      toast('Demand plot sent to PDF / Drive / notify'); }
   renderMRP();
 }
-function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; mrpRemarks={...(d.remarks||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
+function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; mrpAdd={...(d.add||{})}; mrpRemarks={...(d.remarks||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
 // A saved demand plot is immutable — VIEW it read-only, then print or download.
 function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p;
   const date=p.plan_date||p.date||''; const ref=d.ref||p.ref||''; window._viewPlan={date,ref,d};
@@ -2731,7 +2841,11 @@ async function generatePOsFromMRP(){
       const rec={po_ref:ref, supplier_name:(sup==='(unassigned)'?null:sup), order_date:MRPDATE, status:'open', created_by:CURRENT_USER};
       try{
         await db.create('purchase_orders', rec);
-        const pl=bySup[sup].map(l=>({po_ref:ref, ingredient_sku:l.sku, ordered_kg:Math.round(l.final/10)/100, price_kg:l.price, received_kg:0}));
+        // ordered_kg holds kilos for food and WHOLE UNITS for a supply — the same
+        // basis receiving uses, so a box of masks is not received as 0.007 kg.
+        const pl=bySup[sup].map(l=>({po_ref:ref, ingredient_sku:l.sku,
+          ordered_kg: l.isSupply ? l.final : Math.round(l.final/10)/100,
+          price_kg:l.price, received_kg:0}));
         await db.replaceChildren({model:'po_lines',fk:'po_ref'}, ref, pl);
         const _rem=bySup[sup].filter(l=>l.remark).map(l=>l.name+' — '+l.remark);
         sysLog('purchase_orders',ref,'🤖 Auto-generated from Demand Plot V'+_p2(xx)+' ('+MRPDATE+') by '+CURRENT_USER+(_rem.length?('\n• '+_rem.join('\n• ')):''));
@@ -4812,18 +4926,22 @@ async function prodLoadDraft(){
    saved plot regardless of date, which meant planning an older date showed next
    week's numbers. */
 async function prodLoadTargets(){
-  let dm={...mrpDemand}, planDate=prodPlanDate;
-  if(!Object.keys(dm).some(k=>+dm[k]>0)){
-    try{ mrpPlanCache=await mrpPlans();
-      // the most recent plot on or before this production date — the week we are in
-      const cands=(mrpPlanCache||[]).map(p=>({p, d:String(p.plan_date||p.date||'')})).filter(x=>x.d);
-      const inWeek=cands.filter(x=>x.d<=prodPlanDate).sort((a,b)=>b.d.localeCompare(a.d))[0];
-      const pick=inWeek||cands.sort((a,b)=>b.d.localeCompare(a.d))[0];
-      if(pick){ const d=pick.p.data||pick.p; dm={...(d.demand||{})}; planDate=pick.d; }
-    }catch(e){}
-  }
+  /* A TARGET only comes from LOCKED demand — a saved demand plot, or a locked
+     custom order. Whatever is being typed into the MRP screen right now is a
+     draft; letting it set targets meant the kitchen chased a number nobody had
+     committed to, and it changed under them as someone edited. Nothing here
+     stops you adding products or output ingredients that have no target at all. */
+  let dm={}, planDate='', ref='', locked=false;
+  try{ mrpPlanCache=await mrpPlans();
+    const cands=(mrpPlanCache||[]).map(p=>({p, d:String(p.plan_date||p.date||'')})).filter(x=>x.d);
+    // the most recent saved plot on or before this production date — the week we are in
+    const pick=cands.filter(x=>x.d<=prodPlanDate).sort((a,b)=>b.d.localeCompare(a.d))[0];
+    if(pick){ const d=pick.p.data||pick.p; dm={...(d.demand||{})}; planDate=pick.d; ref=(d&&d.ref)||pick.p.ref||''; locked=true; }
+  }catch(e){}
   // locked custom orders always count towards the target, whatever week they name
-  try{ const co=await coOpenDemandMap(); Object.keys(co).forEach(s=>{ if(!(+dm[s]>0)) dm[s]=co[s]; }); }catch(e){}
+  let coCount=0;
+  try{ const co=await coOpenDemandMap(); Object.keys(co).forEach(s=>{ if(!(+dm[s]>0)){ dm[s]=co[s]; coCount++; } }); }catch(e){}
+  window._prodTargetLocked=locked||coCount>0; window._prodTargetRef=ref; window._prodTargetCo=coCount;
   prodTargetMap=dm; window._prodTargetDate=planDate;
   prodProducedMap={};
   try{ let rows;
@@ -4843,14 +4961,16 @@ function drawProdPlan(){
   let h=`<div class="repcard"><div class="repbar"><span>Production date</span>
     <input type="date" value="${prodPlanDate}" onchange="prodPlanDate=this.value;renderProdPlan()">
     ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
-    <span style="color:var(--muted);font-size:12px">Running target: <b>Target</b> = the demand plot for this week${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''} plus any locked custom order. <b>Remaining</b> = target − confirmed production since that date − this run. Each posted run eats into it.</span></div>
+    ${window._prodTargetLocked
+      ? `<span style="color:var(--muted);font-size:12px">Running target from <b>locked demand</b>${window._prodTargetRef?' · '+esc(window._prodTargetRef):''}${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''}${window._prodTargetCo?' + '+window._prodTargetCo+' custom order SKU(s)':''}. <b>Remaining</b> = target − confirmed production since that date − this run.</span>`
+      : `<span style="color:var(--earth,#b5762a);font-size:12px">No locked demand for this week — <b>targets are blank on purpose</b>. Save a plan in Demand/MRP to lock it. You can still build and post this run without one.</span>`}</div>
     <div class="smart" style="margin:8px 0"><div class="stile"><div class="v">${totTarget}</div><div class="l">Target packs</div></div><div class="stile"><div class="v">${totGood}</div><div class="l">This run (good)</div></div><div class="stile"><div class="v" style="color:${totRemain>0?'var(--berry)':'#4e7a3e'}">${totRemain}</div><div class="l">Remaining to make</div></div></div>
     <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th class="num">Target</th><th class="num">Produced (wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
     ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodProducedMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
-      return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div></td>
+      return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${t?'':'<div class="mini" style="color:var(--muted)">no target — made to order</div>'}</td>
       <td class="num">${t||'—'}</td><td class="num" style="color:var(--muted)">${p||'—'}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:74px;text-align:right" value="${l.good_packs||''}" oninput="prodPlanLines[${i}].good_packs=+this.value||0;prodRemainCell(${i})"></td>
-      <td class="num" id="prem${i}"><b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b></td>
+      <td class="num" id="prem${i}">${t?`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:60px;text-align:right" value="${l.reject_packs||''}" oninput="prodPlanLines[${i}].reject_packs=+this.value||0"></td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:70px;text-align:right" value="${l.waste_g||''}" oninput="prodPlanLines[${i}].waste_g=+this.value||0"></td>
       <td><input style="width:110px" value="${esc(l.output_lot||'')}" oninput="prodPlanLines[${i}].output_lot=this.value"></td>
@@ -4900,9 +5020,9 @@ function prodKitchenCart(){
       <input id="kc_q" placeholder="🔎 search name / SKU / group…" oninput="window._kcQ=this.value;drawKitchenCartBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
       <select id="kc_g" onchange="window._kcG=this.value;drawKitchenCartBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All groups</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
     </div>
-    <div style="max-height:380px;overflow:auto"><table><thead><tr><th>Product</th><th class="num">Target</th><th class="num">Remaining</th><th class="num">Produce</th></tr></thead><tbody id="kcBody"></tbody></table></div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="prodCartApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
-  $('overlay').classList.add('on'); drawKitchenCartBody();
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Product</th><th class="num">Target</th><th class="num">Remaining</th><th class="num">Produce</th></tr></thead><tbody id="kcBody"></tbody></table></div>
+    <div class="mfoot"><button class="btn" onclick="prodCartApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on'); drawKitchenCartBody();
 }
 function drawKitchenCartBody(){
   const prods=(window._prodAllProducts||[]); const q=(window._kcQ||'').toLowerCase().split(/\s+/).filter(Boolean); const gf=window._kcG||'';
@@ -4911,8 +5031,8 @@ function drawKitchenCartBody(){
   const shown=prods.filter(match); let body='';
   hierGroups(shown,{g1:'group_1',g2:'group_2'}).forEach(G=>G.subs.forEach(S=>{
     body+=`<tr style="background:#f6f8f4"><td colspan="4" style="padding-left:10px">▸ <b>${esc(G.g1+' › '+(S.g2||''))}</b></td></tr>`;
-    S.items.forEach(p=>{ const rem=_prodRemain(p.sku,0); const v=(window._kcQty&&window._kcQty[p.sku]!=null)?window._kcQty[p.sku]:'';
-      body+=`<tr><td>${esc(p.name)}<div class="mini"><code>${esc(p.sku)}</code></div></td><td class="num mini">${prodTargetMap[p.sku]||'—'}</td><td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem||'—'}</td>
+    S.items.forEach(p=>{ const hasT=+prodTargetMap[p.sku]>0; const rem=hasT?_prodRemain(p.sku,0):0; const v=(window._kcQty&&window._kcQty[p.sku]!=null)?window._kcQty[p.sku]:'';
+      body+=`<tr><td>${esc(p.name)}<div class="mini"><code>${esc(p.sku)}</code></div></td><td class="num mini">${prodTargetMap[p.sku]||'—'}</td><td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${hasT?(rem||'—'):'—'}</td>
         <td><input type="number" step="any" inputmode="decimal" value="${v}" placeholder="${rem||0}" oninput="window._kcQty['${esc(p.sku)}']=this.value===''?'':(+this.value||0)" style="width:70px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); }));
   const el=$('kcBody'); if(el) el.innerHTML=body||'<tr><td colspan="4" class="empty">No products match.</td></tr>';
 }
@@ -4936,9 +5056,9 @@ function prodOutPick(){
       <input id="op_q" placeholder="🔎 search name / SKU / raw parent…" oninput="window._opQ=this.value;drawOutPickBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
       <select onchange="window._opG=this.value;drawOutPickBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All categories</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
     </div>
-    <div style="max-height:380px;overflow:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Needed kg</th></tr></thead><tbody id="opBody"></tbody></table></div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="prodOutApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
-  $('overlay').classList.add('on'); drawOutPickBody();
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Needed kg</th></tr></thead><tbody id="opBody"></tbody></table></div>
+    <div class="mfoot"><button class="btn" onclick="prodOutApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on'); drawOutPickBody();
 }
 function drawOutPickBody(){
   const ings=(window._prodAllIngredients||[]);
@@ -5185,7 +5305,7 @@ const KSHEET_CSS=`  :root{
   .mix-content > .notes-panel{flex:1 1 0;}
   .mix-content > .tracking-block{flex:1 1 0;}
   .mix-content > .notes-free{flex:0.7 1 0;min-width:0;}
-  @media (max-width:760px){
+  @media screen and (max-width:760px){
     .mix-block .mix-content{flex-direction:column;}
   }
   .ingred-col{display:flex;flex-direction:column;height:100%;}
@@ -5299,9 +5419,23 @@ const KSHEET_CSS=`  :root{
     }
     /* Keep the whole recipe card together as one unbreakable unit */
     .mix-block, .mix-block *{break-inside:avoid !important;page-break-inside:avoid !important;}
-    .mix-content{display:flex !important;max-width:100% !important;}
-    .mix-content > .ingred-col{flex:1.3 1 0 !important;}
-    .mix-content > .notes-panel{flex:1.1 1 0 !important;}
+    /* A4 at 14mm margins is ~688 CSS px, which is under the 760px phone
+       breakpoint — without this the mix block prints stacked and the right-hand
+       panel overshoots the page. Force the two-column layout back on. */
+    .mix-content{display:flex !important;flex-direction:row !important;max-width:100% !important;gap:18px !important;}
+    /* the notes column is narrow on A4 — stack its two tracking blocks so the
+       labels stop wrapping and the fill lines are long enough to write on */
+    .tracking-2col{display:block !important;}
+    .tracking-2col .tracking-block{margin-bottom:10px !important;}
+    .cover-2col{display:flex !important;flex-wrap:nowrap !important;}
+    .day-totals{display:flex !important;flex-wrap:nowrap !important;}
+    table.ingred td, table.ingred th{word-break:break-word;}
+    .track-row span{flex:0 0 118px !important;font-size:10px !important;}
+    .track-row .fill-line{min-width:60px !important;}
+    table.ingred th{font-size:10px !important;}
+    table.ingred td{font-size:11.5px !important;padding:5px 6px !important;}
+    .mix-content > .ingred-col{flex:1.55 1 0 !important;min-width:0 !important;}
+    .mix-content > .notes-panel{flex:1 1 0 !important;min-width:0 !important;}
     .mix-content > .notes-free{display:none !important;}
     .notes-free{min-height:0 !important;}
     .notes-free .lined-area{flex:0 0 auto !important;}
@@ -5597,13 +5731,15 @@ async function prodSubstitute(){
       <td><select onchange="prodSetSub('${esc(sku)}',this.value)" style="width:280px"><option value="" ${!chosen?'selected':''}>— same (no change) —</option>${opts}</select></td></tr>`; }).join('');
   $('modal').innerHTML=`<div><h3>🔁 Substitute BOM ingredients — this run</h3>
     <p class="mini">When an ingredient is unavailable, swap it for another for <b>this production run only</b>. The recipe grams stay the same; the replacement is processed &amp; consumed instead, with its own yield &amp; cost. The finished product is unchanged.</p>
-    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Recipe ingredient</th><th>Replace with</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Recipe ingredient</th><th>Replace with</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px"><b id="subCount">${Object.keys(window._prodSub).length}</b> substitution(s) set for this run</div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="closeModal();drawProdPlan()">✅ Apply</button><button class="btn sec" onclick="window._prodSub={};closeModal();drawProdPlan()">Clear all</button></div></div>`;
   $('overlay').classList.add('on');
 }
 function prodSetSub(orig,val){ window._prodSub=window._prodSub||{}; if(!val||val===orig) delete window._prodSub[orig]; else window._prodSub[orig]=val; const c=$('subCount'); if(c)c.textContent=Object.keys(window._prodSub).length; }
-function prodRemainCell(i){ const l=prodPlanLines[i]; const el=$('prem'+i); if(!el)return; const rem=_prodRemain(l.product_sku,l.good_packs); el.innerHTML=`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`; }
+function prodRemainCell(i){ const l=prodPlanLines[i]; const el=$('prem'+i); if(!el)return;
+  if(!(+prodTargetMap[l.product_sku]>0)){ el.innerHTML='<span class="mini" style="color:var(--muted)">—</span>'; return; }
+  const rem=_prodRemain(l.product_sku,l.good_packs); el.innerHTML=`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`; }
 function prodAddLine(sku){ if(!sku)return; if(prodPlanLines.some(l=>l.product_sku===sku)){ drawProdPlan(); return; } const p=(window._prodAllProducts||[]).find(x=>x.sku===sku)||{}; prodPlanLines.push({product_sku:sku,name:p.name||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:0,reject_packs:0,waste_g:0,output_lot:''}); drawProdPlan(); }
 function prodDelLine(i){ prodPlanLines.splice(i,1); drawProdPlan(); }
 async function prodPersist(status){
@@ -5677,7 +5813,7 @@ async function prodOpenDrafts(){
   $('modal').innerHTML=`<div><h3>📂 Saved production plans</h3>
     <p class="mini">The working flow: build a draft, print the <b>Daily Production Sheet</b>, let the kitchen run the day — then come back here, open the same draft, attach the photo, enter what was actually produced and <b>Confirm</b>. A draft holds the product lines, the output ingredients and this run's substitutions.</p>
     ${(!docs.length&&fromBatches.length)?`<div style="margin:0 0 8px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">Showing plans rebuilt from batches — product lines only. Run <b>wr_production_plans.sql</b> once and drafts will keep their output ingredients and substitutions too.</div>`:''}
-    <div style="max-height:360px;overflow:auto"><table><thead><tr><th>Date</th><th>Run</th><th>Status</th><th class="num">Products</th><th class="num">Packs</th><th class="num">Outputs</th><th></th></tr></thead>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Run</th><th>Status</th><th class="num">Products</th><th class="num">Packs</th><th class="num">Outputs</th><th></th></tr></thead>
       <tbody>${rows||'<tr><td colspan="7" class="empty">No saved plans yet — build one and press 💾 Save draft.</td></tr>'}</tbody></table></div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn sec" onclick="closeModal()">Close</button></div></div>`;
   $('overlay').classList.add('on');
@@ -5754,7 +5890,7 @@ async function drawPreConfirmSub(){
   const nSub=Object.keys(window._prodSub).length;
   $('modal').innerHTML=`<div><h3>⚠ Before confirming — ${sh.length} ingredient(s) short</h3>
     <p class="mini">Using <b>processed stock first, then raw</b>, these can't fully cover the run. Pick a <b>replacement</b> for any you want to swap (it's consumed instead, at its own yield &amp; cost — the finished product is unchanged), or leave as-is and the run will make what stock allows. You can still confirm either way.</p>
-    <div style="max-height:300px;overflow:auto"><table><thead><tr><th>Short ingredient</th><th>Replace with</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Short ingredient</th><th>Replace with</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div style="margin-top:8px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px"><b id="preSubCount">${nSub}</b> replacement(s) set for this run</div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="drawPreConfirmSub()">↻ Re-check stock</button><button class="wfbtn" onclick="closeModal();openProdActuals()">✅ Continue to confirm</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   $('overlay').classList.add('on');
@@ -5873,7 +6009,7 @@ function _paRow(x,i){
     <td class="num"><input type="number" step="any" inputmode="decimal" id="pamd${i}" value="${x.actualMadeKg}" oninput="_paEdit(${i},'actualMadeKg',this.value)" style="width:78px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
     <td class="num" id="payl${i}">${c.yieldPct?`<b style="color:${c.yieldPct<70?'var(--danger)':'#4e7a3e'}">${c.yieldPct}%</b>`:'—'}</td>
     <td class="num mini" id="paex${i}" style="color:${c.excess<-0.0005?'var(--danger)':(c.excess>0.0005?'#4e7a3e':'var(--muted)')}">${c.excess?((c.excess>0?'+':'')+_pa2(c.excess)):'0'}</td></tr>
-  <tr class="parecap"><td colspan="7" id="parc${i}">${_paRecap(x)}</td></tr>`;
+  <tr class="parecap"><td colspan="8" id="parc${i}">${_paRecap(x)}</td></tr>`;
 }
 function drawProdActuals(){
   const a=window._prodAct||[]; const A=a.filter(x=>x.type==='A'), B=a.filter(x=>x.type==='B');
@@ -5889,11 +6025,12 @@ function drawProdActuals(){
     </div>
     <div id="paWarn" style="display:${short.length?'block':'none'};margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px"><b>${short.length} ingredient(s) come up short</b> — processed stock plus what you made is less than the run needs. Post anyway and stock goes negative, or raise the output made.</div>
     ${A.length?`<div class="mini" style="margin:6px 0 2px;font-weight:700">For products (mix ingredients)</div>
-    <div style="max-height:300px;overflow:auto"><table class="pa">${head}<tbody>${A.map(x=>_paRow(x,idx(x))).join('')}</tbody></table></div>`:''}
+    <div class="mscroll" style="overflow-x:auto"><table class="pa">${head}<tbody>${A.map(x=>_paRow(x,idx(x))).join('')}</tbody></table></div>`:''}
     ${B.length?`<div class="mini" style="margin:12px 0 2px;font-weight:700">Output ingredients (make to stock)</div>
-    <div style="max-height:240px;overflow:auto"><table class="pa">${head}<tbody>${B.map(x=>_paRow(x,idx(x))).join('')}</tbody></table></div>`:''}
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="prodActualsApply()">✅ Confirm &amp; post</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
-  $('overlay').classList.add('on');
+    <div class="mscroll" style="overflow-x:auto"><table class="pa">${head}<tbody>${B.map(x=>_paRow(x,idx(x))).join('')}</tbody></table></div>`:''}
+    <div class="mfoot"><button class="btn" onclick="prodActualsApply()">✅ Confirm &amp; post</button><button class="btn sec" onclick="closeModal()">Cancel</button>
+      <span style="flex:1"></span><span class="mini" style="color:var(--muted);align-self:center">${a.length} ingredient(s) in this run</span></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
 }
 async function prodActualsApply(){
   if(_postLock){ toast('Still posting…',true); return; }
@@ -6015,7 +6152,7 @@ function drawProcessing(){
       <td><span class="btn link" style="color:var(--danger)" onclick="window._procLines.splice(${i},1);drawProcessing()">✕</span></td></tr>`; }).join('');
   $('modal').innerHTML=`<div><h3>🔪 Raw → Process Logs <span class="mini" style="font-weight:400">raw → processed</span></h3>
     <p class="mini">Record what the prep team processed. Enter the <b>processed output</b> and how many <b>kg you made</b> (decimals OK). Each line <b>adds</b> that processed output to stock and <b>auto-deducts</b> the raw it came from — raw used = processed ÷ yield% (you don't type the raw). Optional: this pre-stages processed stock ahead of a run; you can also capture actual raw→processed inside ✅ Confirm production instead.</p>
-    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Processed output</th><th class="num">Processed kg</th><th class="num">Raw used</th><th></th></tr></thead><tbody>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Processed output</th><th class="num">Processed kg</th><th class="num">Raw used</th><th></th></tr></thead><tbody>
     ${rows||'<tr><td colspan="4" class="empty">Add a line below.</td></tr>'}
     </tbody></table></div>
     <div style="margin-top:8px"><span class="addrow" onclick="window._procLines.push({sku:'',kg:''});drawProcessing()">＋ Add line</span></div>
@@ -7236,9 +7373,16 @@ function openOpeningImport(){ _opRows=null; _opReport=null;
    which matches the "one location per upload, re-upload replaces" rule. */
 function obRef(){ return 'OB-'+String(_opLoc||'bulacan').toUpperCase(); }
 async function obProofLoad(){
-  window._attCtx={model:'opening_balance', ref:obRef(), rerender:drawObProof};
-  formAtts=await attsForRecord('opening_balance', obRef());
-  window._obNotes=await notesForRecord('opening_balance', obRef());
+  const ref=obRef();
+  window._attCtx={model:'opening_balance', ref, rerender:drawObProof};
+  formAtts=await attsForRecord('opening_balance', ref);
+  window._obNotes=await notesForRecord('opening_balance', ref);
+  // upload history — the system-logged posts, newest first
+  window._obHist=(window._obNotes||[])
+    .filter(n=>/opening row\(s\)|Opening balances uploaded/i.test(String(n.body||'')))
+    .map(n=>({at:n.created_at, body:n.body}))
+    .sort((a,b)=>String(b.at||'').localeCompare(String(a.at||'')))
+    .slice(0,12);
   drawObProof();
 }
 function drawObProof(){
@@ -7246,9 +7390,16 @@ function drawObProof(){
   const notes=(window._obNotes||[]).filter(n=>n.kind!=='activity');
   const list=notes.map(n=>`<div class="nmsg ${n.resolved?'done':''}"><div class="nhd"><b>${esc(n.author||'—')}</b>${(n.mentions&&n.mentions.length)?` <span class="tm">→ @${n.mentions.map(esc).join(', @')}</span>`:''}<span style="flex:1"></span><span class="tm">${esc(String(n.created_at||'').slice(0,16).replace('T',' '))}</span></div>
       <div class="bd">${noteBodyHtml(n.body||'')}</div></div>`).join('')||'<div class="nmsg" style="color:var(--muted)">No notes yet.</div>';
+  const hist=(window._obHist||[]);
+  const histHtml=hist.length
+    ? `<div style="overflow-x:auto;margin-bottom:10px"><table><thead><tr><th>When</th><th>What happened</th></tr></thead><tbody>
+        ${hist.map(h=>`<tr><td class="mini" style="white-space:nowrap">${esc(String(h.at||'').slice(0,16).replace('T',' '))}</td><td class="mini">${esc(h.body||'')}</td></tr>`).join('')}
+       </tbody></table></div>`
+    : '<div class="hint" style="margin-bottom:10px">No uploads recorded for this location yet.</div>';
   el.innerHTML=`<div style="border-top:1px solid var(--line);padding-top:12px">
-    <h4 style="margin:0 0 4px">🧾 Proof for this opening balance <span class="mini" style="font-weight:400;color:var(--muted)">· ${esc(obRef())}</span></h4>
-    <div class="hint" style="margin-bottom:8px">Attach the signed opening sheet, the source spreadsheet and stock photos, and leave a note saying who counted and when. It stays on <code>${esc(obRef())}</code> — re-uploading the balances does not clear it.</div>
+    <h4 style="margin:0 0 4px">🧾 Proof &amp; upload history <span class="mini" style="font-weight:400;color:var(--muted)">· ${esc(obRef())}</span></h4>
+    <div class="hint" style="margin-bottom:8px">Every posted upload is logged here and the workbook you uploaded is filed as an attachment automatically, so you can pull the exact source file back later. Add the signed sheet, stock photos and a note saying who counted. It stays on <code>${esc(obRef())}</code> — re-uploading the balances does not clear it.</div>
+    ${histHtml}
     ${attachHtml()}
     <div class="ncompose" style="margin-top:10px"><textarea id="obNoteInput" rows="2" placeholder="Who counted this, when, and anything unusual… use @name to notify a teammate"></textarea>
       <div class="mchips">${mentionChips()}</div>
@@ -7277,25 +7428,43 @@ function obClose(){ window._attCtx=null; formAtts=[]; closeModal(); }
 async function _openingSections(uploaded, loc){
   loc=(loc==='pasig'?'pasig':'bulacan');
   const ings=await listIngredients(); const prods=(await db.list('products',{})).filter(p=>p.active!==false);
+  /* Live figures alongside each line, so the sheet is a COUNT sheet and not a
+     blind list: what the system currently thinks is on hand at this location,
+     and what a unit is worth. Counting against a book figure is how variances
+     get spotted at the shelf instead of three days later. */
+  const book={};
+  if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(b=>{ if(String(b.location_code||'')!==loc) return;
+    book[(b.kind==='product'?'product:':'ingredient:')+b.ref_sku]=(book[(b.kind==='product'?'product:':'ingredient:')+b.ref_sku]||0)+(+b.on_hand||0); }); }catch(e){} }
+  else { (DEMO.inventory_movements||[]).forEach(m=>{ if(String(m.location_code||'')!==loc) return;
+    const k=(m.kind==='product'?'product:':'ingredient:')+m.ref_sku; book[k]=(book[k]||0)+(+m.qty||0); }); }
+  const _bookIng=(i)=>{ const g=+book['ingredient:'+i.sku]||0; return isSupplyItem(i)?g:Math.round(g/10)/100; };  // supplies in units, food kg
+  const _bookProd=(sku)=>+book['product:'+sku]||0;
+  const _costIng=(i)=> isSupplyItem(i) ? (+i.list_price_kg||+i.moving_avg_cost_kg||0)
+                                       : (+i.moving_avg_cost_kg||+i.list_price_kg||0);   // per kg / per unit
   const food=ings.filter(i=>!isSupplyItem(i)), sup=ings.filter(isSupplyItem);
   const _bs={},_bn={}; food.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
   const _pm=_countProcMaps(food,_bs,_bn); const ctx={bs:_bs,bn:_bn,procBases:_pm.bases,procCat:_pm.catByBase};
   const uq={}; if(uploaded) uploaded.forEach(r=>{ uq[String(r.sku).trim().toLowerCase()]=r.qty; });   // one location per upload → match by sku
   const q=(sku)=>{ if(!uploaded) return ''; const v=uq[String(sku).trim().toLowerCase()]; return (v==null||v==='')?'':v; };
-  const ingLines=food.map(i=>{ const c=_countIngClass(i,ctx); return {sku:i.sku,name:c.name,type:c.form,unit:'kg',location:loc,qty:q(i.sku),g1:c.g1,g2:c.g2,grank:c.grank,form:c.form}; });
-  const supLines=sup.map(i=>({sku:i.sku,name:i.name,type:'supply',unit:(i.uom||'pcs'),location:loc,qty:q(i.sku),g1:'Kitchen Supplies',g2:(i.category||'Supplies'),grank:_grank(i.category||'Supplies')*1000+_so(i),form:'supply'}));
+  const ingLines=food.map(i=>{ const c=_countIngClass(i,ctx); return {sku:i.sku,name:c.name,type:c.form,unit:'kg',location:loc,qty:q(i.sku),
+    book:_bookIng(i), cost:_costIng(i), g1:c.g1,g2:c.g2,grank:c.grank,form:c.form}; });
+  const supLines=sup.map(i=>({sku:i.sku,name:i.name,type:'supply',unit:(i.uom||'pcs'),location:loc,qty:q(i.sku),
+    book:_bookIng(i), cost:_costIng(i), g1:'Kitchen Supplies',g2:(i.category||'Supplies'),grank:_grank(i.category||'Supplies')*1000+_so(i),form:'supply'}));
   const prodLines=[],stkLines=[]; prods.slice().sort(cmpItems).forEach(p=>{
-    prodLines.push({sku:p.sku,name:p.name,type:'product',unit:'packs',location:loc,qty:q(p.sku),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),form:''});
-    stkLines.push({sku:'STK-'+p.sku,name:p.name+' — Sticker',type:'sticker',unit:'pcs',location:loc,qty:q('STK-'+p.sku),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),form:''}); });
+    prodLines.push({sku:p.sku,name:p.name,type:'product',unit:'packs',location:loc,qty:q(p.sku),
+      book:_bookProd(p.sku), cost:(+p.tot_cost_ref||0), g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),form:''});
+    stkLines.push({sku:'STK-'+p.sku,name:p.name+' — Sticker',type:'sticker',unit:'pcs',location:loc,qty:q('STK-'+p.sku),
+      book:(+p['sticker_'+loc+'_on_hand']||0), cost:0, g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),form:''}); });
   return {ingredients:ingLines, products:prodLines, supplies:supLines, stickers:stkLines};
 }
-const _OPHDR=['sku','name','type','unit','location','qty'];
+const _OPHDR=['sku','name','type','unit','location','qty','on hand now','cost/unit'];
 // Render one section's lines to an AoA: optional header row, then section/subgroup header rows
 // (blank SKU cell → the importer's parser skips them) + item rows.
 function _openingAoa(lines, withHdr){ const out=[]; if(withHdr!==false) out.push(_OPHDR.slice());
-  _renderRows(lines).forEach(r=>{ if(r.type==='g1'){ out.push(['',r.label+' ('+r.count+')','','','','']); return; }
-    if(r.type==='g2'){ out.push(['','  ▸ '+r.label+' ('+r.count+')','','','','']); return; }
-    const l=r.l; out.push([l.sku,l.name,l.type,l.unit,l.location,(l.qty===''||l.qty==null)?'':l.qty]); });
+  _renderRows(lines).forEach(r=>{ if(r.type==='g1'){ out.push(['',r.label+' ('+r.count+')','','','','','','']); return; }
+    if(r.type==='g2'){ out.push(['','  ▸ '+r.label+' ('+r.count+')','','','','','','']); return; }
+    const l=r.l; out.push([l.sku,l.name,l.type,l.unit,l.location,(l.qty===''||l.qty==null)?'':l.qty,
+      (l.book==null||l.book==='')?'':l.book, (+l.cost)?Math.round(l.cost*100)/100:'']); });
   return out; }
 function _openingTabs(S){ return [['Ingredients',S.ingredients],['Products',S.products],['Kitchen Supplies',S.supplies],['Stickers',S.stickers]]; }
 // The 4 sections in order, each with a file-safe key for organized PDF/Excel names.
@@ -7307,7 +7476,7 @@ function _openingSectionList(S){ return [
 // Render rows for a section WITH a running item number (n) on item rows (1..N within the section).
 function _numberedRows(lines){ let n=0; return _renderRows(lines).map(r=>{ if(r.type==='item'){ n++; return {t:'item',n,l:r.l}; } return {t:r.type,label:r.label,count:r.count}; }); }
 function _openingWriteXlsx(S, fname){ const wb=XLSX.utils.book_new();
-  _openingTabs(S).forEach(([nm,lines])=>{ const ws=XLSX.utils.aoa_to_sheet(_openingAoa(lines)); ws['!cols']=[{wch:34},{wch:46},{wch:12},{wch:12},{wch:12},{wch:10}]; XLSX.utils.book_append_sheet(wb,ws,nm); });
+  _openingTabs(S).forEach(([nm,lines])=>{ const ws=XLSX.utils.aoa_to_sheet(_openingAoa(lines)); ws['!cols']=[{wch:34},{wch:46},{wch:12},{wch:12},{wch:12},{wch:10},{wch:13},{wch:12}]; XLSX.utils.book_append_sheet(wb,ws,nm); });
   XLSX.writeFile(wb,fname); }
 function _openingWriteCsv(S, fname){ const all=[_OPHDR.slice()];
   _openingTabs(S).forEach(([nm,lines])=>{ all.push(['','═══ '+nm+' ═══','','','','']); _openingAoa(lines,false).forEach(r=>all.push(r)); });
@@ -7321,7 +7490,10 @@ function _opCols(blank){ return [
   {label:'type', width:12, pdfWidth:'auto', val:l=>l.type},
   {label:'unit', width:9, pdfWidth:'auto', val:l=>l.unit},
   {label:'location', width:11, pdfWidth:'auto', val:l=>l.location},
-  {label:'qty', width:12, pdfWidth:52, align:'right', numFmt:'#,##0.####', val:l=> blank?'' : (l.qty===''?'':l.qty)} ]; }
+  {label:'qty', width:12, pdfWidth:52, align:'right', numFmt:'#,##0.####', val:l=> blank?'' : (l.qty===''?'':l.qty)},
+  // live reference columns — read-only context for the counter, ignored on re-upload
+  {label:'on hand now', width:13, pdfWidth:58, align:'right', numFmt:'#,##0.###', val:l=> (l.book==null||l.book==='')?'':l.book},
+  {label:'cost/unit', width:12, pdfWidth:56, align:'right', numFmt:'#,##0.00', val:l=> (+l.cost)?Math.round(l.cost*100)/100:''} ]; }
 async function openingDownloadTemplate(){
   const S=await _openingSections(null,_opLoc); const total=S.ingredients.length+S.products.length+S.supplies.length+S.stickers.length;
   const suffix='_'+_opLoc+'_'+todayISO();
@@ -7383,7 +7555,7 @@ function _opParseSheet(name,data){
   if(!rows.length) throw new Error('No "sku"/"qty" rows found on any tab');
   return rows;
 }
-function openingStageFile(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader();
+function openingStageFile(e){ const f=e.target.files[0]; if(!f)return; window._opFile=f; const rd=new FileReader();
   rd.onload=()=>{ try{ _opRows=_opParseSheet(f.name,rd.result); _opReport=null;
       $('opArea').innerHTML=`<b>${esc(f.name)}</b> — ${_opRows.length} row(s) read.<div style="margin-top:8px"><button class="btn sec" onclick="openingTest()">🔍 Test</button></div>`; }
     catch(err){ $('opArea').innerHTML='<span style="color:var(--danger)">Could not read file: '+esc(err.message)+'</span>'; } };
@@ -7449,6 +7621,17 @@ async function openingDoImport(){ if(!_opReport)return;
       }catch(e){ fail++; }
     }
     sysLog('inventory_movements',note,'📥 Opening balances uploaded ('+posted+' rows'+(_unpriced?', '+_unpriced+' with no master price':'')+') by '+CURRENT_USER);
+    /* File the workbook itself against the location's opening-balance record, and
+       log the post as a note. Without this the source file lived only in whoever's
+       Downloads folder ran the upload, and there was nothing to audit against. */
+    try{
+      const ref=obRef();
+      sysLog('opening_balance', ref, '📥 Posted '+posted+' opening row(s) for '+upLoc+' by '+CURRENT_USER+(_unpriced?(' · '+_unpriced+' with no master price'):''));
+      if(window._opFile){
+        window._attCtx={model:'opening_balance', ref, rerender:()=>{}};
+        await uploadAttach(window._opFile);          // → Drive, then record_attachments
+      }
+    }catch(e){ console.warn('opening proof filing failed', String(e&&e.message||e)); }
     closeModal();
     toast('Opening balances posted: '+posted+(fail?(' · ⚠ '+fail+' failed'):'')
       +(_unpriced?(' · ⚠ '+_unpriced+' item(s) had no price in the master and posted at ₱0 — set the price, then re-upload'):''), (fail>0||_unpriced>0));
