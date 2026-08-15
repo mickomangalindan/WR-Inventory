@@ -92,6 +92,15 @@
         padding:1px 6px;border-radius:4px;vertical-align:1px;margin-right:5px}
   .tagf-proc{background:#dbeddb;color:#1e6b2e}
   .tagf-raw{background:#f0ece3;color:#7a6432}
+  /* On-hand chips. Same two colours as the Processed / Raw tags, so a glance
+     tells you WHICH stock a number is — the green one is what you already made,
+     the brown one is what you can still pull from the chiller. */
+  .ohchip{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 6px;border-radius:10px;
+          margin-left:6px;white-space:nowrap;vertical-align:1px}
+  .ohchip.proc{background:#dbeddb;color:#1e6b2e}
+  .ohchip.raw{background:#f0ece3;color:#7a6432}
+  .ohchip.none{background:#f3f3f1;color:#9a9a93}
+  .ohchip.short{background:#f7dcd6;color:#8a2b1c}
   /* Record tables sized to their content instead of an even split — a PO's SKU
      column no longer gets the same width as a one-character flag. Each header
      carries a grip you can drag; the width is remembered per model+column. */
@@ -505,12 +514,12 @@
    buy it, make it, count it. Master Data is reference material you set up once,
    so it sits with Administration at the bottom rather than at the top. */
 const MODULES = [
-  {id:'analytics', label:'Analytics', items:['reporting','margin','momentum']},
+  {id:'analytics', label:'Analytics', items:['stock_balance','reporting','margin','momentum']},
   {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc','ffprofiles']},
   {id:'plan',   label:'Planning',    items:['mrp']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
-  {id:'inv',    label:'Inventory',    items:['stock_balance','inventory_movements','variance_log']},
+  {id:'inv',    label:'Inventory',    items:['inventory_movements','variance_log']},
   {id:'help',   label:'Help', items:['guides']},
   {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
   {id:'admin',  label:'Administration', items:['connection','users','approvals','fieldacl','refs','automations','notif','studio','selftest','cleanser']},
@@ -669,17 +678,28 @@ const MODELS = {
       {n:'on_hand',l:'On hand',t:'number'},{n:'stock_value',l:'Value',t:'currency'}],
     list:['ref_sku','location_code','on_hand','stock_value'], groups:[[],[]] },
 
+  /* Two kinds of row live here now. A PRODUCT batch is packs made. An OUTPUT
+     batch is the prep behind them — kilos of raw turned into a processed
+     ingredient — which used to post its movements and leave no record at all.
+     They share the run reference, so a day reads as one job. */
   production_batches:{ label:'Production', icon:'🏭', name:'batch_ref', pk:'batch_ref',
-    searchOn:['batch_ref','product_sku','status','output_lot','operator'],
+    searchOn:['batch_ref','product_sku','status','output_lot','operator','run_ref','kind'],
     status:{f:'status',stages:['draft','confirmed','cancelled']}, cancelable:true,
-    fields:[{n:'batch_ref',l:'Batch Ref',t:'text'},{n:'product_sku',l:'Product',t:'rel',rel:'products'},
+    fields:[{n:'batch_ref',l:'Batch Ref',t:'text'},{n:'kind',l:'Kind',t:'select',o:['product','output'],ro:true},
+      // the picker only knows products; an OUTPUT batch points at an ingredient,
+      // so the readable name is resolved separately and shown beside it
+      {n:'_item',l:'Item',t:'text',ro:true,virtual:true},
+      {n:'product_sku',l:'Product / output',t:'rel',rel:'products'},
       {n:'status',l:'Status',t:'select',o:['draft','confirmed','cancelled']},
       {n:'planned_packs',l:'Planned packs',t:'number'},
       {n:'good_packs',l:'Good packs',t:'number'},{n:'reject_packs',l:'Reject packs',t:'number'},
+      {n:'raw_used_kg',l:'Raw used (kg)',t:'number'},{n:'output_kg',l:'Output made (kg)',t:'number'},
+      {n:'from_stock_kg',l:'Drawn from processed stock (kg)',t:'number'},{n:'yield_pct',l:'Actual yield %',t:'number'},
+      {n:'run_ref',l:'Run',t:'text',ro:true},
       {n:'waste_g',l:'Waste (g)',t:'number'},{n:'output_lot',l:'Output lot',t:'text'},
       {n:'production_date',l:'Date',t:'date'},{n:'best_before',l:'Best before',t:'date'},{n:'cost_per_pack',l:'₱/pack',t:'currency'},{n:'operator',l:'Operator',t:'text',ro:true}],
-    list:['batch_ref','product_sku','status','planned_packs','good_packs','production_date'],
-    groups:[['batch_ref','product_sku','production_date','best_before'],['good_packs','reject_packs','waste_g','output_lot','cost_per_pack']],
+    list:['batch_ref','kind','_item','status','good_packs','output_kg','production_date'],
+    groups:[['batch_ref','kind','run_ref','_item','product_sku','production_date','best_before'],['good_packs','reject_packs','waste_g','output_lot','cost_per_pack'],['raw_used_kg','output_kg','from_stock_kg','yield_pct']],
     o2m:{field:'issues',model:'batch_issues',fk:'batch_ref',label:'Ingredients Issued',
       cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'uom',l:'UoM',t:'select',o:['kg','g','pcs','mL']},
         {n:'expected_raw_g',l:'Exp raw (kg)',t:'number',scale:1000,ro:true},{n:'actual_raw_g',l:'Act raw (kg)',t:'number',scale:1000},
@@ -1112,6 +1132,15 @@ async function renderList(){
   if(['products','ingredients','supplies'].includes(state.model)) rows.sort(cmpItems);   // warehouse ordering
   state._rows=rows; const bulk=!m.readonly;
   const cols=m.list.map(n=>m.fields.find(f=>f.n===n)).filter(f=>f && fieldMode(state.model,f.n)!=='hide');
+  /* Production: a batch's SKU is a product on a product batch and an INGREDIENT
+     on an output batch, so neither master alone can name every row. */
+  if(state.model==='production_batches'){
+    try{ const nm={};
+      (await db.list('products',{})).forEach(p=>nm[p.sku]=p.name||p.sku);
+      (await listIngredients()).forEach(i=>nm[i.sku]=i.name||i.sku);
+      rows.forEach(r=>{ r._item=nm[r.product_sku]||r.product_sku; if(!r.kind) r.kind='product'; });
+    }catch(e){ rows.forEach(r=>{ r._item=r.product_sku; }); }
+  }
   // Purchase Orders: append Total kg + Est. value columns, summed from each PO's lines.
   if(state.model==='purchase_orders'){
     try{ const pls=await db.list('po_lines',{}); let ings=[]; try{ings=await listIngredients();}catch(e){}
@@ -1234,6 +1263,14 @@ async function openForm(idEnc){
     // opening then discarding a new document no longer burns a sequence number.
   }
   formChildren = m.o2m && idEnc ? await db.children(m.o2m, decodeURIComponent(idEnc)) : [];
+  // a production batch names either a product or a processed ingredient
+  if(state.model==='production_batches' && formRec.product_sku){
+    try{ const nm={};
+      (await db.list('products',{})).forEach(p=>nm[p.sku]=p.name||p.sku);
+      (await listIngredients()).forEach(i=>nm[i.sku]=i.name||i.sku);
+      formRec._item=nm[formRec.product_sku]||formRec.product_sku;
+    }catch(e){ formRec._item=formRec.product_sku; }
+  }
   // preload rel options
   for(const f of m.fields) if(f.t==='rel') await relOptions(f.rel);
   if(m.o2m) for(const c of m.o2m.cols) if(c.t==='rel') await relOptions(c.rel);
@@ -4338,9 +4375,10 @@ async function coOpenDemand(){
      so two orders sharing a recipe cannot both claim the same packs. */
   const made={};
   try{ let rows;
-    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status&status=eq.confirmed');
+    // prep batches carry kilos, not packs — they must never count as packs made
+    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
-    (rows||[]).forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
+    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
   const pool={...made}, owed={};
   const byNeed=Object.values(keep).sort((a,b)=>
@@ -4408,9 +4446,9 @@ async function coPlanEvidence(){
   const _today=todayISO();
   const planned={}, inDemand={};
   try{ let rows;
-    if(isLive()) rows=await sb('production_batches?select=product_sku,status,planned_packs,good_packs,production_date,run_ref,batch_ref&status=eq.draft');
+    if(isLive()) rows=await sb('production_batches?select=product_sku,status,planned_packs,good_packs,production_date,run_ref,batch_ref,kind&status=eq.draft');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='draft');
-    (rows||[]).forEach(b=>{
+    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{
       if(!((+b.planned_packs||0)>0 || (+b.good_packs||0)>0)) return;     // a zero line plans nothing
       const d=String(b.production_date||'').slice(0,10);
       if(d && d<_today) return;                                          // abandoned draft — not "in production"
@@ -4468,9 +4506,10 @@ async function coSyncStatuses(){
   // packs confirmed produced, per SKU
   const made={};
   try{ let rows;
-    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status&status=eq.confirmed');
+    // prep batches carry kilos, not packs — they must never count as packs made
+    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
-    (rows||[]).forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
+    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
   // one shared reading of what is planned where — see coPlanEvidence
   const ev=await coPlanEvidence();
@@ -5525,9 +5564,9 @@ async function prodLoadTargets(){
   prodTargetMap=dm; window._prodTargetDate=planDate;
   prodProducedMap={};
   try{ let rows;
-    if(isLive()){ rows=await sb('production_batches?select=product_sku,good_packs,status,production_date&status=eq.confirmed&production_date=gte.'+encodeURIComponent(planDate)); }
+    if(isLive()){ rows=await sb('production_batches?select=product_sku,good_packs,status,production_date,kind&status=eq.confirmed&production_date=gte.'+encodeURIComponent(planDate)); }
     else { rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed' && String(b.production_date||'')>=String(planDate)); }
-    (rows||[]).forEach(b=>{ prodProducedMap[b.product_sku]=(prodProducedMap[b.product_sku]||0)+(+b.good_packs||0); });
+    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ prodProducedMap[b.product_sku]=(prodProducedMap[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
 }
 function _prodRemain(sku,thisGood){ const t=+prodTargetMap[sku]||0, p=+prodProducedMap[sku]||0; return Math.max(0, t-p-(+thisGood||0)); }
@@ -5575,7 +5614,7 @@ function drawProdPlan(){
       return `<option value="${esc(i.sku)}">${pre}Processed: ${esc(i._nm)}${i._raw?'  ·  Raw: '+esc(i._raw):''}</option>`; }).join('')).join('')+`</optgroup>`).join('');
   const outRows=_outIngRows(_allIng, prodOutLines.map(l=>_bs[l.ingredient_sku]||{sku:l.ingredient_sku,name:l.name}));
   h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Output ingredients — raw to process</span>
-    <span style="color:var(--muted);font-size:12px">Enter the <b>raw you plan to pull</b>. The output is worked out from the standard yield — come back after the prep and correct either figure before you confirm.</span></div>
+    <span style="color:var(--muted);font-size:12px">Enter the <b>raw you plan to pull</b>. The output is worked out from the standard yield — come back after the prep and correct either figure before you confirm. The chips show stock at <b>${esc(planProduceLoc())}</b>: <span class="ohchip proc">processed</span> beside the item, <span class="ohchip raw">raw</span> beside its parent.</span></div>
     <div style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Raw to use (kg)</th><th class="num">Output qty (kg)</th><th class="num">Yield</th><th></th></tr></thead><tbody>
     ${prodOutLines.map((l,i)=>{ const r=outRows[i]||{};
       const y=((+r.yield_pct||100)/100)||1;
@@ -5586,14 +5625,18 @@ function drawProdPlan(){
       const raw=(l.raw_kg!=null&&l.raw_kg!=='')?l.raw_kg:'';
       const made=(l.needed_kg!=null&&l.needed_kg!=='')?l.needed_kg:'';
       const a=(parseFloat(raw)>0&&parseFloat(made)>0)?Math.round((parseFloat(made)/parseFloat(raw))*1000)/10:0;
-      return `<tr><td><span class="tagf tagf-proc">Processed</span> <b>${esc(r._nm||l.name)}</b><div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''}</div></td>
-      <td class="mini">${r._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(r._raw)}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
-      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:96px;text-align:right" value="${raw}" oninput="prodOutSetRaw(${i},this.value)" title="what you pull from the chiller"></td>
+      const _oh=window._prodSupOh||{};
+      const ohOut=_oh[l.ingredient_sku]||0, ohRaw=r._rawSku?(_oh[r._rawSku]||0):0;
+      const overdrawn=parseFloat(raw)>0 && r._rawSku && parseFloat(raw)*1000>ohRaw+0.5;
+      return `<tr><td><span class="tagf tagf-proc">Processed</span> <b>${esc(r._nm||l.name)}</b>${_ohChip('proc',ohOut)}<div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''}</div></td>
+      <td class="mini">${r._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(r._raw)}${_ohChip('raw',ohRaw,{short:overdrawn})}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:96px;text-align:right${overdrawn?';border-color:var(--danger);color:var(--danger)':''}" value="${raw}" oninput="prodOutSetRaw(${i},this.value)" title="${overdrawn?'more than the '+(Math.round(ohRaw/10)/100)+' kg of raw on hand':'what you pull from the chiller'}"></td>
       <td class="num"><input type="number" step="any" inputmode="decimal" id="pom${i}" style="width:100px;text-align:right" value="${made}" oninput="prodOutSetMade(${i},this.value)" title="what came off it — estimated from the standard yield until you correct it"></td>
       <td class="num" id="poy${i}">${a?`<b style="color:${a<70?'var(--danger)':'#4e7a3e'}">${a}%</b>`:`<span class="mini" style="color:var(--muted)">std ${Math.round(y*1000)/10}%</span>`}</td>
       <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="6" class="empty">Optional — add a processed ingredient and enter the raw you will prep.</td></tr>'}
     </tbody></table></div>
-    <div style="margin-top:8px"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button></div></div>`;
+    <div style="margin-top:8px"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button></div>
+    <div class="hint" style="margin-top:8px">This list is for prep you <b>still have to do</b>. Processed stock you have <b>already made</b> needs no line here — when you confirm the run, every recipe draws the processed bin first and only makes the shortfall from raw. So 25 kg of a processed ingredient sitting in the chiller against a 21 kg recipe means <b>nothing to prep and nothing to type</b>; the green chip beside each item is there so you can see that at a glance.</div></div>`;
   h+=prodPackHtml();
   $('content').innerHTML=h;
 }
@@ -5849,12 +5892,13 @@ function prodOutPick(){
   window._opQ=''; window._opG='';
   const groups=[...new Set(_outIngRows(window._prodAllIngredients||[],ings).map(i=>i._g1||'—'))].sort();
   $('modal').innerHTML=`<div><h3>🔎 Output ingredients — browse &amp; add</h3>
-    <p class="mini">Grouped by <b>category → base material</b>, the same way the weekly count sheet reads. Enter the <b>raw kg you plan to pull</b> against any row — the output is worked out from that item's yield, and both stay editable on the plan.</p>
+    <p class="mini">Grouped by <b>category → base material</b>, the same way the weekly count sheet reads. Enter the <b>raw kg you plan to pull</b> against any row — the output is worked out from that item's yield, and both stay editable on the plan.<br>
+    The chips are stock on hand at <b>${esc(planProduceLoc())}</b>: <span class="ohchip proc">green</span> is processed you have <b>already made</b> — you may not need to prep at all — and <span class="ohchip raw">brown</span> is the raw you can still pull. A raw figure turns <span class="ohchip short">red</span> when you ask for more than there is.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
       <input id="op_q" placeholder="🔎 search name / SKU / raw parent…" oninput="window._opQ=this.value;drawOutPickBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
       <select onchange="window._opG=this.value;drawOutPickBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All categories</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
     </div>
-    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Std yield</th><th class="num">Raw kg</th></tr></thead><tbody id="opBody"></tbody></table></div>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Std yield</th><th class="num">Raw to use (kg)</th></tr></thead><tbody id="opBody"></tbody></table></div>
     <div class="mfoot"><button class="btn" onclick="prodOutApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on'); drawOutPickBody();
 }
@@ -5865,15 +5909,19 @@ function drawOutPickBody(){
   const match=i=>{ if(gf && (i._g1||'—')!==gf) return false; if(!q.length) return true;
     const t=[i._nm,i.name,i.sku,i._g1,i._g2,i._raw,i.raw_input,i.category].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
   const shown=rows.filter(match); let body='';
+  const oh=window._prodSupOh||{};
   hierGroups(shown,{g1:'_g1',g2:'_g2'}).forEach(G=>{
     body+=`<tr class="grp"><td colspan="4" style="padding-left:10px">▸ <b>${esc(G.g1)}</b></td></tr>`;
     G.subs.forEach(S=>{
       if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="4" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(i=>{ const v=(window._opQty&&window._opQty[i.sku]!=null)?window._opQty[i.sku]:'';
-        body+=`<tr><td style="padding-left:26px"><span class="tagf tagf-proc">Processed</span> <b>${esc(i._nm)}</b>${i.is_intermediate?'':'<div class="mini" style="color:var(--earth,#b5762a)">⚠ <b>Intermediate</b> is not ticked on this ingredient — tick it in Master Data so it behaves as a processed output everywhere</div>'}</td>
-          <td class="mini">${i._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(i._raw)}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
+        const ohOut=oh[i.sku]||0, ohRaw=i._rawSku?(oh[i._rawSku]||0):0;
+        const want=(v===''||v==null)?0:(+v||0);
+        const overdrawn=want>0 && i._rawSku && want*1000>ohRaw+0.5;
+        body+=`<tr><td style="padding-left:26px"><span class="tagf tagf-proc">Processed</span> <b>${esc(i._nm)}</b>${_ohChip('proc',ohOut)}${i.is_intermediate?'':'<div class="mini" style="color:var(--earth,#b5762a)">⚠ <b>Intermediate</b> is not ticked on this ingredient — tick it in Master Data so it behaves as a processed output everywhere</div>'}</td>
+          <td class="mini">${i._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(i._raw)}${_ohChip('raw',ohRaw,{short:overdrawn})}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
           <td class="num mini" style="color:var(--muted)">${i.yield_pct?esc(i.yield_pct)+'%':'—'}</td>
-          <td><input type="number" step="any" value="${v}" oninput="window._opQty['${esc(i.sku)}']=this.value===''?'':(+this.value||0)" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px" title="raw kg to pull"></td></tr>`; }); }); });
+          <td><input type="number" step="any" value="${v}" oninput="window._opQty['${esc(i.sku)}']=this.value===''?'':(+this.value||0);drawOutPickBody()" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px${overdrawn?';border-color:var(--danger);color:var(--danger)':''}" title="raw kg to pull"></td></tr>`; }); }); });
   const el=$('opBody'); if(el) el.innerHTML=body||'<tr><td colspan="4" class="empty">No output ingredients match.</td></tr>';
 }
 function prodOutApply(){ const q=window._opQty||{}; let n=0;
@@ -6865,6 +6913,38 @@ async function prodActualsApply(){
       if(x.parent && rawG>0){ try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:x.parent,location_code:'bulacan',qty:-rawG,unit_cost:x.parentCostG,movement_type:'processing_out',note:procRef}); }catch(e){} }
       if(madeG>0){ const y=(rawG>0?madeG/rawG:1); try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:x.sku,location_code:'bulacan',qty:madeG,unit_cost:(y>0?x.parentCostG/y:x.outCostG),movement_type:'processing_in',note:procRef}); }catch(e){} }
     }
+    /* 1b) THE PREP IS PRODUCTION TOO.
+       Before this, a run that only processed raw — trimming buffalo, deboning a
+       duck — posted its movements and left NOTHING in the Production list. The
+       stock moved, but the day's work was invisible, and there was no record to
+       point at when someone asked what the team did. Each output ingredient now
+       writes its own batch, marked kind='output', alongside the product batches
+       of the same run. Quantities live in their own kg columns so nothing that
+       counts PACKS is disturbed. */
+    let outRecs=[];
+    try{
+      // re-confirming a run must not duplicate the prep rows
+      if(isLive()){ try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef)+'&kind=eq.output',{method:'DELETE',prefer:'return=minimal'}); }catch(e){} }
+      else DEMO.production_batches=(DEMO.production_batches||[]).filter(b=>!(b.run_ref===prodRunRef&&b.kind==='output'));
+      let _pi=0;
+      for(const x of acts){
+        const madeKg=Math.round((+x.actualMadeKg||0)*1000)/1000;
+        const rawKg =Math.round((+x.actualRawKg ||0)*1000)/1000;
+        const procKg=Math.round((+x.procUsedKg  ||0)*1000)/1000;
+        // nothing was prepped for this one — it came entirely out of processed stock
+        if(!(madeKg>0 || rawKg>0)) continue;
+        _pi++;
+        const rec={ batch_ref:prodRunRef+'/P'+_p2(_pi), run_ref:prodRunRef, product_sku:x.sku,
+          kind:'output', location_code:planProduceLoc(), production_date:prodPlanDate,
+          status:'confirmed', operator:CURRENT_USER,
+          planned_packs:0, good_packs:0, reject_packs:0, waste_g:0, output_lot:'',
+          output_kg:madeKg, raw_used_kg:rawKg, from_stock_kg:procKg,
+          yield_pct:(rawKg>0?Math.round((madeKg/rawKg)*1000)/10:null) };
+        try{ await db.create('production_batches',rec); outRecs.push(rec); }
+        catch(e){ console.warn('output batch failed',rec.batch_ref,String(e&&e.message||e)); }
+      }
+    }catch(e){ console.warn('output batches failed',String(e&&e.message||e)); }
+
     // 2) per batch: finished output + mix draw-down + batch issues (actuals allocated by share)
     let posted=0,failed=0,drawn=0;
     for(const r of recs){ const packs=+r.good_packs||0; if(packs<=0) continue;
@@ -6908,8 +6988,10 @@ async function prodActualsApply(){
         sysLog('production_batches',prodRunRef,'🏷️ Packaging posted — '+_lblDone+' label line(s), '+_supDone+' supply line(s)'+
           (_pers.length?(' · personalised: '+_pers.map(x=>x.name+' ×'+x.qty).join(', ')):'')+' at '+_loc);
     }catch(e){ console.warn('packaging post failed',String(e&&e.message||e)); }
-    const nOut=(acts.filter(x=>x.type==='B')).length;
-    sysLog('production_batches',prodRunRef,'✅ Production confirmed with actuals ('+recs.length+' product batch(es)'+(nOut?', '+nOut+' output ingredient(s)':'')+') — processed+produced by '+CURRENT_USER);
+    const nOut=outRecs.length;
+    sysLog('production_batches',prodRunRef,'✅ Production confirmed with actuals ('+recs.length+' product batch(es)'
+      +(nOut?', '+nOut+' prep batch(es) — '+outRecs.map(r=>ingName(r.product_sku)+' '+r.output_kg+' kg').join(', '):'')
+      +') — processed+produced by '+CURRENT_USER);
     if(recs.length) notifyRecordDone('production_batches', prodRunRef, {batch_ref:prodRunRef,status:'confirmed',operator:CURRENT_USER,production_date:prodPlanDate}, recs);
     try{ await prodSavePlanDoc('confirmed'); }catch(e){}
     try{ await coSyncStatuses(); }catch(e){}   // packs made → Partially Fulfilled / Completed
@@ -6959,10 +7041,20 @@ function isProcessedItem(i){
 function _outIngRows(ings, list){
   const {bs,bn,ctx}=_outIngCtx(ings);
   return (list||[]).map(i=>{ const cl=_countIngClass(i,ctx); const p=_procParent(i,bs,bn);
-    return {...i, _g1:cl.g1, _g2:cl.g2, _nm:_outName(i,cl), _raw:p?p.name:'', _grank:cl.grank}; });
+    return {...i, _g1:cl.g1, _g2:cl.g2, _nm:_outName(i,cl), _raw:p?p.name:'', _rawSku:p?p.sku:'', _grank:cl.grank}; });
 }
 /* "Rabbit Ground Whole (w/ organs) — Processed" reads better here as just the item name;
    the "Processed:" / "Raw:" labels live in the two columns instead. */
+/* kg on hand at the production site, as a chip. kind decides the colour, so a
+   processed figure can never be mistaken for a raw one. */
+function _ohChip(kind, grams, opts){
+  opts=opts||{};
+  const kg=Math.round((+grams||0)/10)/100;
+  if(!(kg>0)) return `<span class="ohchip none" title="nothing on hand at ${esc(planProduceLoc())}">0 kg</span>`;
+  const cls=opts.short?'short':(kind==='proc'?'proc':'raw');
+  const what=kind==='proc'?'processed and on hand':'raw on hand';
+  return `<span class="ohchip ${cls}" title="${kg} kg ${what} at ${esc(planProduceLoc())}">${kg} kg</span>`;
+}
 function _outName(i,cl){ return String(cl&&cl.name||i.name||i.sku).replace(/\s+—\s+(Processed|Raw)$/i,'').trim(); }
 /* ONE grouped <optgroup> builder for every ingredient dropdown in the app —
    category › base material › master sort order, the same reading order as the
