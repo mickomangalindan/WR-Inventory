@@ -448,7 +448,7 @@ const MODULES = [
   {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
   {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc','ffprofiles']},
   {id:'plan',   label:'Planning',    items:['mrp']},
-  {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder']},
+  {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
   {id:'analytics', label:'Analytics', items:['reporting','margin','momentum']},
@@ -542,7 +542,7 @@ const MODELS = {
     list:['name','status','family','variant','pack_g','sell_price'],
     groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
             ['cost_debone','cost_butcher','cost_sousvide','cost_ecobag','cost_thermal'],
-            ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_per_sheet','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par']],
+            ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_per_sheet','sticker_price','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par']],
     tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'💰 Cost profile', groups:[3]},{l:'🏷️ Stickers', groups:[4]}],
     o2m:{ field:'bom', model:'bom_lines', fk:'product_sku', label:'Recipe (BOM)',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ingredient_category',l:'Category',t:'text'},{n:'usable_g',l:'Grams/pack',t:'number'},{n:'pct_of_pack',l:'% of pack',t:'number'},{n:'has_bones',l:'Bones',t:'text'},{n:'method_override',l:'Method',t:'text'}] } },
@@ -631,6 +631,7 @@ const MODELS = {
   notif:{ label:'Notifications', icon:'🔔', special:'notif' },
   cleanser:{ label:'Data Cleanser', icon:'🧹', special:'cleanser' },
   supplies_reorder:{ label:'Supplies Reorder', icon:'🧻', special:'supplies_reorder' },
+  sticker_reorder:{ label:'Sticker Reorder', icon:'🏷️', special:'sticker_reorder' },
   sticker_po:{ label:'Sticker PO', icon:'🏷️', special:'sticker_po' },
   approvals:{ label:'Approvals', icon:'✅', special:'approvals' },
   margin:{ label:'Gross Margin', icon:'📈', special:'margin' },
@@ -834,6 +835,7 @@ function route(){
     if(m.special==='cleanser') return renderCleanser();
     if(m.special==='guides') return renderGuides();
     if(m.special==='supplies_reorder') return renderSuppliesReorder();
+    if(m.special==='sticker_reorder') return renderStickerReorder();
     if(m.special==='sticker_po') return renderStickerPO();
     if(m.special==='approvals') return renderApprovals();
     if(m.special==='margin') return renderMargin();
@@ -7678,6 +7680,150 @@ async function generateSuppliesPO(){
   } finally { hideBusy(); }
   toast('Created '+refs.length+' supplies PO(s) — ready to send & receive'); openModel('purchase_orders');
 }
+/* ================= Sticker Reorder → Sticker PO =================================
+   The gap this fills: labels had a read-only "below PAR" report and a read-only
+   Sticker PO viewer, and nothing in between. You could see the shortfall and you
+   could read a PO someone else had created, but there was no way to turn one into
+   the other.
+
+   Sticker demand comes from two places and the answer is the LARGER of them, not
+   the sum — one label per pack, and you still want to end the week at PAR:
+     production  packs the locked demand plan says to make, minus labels on hand
+     PAR top-up  PAR − on hand
+   Per product, per site, because Bulacan and Pasig hold their own label stock.
+   Rounded up to whole sheets when the product says how many print per sheet —
+   printers charge by the sheet, so ordering 61 of a 10-up label costs the same
+   as ordering 70.                                                              */
+let _stkRoLoc='bulacan', _stkRoQty={}, _stkRoRows=[];
+async function renderStickerReorder(){
+  $('cp').innerHTML=`<div class="title">Sticker Reorder <span onclick="openKB('sticker_reorder')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <select onchange="_stkRoLoc=this.value;_stkRoQty={};renderStickerReorder()">
+      ${['bulacan','pasig'].map(l=>`<option value="${l}" ${_stkRoLoc===l?'selected':''}>${l}</option>`).join('')}</select>
+    <button class="btn sec" onclick="_stkRoFill('need')">↺ Reset to suggested</button>
+    <button class="btn sec" onclick="_stkRoFill('zero')">✕ Clear all</button>
+    <button class="wfbtn" onclick="generateStickerPO()">🧾 Generate Sticker PO</button>
+    <div class="sp"></div><span style="color:var(--muted)">production + PAR → labels to order → PO</span>`;
+
+  const prods=(await db.list('products',{})).filter(p=>p.active!==false);
+  // packs planned this week: the locked demand plot, plus any locked custom order
+  let planned={};
+  try{ const plans=await mrpPlans();
+    const cands=(plans||[]).map(p=>({p,d:String(p.plan_date||p.date||'')})).filter(x=>x.d).sort((a,b)=>b.d.localeCompare(a.d));
+    if(cands[0]){ const d=cands[0].p.data||cands[0].p; planned={...(d.demand||{})}; window._stkRoPlanRef=(d&&d.ref)||''; window._stkRoPlanDate=cands[0].d; }
+  }catch(e){}
+  try{ const co=await coOpenDemandMap(); Object.keys(co).forEach(s=>{ planned[s]=Math.max(+planned[s]||0, co[s]); }); }catch(e){}
+  // production labels are pulled at the site that makes them
+  const madeHere=(_stkRoLoc===planProduceLoc());
+
+  _stkRoRows=prods.map(p=>{
+    const oh=+p['sticker_'+_stkRoLoc+'_on_hand']||0;
+    const par=+p['sticker_'+_stkRoLoc+'_par']||0;
+    const packs=madeHere?(+planned[p.sku]||0):0;
+    const forProd=Math.max(0, packs-oh);          // one label per pack
+    const forPar =Math.max(0, par-oh);
+    const need=Math.max(forProd, forPar);
+    const perSheet=+p.sticker_per_sheet||0;
+    const sheets=perSheet>0?Math.ceil(need/perSheet):0;
+    const order=perSheet>0?sheets*perSheet:need;  // printers charge by the sheet
+    return {sku:p.sku, name:p.name, variant:p.variant||'', group_1:p.group_1||'Other', group_2:p.group_2||p.family||'Other',
+            sort_order:p.sort_order, oh, par, packs, forProd, forPar, need, perSheet, sheets, order,
+            price:+p.sticker_price||0, supplier:(p.sticker_supplier||'').trim(), link:(p.sticker_art_url||'').trim(),
+            dim:p.sticker_dimension||''};
+  });
+  if(!Object.keys(_stkRoQty).length) _stkRoRows.forEach(r=>{ if(r.order>0) _stkRoQty[r.sku]=r.order; });
+  drawStickerReorder();
+}
+function _stkRoFill(mode){ _stkRoQty={};
+  if(mode==='need') _stkRoRows.forEach(r=>{ if(r.order>0) _stkRoQty[r.sku]=r.order; });
+  drawStickerReorder(); }
+function _stkRoSet(sku,v){ const q=+v||0; if(q>0) _stkRoQty[sku]=q; else delete _stkRoQty[sku]; _stkRoTotals(); }
+function _stkRoTotals(){
+  const pcs=Object.values(_stkRoQty).reduce((s,v)=>s+(+v||0),0);
+  const val=_stkRoRows.reduce((s,r)=>s+(+_stkRoQty[r.sku]||0)*(+r.price||0),0);
+  const n=Object.keys(_stkRoQty).filter(k=>+_stkRoQty[k]>0).length;
+  const el=$('stkRoTot'); if(el) el.innerHTML=`${n} label(s) · <b>${pcs.toLocaleString('en-PH')}</b> pieces · est. <b>₱${(Math.round(val*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2})}</b>`;
+}
+function drawStickerReorder(){
+  const rows=_stkRoRows;
+  const short=rows.filter(r=>r.order>0);
+  const noPrice=short.filter(r=>!(+r.price>0)).length;
+  const noSup=short.filter(r=>!r.supplier).length;
+  const noArt=short.filter(r=>!r.link).length;
+  const planTag=window._stkRoPlanRef?`<b>${esc(window._stkRoPlanRef)}</b> (${esc(window._stkRoPlanDate||'')})`:'<span style="color:var(--earth,#b5762a)">no locked demand plan — production need reads zero</span>';
+  let h=`<div class="repcard">
+    <div class="hint" style="margin:0 0 8px">One label per pack. <b>Need</b> is the larger of <b>production</b> (packs planned − labels on hand) and <b>PAR top-up</b> (PAR − on hand) — not the sum, because the same label serves both. Rounded up to whole <b>sheets</b> where a product says how many print per sheet. Production demand comes from ${planTag}; labels are pulled at <b>${esc(planProduceLoc())}</b>, so the other site only ever shows PAR top-up.</div>
+    ${(noPrice||noSup||noArt)?`<div style="margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
+      Before sending: ${[noPrice?`<b>${noPrice}</b> with no price per piece`:'',noSup?`<b>${noSup}</b> with no label supplier`:'',noArt?`<b>${noArt}</b> with no artwork link`:''].filter(Boolean).join(' · ')}.
+      Set them on the product's <b>🏷️ Stickers</b> tab — a PO with no price still generates, it just cannot be valued.</div>`:''}
+    <div style="overflow-x:auto"><table><thead><tr>
+      <th>Product</th><th>SKU</th><th class="num">On hand</th><th class="num">Packs planned</th><th class="num">For production</th><th class="num">PAR top-up</th><th class="num">Need</th><th class="num">Sheets</th><th class="num">Order</th><th class="num">₱/pc</th><th>Supplier</th><th>Artwork</th>
+    </tr></thead><tbody>`;
+  hierGroups(rows.filter(r=>r.order>0||_stkRoQty[r.sku]),{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    h+=`<tr style="background:#e7f0e9"><td colspan="12"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
+    G.subs.forEach(S=>{
+      h+=`<tr style="background:#f6f8f4"><td colspan="12" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
+      S.items.forEach(r=>{
+        h+=`<tr><td>${esc(r.variant||r.name)}${r.dim?`<div class="mini" style="color:var(--muted)">${esc(r.dim)}</div>`:''}</td>
+          <td><code>${esc(r.sku)}</code></td>
+          <td class="num">${r.oh||'—'}</td>
+          <td class="num mini">${r.packs||'—'}</td>
+          <td class="num mini" style="${r.forProd>0?'color:var(--berry);font-weight:600':'color:var(--muted)'}">${r.forProd||'—'}</td>
+          <td class="num mini" style="color:var(--muted)">${r.forPar||'—'}</td>
+          <td class="num"><b>${r.need||'—'}</b></td>
+          <td class="num mini" style="color:var(--muted)">${r.perSheet?(r.sheets+' × '+r.perSheet):'—'}</td>
+          <td class="num"><input type="number" step="1" inputmode="numeric" value="${_stkRoQty[r.sku]||''}" onchange="_stkRoSet('${esc(r.sku)}',this.value)" style="width:82px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+          <td class="num mini">${r.price?('₱'+r.price.toFixed(2)):'<span style="color:var(--danger)">—</span>'}</td>
+          <td class="mini">${esc(r.supplier)||'<span style="color:var(--danger)">set one</span>'}</td>
+          <td class="mini">${r.link&&safeUrl(r.link)!=='#'?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener noreferrer">open ↗</a>`:'<span style="color:var(--muted)">—</span>'}</td></tr>`;
+      });
+    });
+  });
+  if(!short.length && !Object.keys(_stkRoQty).length)
+    h+=`<tr><td colspan="12" class="empty">No labels short at ${esc(_stkRoLoc)}. Set a Label PAR on the product's 🏷️ Stickers tab, or lock a demand plan so production need is counted.</td></tr>`;
+  h+=`</tbody></table></div><div class="pager" id="stkRoTot"></div></div>`;
+  $('content').innerHTML=h;
+  _stkRoTotals();
+}
+async function generateStickerPO(){
+  const lines=_stkRoRows.filter(r=>(+_stkRoQty[r.sku]||0)>0).map(r=>({...r, qty:+_stkRoQty[r.sku]||0}));
+  if(!lines.length){ toast('Nothing to order — set a quantity first',true); return; }
+  const val=lines.reduce((s,l)=>s+l.qty*(+l.price||0),0);
+  const pcs=lines.reduce((s,l)=>s+l.qty,0);
+  if(!confirm('Generate sticker PO(s)?\n\n'+lines.length+' label(s) · '+pcs.toLocaleString('en-PH')+' pieces · est. ₱'+
+      (Math.round(val*100)/100).toLocaleString('en-PH')+'\nGrouped by label supplier, for '+_stkRoLoc+'.')) return;
+  const bySup={}; lines.forEach(l=>{ const s=l.supplier||'(unassigned)'; (bySup[s]=bySup[s]||[]).push(l); });
+  showBusy('Creating sticker PO(s)…'); const refs=[];
+  try{
+    const dd=_mmddyyyy(todayISO()); let zz=0;
+    for(const sup of Object.keys(bySup)){ zz++;
+      // [STICKERS] in the reference is what routes it to the Sticker PO screen
+      const ref='PO-'+dd+' [STICKERS] V01.'+_p2(zz);
+      const rec={po_ref:ref, supplier_name:(sup==='(unassigned)'?null:sup), order_date:todayISO(),
+                 status:'confirmed', created_by:CURRENT_USER};
+      try{
+        await db.create('purchase_orders',rec);
+        // a sticker line is counted in PIECES and keyed by the PRODUCT sku
+        const pl=bySup[sup].map(l=>({po_ref:ref, ingredient_sku:l.sku, ordered_kg:l.qty, available_kg:l.qty, price_kg:+l.price||0, received_kg:0}));
+        await db.replaceChildren({model:'po_lines',fk:'po_ref'}, ref, pl);
+        sysLog('purchase_orders',ref,'🏷️ Sticker reorder for '+_stkRoLoc+' — '+bySup[sup].length+' label(s), '+
+          bySup[sup].reduce((s,l)=>s+l.qty,0)+' pcs by '+CURRENT_USER);
+        refs.push(ref);
+      }catch(e){ toast(_stkPoErr(e),true); }
+    }
+  } finally { hideBusy(); }
+  if(!refs.length) return;
+  _stkRoQty={};
+  toast('Created '+refs.length+' sticker PO(s) — open Sticker PO to print or send');
+  window._stkPoRef=refs[0];
+  openModel('sticker_po');
+}
+// A sticker line points at a PRODUCT sku, which the original po_lines→ingredients
+// foreign key forbids. Say so plainly instead of showing a raw constraint error.
+function _stkPoErr(e){ const m=String((e&&e.message)||e||'');
+  return /foreign key|violates|ingredient/i.test(m)
+    ? 'Sticker PO lines reference a product SKU, which the po_lines → ingredients foreign key blocks. Run wr_sticker_reorder.sql once, then try again. ('+m+')'
+    : m; }
+
 /* ===== Sticker PO — shared layout (master sticker-file format), used by the
    Sticker PO screen AND the Purchase Order record view for sticker POs ===== */
 function _stkRowsFrom(lines, prods, ings){
@@ -7890,6 +8036,7 @@ const KB = {
   supplies:{d:'Kitchen supplies — packaging, labels/stickers and consumables (vacuum bags, ecobags, thermal pouches). Split out from food ingredients.',h:['Add/edit a supply with its unit cost, PAR and reorder point','Keep "Kitchen supply" ticked so it stays out of the Ingredients list','Group by Type; reorder via Purchasing → Supplies Reorder'],l:['Shares the ingredients table (is_supply = true) so stock & receiving still work','Cost/unit feeds Gross Margin packaging and PO value estimates','Received & counted in whole units (not kg)']},
   margin:{d:'Live gross margin per product: BOM raw cost + variable process & packaging + fees → GP% and a suggested price at your target.',h:['Edit the global rate model (per-gram utilities, labor, packaging, fees, target GM) then 💾 Save','Set each product’s Cost profile tab: deboning / butcher / sous-vide / ecobag / thermal','Tap a row to open the product; ⬆ Write total cost pushes COGS to products'],l:['Raw = BOM grams × ingredient moving-average cost (falls back to processed/list price)','Process = (electricity+water+transport) per gram + labor (plain OR deboning) ± butcher ± sous-vide','Packaging = vacuum + sticker + ecobag + thermal, pulled from Kitchen Supplies costs','Fees = (transaction+marketing) % of price; Suggested = fixed cost ÷ (1 − target − fees%)','Rates persist in Supabase (app_settings.cost_model) — shared with the whole team']},
   momentum:{d:'Reads Shopify rolling sales (30/60/90/120 days) against live stock to show what to make now vs what’s overstocked.',h:['📊 Runway view: days of stock left per product, most urgent first','🎯 Quadrant view: momentum × stock for a two-axis read','Group by family or priority; 📥 Import/paste sales; tap a row to open the product'],l:['Momentum × = recent 30-day daily rate ÷ 120-day average (>1 = accelerating)','Days of cover = current stock ÷ recent daily rate','Stockout risk = low cover + steady/rising demand; overstock = high cover + slowing','Fed hourly from the “90-120 Day Demand” sheet into the sales_momentum table']},
+  sticker_reorder:{d:'Label demand per site — the larger of what production needs and what PAR needs — turned into a sticker PO.',h:['Pick the site, review Need (production vs PAR top-up)','Adjust Order where you want a different quantity — it rounds up to whole sheets','🧾 Generate Sticker PO — one draft per label supplier'],l:['One label per pack; production need = packs planned − labels on hand','Need is the LARGER of production and PAR top-up, never the sum','Quantities are in pieces; the PO reference carries [STICKERS] so it opens on the Sticker PO screen']},
   supplies_reorder:{d:'Supplies below their PAR, with the quantity to reorder, ready to turn into a supplier PO.',h:['Review items below PAR (reorder = PAR − on hand)','🧾 Generate Supplies PO — one draft per supplier, ready to send','Set each supply’s PAR & reorder in Kitchen Supplies'],l:['Simple PAR rule — supplies have no recipe so they aren’t in MRP','Reorder qty is in the item’s own unit','Generated POs are confirmed and priced at the supply’s unit cost']},
   ffprofiles:{d:'A searchable list of the Fresh Food Calculator’s saved customers, shared across devices via Supabase.',h:['Search by customer, pet, or feeding type','Open the 🧮 Calculator to build a pack for one (Load saved profile there)','Profiles sync from the calculator’s ☁ Sync'],l:['Reads the ffcalc_profiles table (run wr_ffcalc_profiles.sql once)','Each calculator save pushes here; the calculator pulls on load','Read-only here — edit in the calculator']},
   ffcalc:{d:'The full Fresh Food Calculator, embedded in the app — size a custom pack per pet, then push it straight into a Custom Order.',h:['Fill in the pet profile & feeding type, compute the pack (Feeding / Kitchen)','Click 📤 Send order to ERP (top-right) to import the recipe','It lands as a Custom Order — map any unmatched ingredient, then 🔒 Lock'],l:['Runs isolated in a frame so it never clashes with the ERP','Sending posts the per-pack recipe (ingredient + grams), pack size, packs, customer & price','The ERP matches ingredient names to your master SKUs; unmatched ones are flagged for you to pick']},
