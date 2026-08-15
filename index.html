@@ -93,6 +93,7 @@
   table.pa tr.parecap b{color:#22201c}
   .b-open{background:#eef0f6;color:#40506b}.b-received{background:#dbeddb;color:#1e6b2e}
   .b-invoiced{background:#fbe6cf;color:#8a5a12}.b-closed{background:#e5e5ea;color:#555}
+  .b-partial{background:#fbe6cf;color:#8a5a12}
   .b-true{background:#dbeddb;color:#1e6b2e}.b-false{background:#f3e3e0;color:#9a3b2e}
   /* form */
   .formwrap{max-width:920px;margin:0 auto}
@@ -454,19 +455,41 @@
 
 <script>
 /* ============================ CONFIG / METADATA ============================ */
+/* Menu order follows the working day: read the numbers, take the order, plan it,
+   buy it, make it, count it. Master Data is reference material you set up once,
+   so it sits with Administration at the bottom rather than at the top. */
 const MODULES = [
-  {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
+  {id:'analytics', label:'Analytics', items:['reporting','margin','momentum']},
   {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc','ffprofiles']},
   {id:'plan',   label:'Planning',    items:['mrp']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
-  {id:'analytics', label:'Analytics', items:['reporting','margin','momentum']},
   {id:'help',   label:'Help', items:['guides']},
+  {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
   {id:'admin',  label:'Administration', items:['connection','users','approvals','fieldacl','refs','automations','notif','studio','selftest','cleanser']},
 ];
+
+/* ---- Status wording -------------------------------------------------------
+   The stored value stays short and machine-friendly ('partial'); what a person
+   reads says what it means. A PO with one delivery in and one still to come is
+   PARTIALLY RECEIVED, not "confirmed" — the old wording made a half-delivered
+   order look identical to one nothing has arrived against.                     */
+const STATUS_LABEL={
+  purchase_orders:{ open:'Open', rfq:'RFQ sent', quoted:'Quoted', confirmed:'Ordered',
+                    partial:'Partially received', received:'Fully received', cancelled:'Cancelled' }
+};
+function statusLabel(model,v){ const s=String(v==null?'':v); return ((STATUS_LABEL[model]||{})[s])||s; }
+/* Statuses a PO can still owe money or goods against. 'partial' joins the pair
+   everywhere the old code asked for confirmed-or-received — payables, the
+   payment button, the dashboard, the MRP's on-order column. */
+const PO_LIVE=['confirmed','partial','received'];
+/* Hidden from the PO list unless you ask for them: a cancelled order is dead, a
+   fully received one is history. Both stay one click away. */
+const PO_DONE=['received','cancelled'];
 const MODELS = {
   suppliers:{ label:'Suppliers', icon:'🏢', name:'name', pk:'name', archivable:true,
+    searchOn:['name','supplier_id','contact','mobile','c1_email','c2_name','payment_term'],
     fields:[
       {n:'name',l:'Supplier',t:'text'},{n:'supplier_id',l:'Supplier ID',t:'text'},
       {n:'contact',l:'Contact 1 — Name',t:'text'},{n:'mobile',l:'Contact 1 — Mobile',t:'text'},
@@ -486,6 +509,7 @@ const MODELS = {
     full:['notes'] },
 
   ingredients:{ label:'Ingredients', icon:'🥩', name:'name', pk:'sku', archivable:true,
+    searchOn:['name','sku','category','ingredient_group','raw_input','processing_method','supplier','supplier1','supplier2','uom'],
     fields:[
       {n:'sku',l:'SKU',t:'text'},{n:'name',l:'Processed output (into mix)',t:'text'},
       {n:'ingredient_group',l:'Raw group',t:'text'},{n:'sort_order',l:'Sort #',t:'number'},
@@ -515,6 +539,7 @@ const MODELS = {
 
   // Kitchen Supplies — a filtered view of the ingredients table (is_supply / supply-like category).
   supplies:{ label:'Kitchen Supplies', icon:'🧴', name:'name', pk:'sku', archivable:true, srcTable:'ingredients', supplyModel:true,
+    searchOn:['name','sku','category','uom','supplier','supplier1'],
     fields:[
       {n:'sku',l:'SKU',t:'text'},{n:'name',l:'Supply name',t:'text'},{n:'category',l:'Type',t:'text'},
       {n:'storage',l:'Storage',t:'select',o:['Frozen','Refrigerated','Dry','Live']},
@@ -531,6 +556,7 @@ const MODELS = {
     full:['notes'] },
 
   products:{ label:'Products', icon:'📦', name:'name', pk:'sku', archivable:true,
+    searchOn:['name','sku','group_1','group_2','family','variant','product_line','feeding_style','animal'],
     status:{f:'status',stages:['No SKU Yet','No Recipe Yet','Active - Scaled','Active']},
     fields:[
       {n:'sku',l:'SKU',t:'text'},{n:'group_1',l:'Group',t:'text'},{n:'group_2',l:'Subgroup',t:'text'},{n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant / Product name',t:'text'},{n:'sort_order',l:'Sort #',t:'number'},
@@ -558,17 +584,19 @@ const MODELS = {
     o2m:{ field:'bom', model:'bom_lines', fk:'product_sku', label:'Recipe (BOM)',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ingredient_category',l:'Category',t:'text'},{n:'usable_g',l:'Grams/pack',t:'number'},{n:'pct_of_pack',l:'% of pack',t:'number'},{n:'has_bones',l:'Bones',t:'text'},{n:'method_override',l:'Method',t:'text'}] } },
 
-  custom_orders:{ label:'Custom Orders', icon:'🧑‍🍳', name:'order_ref', pk:'order_ref', special:'customorders' },
+  custom_orders:{ label:'Custom Orders', icon:'🧑‍🍳', name:'order_ref', pk:'order_ref', special:'customorders',
+    searchOn:['order_ref','customer_name','contact','status','notes'] },
 
   ffcalc:{ label:'Fresh Food Calculator', icon:'🧮', special:'ffcalc' },
 
   ffprofiles:{ label:'Calculator Profiles', icon:'🐾', special:'ffprofiles' },
 
   purchase_orders:{ label:'Purchase Orders', icon:'🧾', name:'po_ref', pk:'po_ref',
-    status:{f:'status',stages:['open','rfq','quoted','confirmed','received','cancelled']}, cancelable:true,
+    status:{f:'status',stages:['open','rfq','quoted','confirmed','partial','received','cancelled']}, cancelable:true,
+    searchOn:['po_ref','supplier_name','status','created_by'],
     fields:[
       {n:'po_ref',l:'PO Reference',t:'text'},{n:'supplier_name',l:'Vendor',t:'rel',rel:'suppliers'},
-      {n:'order_date',l:'Order date',t:'date'},{n:'expected_delivery',l:'Expected delivery',t:'date'},{n:'status',l:'Status',t:'select',o:['open','rfq','quoted','confirmed','received','cancelled']},
+      {n:'order_date',l:'Order date',t:'date'},{n:'expected_delivery',l:'Expected delivery',t:'date'},{n:'status',l:'Status',t:'select',o:['open','rfq','quoted','confirmed','partial','received','cancelled']},
       {n:'created_by',l:'Created by',t:'text'},
       {n:'discount',l:'Discount ₱',t:'currency'},{n:'delivery_fee',l:'Delivery fee ₱',t:'currency'},
       {n:'delivery_payee',l:'Delivery fee payable to',t:'select',o:['Supplier','Fleet service']},
@@ -580,17 +608,20 @@ const MODELS = {
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Requested (kg)',t:'number'},{n:'available_kg',l:'Order qty · vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
 
   inventory_movements:{ label:'Inventory Moves', icon:'📊', name:'id', pk:'id', readonly:true,
+    searchOn:['ref_sku','movement_type','location_code','kind','note'],
     fields:[{n:'created_at',l:'When',t:'text'},{n:'kind',l:'Kind',t:'text'},{n:'ref_sku',l:'Item',t:'text'},
       {n:'location_code',l:'Location',t:'text'},{n:'qty',l:'Qty',t:'number'},{n:'unit_cost',l:'Unit cost',t:'currency'},
       {n:'movement_type',l:'Type',t:'text'}],
     list:['created_at','movement_type','ref_sku','location_code','qty'], groups:[[],[]] },
 
   stock_balance:{ label:'Live Stock', icon:'📈', name:'ref_sku', pk:'ref_sku', readonly:true, special:'livestock',
+    searchOn:['ref_sku','location_code','kind'],
     fields:[{n:'kind',l:'Kind',t:'text'},{n:'ref_sku',l:'Item',t:'text'},{n:'location_code',l:'Location',t:'text'},
       {n:'on_hand',l:'On hand',t:'number'},{n:'stock_value',l:'Value',t:'currency'}],
     list:['ref_sku','location_code','on_hand','stock_value'], groups:[[],[]] },
 
   production_batches:{ label:'Production', icon:'🏭', name:'batch_ref', pk:'batch_ref',
+    searchOn:['batch_ref','product_sku','status','output_lot','operator'],
     status:{f:'status',stages:['draft','confirmed','cancelled']}, cancelable:true,
     fields:[{n:'batch_ref',l:'Batch Ref',t:'text'},{n:'product_sku',l:'Product',t:'rel',rel:'products'},
       {n:'status',l:'Status',t:'select',o:['draft','confirmed','cancelled']},
@@ -606,6 +637,7 @@ const MODELS = {
         {n:'expected_processed_g',l:'Exp proc (kg)',t:'number',scale:1000,ro:true},{n:'actual_processed_g',l:'Act proc (kg)',t:'number',scale:1000}]} },
 
   transfers:{ label:'Internal Transfer', icon:'🚚', name:'transfer_ref', pk:'transfer_ref',
+    searchOn:['transfer_ref','from_code','to_code','status','created_by'],
     status:{f:'status',stages:['sent','received','cancelled']}, cancelable:true,
     fields:[{n:'transfer_ref',l:'Reference',t:'text'},{n:'from_code',l:'From',t:'select',o:['bulacan','pasig']},
       {n:'to_code',l:'To',t:'select',o:['pasig','bulacan']},{n:'status',l:'Status',t:'select',o:['sent','received','cancelled']},
@@ -617,6 +649,7 @@ const MODELS = {
       cols:[{n:'product_sku',l:'Product',t:'rel',rel:'products'},{n:'sent_packs',l:'Sent',t:'number'},{n:'received_packs',l:'Received',t:'number',ro:true}]} },
 
   count_sessions:{ label:'Weekly Inventory', icon:'🧮', name:'count_ref', pk:'count_ref', customForm:'count',
+    searchOn:['count_ref','location_code','status','counted_by'],
     status:{f:'status',stages:['draft','approved']},
     fields:[{n:'count_ref',l:'Reference',t:'text'},{n:'location_code',l:'Location',t:'text'},{n:'count_date',l:'Date',t:'date'},
       {n:'status',l:'Status',t:'text'},{n:'counted_by',l:'Counted by',t:'text',ro:true}],
@@ -624,6 +657,7 @@ const MODELS = {
     groups:[['count_ref','location_code'],['count_date','status','counted_by']] },
 
   variance_log:{ label:'Variances', icon:'⚠️', name:'source_ref', pk:'id',
+    searchOn:['source_ref','check_type','location','responsible_user','status','note'],
     status:{f:'status',stages:['open','explained','resolved']},
     fields:[{n:'check_type',l:'Check',t:'text',ro:true},{n:'source_ref',l:'Source',t:'text',ro:true},
       {n:'expected',l:'Expected',t:'number',ro:true},{n:'actual',l:'Actual',t:'number',ro:true},
@@ -695,18 +729,55 @@ async function sbAuth(email,password){
 const MASKED_TABLES=['ingredients','products'];
 async function _readRel(T){ return (MASKED_TABLES.includes(T) && await useSecure()) ? T+'_secure' : T; }
 async function _maskedWrite(T){ return MASKED_TABLES.includes(T) && await useSecure(); }
+/* Which columns a text search actually looks at. Before this, EVERY search — the
+   list box and ⌘K alike — matched one column, the model's `name`. So typing a SKU
+   into Ingredients found nothing, a supplier's name never found their POs, and a
+   customer's name never found their custom order. Declare the columns per model
+   and both paths widen at once. */
+function searchCols(model){ const m=MODELS[model]||{}; return (m.searchOn&&m.searchOn.length)?m.searchOn:(m.name?[m.name]:[]); }
+// PostgREST's or=() is comma/paren-delimited, so strip those from the term.
+function _sanitizeTerm(s){ return String(s==null?'':s).replace(/[(),"']/g,' ').replace(/\s+/g,' ').trim(); }
+/* Every word must appear somewhere in the row — so "beef kidney" finds the one
+   item, not everything with "beef" in it. */
+function _localSearch(rows, cols, term){
+  const words=String(term||'').toLowerCase().split(/\s+/).filter(Boolean); if(!words.length) return rows;
+  return (rows||[]).filter(r=>{ const t=cols.map(c=>r[c]).filter(v=>v!=null&&v!=='').join(' ').toLowerCase();
+    return words.every(w=>t.includes(w)); });
+}
 const db = {
   async list(model, {search,groupBy,page,per}={}){
     const m=MODELS[model]||{};   // child models (bom_lines, po_lines) have no top-level entry
     const T=m.srcTable||model;   // a model may read/write a shared physical table (e.g. supplies → ingredients)
+    const cols=searchCols(model), term=_sanitizeTerm(search);
     if(isLive()){
-      let q='?select=*';
-      if(search && m.name) q+='&'+m.name+'=ilike.*'+encodeURIComponent(search)+'*';
-      q+='&limit='+(per||1000);
-      return await sb((await _readRel(T))+q);
+      const lim='&limit='+(per||1000);
+      let filt='';
+      // Two or more words is an AND across columns ("beef kidney"), which ilike
+      // cannot express — read the table and match in the browser instead.
+      if(term && cols.length && term.split(' ').length>1){
+        return _localSearch(await sb((await _readRel(T))+'?select=*'+lim), cols, term);
+      }
+      if(term && cols.length){
+        filt = cols.length===1
+          ? '&'+cols[0]+'=ilike.*'+encodeURIComponent(term)+'*'
+          : '&or=('+cols.map(c=>c+'.ilike.*'+encodeURIComponent(term)+'*').join(',')+')';
+      }
+      const rel=await _readRel(T);
+      try{ return await sb(rel+'?select=*'+filt+lim); }
+      catch(e){
+        // A declared column may not exist on this database yet (older schema, or a
+        // masked view that drops it). Rather than showing "no results", fall back
+        // to the name column, then to an unfiltered read filtered in the browser.
+        if(!filt) throw e;
+        try{
+          if(m.name) return await sb(rel+'?select=*&'+m.name+'=ilike.*'+encodeURIComponent(term)+'*'+lim);
+        }catch(e2){}
+        const rows=await sb(rel+'?select=*'+lim);
+        return _localSearch(rows, cols, term);
+      }
     } else {
       let rows=[...(DEMO[T]||[])];
-      if(search && m.name) rows=rows.filter(r=>String(r[m.name]||'').toLowerCase().includes(search.toLowerCase()));
+      if(term && cols.length) rows=_localSearch(rows, cols, term);
       return rows;
     }
   },
@@ -907,6 +978,7 @@ function controlPanel(){
     ${state.view!=='report'?gb:''}
     ${m.archivable?`<button class="btn sec sm" onclick="state.showArchived=!state.showArchived;route()">${state.showArchived?'Hide archived':'Show archived'}</button>`:''}
     ${(state.model==='purchase_orders'&&state.view==='list')?`<button class="btn sec sm ${state._poWS!==false?'on':''}" onclick="state._poWS=${state._poWS!==false?'false':'true'};route()">${state._poWS!==false?'✕ Ungroup':'⑃ Week → Status'}</button>`:''}
+    ${(state.model==='purchase_orders'&&state.view==='list')?`<button class="btn sec sm ${state._poAll?'on':''}" onclick="state._poAll=${state._poAll?'false':'true'};route()" title="Cancelled and fully received orders are hidden by default — they are finished business.">${state._poAll?'👁 Showing every status':'👁 Live orders only'}</button>`:''}
     <div class="vswitch">${vbtn('list','≣','List')}${m.status?vbtn('kanban','▥','Kanban'):''}${canForm?vbtn('form','▤','Form'):''}${vbtn('report','▦','Report')}</div>`;
 }
 let searchTimer;
@@ -975,6 +1047,14 @@ async function renderList(){
   catch(e){ $('content').innerHTML=`<div class="empty">⚠ ${esc(e.message)}<br><br>Check your Supabase connection / RLS.</div>`; return; }
   let archivedCount=0;
   if(m.archivable && !state.showArchived){ archivedCount=rows.filter(r=>r.active===false).length; rows=rows.filter(r=>r.active!==false); }
+  /* Purchase Orders open on LIVE business only. A cancelled order is dead and a
+     fully received one is history — keeping both in the default view buried the
+     handful of orders that still need doing. One click brings them back. */
+  let poHidden=0;
+  if(state.model==='purchase_orders' && !state._poAll){
+    poHidden=rows.filter(r=>PO_DONE.includes(String(r.status||''))).length;
+    rows=rows.filter(r=>!PO_DONE.includes(String(r.status||'')));
+  }
   // Ingredients hides kitchen supplies; the Supplies module shows only them (same table).
   if(state.model==='ingredients') rows=rows.filter(r=>!isSupplyItem(r));
   else if(m.supplyModel) rows=rows.filter(isSupplyItem);
@@ -1004,7 +1084,7 @@ async function renderList(){
     if(f.t==='currency') return `<td class="num"${L}>${fmt(v)}</td>`;
     if(f.t==='number') return `<td class="num"${L}>${v==null?'':num(v)}</td>`;
     if(f.t==='bool') return `<td style="text-align:center"${L}>${v?'<span title="Yes" style="color:#2f7d33;font-weight:800">✓</span>':'<span title="No" style="color:#cbcbcb">–</span>'}</td>`;
-    if(f.n==='status') return `<td${L}><span class="badge b-${v}">${esc(v)}</span></td>`;
+    if(f.n==='status') return `<td${L}><span class="badge b-${v}">${esc(statusLabel(state.model,v))}</span></td>`;
     return `<td${L}>${esc(v)}</td>`;
   };
   const numCols=cols.filter(f=>['currency','number'].includes(f.t));
@@ -1019,7 +1099,7 @@ async function renderList(){
       body+=`<tr class="grp">${bulk?'<td></td>':''}<td>📅 ${esc(wk)} <span style="opacity:.6;font-weight:400">(${wr.length})</span></td>${numSub(wr).slice(1).join('')}</tr>`;
       const gs={}; wr.forEach(r=>{ const s=r.status==null?'—':r.status; (gs[s]=gs[s]||[]).push(r); });
       Object.keys(gs).sort().forEach(st=>{ const sr=gs[st];
-        body+=`<tr class="grp" style="background:#faf9f4">${bulk?'<td></td>':''}<td style="padding-left:24px">▸ <span class="badge b-${esc(st)}">${esc(st)}</span> <span style="opacity:.6;font-weight:400">(${sr.length})</span></td>${numSub(sr).slice(1).join('')}</tr>`;
+        body+=`<tr class="grp" style="background:#faf9f4">${bulk?'<td></td>':''}<td style="padding-left:24px">▸ <span class="badge b-${esc(st)}">${esc(statusLabel('purchase_orders',st))}</span> <span style="opacity:.6;font-weight:400">(${sr.length})</span></td>${numSub(sr).slice(1).join('')}</tr>`;
         sr.forEach(r=>{ body+=`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map((f,ci)=>cell(f,r,ci)).join('')}</tr>`; });
       });
     });
@@ -1047,7 +1127,7 @@ async function renderList(){
   $('content').innerHTML = `<div id="bulkbar" class="bulkbar" style="display:none"></div><div class="listcard">
     <table class="mcards autow"><thead><tr>${bulk?'<th style="width:34px"><input type="checkbox" onclick="selAll(this.checked)"></th>':''}${cols.map((f,ci)=>`<th class="${['currency','number'].includes(f.t)?'num':''}" data-ci="${ci}">${f.l}<span class="colgrip" onmousedown="colDragStart(event,this)" title="drag to resize"></span></th>`).join('')}</tr></thead>
     <tbody>${body||`<tr><td colspan="${cols.length+(bulk?1:0)}" class="empty">No records</td></tr>`}</tbody>${foot}</table>
-    <div class="pager">${rows.length} record${rows.length!==1?'s':''} <span class="mini" style="color:var(--muted)">· drag a column edge to resize, double-click it to go back to automatic</span></div></div>`;
+    <div class="pager">${rows.length} record${rows.length!==1?'s':''}${poHidden?` <span class="mini">· <b>${poHidden}</b> cancelled / fully received hidden — <a onclick="state._poAll=true;route()" style="cursor:pointer;color:#4e7a3e">show them</a></span>`:''} <span class="mini" style="color:var(--muted)">· drag a column edge to resize, double-click it to go back to automatic</span></div></div>`;
   applyColWidths();
   bulkBar();
 }
@@ -2427,11 +2507,13 @@ async function renderMRP(){
   try{
     const openRefs={};
     (await db.list('purchase_orders',{})).forEach(o=>{
-      if(String(o.status||'').toLowerCase()==='confirmed') openRefs[o.po_ref]=o.expected_delivery||''; });
+      const st=String(o.status||'').toLowerCase();
+      // A partially received PO is still bringing the REST of its order in.
+      if(st==='confirmed'||st==='partial') openRefs[o.po_ref]=o.expected_delivery||''; });
     if(Object.keys(openRefs).length){
       (await db.list('po_lines',{})).forEach(l=>{
         if(!(l.po_ref in openRefs)) return;
-        const g=poOrderQty(l)*1000; if(!(g>0)) return;
+        const g=poRemainQty(l)*1000; if(!(g>0)) return;   // only what has NOT landed yet
         onOrder[l.ingredient_sku]=(onOrder[l.ingredient_sku]||0)+g;
         const eta=openRefs[l.po_ref];
         if(eta && (!onOrderEta[l.ingredient_sku] || eta<onOrderEta[l.ingredient_sku])) onOrderEta[l.ingredient_sku]=eta;
@@ -3074,6 +3156,8 @@ const FLOW = { purchase_orders:{ buttons:[
   {when:'quoted',label:'🧾 Issue PO',fn:'openPOConfirm()'},
   {when:'confirmed',label:'📦 Receive order',fn:'openPOReceive()'},
   {when:'confirmed',label:'💵 Register payment',fn:'openPayment()'},
+  {when:'partial',label:'📦 Receive the rest',fn:'openPOReceive()'},
+  {when:'partial',label:'💵 Register payment',fn:'openPayment()'},
   {when:'received',label:'💵 Register payment',fn:'openPayment()'} ]},
   variance_log:{ buttons:[
   {when:'open',label:'Mark Explained',to:'explained'},
@@ -3322,6 +3406,8 @@ async function poPayments(ref){ if(!ref) return [];
 // Effective ORDER qty per line = vendor-available (what we actually order), falling back to the
 // original requested qty until a quotation sets availability. The requested (ordered_kg) is locked.
 function poOrderQty(l){ return (l&&l.available_kg!=null&&l.available_kg!=='')?(+l.available_kg||0):(+((l||{}).ordered_kg)||0); }
+// What a line still owes: ordered minus what has already been received.
+function poRemainQty(l){ return Math.max(0, Math.round((poOrderQty(l)-(+((l||{}).received_kg)||0))*1000)/1000); }
 // Billable = received qty × price (falls back to the ORDER qty — vendor avail — until anything is
 // received) − discount + delivery fee.
 /* A delivery fee charged by a third-party fleet is NOT owed to the supplier —
@@ -3343,7 +3429,7 @@ function poPaymentsPanel(rec, lines){
   const fleetDue=poFleetDue(rec);
   const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
   const st = paid<=0.005 ? {t:'unpaid',c:'var(--danger)'} : (bal>0.5 ? {t:'partial',c:'var(--earth,#b5762a)'} : {t:'paid',c:'#4e7a3e'});
-  const canPay = ['confirmed','received'].includes(rec.status);
+  const canPay = PO_LIVE.includes(rec.status);
   const fleetHtml = fleetDue>0 ? `<div style="margin:6px 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
       <b>Separate payable — ${P(fleetDue)} to ${esc(rec.delivery_provider||'the fleet service')}.</b>
       The delivery fee on this PO is owed to a courier, not to ${esc(rec.supplier_name||'the supplier')}, so it is excluded from the supplier balance above. Record it as its own payment line, or against the fleet's own PO.</div>` : '';
@@ -3510,7 +3596,8 @@ async function _poReceiveApply(){
     await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
     formChildren=updated;
     if(deltas.length){ const res=await postReceiptDelta(formRec, deltas, loc); }
-    formRec.status = willClose ? 'received' : 'confirmed';
+    // A PO with one delivery in and another still to come now says so.
+    formRec.status = willClose ? 'received' : 'partial';
     await db.update('purchase_orders','po_ref',formRec.po_ref,{status:formRec.status});
     const batchQty=deltas.reduce((s,d)=>s+(+d.recvKg||0),0);
     sysLog('purchase_orders',formRec.po_ref, '📦 '+(willClose?'Final receipt':'Batch receipt')+' by '+CURRENT_USER+' — '+Math.round(batchQty*100)/100+' unit(s) this batch'+(willClose?' · PO closed':' · still open for more')+(notes.length?(' — '+notes.join('; ')):''));
@@ -3652,12 +3739,12 @@ async function renderDashboard(){
   let _pay=[]; try{_pay=await db.list('po_payments',{})}catch(e){}
   const _payByPo={}; _pay.forEach(p=>_payByPo[p.po_ref]=(_payByPo[p.po_ref]||0)+(+p.amount||0));
   const _lineByPo={}; _pol.forEach(l=>{ (_lineByPo[l.po_ref]=_lineByPo[l.po_ref]||[]).push(l); });
-  let payables=0,payCount=0; po.forEach(p=>{ if(['confirmed','received'].includes(p.status)){ const bl=poBillable(p,_lineByPo[p.po_ref]||[]); const b=Math.max(0,bl-(_payByPo[p.po_ref]||0)); if(b>0.5){ payables+=b; payCount++; } } });
+  let payables=0,payCount=0; po.forEach(p=>{ if(PO_LIVE.includes(p.status)){ const bl=poBillable(p,_lineByPo[p.po_ref]||[]); const b=Math.max(0,bl-(_payByPo[p.po_ref]||0)); if(b>0.5){ payables+=b; payCount++; } } });
   // Payables detail: total billable / paid, and the remaining-due schedule from each supplier's terms.
   let _sups=[]; try{_sups=await db.list('suppliers',{})}catch(e){}
   const _supBy={}; _sups.forEach(s=>_supBy[s.name]=s);
   let totBillable=0, totPaid=0; const paySched=[];
-  po.forEach(p=>{ if(!['confirmed','received'].includes(p.status)) return;
+  po.forEach(p=>{ if(!PO_LIVE.includes(p.status)) return;
     const bl=poBillable(p,_lineByPo[p.po_ref]||[]); const pd=_payByPo[p.po_ref]||0;
     totBillable+=bl; totPaid+=Math.min(pd,bl); const bal=Math.max(0,bl-pd); if(bal<=0.5) return;
     const s=_supBy[p.supplier_name]||{}; const dpP=+s.dp_pct||0, rvP=+s.receiving_pct||0, tmP=+s.term_pct||0, tmD=+s.term_days||0;
@@ -3681,8 +3768,8 @@ async function renderDashboard(){
   const _ingP={}; ing.forEach(i=>_ingP[i.sku]=(+i.moving_avg_cost_kg||+i.list_price_kg||0));   // covers raw + supplies
   const _stkCost=_supplyCosts(ing).sticker; const _stkPO=new Set(po.filter(p=>_isStickerPO(p)).map(p=>p.po_ref));
   let estPO=0, estPOcount=0;
-  po.forEach(p=>{ if(['received','cancelled'].includes(p.status)) return;
-    let v=0; (_lineByPo[p.po_ref]||[]).forEach(l=>{ let pr=(+l.price_kg||0)||_ingP[l.ingredient_sku]||0; if(!pr && _stkPO.has(p.po_ref)) pr=_stkCost; v+=poOrderQty(l)*pr; });
+  po.forEach(p=>{ if(PO_DONE.includes(p.status)) return;
+    let v=0; (_lineByPo[p.po_ref]||[]).forEach(l=>{ let pr=(+l.price_kg||0)||_ingP[l.ingredient_sku]||0; if(!pr && _stkPO.has(p.po_ref)) pr=_stkCost; v+=poRemainQty(l)*pr; });
     if(v>0){ estPO+=v; estPOcount++; } });
   const _sum=(a,f)=>a.reduce((s,x)=>s+(+f(x)||0),0);
   const q1o=_sum(_pol,l=>poOrderQty(l)), q1r=_sum(_pol,l=>l.received_kg); const q1=q1o?Math.round(q1r/q1o*100):null;
@@ -3718,12 +3805,25 @@ async function renderDashboard(){
   // Purchase payables — total payable / paid + remaining-due schedule.
   const _today=todayISO();
   const schedRows = paySched.slice(0,10).map(x=>{ const od=x.due&&x.due<_today; return `<tr onclick="event.stopPropagation();gotoRecord('purchase_orders','${esc(String(x.po)).replace(/'/g,'&#39;')}')" style="cursor:pointer"><td class="mini" style="${od?'color:var(--danger);font-weight:700':''}">${esc(x.due||'on delivery')}${od?' ⚠':''}</td><td>${esc(x.sup)}</td><td><code>${esc(x.po)}</code></td><td class="mini">${esc(x.stage)}</td><td class="n"><b>${wpeso(x.amt)}</b></td></tr>`; }).join('') || '<tr><td colspan="5" class="empty">No scheduled payments due ✅</td></tr>';
-  const payBody = mh ? '<div class="hint">Payables are hidden for your role.</div>' : `<div class="kpirow" style="grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px">
+  /* Payables live HERE, on the dashboard, and nowhere new. Money owed is a
+     "what do I do today" number, not a filing cabinet — it belongs beside the
+     stock and margin tiles, with the full ageing detail one click away in
+     Analytics → Reports → Supplier payables. Splitting it by WHEN it falls due
+     is what makes the tile actionable. */
+  const _in7=addDaysISO(_today,7);
+  const _overdue=paySched.filter(x=>x.due&&x.due<_today).reduce((n,x)=>n+x.amt,0);
+  const _due7=paySched.filter(x=>x.due&&x.due>=_today&&x.due<=_in7).reduce((n,x)=>n+x.amt,0);
+  // A courier fee is owed to the courier, not the supplier, so it is not in the
+  // PO balance above — it would overstate the supplier's bill. Shown separately.
+  let _fleet=0; po.forEach(p=>{ if(PO_LIVE.includes(p.status)) _fleet+=poFleetDue(p); });
+  const payBody = mh ? '<div class="hint">Payables are hidden for your role.</div>' : `<div class="kpirow" style="grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px">
       <div class="kpi"><div class="l">Total payable</div><div class="v" style="color:var(--danger)">${wpeso(payables)}</div><div class="s">${payCount} unpaid PO${payCount===1?'':'s'}</div></div>
-      <div class="kpi"><div class="l">Paid to date</div><div class="v" style="color:#4e7a3e">${wpeso(totPaid)}</div><div class="s">on confirmed POs</div></div>
-      <div class="kpi"><div class="l">Billable total</div><div class="v">${wpeso(totBillable)}</div><div class="s">received × price − disc + fee</div></div></div>
+      <div class="kpi"><div class="l">Overdue</div><div class="v" style="color:${_overdue>0.5?'var(--danger)':'#4e7a3e'}">${wpeso(_overdue)}</div><div class="s">${_overdue>0.5?'past its due date':'nothing overdue ✅'}</div></div>
+      <div class="kpi"><div class="l">Due within 7 days</div><div class="v" style="color:${_due7>0.5?'var(--earth,#b5762a)':'var(--ink)'}">${wpeso(_due7)}</div><div class="s">by ${esc(_in7)}</div></div>
+      <div class="kpi"><div class="l">Paid to date</div><div class="v" style="color:#4e7a3e">${wpeso(totPaid)}</div><div class="s">of ${wpeso(totBillable)} billable</div></div></div>
+    ${_fleet>0.5?`<div class="hint" style="margin:0 0 8px">🚚 <b>${wpeso(_fleet)}</b> of delivery fees on these orders is payable to a <b>fleet / courier</b>, not to the supplier — it is not included in the balances above.</div>`:''}
     <div style="overflow-x:auto"><table><thead><tr><th>Due</th><th>Supplier</th><th>PO</th><th>Stage</th><th class="n">Amount due</th></tr></thead><tbody>${schedRows}</tbody></table></div>
-    ${paySched.length>10?`<p class="note">Showing 10 of ${paySched.length} scheduled payments — tap a row to open the PO, or see Reports → Supplier payables.</p>`:'<p class="note">Tap a row to open the PO. Overdue dates are flagged ⚠.</p>'}`;
+    <p class="note">${paySched.length>10?`Showing 10 of ${paySched.length} scheduled payments. `:''}Tap a row to open the PO; overdue dates are flagged ⚠. <a onclick="gotoReport('payables')" style="cursor:pointer;color:#4e7a3e;font-weight:700">Full payables report →</a></p>`;
 
   // Quick-analysis glimpse cards (headline + link).
   const glimpse=(icon,title,big,sub,go)=>`<div class="card" style="cursor:pointer" onclick="${go}"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h2 style="margin:0;font-size:16px">${icon} ${title}</h2><span class="mini" style="color:var(--berry);font-weight:700;white-space:nowrap">Open →</span></div><div style="font-size:22px;font-weight:800;color:var(--berry);margin:8px 0 2px">${big}</div><div class="mini">${sub}</div></div>`;
@@ -3750,7 +3850,7 @@ async function renderKanban(){
   const nm=m.name, sub=m.list.filter(f=>f!==nm).slice(0,3);
   let h='<div class="kb">';
   m.status.stages.forEach(st=>{ const items=rows.filter(r=>r[m.status.f]===st);
-    h+=`<div class="kbcol"><h4>${st}<span class="c">${items.length}</span></h4>`;
+    h+=`<div class="kbcol"><h4>${esc(statusLabel(state.model,st))}<span class="c">${items.length}</span></h4>`;
     items.forEach(r=>{ h+=`<div class="kbcard" onclick="openForm('${encodeURIComponent(r[m.pk])}')"><div class="kt">${esc(r[nm])}</div>${sub.map(f=>{const fd=m.fields.find(x=>x.n===f)||{};return `<div class="km">${fd.l}: ${esc(r[f])}</div>`;}).join('')}</div>`; });
     h+='</div>'; });
   $('content').innerHTML=h+'</div>';
@@ -3942,16 +4042,81 @@ function ensureCmd(){ if($('cmdwrap')) return;
 }
 function openCmd(){ ensureCmd(); $('cmdwrap').classList.add('on'); $('cmdq').value=''; cmdSearch(''); setTimeout(()=>{const q=$('cmdq'); if(q)q.focus();},30); }
 function closeCmd(){ const w=$('cmdwrap'); if(w) w.classList.remove('on'); }
-async function cmdSearch(q){
-  q=(q||'').toLowerCase(); const items=[{icon:'🏠',label:'Dashboard',tag:'Open',act:()=>openModel('home')}];
-  Object.keys(MODELS).forEach(k=>{ if(!q||MODELS[k].label.toLowerCase().includes(q)) items.push({icon:MODELS[k].icon,label:MODELS[k].label,tag:'Open',act:()=>openModel(k)}); });
-  if(q.length>=1){ for(const mdl of ['ingredients','products','suppliers','purchase_orders']){ const m=MODELS[mdl];
-    let rows=[]; try{ rows=await db.list(mdl,{search:q}); }catch(e){}
-    rows.slice(0,6).forEach(r=>items.push({icon:m.icon,label:r[m.name],tag:m.label,act:()=>{ state.model=mdl; openForm(encodeURIComponent(r[m.pk])); }})); } }
-  cmdItems=items.slice(0,30); cmdSel=0; renderCmd();
+/* ---- ⌘K, rebuilt ------------------------------------------------------------
+   What was wrong with the old one, in order of how often it bit:
+     • it searched FOUR tables — ingredients, products, suppliers, POs. A custom
+       order, a batch, a count, a transfer, a variance was simply unfindable.
+     • it matched ONE column per table (the model's `name`), so a SKU, a PO
+       reference, a customer name or a supplier's name on a PO never matched.
+     • every failure was swallowed by `catch(e){}` — an RLS block or a missing
+       column looked exactly like "nothing found".
+     • it showed the name and nothing else, so two look-alike rows were
+       indistinguishable, and six results per table was a hard ceiling.
+   Now: every table with a search config, all its declared columns, errors shown
+   rather than hidden, the SKU / reference on every line, and the modules the
+   term matches kept at the bottom instead of eating the first slots.          */
+const CMD_MODELS=['products','ingredients','supplies','suppliers','purchase_orders','custom_orders',
+                  'production_batches','transfers','count_sessions','variance_log','inventory_movements'];
+// second line under a result — what tells two similar rows apart
+function _cmdSub(mdl,r){
+  const p=[];
+  if(mdl==='products'||mdl==='ingredients'||mdl==='supplies'){ if(r.sku)p.push(r.sku); if(r.group_1||r.category)p.push(r.group_1||r.category); if(r.variant)p.push(r.variant); }
+  else if(mdl==='purchase_orders'){ if(r.supplier_name)p.push(r.supplier_name); if(r.order_date)p.push(r.order_date); if(r.status)p.push(statusLabel('purchase_orders',r.status)); }
+  else if(mdl==='custom_orders'){ if(r.customer_name)p.push(r.customer_name); if(r.needed_date)p.push('needed '+r.needed_date); if(r.status)p.push(typeof coStatDef==='function'?(coStatDef(r.status).l||r.status):r.status); }
+  else if(mdl==='production_batches'){ if(r.product_sku)p.push(r.product_sku); if(r.production_date)p.push(r.production_date); if(r.status)p.push(r.status); }
+  else if(mdl==='transfers'){ p.push((r.from_code||'?')+' → '+(r.to_code||'?')); if(r.transfer_date)p.push(r.transfer_date); }
+  else if(mdl==='count_sessions'){ if(r.location_code)p.push(r.location_code); if(r.count_date)p.push(r.count_date); }
+  else if(mdl==='variance_log'){ if(r.check_type)p.push(r.check_type); if(r.location)p.push(r.location); }
+  else if(mdl==='inventory_movements'){ if(r.movement_type)p.push(r.movement_type); if(r.location_code)p.push(r.location_code); if(r.qty!=null)p.push(num(r.qty)); }
+  else if(mdl==='suppliers'){ if(r.supplier_id)p.push(r.supplier_id); if(r.mobile)p.push(r.mobile); if(r.payment_term)p.push(r.payment_term); }
+  return p.filter(Boolean).join(' · ');
 }
-function renderCmd(){ const el=$('cmdres'); if(!el) return;
-  el.innerHTML=cmdItems.map((it,i)=>`<div class="r ${i===cmdSel?'sel':''}" onclick="cmdRun(${i})"><span>${it.icon}</span><span>${esc(it.label)}</span><span class="tag">${it.tag}</span></div>`).join('')||'<div class="r">No results</div>'; }
+// an exact SKU / reference hit ranks above a word found mid-name
+function _cmdScore(mdl,r,q){
+  const m=MODELS[mdl]||{}; const pk=String(r[m.pk]||'').toLowerCase(), nm=String(r[m.name]||'').toLowerCase();
+  if(pk===q||nm===q) return 0;
+  if(pk.startsWith(q)||nm.startsWith(q)) return 1;
+  if(pk.includes(q)) return 2;
+  if(nm.includes(q)) return 3;
+  return 4;
+}
+let _cmdSeq=0;
+async function cmdSearch(q){
+  const raw=String(q||'').trim(); const ql=raw.toLowerCase(); const seq=++_cmdSeq;
+  const items=[], mods=[], errs=[];
+  if(!ql||'dashboard'.includes(ql)) mods.push({icon:'🏠',label:'Dashboard',tag:'Go to',act:()=>openModel('home')});
+  Object.keys(MODELS).forEach(k=>{ if(!ql||MODELS[k].label.toLowerCase().includes(ql)) mods.push({icon:MODELS[k].icon,label:MODELS[k].label,tag:'Go to',act:()=>openModel(k)}); });
+  if(ql.length>=2){
+    const found=await Promise.all(CMD_MODELS.map(async mdl=>{
+      const m=MODELS[mdl]; if(!m) return null;
+      try{ return {mdl, rows:await db.list(mdl,{search:raw})}; }
+      catch(e){ return {mdl, rows:[], err:(e&&e.message)||String(e)}; }
+    }));
+    if(seq!==_cmdSeq) return;                       // a newer keystroke overtook this one
+    found.filter(Boolean).forEach(({mdl,rows,err})=>{
+      const m=MODELS[mdl];
+      if(err){ errs.push({icon:'⚠',label:'Could not search '+m.label,sub:err,tag:'Error',act:()=>openModel(mdl)}); return; }
+      (rows||[]).filter(r=>r.active!==false)
+        .sort((a,b)=>_cmdScore(mdl,a,ql)-_cmdScore(mdl,b,ql))
+        .slice(0,8)
+        .forEach(r=>items.push({icon:m.icon, label:String(r[m.name]||r[m.pk]||'(untitled)'), sub:_cmdSub(mdl,r), tag:m.label,
+          _s:_cmdScore(mdl,r,ql),
+          act:()=>{ if(mdl==='custom_orders'){ openModel('custom_orders'); setTimeout(()=>coOpen(encodeURIComponent(r[m.pk])),60); }
+                    else if(m.special){ openModel(mdl); }
+                    else gotoRecord(mdl, r[m.pk]); }}));
+    });
+    items.sort((a,b)=>a._s-b._s);
+  }
+  cmdItems=errs.concat(items.slice(0,40)).concat(mods.slice(0,12));
+  if(ql.length===1) cmdItems=mods.slice(0,20);
+  cmdSel=0; renderCmd(ql);
+}
+function renderCmd(q){ const el=$('cmdres'); if(!el) return;
+  const nRec=cmdItems.filter(i=>i.tag!=='Go to'&&i.tag!=='Error').length;
+  const hint = (q&&q.length===1) ? '<div class="r" style="color:var(--muted);font-size:12px">Keep typing — records are searched from 2 characters.</div>' : '';
+  el.innerHTML=hint+cmdItems.map((it,i)=>`<div class="r ${i===cmdSel?'sel':''}" onclick="cmdRun(${i})"><span>${it.icon}</span><span>${esc(it.label)}${it.sub?`<div class="mini" style="color:var(--muted)">${esc(it.sub)}</div>`:''}</span><span class="tag">${esc(it.tag)}</span></div>`).join('')
+    || (q?'<div class="r">No match for “'+esc(q)+'” — try a SKU, a reference, a customer or a supplier.</div>':'<div class="r">Type to search.</div>');
+  el.setAttribute('data-n',nRec); }
 function cmdRun(i){ const it=cmdItems[i]; if(it){ closeCmd(); it.act(); } }
 document.addEventListener('keydown',e=>{
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){ e.preventDefault(); openCmd(); return; }
@@ -4272,27 +4437,92 @@ function coDelLine(i){ coLines.splice(i,1); drawCOForm(); }
 function coSetProduct(i,sku){ const l=coLines[i]; l.product_sku=sku; const p=_coProd[sku]; if(p){ l.description=p.name||sku; l.pack_size_g=+p.pack_g||l.pack_size_g||0; if(!(+l.unit_price>0)) l.unit_price=+p.sell_price||0; } drawCOForm(); }
 // ---- Recipe editor for a custom line (add/remove counter before saving) ----
 let _coEditIdx=-1, _coEditRows=[], _coEditBase=0;
-function coEditRecipe(i){ _coEditIdx=i; const l=coLines[i]; _coEditRows=(l.recipe||[]).map(r=>({...r})); if(!_coEditRows.length)_coEditRows=[{ingredient_sku:'',grams:0}];
+function coEditRecipe(i){ _coEditIdx=i; const l=coLines[i]; _coEditRows=(l.recipe||[]).map(r=>({...r}));
+  // No blank starter row any more — each PMR section carries its own "＋ Add".
   _coEditBase=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; drawCoRecipe(); }
 /* Was grouped by `ingredient_group`, which is not a field on ingredients — so every
    ingredient landed in one "Other" bucket. Now category › base material, like the count. */
 function _coIngOptions(sel){ return _ingGroupOptions(_coIng, _coIng, {selected:sel, showKind:true}); }
+
+/* ---- PMR sections, the same eight the Fresh Food Calculator uses ------------
+   A raw recipe is not a flat list — it is a ratio. The calculator builds it as
+   muscle / organ / bone / liver / secreting / veg / seed / fruit, and CS reads
+   the sheet that way, so the ERP's editor now does too: one block per category,
+   its own running grams and share of the pack, next to the standard target.
+   Colours and targets are lifted from the calculator so the two read alike.   */
+const CO_CATS=[
+  {k:'muscle',   l:'Muscle meat',             c:'#1D9E75', pct:.45, re:/muscle\s*meat|whole\s*dressed|^meat|fish|sardine|mackerel|source\s*material/i},
+  {k:'organ',    l:'Muscle organ',            c:'#7F77DD', pct:.25, re:/muscle\s*organ|^organ/i},
+  {k:'bones',    l:'Raw meaty bones',         c:'#D85A30', pct:.10, re:/bone/i},
+  {k:'liver',    l:'Liver',                   c:'#BA7517', pct:.05, re:/liver/i},
+  {k:'secreting',l:'Other secreting organs',  c:'#D4537E', pct:.05, re:/secret/i},
+  {k:'veggies',  l:'Vegetables',              c:'#639922', pct:.07, re:/veg/i},
+  {k:'seeds',    l:'Seeds',                   c:'#888780', pct:.02, re:/seed|nut/i},
+  {k:'fruit',    l:'Fruit',                   c:'#E24B4A', pct:.01, re:/fruit|berr/i},
+  {k:'other',    l:'Supplements &amp; other',  c:'#7b6fe0', pct:0,   re:null},
+];
+/* Order matters: "Other secreting organs" contains the word "organ", and
+   "raw meaty bones" contains "meat". Test the specific ones first. */
+const _CO_CAT_ORDER=['bones','liver','secreting','organ','veggies','seeds','fruit','muscle'];
+function _coCatOf(ing){
+  const t=String((ing&&ing.category)||'')+' '+String((ing&&ing.ingredient_group)||'');
+  for(const k of _CO_CAT_ORDER){ const c=CO_CATS.find(x=>x.k===k); if(c&&c.re&&c.re.test(t)) return k; }
+  return 'other';
+}
+function _coCat(k){ return CO_CATS.find(c=>c.k===k)||CO_CATS[CO_CATS.length-1]; }
+// The bucket a row sits in: whatever its ingredient is, or the section it was added under.
+function _coRowCat(r){
+  const ing=(_coIng||[]).find(i=>i.sku===r.ingredient_sku);
+  return ing?_coCatOf(ing):(r._cat||'other');
+}
+// Options for one section — that category first, everything else still reachable below.
+function _coIngOptionsFor(cat, sel){
+  const mine=(_coIng||[]).filter(i=>_coCatOf(i)===cat);
+  const rest=(_coIng||[]).filter(i=>_coCatOf(i)!==cat);
+  let h=`<option value="">— pick an ingredient —</option>`;
+  if(mine.length) h+=`<optgroup label="${esc(_coCat(cat).l.replace(/&amp;/g,'&'))}">`+
+    mine.map(i=>`<option value="${esc(i.sku)}" ${sel===i.sku?'selected':''}>${esc((i.is_intermediate?'Processed: ':'Raw: ')+(i.name||i.sku))}</option>`).join('')+`</optgroup>`;
+  h+=`<optgroup label="── everything else ──">`+
+    rest.map(i=>`<option value="${esc(i.sku)}" ${sel===i.sku?'selected':''}>${esc(_coCat(_coCatOf(i)).l.replace(/&amp;/g,'&')+' · '+(i.name||i.sku))}</option>`).join('')+`</optgroup>`;
+  return h;
+}
+function _coAddTo(cat){ _coEditRows.push({ingredient_sku:'',grams:0,_cat:cat}); drawCoRecipe(); }
 function drawCoRecipe(){
-  const now=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; const added=Math.max(0,now-_coEditBase), removed=Math.max(0,_coEditBase-now);
+  const now=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length;
   const totG=_coEditRows.reduce((s,r)=>s+(+r.grams||0),0); const packG=+coLines[_coEditIdx].pack_size_g||0;
-  const rows=_coEditRows.map((r,j)=>{ const unm=r.src_name&&!r.ingredient_sku;
-    const srcHint=r.src_name?`<div class="mini" style="color:${unm?'var(--danger)':'var(--muted)'}">calculator: <b>${esc(r.src_name)}</b>${unm?' — pick a match':''}</div>`:'';
-    return `<tr${unm?' style="background:#fdf3f0"':''}><td><select onchange="_coEditRows[${j}].ingredient_sku=this.value;drawCoRecipe()" style="width:210px"><option value="">— ingredient —</option>${_coIngOptions(r.ingredient_sku)}</select>${srcHint}</td>
-    <td><input type="number" step="any" value="${r.grams||''}" oninput="_coEditRows[${j}].grams=+this.value||0;coRecipeTick()" style="width:84px;text-align:right"> g</td>
-    <td><span style="cursor:pointer;color:var(--danger)" onclick="_coEditRows.splice(${j},1);drawCoRecipe()">✕</span></td></tr>`; }).join('');
   const nUnm=_coEditRows.filter(r=>r.src_name&&!r.ingredient_sku).length;
+  // bucket every row by its ingredient's PMR category
+  const byCat={}; CO_CATS.forEach(c=>byCat[c.k]=[]);
+  _coEditRows.forEach((r,j)=>{ const k=_coRowCat(r); (byCat[k]=byCat[k]||[]).push({r,j}); });
+  const rowHtml=({r,j},cat)=>{ const unm=r.src_name&&!r.ingredient_sku;
+    const srcHint=r.src_name?`<div class="mini" style="color:${unm?'var(--danger)':'var(--muted)'}">calculator: <b>${esc(r.src_name)}</b>${unm?' — pick a match':''}</div>`:'';
+    return `<tr${unm?' style="background:#fdf3f0"':''}><td><select onchange="_coEditRows[${j}].ingredient_sku=this.value;drawCoRecipe()" style="width:100%;min-width:200px">${_coIngOptionsFor(cat,r.ingredient_sku)}</select>${srcHint}</td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" value="${r.grams||''}" oninput="_coEditRows[${j}].grams=+this.value||0;coRecipeTick()" style="width:84px;text-align:right"> g</td>
+      <td style="width:24px"><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="_coEditRows.splice(${j},1);drawCoRecipe()">✕</span></td></tr>`; };
+  const sections=CO_CATS.map(c=>{
+    const rows=byCat[c.k]||[];
+    if(!rows.length && c.k==='other') return '';                 // don't show an empty catch-all
+    const g=rows.reduce((n,x)=>n+(+x.r.grams||0),0);
+    const pctNow=packG>0?(g/packG*100):0;
+    const tgt=c.pct?Math.round(c.pct*100):0;
+    const off=(packG>0&&c.pct)?Math.abs(pctNow-tgt):0;
+    const col=!c.pct?'var(--muted)':(off<=2?'#4e7a3e':(off<=6?'var(--earth,#b5762a)':'var(--danger)'));
+    return `<div style="border:1px solid var(--line);border-left:4px solid ${c.c};border-radius:8px;margin:0 0 10px;overflow:hidden">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 10px;background:#fbfbf8">
+        <b style="color:${c.c}">${c.l}</b>
+        <span class="mini" style="color:var(--muted)">${rows.length} item${rows.length===1?'':'s'}</span>
+        <div style="flex:1"></div>
+        <span class="mini"><b>${Math.round(g*10)/10} g</b>${packG>0?` · <span style="color:${col};font-weight:700">${pctNow.toFixed(1)}%</span>`:''}${c.pct?` <span style="color:var(--muted)">of ${tgt}% standard</span>`:''}</span>
+      </div>
+      ${rows.length?`<table style="margin:0"><tbody>${rows.map(x=>rowHtml(x,c.k)).join('')}</tbody></table>`:''}
+      <div style="padding:6px 10px"><span class="addrow" onclick="_coAddTo('${c.k}')">＋ Add ${c.l.replace(/&amp;/g,'&').toLowerCase()}</span></div>
+    </div>`; }).join('');
   $('modal').innerHTML=`<div><h3>🧪 Custom recipe — ${esc(coLines[_coEditIdx].description||'')||'(unnamed)'}</h3>
-    <p class="mini">Enter each ingredient and grams <b>per pack</b>. This becomes the sellable SKU's BOM when the order is locked. Pack size: <b>${packG||'—'} g</b>.${nUnm?` <b style="color:var(--danger)">${nUnm} calculator ingredient(s) need a match</b> — pick the equivalent from your master list; the app <b>remembers it</b> for next time.`:''}</p>
-    <div style="max-height:320px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">g / pack</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div style="margin-top:8px"><span class="addrow" onclick="_coEditRows.push({ingredient_sku:'',grams:0});drawCoRecipe()">＋ Add ingredient</span></div>
+    <p class="mini">Built the way the <b>Fresh Food Calculator</b> builds it — one section per PMR category, grams <b>per pack</b>. Each header shows what that section adds up to against the standard raw ratio, so an unbalanced mix is obvious before you save. This becomes the sellable SKU's BOM when the order is locked. Pack size: <b>${packG||'—'} g</b>.${nUnm?` <b style="color:var(--danger)">${nUnm} calculator ingredient(s) need a match</b> — pick the equivalent from your master list; the app <b>remembers it</b> for next time.`:''}</p>
+    <div style="max-height:52vh;overflow:auto;padding-right:2px">${sections}</div>
     <div id="coRecSum" style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px">${_coRecipeSummaryHtml()}</div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" id="coRecSaveBtn" onclick="coSaveRecipe()">💾 Save recipe (${now})</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
-  $('overlay').classList.add('on');
+  modalWide(true); $('overlay').classList.add('on');
 }
 // summary HTML (recomputed live without re-rendering rows, so focus stays put)
 function _coRecipeSummaryHtml(){
@@ -5119,7 +5349,7 @@ function drawProdPlan(){
     ${(()=>{const o=prodOutLines.filter(l=>(+l.needed_kg||0)>0); if(!o.length) return '';
       return `<div style="margin-top:8px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12.5px">
         <b>Also on this run — output ingredients</b> (detail below):
-        ${o.map(l=>esc(l.name)+' <b>'+(+l.needed_kg||0)+' kg</b>').join(' · ')}</div>`;})()}</div>`;
+        ${o.map(l=>esc(l.name)+' <b>'+(+l.needed_kg||0)+' kg</b>'+(l.already?' <span class="mini">(already made)</span>':'')).join(' · ')}</div>`;})()}</div>`;
   // ---- Output ingredients (make processed stock directly, no finished product) ----
   const _allIng=window._prodAllIngredients||[];
   const outAll=_allIng.filter(i=>i.is_intermediate);
@@ -5132,21 +5362,38 @@ function drawProdPlan(){
       const pre=(S.g2 && !String(i._nm||'').toLowerCase().includes(String(S.g2).toLowerCase()))?esc(S.g2)+' › ':'';
       return `<option value="${esc(i.sku)}">${pre}Processed: ${esc(i._nm)}${i._raw?'  ·  Raw: '+esc(i._raw):''}</option>`; }).join('')).join('')+`</optgroup>`).join('');
   const outRows=_outIngRows(_allIng, prodOutLines.map(l=>_bs[l.ingredient_sku]||{sku:l.ingredient_sku,name:l.name}));
+  // processed items already sitting in inventory at the production site, not yet on the plan
+  const _madeAvail=outAll.filter(i=>!inOut.has(i.sku) && ((window._prodSupOh||{})[i.sku]||0)>0).length;
   h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Output ingredients</span>
     <span style="color:var(--muted);font-size:12px">Make processed stock directly from raw (prep ahead of a run). Raw used = needed ÷ yield%. Confirm records the actuals.</span></div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Raw used (kg)</th><th class="num">Output made (kg)</th><th class="num">Yield</th><th></th></tr></thead><tbody>
+    <div style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">On hand</th><th class="num">Raw used (kg)</th><th class="num">Output made (kg)</th><th class="num">Yield</th><th></th></tr></thead><tbody>
     ${prodOutLines.map((l,i)=>{ const r=outRows[i]||{};
       const y=((+r.yield_pct||100)/100)||1;
+      const oh=Math.round(((window._prodSupOh||{})[l.ingredient_sku]||0)/10)/100;
       const raw=(l.raw_kg!=null&&l.raw_kg!=='')?l.raw_kg:(Math.round(((+l.needed_kg||0)/y)*1000)/1000||'');
       const a=(parseFloat(raw)>0)?Math.round(((+l.needed_kg||0)/parseFloat(raw))*1000)/10:0;
+      /* A line DRAWN from inventory is already in the ledger — it was posted by a
+         Raw→Process log, an opening balance or a count. It rides along on the plan
+         so the kitchen can see it, but confirming the run must not post it twice,
+         so its quantity boxes are locked. */
+      if(l.already) return `<tr style="background:#f6f8f4"><td><span class="tagf tagf-proc">Processed</span> ${esc(r._nm||l.name)}<div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''} · <code>${esc(l.ingredient_sku)}</code></div></td>
+        <td class="mini"><span class="badge b-received">already made</span><div class="mini" style="color:var(--muted)">in stock — not re-posted on confirm</div></td>
+        <td class="num"><b>${oh}</b> kg</td>
+        <td class="num mini" style="color:var(--muted)">—</td>
+        <td class="num"><b>${Math.round((+l.needed_kg||0)*1000)/1000}</b> kg</td>
+        <td class="num mini" style="color:var(--muted)">—</td>
+        <td><span style="cursor:pointer;color:var(--danger)" title="Remove from the plan (stock is untouched)" onclick="prodDelOut(${i})">✕</span></td></tr>`;
       return `<tr><td><span class="tagf tagf-proc">Processed</span> ${esc(r._nm||l.name)}<div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''} · <code>${esc(l.ingredient_sku)}</code></div></td>
       <td class="mini">${r._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(r._raw)}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
+      <td class="num mini" style="color:${oh>0?'#1e6b2e':'var(--muted)'}">${oh>0?'<b>'+oh+'</b> kg':'—'}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:92px;text-align:right" value="${raw}" oninput="prodOutLines[${i}].raw_kg=this.value;prodOutYield(${i})" title="raw pulled from the chiller"></td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:98px;text-align:right" value="${l.needed_kg||''}" oninput="prodOutLines[${i}].needed_kg=+this.value||0;prodOutYield(${i})" title="processed output that came off it"></td>
       <td class="num" id="poy${i}">${a?`<b style="color:${a<70?'var(--danger)':'#4e7a3e'}">${a}%</b>`:`<span class="mini" style="color:var(--muted)">std ${Math.round(y*1000)/10}%</span>`}</td>
-      <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="6" class="empty">Optional — add a processed ingredient to make to stock.</td></tr>'}
+      <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="7" class="empty">Optional — add a processed ingredient to make to stock.</td></tr>'}
     </tbody></table></div>
-    <div style="margin-top:8px"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button></div></div>`;
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button>
+      <button class="btn sec sm" onclick="prodDrawMade()" title="Processed stock that is already in inventory — pull it onto this plan instead of entering it again">📥 Draw already-made stock (${_madeAvail} available)</button></div>
+    ${prodOutLines.some(l=>l.already)?`<div class="hint" style="margin-top:8px">Rows marked <b>already made</b> were drawn from inventory. They appear on the plan and the kitchen sheet for tracking, and are <b>skipped when you confirm</b> — the stock is already posted, so nothing is counted twice.</div>`:''}</div>`;
   h+=prodPackHtml();
   $('content').innerHTML=h;
 }
@@ -5377,7 +5624,8 @@ function prodCartApply(){ const q=window._kcQty||{}; let n=0;
 /* ---- Searchable output-ingredient picker (#7) ---- */
 function prodOutPick(){
   const ings=(window._prodAllIngredients||[]).filter(i=>i.is_intermediate); if(!ings.length){ toast('No output (processed) ingredients defined',true); return; }
-  window._opQty={}; prodOutLines.forEach(l=>window._opQty[l.ingredient_sku]=+l.needed_kg||0);
+  // "already made" rows are not editable here — they represent posted stock.
+  window._opQty={}; prodOutLines.forEach(l=>{ if(!l.already) window._opQty[l.ingredient_sku]=+l.needed_kg||0; });
   window._opQ=''; window._opG='';
   const groups=[...new Set(_outIngRows(window._prodAllIngredients||[],ings).map(i=>i._g1||'—'))].sort();
   $('modal').innerHTML=`<div><h3>🔎 Output ingredients — browse &amp; add</h3>
@@ -5386,7 +5634,7 @@ function prodOutPick(){
       <input id="op_q" placeholder="🔎 search name / SKU / raw parent…" oninput="window._opQ=this.value;drawOutPickBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
       <select onchange="window._opG=this.value;drawOutPickBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All categories</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
     </div>
-    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Needed kg</th></tr></thead><tbody id="opBody"></tbody></table></div>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">On hand</th><th class="num">Needed kg</th></tr></thead><tbody id="opBody"></tbody></table></div>
     <div class="mfoot"><button class="btn" onclick="prodOutApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on'); drawOutPickBody();
 }
@@ -5397,19 +5645,64 @@ function drawOutPickBody(){
   const match=i=>{ if(gf && (i._g1||'—')!==gf) return false; if(!q.length) return true;
     const t=[i._nm,i.name,i.sku,i._g1,i._g2,i._raw,i.raw_input,i.category].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
   const shown=rows.filter(match); let body='';
+  const oh=window._prodSupOh||{};
   hierGroups(shown,{g1:'_g1',g2:'_g2'}).forEach(G=>{
-    body+=`<tr class="grp"><td colspan="3" style="padding-left:10px">▸ <b>${esc(G.g1)}</b></td></tr>`;
+    body+=`<tr class="grp"><td colspan="4" style="padding-left:10px">▸ <b>${esc(G.g1)}</b></td></tr>`;
     G.subs.forEach(S=>{
-      if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="3" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
+      if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="4" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(i=>{ const v=(window._opQty&&window._opQty[i.sku]!=null)?window._opQty[i.sku]:'';
+        const k=Math.round((oh[i.sku]||0)/10)/100;
         body+=`<tr><td style="padding-left:26px"><span class="tagf tagf-proc">Processed</span> ${esc(i._nm)}<div class="mini" style="color:var(--muted)"><code>${esc(i.sku)}</code>${i.yield_pct?' · yield '+esc(i.yield_pct)+'%':''}</div></td>
           <td class="mini">${i._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(i._raw)}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
+          <td class="num mini" style="color:${k>0?'#1e6b2e':'var(--muted)'}">${k>0?'<b>'+k+'</b> kg':'—'}</td>
           <td><input type="number" step="any" value="${v}" oninput="window._opQty['${esc(i.sku)}']=this.value===''?'':(+this.value||0)" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); }); });
-  const el=$('opBody'); if(el) el.innerHTML=body||'<tr><td colspan="3" class="empty">No output ingredients match.</td></tr>';
+  const el=$('opBody'); if(el) el.innerHTML=body||'<tr><td colspan="4" class="empty">No output ingredients match.</td></tr>';
+}
+/* ---- Draw processed stock that has ALREADY been made -----------------------
+   The case this fixes: the prep team logged a Raw→Process run (or it came in on
+   an opening balance / a count), so the processed ingredient is sitting in
+   inventory — but the production plan knew nothing about it and the only way to
+   show it was to type the whole line again. This reads what is actually on hand
+   at the production site and puts it on the plan as a read-only "already made"
+   row. Nothing is posted; the ledger already has it.                          */
+function prodDrawMade(){
+  const oh=window._prodSupOh||{};
+  const ings=(window._prodAllIngredients||[]).filter(i=>i.is_intermediate && (oh[i.sku]||0)>0);
+  if(!ings.length){ toast('No processed stock on hand at '+planProduceLoc()+' to draw',true); return; }
+  const onPlan=new Set(prodOutLines.map(l=>l.ingredient_sku));
+  window._dmPick={}; ings.forEach(i=>{ if(!onPlan.has(i.sku)) window._dmPick[i.sku]=true; });
+  const rows=_outIngRows(window._prodAllIngredients||[], ings);
+  let body='';
+  hierGroups(rows,{g1:'_g1',g2:'_g2'}).forEach(G=>{
+    body+=`<tr class="grp"><td colspan="4" style="padding-left:10px">▸ <b>${esc(G.g1)}</b></td></tr>`;
+    G.subs.forEach(S=>{
+      if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="4" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
+      S.items.forEach(i=>{ const kg=Math.round((oh[i.sku]||0)/10)/100; const already=onPlan.has(i.sku);
+        body+=`<tr><td style="width:34px;padding-left:26px"><input type="checkbox" ${already?'disabled':(window._dmPick[i.sku]?'checked':'')} onchange="window._dmPick['${esc(i.sku)}']=this.checked"></td>
+          <td><span class="tagf tagf-proc">Processed</span> ${esc(i._nm)}<div class="mini" style="color:var(--muted)"><code>${esc(i.sku)}</code>${i._raw?' · from '+esc(i._raw):''}</div></td>
+          <td class="num"><b>${kg}</b> kg</td>
+          <td class="mini">${already?'<span style="color:var(--muted)">already on this plan</span>':''}</td></tr>`; }); }); });
+  $('modal').innerHTML=`<div><h3>📥 Draw already-made stock</h3>
+    <p class="mini">Processed ingredients that are <b>already in inventory</b> at <b>${esc(planProduceLoc())}</b>. Tick the ones that belong to this run and they join the output list as <b>already made</b> — visible on the plan and the kitchen sheet, and <b>skipped on confirm</b> so the stock is never posted twice.</p>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th style="width:34px"></th><th>Processed ingredient</th><th class="num">On hand</th><th></th></tr></thead><tbody>${body}</tbody></table></div>
+    <div class="mfoot"><button class="btn" onclick="prodDrawMadeApply()">📥 Add to the plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
+}
+function prodDrawMadeApply(){
+  const oh=window._prodSupOh||{}; const pick=window._dmPick||{}; let n=0;
+  Object.keys(pick).forEach(sku=>{ if(!pick[sku]) return;
+    if(prodOutLines.some(l=>l.ingredient_sku===sku)) return;
+    const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{};
+    const kg=Math.round((oh[sku]||0)/10)/100; if(!(kg>0)) return;
+    prodOutLines.push({ingredient_sku:sku, name:i.name||sku, needed_kg:kg, raw_kg:'', already:true, drawn_from:planProduceLoc()});
+    n++; });
+  closeModal(); drawProdPlan();
+  toast(n?('Drawn · '+n+' already-made output(s) added to the plan'):'Nothing selected');
 }
 function prodOutApply(){ const q=window._opQty||{}; let n=0;
   Object.keys(q).forEach(sku=>{ const v=q[sku]; const kg=(v===''||v==null)?0:(+v||0); const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{name:sku};
     let line=prodOutLines.find(l=>l.ingredient_sku===sku);
+    if(line&&line.already) return;                       // drawn-from-stock rows are managed separately
     if(kg>0){ if(line){ line.needed_kg=kg; } else { prodOutLines.push({ingredient_sku:sku,name:i.name||sku,needed_kg:kg}); } n++; }
     else if(line){ prodOutLines=prodOutLines.filter(l=>l.ingredient_sku!==sku); }
   });
@@ -5833,7 +6126,7 @@ function _ksPrepNotes(fmt, ings){
 }
 async function prodKitchenSheet(){
   const lines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
-  const outs=prodOutLines.filter(l=>(+l.needed_kg||0)>0);
+  const outs=prodOutLines.filter(l=>(+l.needed_kg||0)>0 && !l.already);   // "already made" is stock, not work
   if(!lines.length && !outs.length){ toast('Add products with packs, or an output ingredient, first',true); return; }
   const bm=await prodBOMMap();
   const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
@@ -6174,7 +6467,7 @@ async function prodLoadRun(refEnc,date){
 // Honours any substitutions already set (prodBOMMap applies them). Returns the short items.
 async function _prodShortages(){
   const prodLines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
-  const outLines=prodOutLines.filter(l=>(+l.needed_kg||0)>0);
+  const outLines=prodOutLines.filter(l=>(+l.needed_kg||0)>0 && !l.already);   // drawn stock needs no raw
   if(!prodLines.length && !outLines.length) return [];
   const bm=await prodBOMMap(); const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
   const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
@@ -6203,7 +6496,7 @@ function _prodShortWarn(sh, headline){
 }
 async function prodConfirm(){
   if(_postLock){ toast('Still posting — please wait…',true); return; }
-  if(!prodPlanLines.some(l=>(+l.good_packs||0)>0) && !prodOutLines.some(l=>(+l.needed_kg||0)>0)){ toast('Enter good packs on a product, or a needed qty on an output ingredient',true); return; }
+  if(!prodPlanLines.some(l=>(+l.good_packs||0)>0) && !prodOutLines.some(l=>(+l.needed_kg||0)>0 && !l.already)){ toast('Enter good packs on a product, or a needed qty on an output ingredient',true); return; }
   // Step 1 — check stock (processed-first, then raw) and let them set replacements for anything short.
   let sh=[]; try{ sh=await _prodShortages(); }catch(e){}
   if(sh.length){ await drawPreConfirmSub(); return; }
@@ -6239,7 +6532,7 @@ async function _ingOhBulacanG(){ const oh={};
 // any output created above the shortfall lands back in the processed ingredient's stock.
 async function openProdActuals(){
   const anyProd=prodPlanLines.some(l=>(+l.good_packs||0)>0);
-  const anyOut=prodOutLines.some(l=>(+l.needed_kg||0)>0);
+  const anyOut=prodOutLines.some(l=>(+l.needed_kg||0)>0 && !l.already);
   if(!anyProd && !anyOut){ toast('Enter good packs on a product, or a needed qty on an output ingredient',true); return; }
   const bm=await prodBOMMap(); const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
   const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
@@ -6257,7 +6550,8 @@ async function openProdActuals(){
       yield:y, neededKg:Math.round(neededG/10)/100, ohKg:Math.round(ohG/10)/100,
       procUsedKg, actualRawKg:Math.round(rawG/10)/100, actualMadeKg:Math.round(shortG/10)/100 }; };
   const A=Object.keys(agg).map(sku=>mk(sku,agg[sku].neededG,'A'));
-  const B=prodOutLines.filter(l=>(+l.needed_kg||0)>0).map(l=>mk(l.ingredient_sku,(+l.needed_kg||0)*1000,'B'));
+  // Lines drawn from inventory are excluded — the ledger already carries them.
+  const B=prodOutLines.filter(l=>(+l.needed_kg||0)>0 && !l.already).map(l=>mk(l.ingredient_sku,(+l.needed_kg||0)*1000,'B'));
   window._prodAct=A.concat(B);
   drawProdActuals();
 }
@@ -7597,7 +7891,7 @@ async function rptPayables(){
   const payByPo={}; pay.forEach(p=>payByPo[p.po_ref]=(payByPo[p.po_ref]||0)+(+p.amount||0));
   const lineByPo={}; pol.forEach(l=>{ (lineByPo[l.po_ref]=lineByPo[l.po_ref]||[]).push(l); });
   const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
-  const rows=po.filter(p=>['confirmed','received'].includes(p.status)).map(p=>{ const bl=poBillable(p,lineByPo[p.po_ref]||[]); const pd=payByPo[p.po_ref]||0; const bal=Math.max(0,bl-pd); const st=pd<=0.005?'unpaid':(bal>0.5?'partial':'paid'); return {p,bl,pd,bal,st}; }).sort((a,b)=>b.bal-a.bal);
+  const rows=po.filter(p=>PO_LIVE.includes(p.status)).map(p=>{ const bl=poBillable(p,lineByPo[p.po_ref]||[]); const pd=payByPo[p.po_ref]||0; const bal=Math.max(0,bl-pd); const st=pd<=0.005?'unpaid':(bal>0.5?'partial':'paid'); return {p,bl,pd,bal,st}; }).sort((a,b)=>b.bal-a.bal);
   const bySup={}; rows.forEach(r=>{ const s=r.p.supplier_name||'(unassigned)'; bySup[s]=(bySup[s]||0)+r.bal; });
   const totBal=rows.reduce((s,r)=>s+r.bal,0), totBill=rows.reduce((s,r)=>s+r.bl,0), totPaid=rows.reduce((s,r)=>s+r.pd,0);
   let h=`<div class="repcard"><h3 style="margin:0 0 4px">Supplier payables &amp; payment status</h3>
@@ -8565,7 +8859,7 @@ const KB = {
   ingredients:{d:'Master list of everything you buy or make into product: raw meats, organs, veg, fruit, seeds, supplies, plus live animals and internal intermediates.',h:['Open a row to edit price, category, storage, par, lead time','Set the processing method + yield so costing is accurate','Mark live-animal / intermediate items with their flags'],l:['₱/kg usable = raw price ÷ processing yield — the true cost in a pack','moving_avg_cost auto-updates from goods receipts (perpetual costing)','Intermediates (e.g. Rabbit Ground Meat) derive cost from their source × dress-out yield']},
   products:{d:'Sellable finished goods, grouped into families with size variants, each with its own SKU, price and recipe (BOM).',h:['Open a product to edit price, pack size, feeding style','Edit the Recipe (BOM) lines — usable grams per pack','Add variants as separate products under the same family'],l:['BOM grams are USABLE grams in the pack','Raw needed for production = usable ÷ ingredient yield','Cost/pack is computed from actual ingredients issued at production']},
   suppliers:{d:'Your vendors with contacts, payment terms and how they sell (loose / case / head).',h:['Add or edit a vendor','Record payment term + delivery notes','Link vendors to ingredients via the ingredient record'],l:['Conservative costing uses the most-expensive supplier price','Backup suppliers are shown for sourcing decisions']},
-  purchase_orders:{d:'Orders to vendors — request a quote, issue the PO, receive the goods.',h:['New → pick vendor → add ingredient lines → Save','Send RFQ → Enter quotation (vendor avail + price) → Issue PO','Receive order (posts to stock)','Log notes & schedule activities in the chatter'],l:['Status flow: open → RFQ → quoted → confirmed → received','Send RFQ asks the vendor what they can supply; Enter quotation records their available qty + unit price','Issue PO sets the order qty from vendor availability (capped at what you requested) and sends the final PO','The billable amount = received qty × unit price − discount + delivery fee','Every status change is auto-logged with who + when']},
+  purchase_orders:{d:'Orders to vendors — request a quote, issue the PO, receive the goods.',h:['New → pick vendor → add ingredient lines → Save','Send RFQ → Enter quotation (vendor avail + price) → Issue PO','Receive order (posts to stock) — a delivery that does not close the order leaves it Partially received','Log notes & schedule activities in the chatter'],l:['Status flow: open → RFQ → quoted → ordered → partially received → fully received','Cancelled and fully received orders are hidden from the list by default — use “Showing every status” to see them','Send RFQ asks the vendor what they can supply; Enter quotation records their available qty + unit price','Issue PO sets the order qty from vendor availability (capped at what you requested) and sends the final PO','The billable amount = received qty × unit price − discount + delivery fee','Every status change is auto-logged with who + when']},
   production_batches:{d:'Records a production run: which product, ingredients issued, packs out, rejects and waste.',h:['New → pick product → enter ingredients issued + packs produced','Set the output lot & date','Save to post to finished stock'],l:['Check 2 (usage) = actual issued vs recipe expected','Check 3 (yield/mass-balance) = usable produced vs packed + waste','Cost/pack = ingredient cost + labour + packaging ÷ good packs']},
   transfers:{d:'Move finished packs from Bulacan to Pasig. Sent vs received is Check 4.',h:['New → click "Load Bulacan finished stock" to pull available products','Enter sent and received packs','Save — any shortfall is flagged'],l:['sent − received = loss in transit → a Check 4 variance','Posts a transfer_out at Bulacan and transfer_in at Pasig']},
   count_sessions:{d:'Weekly physical inventory with approval. Counted qty becomes the new book stock after approval.',h:['New → choose scope (All / Ingredients / Supplies / Stickers / Products)','Click "Load items" — book qty auto-fills (read-only)','Enter counted qty → Save draft → Approve & post'],l:['Book qty is computed from the ledger — you cannot edit it','On approval, counted−book posts as a count_adjust + a Check 3.5 shrinkage variance','Only approved counts change stock']},
