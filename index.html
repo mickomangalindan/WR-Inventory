@@ -63,6 +63,20 @@
   /* content */
   .content{padding:16px;flex:1}
   .listcard{background:#fff;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  /* ---- Sticky table headers ------------------------------------------------
+     On a 200-row count sheet or reorder list you lose the column headings after
+     one screen. The page itself is the scroller (.main), so a plain sticky <th>
+     pins to the top of the window — no fixed height, no inner scrollbar, and
+     nothing changes for short tables. Anything wrapped in .stickyhead scrolls in
+     its own box instead, for tables inside a modal. */
+  .listcard table thead th,
+  .repcard > div[style*="overflow-x"] > table thead th,
+  table.sticky thead th{position:sticky;top:0;z-index:3}
+  .stickyhead{max-height:70vh;overflow:auto}
+  .stickyhead thead th{position:sticky;top:0;z-index:3}
+  /* the header must be opaque or rows show through it while scrolling */
+  thead th{background:#fbfbfc}
+  .mscroll thead th{position:sticky;top:0;z-index:3;background:#fbfbfc}
   table{width:100%;border-collapse:collapse}
   thead th{background:#fbfbfc;text-align:left;padding:9px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:#7a7a88;font-weight:700;border-bottom:1px solid var(--line);white-space:nowrap}
   tbody td{padding:9px 12px;border-bottom:1px solid var(--line2);font-size:13px}
@@ -422,6 +436,23 @@
   .kpirow{grid-template-columns:1fr 1fr;gap:10px}
   .kpi{padding:12px 13px}.kpi .v{font-size:21px}
   .wrdash .k6{grid-template-columns:1fr 1fr}
+}
+/* =====================================================================
+   PRINT — everything sticky or scrollable becomes ordinary paper.
+   A sticky header would print once, pinned, over the first rows; an inner
+   scroll box would print only what happens to be scrolled into it; a folded
+   <details> would print as a closed triangle. All three are undone here, and
+   the table header is set to repeat at the top of every page instead.
+   ===================================================================== */
+@media print{
+  thead th{position:static !important}
+  thead{display:table-header-group}
+  tfoot{display:table-row-group}
+  tr{break-inside:avoid;page-break-inside:avoid}
+  .stickyhead,.mscroll,.listcard,.repcard{max-height:none !important;overflow:visible !important}
+  details{display:block !important}
+  details>summary{display:none !important}
+  details>*{display:block !important}
 }
 
 @media(max-width:430px){
@@ -1331,9 +1362,11 @@ function renderLines(){
     if(ro&&(c.n==='received_packs'||c.n==='received_kg')&&(v===''||v==null)) v=0; // captured at receiving
     // Product picker: show the SKU under the name so both are visible on the line.
     if(c.t==='rel'){const opts=relCache[c.rel]||[];
-      // The code goes UNDER the box, once. It used to appear inside the option text
-      // as well — "Meatballs Rabbit (RASPGCMB0045)" above "RASPGCMB0045".
-      const skuHint=v?`<div class="mini"><code>${esc(v)}</code></div>`:'';
+      /* The code goes UNDER the box, once — it used to be inside the option text as
+         well ("Meatballs Rabbit (RASPGCMB0045)" above "RASPGCMB0045"). And only for
+         PRODUCTS: a product code (RASPGCGD0500) carries pack size and variant that
+         the name does not, while RAW-BEEF-LIVER next to "Beef liver" says nothing. */
+      const skuHint=(v&&c.rel==='products')?`<div class="mini"><code>${esc(v)}</code></div>`:'';
       return `<td><select onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}><option value="">—</option>${relOptsHTML(opts,v,true)}</select>${skuHint}</td>`;}
     if(c.t==='select')return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}>${(c.o||[]).map(op=>`<option ${v===op?'selected':''}>${op}</option>`).join('')}</select></td>`;
     // Transfer "Sent" packs: case-packed finished goods entered as boxes + loose packs (like receiving & count).
@@ -2198,20 +2231,21 @@ function recordPrintHtml(m, r, children){
       group_1:(g.g1||'Ingredients'), group_2:(g.g2||''), sort_order:g.so}; });
     const qCol=cols.find(c=>/qty|ordered_kg|available_kg/.test(c.n)); const pCol=cols.find(c=>/price/.test(c.n));
     const showAmt=!!(qCol&&pCol); let total=0;
-    const span=3+numCols.length+(showAmt?1:0); let n=0, body='';
+    const span=2+numCols.length+(showAmt?1:0); let n=0, body='';
     hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
       body+=`<tr class="grp"><td colspan="${span}"><b>${esc(G.g1)}</b></td></tr>`;
       G.subs.forEach(S=>{
         if(S.g2) body+=`<tr class="cat"><td colspan="${span}">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`;
         body+=S.items.map(r=>{ n++; let amt=0; if(showAmt){ amt=(+r[qCol.n]||0)*(+r[pCol.n]||0); total+=amt; }
-          return `<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.sku)}</td>`+
+          return `<tr><td>${n}</td><td>${esc(r.name)}</td>`+
             numCols.map(c=>`<td style="text-align:right">${esc(r[c.n]==null?'':r[c.n])}</td>`).join('')+
             (showAmt?`<td style="text-align:right">${amt.toLocaleString('en-PH',{minimumFractionDigits:2})}</td>`:'')+`</tr>`; }).join('');
       });
     });
-    const head=`<th>#</th><th>Item</th><th>SKU</th>`+numCols.map(c=>`<th style="text-align:right">${esc(c.l)}</th>`).join('')+(showAmt?'<th style="text-align:right">Amount</th>':'');
+    // No SKU column: a supplier reads "Beef liver", not RAW-BEEF-LIVER.
+    const head=`<th>#</th><th>Item</th>`+numCols.map(c=>`<th style="text-align:right">${esc(c.l)}</th>`).join('')+(showAmt?'<th style="text-align:right">Amount</th>':'');
     const tot=numCols.map(c=>rows.reduce((a2,r)=>a2+(+r[c.n]||0),0));
-    const foot=`<tr class="tot"><td colspan="3" style="text-align:right">Total · ${n} item(s)</td>`+
+    const foot=`<tr class="tot"><td colspan="2" style="text-align:right">Total · ${n} item(s)</td>`+
       tot.map(v=>`<td style="text-align:right">${num(Math.round(v*100)/100)}</td>`).join('')+
       (showAmt?`<td style="text-align:right">₱${total.toLocaleString('en-PH',{minimumFractionDigits:2})}</td>`:'')+`</tr>`;
     lines=`<h3>${esc(m.o2m.label)}</h3><table class="lines"><thead><tr>${head}</tr></thead><tbody>${body}${foot}</tbody></table>`;
@@ -2715,14 +2749,14 @@ async function renderMRP(){
      already follows). Before this, the roll-up converted the whole recipe need to
      raw and ordered it, so every processed item held in stock was bought twice. */
   const need={}, _unmapped={}, procUse={}, procAvail={};
-  ings.forEach(i=>{ if(i.is_intermediate) procAvail[i.sku]=Math.max(0, +stock[i.sku]||0); });
+  ings.forEach(i=>{ if(isProcessedItem(i)) procAvail[i.sku]=Math.max(0, +stock[i.sku]||0); });
   boms.forEach(b=>{ const dem=+mrpDemand[b.product_sku]||0; if(!dem) return;
     const g=(+b.usable_g||0)*dem; if(!g) return;
     const it=bySku[b.ingredient_sku];
     if(!it){ need[b.ingredient_sku]=(need[b.ingredient_sku]||0)+g; return; }
     const y=(+it.yield_pct||100)/100;
     let recipeG=g, rootSku=b.ingredient_sku;
-    if(it.is_intermediate){
+    if(isProcessedItem(it)){
       // draw the processed bin first; only the shortfall becomes raw to buy
       const take=Math.min(recipeG, procAvail[it.sku]||0);
       if(take>0){ procAvail[it.sku]-=take; procUse[it.sku]=(procUse[it.sku]||0)+take; recipeG-=take; }
@@ -4392,13 +4426,34 @@ async function coPlanEvidence(){
       if(!cur || (d && (!cur.date || d>cur.date))) inDemand[r.sku]={date:d, qty:+r.qty||0};
     });
   }catch(e){}
+  /* THE SAVED DEMAND PLOT. This is where the first version went wrong: a plot
+     does not write rows into the `demand` table — it stores the whole SKU→packs
+     map inside its own document (mrp_plans.data.demand), which is also what the
+     Production Plan reads its locked target from. Checking only the `demand`
+     table meant an order that was plotted and LOCKED still reported "not planned
+     yet", because the evidence was sitting in a place nobody looked. */
+  try{
+    const plots=await mrpPlans();
+    (plots||[]).forEach(pl=>{
+      const d=(pl&&pl.data)||{}; const dem=d.demand||{};
+      const date=String(pl.plan_date||pl.date||'').slice(0,10);
+      const ref=d.ref||pl.ref||'';
+      Object.keys(dem).forEach(sku=>{ if(!((+dem[sku]||0)>0)) return;
+        const cur=inDemand[sku];
+        // the most recent plot wins, and a plot is better evidence than a bare
+        // demand row because it carries the DP reference the kitchen works from
+        if(!cur || !cur.ref || (date && cur.date && date>cur.date)) inDemand[sku]={date, qty:+dem[sku]||0, ref, locked:!!d.locked};
+      });
+    });
+  }catch(e){}
   return {planned, inDemand};
 }
 // Plain-English "why is it at this status", for the card and the demand run.
 function coWhyText(ev, sku){
   const p=(ev.planned||{})[sku], d=(ev.inDemand||{})[sku];
   if(p) return 'on production plan '+(p.ref||'(draft)')+(p.date?' for '+p.date:'');
-  if(d) return 'on the demand plot'+(d.date?' for '+d.date:'')+(d.qty?' · '+d.qty+' pack(s)':'');
+  if(d) return (d.locked?'in locked demand ':'on the demand plot ')+(d.ref?d.ref+' ':'')
+              +(d.date?'('+d.date+')':'')+(d.qty?' · '+d.qty+' pack(s)':'');
   return '';
 }
 
@@ -5506,10 +5561,10 @@ function drawProdPlan(){
     ${(()=>{const o=prodOutLines.filter(l=>(+l.needed_kg||0)>0); if(!o.length) return '';
       return `<div style="margin-top:8px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12.5px">
         <b>Also on this run — output ingredients</b> (detail below):
-        ${o.map(l=>esc(l.name)+' <b>'+(+l.needed_kg||0)+' kg</b>'+(l.already?' <span class="mini">(already made)</span>':'')).join(' · ')}</div>`;})()}</div>`;
+        ${o.map(l=>esc(l.name)+' <b>'+(+l.needed_kg||0)+' kg</b>').join(' · ')}</div>`;})()}</div>`;
   // ---- Output ingredients (make processed stock directly, no finished product) ----
   const _allIng=window._prodAllIngredients||[];
-  const outAll=_allIng.filter(i=>i.is_intermediate);
+  const outAll=_allIng.filter(isProcessedItem);
   const _bs={},_bn={}; _allIng.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
   const inOut=new Set(prodOutLines.map(l=>l.ingredient_sku));
   const outAvail=_outIngRows(_allIng, outAll.filter(i=>!inOut.has(i.sku)));
@@ -5519,38 +5574,26 @@ function drawProdPlan(){
       const pre=(S.g2 && !String(i._nm||'').toLowerCase().includes(String(S.g2).toLowerCase()))?esc(S.g2)+' › ':'';
       return `<option value="${esc(i.sku)}">${pre}Processed: ${esc(i._nm)}${i._raw?'  ·  Raw: '+esc(i._raw):''}</option>`; }).join('')).join('')+`</optgroup>`).join('');
   const outRows=_outIngRows(_allIng, prodOutLines.map(l=>_bs[l.ingredient_sku]||{sku:l.ingredient_sku,name:l.name}));
-  // processed items already sitting in inventory at the production site, not yet on the plan
-  const _madeAvail=outAll.filter(i=>!inOut.has(i.sku) && ((window._prodSupOh||{})[i.sku]||0)>0).length;
-  h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Output ingredients</span>
-    <span style="color:var(--muted);font-size:12px">Make processed stock directly from raw (prep ahead of a run). Raw used = needed ÷ yield%. Confirm records the actuals.</span></div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">On hand</th><th class="num">Raw used (kg)</th><th class="num">Output made (kg)</th><th class="num">Yield</th><th></th></tr></thead><tbody>
+  h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Output ingredients — raw to process</span>
+    <span style="color:var(--muted);font-size:12px">Enter the <b>raw you plan to pull</b>. The output is worked out from the standard yield — come back after the prep and correct either figure before you confirm.</span></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Raw to use (kg)</th><th class="num">Output qty (kg)</th><th class="num">Yield</th><th></th></tr></thead><tbody>
     ${prodOutLines.map((l,i)=>{ const r=outRows[i]||{};
       const y=((+r.yield_pct||100)/100)||1;
-      const oh=Math.round(((window._prodSupOh||{})[l.ingredient_sku]||0)/10)/100;
-      const raw=(l.raw_kg!=null&&l.raw_kg!=='')?l.raw_kg:(Math.round(((+l.needed_kg||0)/y)*1000)/1000||'');
-      const a=(parseFloat(raw)>0)?Math.round(((+l.needed_kg||0)/parseFloat(raw))*1000)/10:0;
-      /* A line DRAWN from inventory is already in the ledger — it was posted by a
-         Raw→Process log, an opening balance or a count. It rides along on the plan
-         so the kitchen can see it, but confirming the run must not post it twice,
-         so its quantity boxes are locked. */
-      if(l.already) return `<tr style="background:#f6f8f4"><td><span class="tagf tagf-proc">Processed</span> ${esc(r._nm||l.name)}<div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''} · <code>${esc(l.ingredient_sku)}</code></div></td>
-        <td class="mini"><span class="badge b-received">already made</span><div class="mini" style="color:var(--muted)">in stock — not re-posted on confirm</div></td>
-        <td class="num"><b>${oh}</b> kg</td>
-        <td class="num mini" style="color:var(--muted)">—</td>
-        <td class="num"><b>${Math.round((+l.needed_kg||0)*1000)/1000}</b> kg</td>
-        <td class="num mini" style="color:var(--muted)">—</td>
-        <td><span style="cursor:pointer;color:var(--danger)" title="Remove from the plan (stock is untouched)" onclick="prodDelOut(${i})">✕</span></td></tr>`;
-      return `<tr><td><span class="tagf tagf-proc">Processed</span> ${esc(r._nm||l.name)}<div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''} · <code>${esc(l.ingredient_sku)}</code></div></td>
+      /* RAW is the input. The kitchen knows what it is pulling out of the chiller;
+         it does not know what it will weigh once trimmed. So raw is typed, output
+         is computed at the standard yield, and BOTH stay editable — after the prep
+         the real output is entered over the estimate and the yield falls out. */
+      const raw=(l.raw_kg!=null&&l.raw_kg!=='')?l.raw_kg:'';
+      const made=(l.needed_kg!=null&&l.needed_kg!=='')?l.needed_kg:'';
+      const a=(parseFloat(raw)>0&&parseFloat(made)>0)?Math.round((parseFloat(made)/parseFloat(raw))*1000)/10:0;
+      return `<tr><td><span class="tagf tagf-proc">Processed</span> <b>${esc(r._nm||l.name)}</b><div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''}</div></td>
       <td class="mini">${r._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(r._raw)}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
-      <td class="num mini" style="color:${oh>0?'#1e6b2e':'var(--muted)'}">${oh>0?'<b>'+oh+'</b> kg':'—'}</td>
-      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:92px;text-align:right" value="${raw}" oninput="prodOutLines[${i}].raw_kg=this.value;prodOutYield(${i})" title="raw pulled from the chiller"></td>
-      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:98px;text-align:right" value="${l.needed_kg||''}" oninput="prodOutLines[${i}].needed_kg=+this.value||0;prodOutYield(${i})" title="processed output that came off it"></td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:96px;text-align:right" value="${raw}" oninput="prodOutSetRaw(${i},this.value)" title="what you pull from the chiller"></td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" id="pom${i}" style="width:100px;text-align:right" value="${made}" oninput="prodOutSetMade(${i},this.value)" title="what came off it — estimated from the standard yield until you correct it"></td>
       <td class="num" id="poy${i}">${a?`<b style="color:${a<70?'var(--danger)':'#4e7a3e'}">${a}%</b>`:`<span class="mini" style="color:var(--muted)">std ${Math.round(y*1000)/10}%</span>`}</td>
-      <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="7" class="empty">Optional — add a processed ingredient to make to stock.</td></tr>'}
+      <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="6" class="empty">Optional — add a processed ingredient and enter the raw you will prep.</td></tr>'}
     </tbody></table></div>
-    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button>
-      <button class="btn sec sm" onclick="prodDrawMade()" title="Processed stock that is already in inventory — pull it onto this plan instead of entering it again">📥 Draw already-made stock (${_madeAvail} available)</button></div>
-    ${prodOutLines.some(l=>l.already)?`<div class="hint" style="margin-top:8px">Rows marked <b>already made</b> were drawn from inventory. They appear on the plan and the kitchen sheet for tracking, and are <b>skipped when you confirm</b> — the stock is already posted, so nothing is counted twice.</div>`:''}</div>`;
+    <div style="margin-top:8px"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button></div></div>`;
   h+=prodPackHtml();
   $('content').innerHTML=h;
 }
@@ -5734,9 +5777,29 @@ function prodPackSupApply(){
   closeModal(); drawProdPlan(); toast(n?('Added '+n+' supply line(s)'):'Nothing added');
 }
 function prodAddOut(sku){ if(!sku)return; if(prodOutLines.some(l=>l.ingredient_sku===sku)){ drawProdPlan(); return; }
-  const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{}; prodOutLines.push({ingredient_sku:sku,name:i.name||sku,needed_kg:0}); drawProdPlan(); }
+  const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{}; prodOutLines.push({ingredient_sku:sku,name:i.name||sku,raw_kg:'',needed_kg:0}); drawProdPlan(); }
 function prodDelOut(i){ prodOutLines.splice(i,1); drawProdPlan(); }
 // live yield beside the two boxes, without redrawing (a redraw eats the decimal point)
+/* Raw typed → output estimated at the standard yield, unless the user has already
+   corrected the output by hand. Pinning it that way is what makes "come back and
+   update either figure" work: the estimate stops moving once you overrule it. */
+function prodOutSetRaw(i,v){
+  const l=prodOutLines[i]; if(!l) return;
+  l.raw_kg=(v===''||v==null)?'':(+v||0);
+  if(!l._madeEdited){
+    const it=(window._prodAllIngredients||[]).find(x=>x.sku===l.ingredient_sku)||{};
+    const y=((+it.yield_pct||100)/100)||1;
+    l.needed_kg=(l.raw_kg==='')?0:Math.round((+l.raw_kg||0)*y*1000)/1000;
+    const md=$('pom'+i); if(md && document.activeElement!==md) md.value=l.needed_kg||'';
+  }
+  prodOutYield(i);
+}
+function prodOutSetMade(i,v){
+  const l=prodOutLines[i]; if(!l) return;
+  l.needed_kg=(v===''||v==null)?0:(+v||0);
+  l._madeEdited=(v!==''&&v!=null);     // clear the box to hand it back to the yield
+  prodOutYield(i);
+}
 function prodOutYield(i){ const l=prodOutLines[i]; const el=$('poy'+i); if(!l||!el) return;
   const raw=parseFloat(l.raw_kg), out=+l.needed_kg||0;
   const a=(raw>0)?Math.round((out/raw)*1000)/10:0;
@@ -5780,100 +5843,50 @@ function prodCartApply(){ const q=window._kcQty||{}; let n=0;
 }
 /* ---- Searchable output-ingredient picker (#7) ---- */
 function prodOutPick(){
-  const ings=(window._prodAllIngredients||[]).filter(i=>i.is_intermediate); if(!ings.length){ toast('No output (processed) ingredients defined',true); return; }
-  // "already made" rows are not editable here — they represent posted stock.
-  window._opQty={}; prodOutLines.forEach(l=>{ if(!l.already) window._opQty[l.ingredient_sku]=+l.needed_kg||0; });
+  const ings=(window._prodAllIngredients||[]).filter(isProcessedItem); if(!ings.length){ toast('No output (processed) ingredients defined',true); return; }
+  // the picker collects RAW kg — the output follows from the yield
+  window._opQty={}; prodOutLines.forEach(l=>{ window._opQty[l.ingredient_sku]=(l.raw_kg===''||l.raw_kg==null)?'':(+l.raw_kg||0); });
   window._opQ=''; window._opG='';
   const groups=[...new Set(_outIngRows(window._prodAllIngredients||[],ings).map(i=>i._g1||'—'))].sort();
   $('modal').innerHTML=`<div><h3>🔎 Output ingredients — browse &amp; add</h3>
-    <p class="mini">Grouped by <b>category → base material</b>, the same way the weekly count sheet reads. Enter <b>needed kg</b> against any row; Apply updates the plan's output list.</p>
+    <p class="mini">Grouped by <b>category → base material</b>, the same way the weekly count sheet reads. Enter the <b>raw kg you plan to pull</b> against any row — the output is worked out from that item's yield, and both stay editable on the plan.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
       <input id="op_q" placeholder="🔎 search name / SKU / raw parent…" oninput="window._opQ=this.value;drawOutPickBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
       <select onchange="window._opG=this.value;drawOutPickBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All categories</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
     </div>
-    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">On hand</th><th class="num">Needed kg</th></tr></thead><tbody id="opBody"></tbody></table></div>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Std yield</th><th class="num">Raw kg</th></tr></thead><tbody id="opBody"></tbody></table></div>
     <div class="mfoot"><button class="btn" onclick="prodOutApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on'); drawOutPickBody();
 }
 function drawOutPickBody(){
   const ings=(window._prodAllIngredients||[]);
-  const rows=_outIngRows(ings, ings.filter(i=>i.is_intermediate));
+  const rows=_outIngRows(ings, ings.filter(isProcessedItem));
   const q=(window._opQ||'').toLowerCase().split(/\s+/).filter(Boolean); const gf=window._opG||'';
   const match=i=>{ if(gf && (i._g1||'—')!==gf) return false; if(!q.length) return true;
     const t=[i._nm,i.name,i.sku,i._g1,i._g2,i._raw,i.raw_input,i.category].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
   const shown=rows.filter(match); let body='';
-  const oh=window._prodSupOh||{};
   hierGroups(shown,{g1:'_g1',g2:'_g2'}).forEach(G=>{
     body+=`<tr class="grp"><td colspan="4" style="padding-left:10px">▸ <b>${esc(G.g1)}</b></td></tr>`;
     G.subs.forEach(S=>{
       if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="4" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(i=>{ const v=(window._opQty&&window._opQty[i.sku]!=null)?window._opQty[i.sku]:'';
-        const k=Math.round((oh[i.sku]||0)/10)/100;
-        body+=`<tr><td style="padding-left:26px"><span class="tagf tagf-proc">Processed</span> ${esc(i._nm)}<div class="mini" style="color:var(--muted)"><code>${esc(i.sku)}</code>${i.yield_pct?' · yield '+esc(i.yield_pct)+'%':''}</div></td>
+        body+=`<tr><td style="padding-left:26px"><span class="tagf tagf-proc">Processed</span> <b>${esc(i._nm)}</b>${i.is_intermediate?'':'<div class="mini" style="color:var(--earth,#b5762a)">⚠ <b>Intermediate</b> is not ticked on this ingredient — tick it in Master Data so it behaves as a processed output everywhere</div>'}</td>
           <td class="mini">${i._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(i._raw)}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
-          <td class="num mini" style="color:${k>0?'#1e6b2e':'var(--muted)'}">${k>0?'<b>'+k+'</b> kg':'—'}</td>
-          <td><input type="number" step="any" value="${v}" oninput="window._opQty['${esc(i.sku)}']=this.value===''?'':(+this.value||0)" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); }); });
+          <td class="num mini" style="color:var(--muted)">${i.yield_pct?esc(i.yield_pct)+'%':'—'}</td>
+          <td><input type="number" step="any" value="${v}" oninput="window._opQty['${esc(i.sku)}']=this.value===''?'':(+this.value||0)" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px" title="raw kg to pull"></td></tr>`; }); }); });
   const el=$('opBody'); if(el) el.innerHTML=body||'<tr><td colspan="4" class="empty">No output ingredients match.</td></tr>';
 }
-/* ---- Draw processed stock that has ALREADY been made -----------------------
-   The case this fixes: the prep team logged a Raw→Process run (or it came in on
-   an opening balance / a count), so the processed ingredient is sitting in
-   inventory — but the production plan knew nothing about it and the only way to
-   show it was to type the whole line again. This reads what is actually on hand
-   at the production site and puts it on the plan as a read-only "already made"
-   row. Nothing is posted; the ledger already has it.                          */
-function prodDrawMade(){
-  const oh=window._prodSupOh||{};
-  const all=(window._prodAllIngredients||[]);
-  /* Widened deliberately. The first version only offered items with is_intermediate
-     ticked — so a processed output loaded by SQL, or one whose flag was never set,
-     had stock in the ledger and in every report but could not be drawn here, which
-     looks exactly like the app losing it. Anything with an OUT- code counts too,
-     and the row says which flag is missing so the master can be fixed. */
-  const looksProcessed=i=>!!i.is_intermediate || /^OUT-/i.test(String(i.sku||'')) || !!i.source_sku;
-  const ings=all.filter(i=>looksProcessed(i) && (oh[i.sku]||0)>0);
-  // What is on hand somewhere ELSE — the other reason an item seems to be missing.
-  const elsewhereN=all.filter(i=>looksProcessed(i) && !(oh[i.sku]>0)).length;
-  if(!ings.length){
-    const other=Object.keys(oh).filter(k=>oh[k]>0).length;
-    toast('Nothing processed on hand at '+planProduceLoc()+((other)?(' — '+other+' item(s) have stock there, but none are processed outputs. Check ⚙ Planning locations, and the Intermediate flag on the ingredient.'):' — check ⚙ Planning locations'),true); return; }
-  const onPlan=new Set(prodOutLines.map(l=>l.ingredient_sku));
-  window._dmPick={}; ings.forEach(i=>{ if(!onPlan.has(i.sku)) window._dmPick[i.sku]=true; });
-  const rows=_outIngRows(window._prodAllIngredients||[], ings);
-  let body='';
-  hierGroups(rows,{g1:'_g1',g2:'_g2'}).forEach(G=>{
-    body+=`<tr class="grp"><td colspan="4" style="padding-left:10px">▸ <b>${esc(G.g1)}</b></td></tr>`;
-    G.subs.forEach(S=>{
-      if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="4" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
-      S.items.forEach(i=>{ const kg=Math.round((oh[i.sku]||0)/10)/100; const already=onPlan.has(i.sku);
-        const noFlag=!i.is_intermediate;
-        body+=`<tr><td style="width:34px;padding-left:26px"><input type="checkbox" ${already?'disabled':(window._dmPick[i.sku]?'checked':'')} onchange="window._dmPick['${esc(i.sku)}']=this.checked"></td>
-          <td><span class="tagf tagf-proc">Processed</span> <b>${esc(i._nm||i.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(i.sku)}</code>${i._raw?' · from '+esc(i._raw):''}</div></td>
-          <td class="num"><b>${kg}</b> kg</td>
-          <td class="mini">${already?'<span style="color:var(--muted)">already on this plan</span>':(noFlag?'<span style="color:var(--earth,#b5762a)">not ticked <b>Intermediate</b> — tick it on the ingredient so it appears everywhere else too</span>':'')}</td></tr>`; }); }); });
-  $('modal').innerHTML=`<div><h3>📥 Draw already-made stock</h3>
-    <p class="mini">Processed ingredients that are <b>already in inventory</b> at <b>${esc(planProduceLoc())}</b>. Tick the ones that belong to this run and they join the output list as <b>already made</b> — visible on the plan and the kitchen sheet, and <b>skipped on confirm</b> so the stock is never posted twice.</p>
-    ${elsewhereN?`<div class="hint" style="margin:0 0 8px">Not finding something you know you made? <b>${elsewhereN}</b> processed item(s) have no stock at <b>${esc(planProduceLoc())}</b>. It was either posted to the other site — change it under <b>⚙ Planning locations</b> in Demand/MRP — or the Raw→Process log was never confirmed. <b>Live Stock</b> shows where each one actually sits.</div>`:''}
-    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th style="width:34px"></th><th>Processed ingredient</th><th class="num">On hand</th><th></th></tr></thead><tbody>${body}</tbody></table></div>
-    <div class="mfoot"><button class="btn" onclick="prodDrawMadeApply()">📥 Add to the plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
-  modalWide(true); $('overlay').classList.add('on');
-}
-function prodDrawMadeApply(){
-  const oh=window._prodSupOh||{}; const pick=window._dmPick||{}; let n=0;
-  Object.keys(pick).forEach(sku=>{ if(!pick[sku]) return;
-    if(prodOutLines.some(l=>l.ingredient_sku===sku)) return;
-    const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{};
-    const kg=Math.round((oh[sku]||0)/10)/100; if(!(kg>0)) return;
-    prodOutLines.push({ingredient_sku:sku, name:i.name||sku, needed_kg:kg, raw_kg:'', already:true, drawn_from:planProduceLoc()});
-    n++; });
-  closeModal(); drawProdPlan();
-  toast(n?('Drawn · '+n+' already-made output(s) added to the plan'):'Nothing selected');
-}
 function prodOutApply(){ const q=window._opQty||{}; let n=0;
-  Object.keys(q).forEach(sku=>{ const v=q[sku]; const kg=(v===''||v==null)?0:(+v||0); const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{name:sku};
+  Object.keys(q).forEach(sku=>{ const v=q[sku]; const rawKg=(v===''||v==null)?0:(+v||0);
+    const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{name:sku};
+    const y=((+i.yield_pct||100)/100)||1;
+    const out=Math.round(rawKg*y*1000)/1000;               // estimate, editable on the plan
     let line=prodOutLines.find(l=>l.ingredient_sku===sku);
-    if(line&&line.already) return;                       // drawn-from-stock rows are managed separately
-    if(kg>0){ if(line){ line.needed_kg=kg; } else { prodOutLines.push({ingredient_sku:sku,name:i.name||sku,needed_kg:kg}); } n++; }
+    if(rawKg>0){
+      if(line){ line.raw_kg=rawKg; if(!line._madeEdited) line.needed_kg=out; }
+      else prodOutLines.push({ingredient_sku:sku, name:i.name||sku, raw_kg:rawKg, needed_kg:out});
+      n++;
+    }
     else if(line){ prodOutLines=prodOutLines.filter(l=>l.ingredient_sku!==sku); }
   });
   closeModal(); drawProdPlan(); toast(n?('Applied · '+n+' output ingredient(s)'):'Output list cleared');
@@ -6296,7 +6309,7 @@ function _ksPrepNotes(fmt, ings){
 }
 async function prodKitchenSheet(){
   const lines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
-  const outs=prodOutLines.filter(l=>(+l.needed_kg||0)>0 && !l.already);   // "already made" is stock, not work
+  const outs=prodOutLines.filter(l=>(+l.needed_kg||0)>0);
   if(!lines.length && !outs.length){ toast('Add products with packs, or an output ingredient, first',true); return; }
   const bm=await prodBOMMap();
   const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
@@ -6637,7 +6650,7 @@ async function prodLoadRun(refEnc,date){
 // Honours any substitutions already set (prodBOMMap applies them). Returns the short items.
 async function _prodShortages(){
   const prodLines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
-  const outLines=prodOutLines.filter(l=>(+l.needed_kg||0)>0 && !l.already);   // drawn stock needs no raw
+  const outLines=prodOutLines.filter(l=>(+l.needed_kg||0)>0);
   if(!prodLines.length && !outLines.length) return [];
   const bm=await prodBOMMap(); const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
   const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
@@ -6666,7 +6679,7 @@ function _prodShortWarn(sh, headline){
 }
 async function prodConfirm(){
   if(_postLock){ toast('Still posting — please wait…',true); return; }
-  if(!prodPlanLines.some(l=>(+l.good_packs||0)>0) && !prodOutLines.some(l=>(+l.needed_kg||0)>0 && !l.already)){ toast('Enter good packs on a product, or a needed qty on an output ingredient',true); return; }
+  if(!prodPlanLines.some(l=>(+l.good_packs||0)>0) && !prodOutLines.some(l=>(+l.needed_kg||0)>0)){ toast('Enter good packs on a product, or a needed qty on an output ingredient',true); return; }
   // Step 1 — check stock (processed-first, then raw) and let them set replacements for anything short.
   let sh=[]; try{ sh=await _prodShortages(); }catch(e){}
   if(sh.length){ await drawPreConfirmSub(); return; }
@@ -6702,7 +6715,7 @@ async function _ingOhBulacanG(){ const oh={};
 // any output created above the shortfall lands back in the processed ingredient's stock.
 async function openProdActuals(){
   const anyProd=prodPlanLines.some(l=>(+l.good_packs||0)>0);
-  const anyOut=prodOutLines.some(l=>(+l.needed_kg||0)>0 && !l.already);
+  const anyOut=prodOutLines.some(l=>(+l.needed_kg||0)>0);
   if(!anyProd && !anyOut){ toast('Enter good packs on a product, or a needed qty on an output ingredient',true); return; }
   const bm=await prodBOMMap(); const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
   const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
@@ -6720,8 +6733,7 @@ async function openProdActuals(){
       yield:y, neededKg:Math.round(neededG/10)/100, ohKg:Math.round(ohG/10)/100,
       procUsedKg, actualRawKg:Math.round(rawG/10)/100, actualMadeKg:Math.round(shortG/10)/100 }; };
   const A=Object.keys(agg).map(sku=>mk(sku,agg[sku].neededG,'A'));
-  // Lines drawn from inventory are excluded — the ledger already carries them.
-  const B=prodOutLines.filter(l=>(+l.needed_kg||0)>0 && !l.already).map(l=>mk(l.ingredient_sku,(+l.needed_kg||0)*1000,'B'));
+  const B=prodOutLines.filter(l=>(+l.needed_kg||0)>0).map(l=>mk(l.ingredient_sku,(+l.needed_kg||0)*1000,'B'));
   window._prodAct=A.concat(B);
   drawProdActuals();
 }
@@ -6933,6 +6945,17 @@ function _outIngCtx(ings){
   const pm=_countProcMaps(ings||[],bs,bn);
   return {bs, bn, ctx:{bs, bn, procBases:pm.bases, procCat:pm.catByBase}};
 }
+/* What counts as a processed output. The `is_intermediate` flag is the intent,
+   but it is routinely missing on rows loaded by SQL — and an item the flag forgot
+   then vanished from every output picker while still sitting in stock and in the
+   reports, which reads as the app losing it. An OUT- code or a declared raw parent
+   is the same statement of intent, so accept those too and flag the gap. */
+function isProcessedItem(i){
+  if(!i) return false;
+  if(i.is_intermediate) return true;
+  if(/^OUT-/i.test(String(i.sku||''))) return true;
+  return !!String(i.source_sku||'').trim();
+}
 function _outIngRows(ings, list){
   const {bs,bn,ctx}=_outIngCtx(ings);
   return (list||[]).map(i=>{ const cl=_countIngClass(i,ctx); const p=_procParent(i,bs,bn);
@@ -6960,14 +6983,14 @@ function _ingGroupOptions(allIngs, list, opts){
       }).join('')+`</optgroup>`).join('')).join('');
 }
 function _procIngOptions(allIngs, opts){ opts=opts||{};
-  const list=(allIngs||[]).filter(i=>i.is_intermediate && i.sku!==opts.exclude && (!opts.filter||opts.filter(i)));
+  const list=(allIngs||[]).filter(i=>isProcessedItem(i) && i.sku!==opts.exclude && (!opts.filter||opts.filter(i)));
   return _ingGroupOptions(allIngs, list, opts); }
 function _procParent(it,bySku,byName){ if(!it) return null;
   const bySrc=it.source_sku&&bySku[it.source_sku]?bySku[it.source_sku]:null;
   const ri=(it.raw_input||'').trim().toLowerCase(); const byRi=(ri&&byName[ri]&&byName[ri].sku!==it.sku)?byName[ri]:null;
   return bySrc||byRi||null; }
 function drawProcessing(){
-  const outs=_procIngs.filter(i=>i.is_intermediate);
+  const outs=_procIngs.filter(isProcessedItem);
   const bySku={}, byName={}; _procIngs.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
   const opt=(sel)=>_procIngOptions(_procIngs,{selected:sel, placeholder:'— processed form —'});
   const rows=(window._procLines||[]).map((l,i)=>{ const it=bySku[l.sku]||{}; const y=(+it.yield_pct||100)/100||1; const p=_procParent(it,bySku,byName);
@@ -8731,14 +8754,10 @@ function drawStickerReorder(){
       ${[['all','All labels'],['below','Below PAR'],['order','To order']].map(([k,l])=>
         `<button class="btn sm ${_stkRoView===k?'':'sec'}" onclick="_stkRoView='${k}';window._stkRoViewTouched=1;drawStickerReorder()">${l}</button>`).join('')}
     </div>
-    <div class="hint" style="margin:0 0 8px">One label per pack. <b>Need</b> is the larger of <b>production</b> (packs planned − on hand) and <b>PAR top-up</b> (PAR − on hand) — not the sum, because the same label serves both. Rounded up to whole <b>sheets</b> where a product says how many print per sheet. Production demand comes from ${planTag}; labels are pulled at <b>${esc(planProduceLoc())}</b>, so the other site only ever shows PAR top-up.
-      <b>Every custom order shares one label</b> — the Custom Name Sticker, under Custom Orders below. Only an order flagged for a printed name gets its own line.</div>
-    <div style="margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);background:#f6f8f4;border-radius:6px;font-size:12.5px">
-      <b>Trust PAR over On hand.</b> Label stock only moved at a count, so the figures drifted. From this build, confirming a production run deducts the labels it used (Production Plan → <b>Packaging &amp; labels used</b>), so On hand becomes reliable from the next run onward. Until then, plan against PAR — the <b>PAR top-up</b> column ignores production entirely.</div>
     ${(noPrice||noSup||noArt)?`<div style="margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
       Before sending: ${[noPrice?`<b>${noPrice}</b> with no price per piece`:'',noSup?`<b>${noSup}</b> with no label supplier`:'',noArt?`<b>${noArt}</b> with no artwork link`:''].filter(Boolean).join(' · ')}.
       Set them on the product's <b>🏷️ Stickers</b> tab — a PO with no price still generates, it just cannot be valued.</div>`:''}
-    <div style="overflow-x:auto"><table><thead><tr>
+    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr>
       <th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th>
       <th class="num">PAR</th><th class="num">On hand</th><th class="num">Packs</th><th class="num">PAR top-up</th>
       <th class="num">Need</th><th class="num">Order</th><th class="num">Sheets</th><th class="num">₱/pc</th><th>Supplier</th>
@@ -8778,6 +8797,15 @@ function drawStickerReorder(){
     h+=`<tr><td colspan="15" class="empty">${_stkRoView==='all'?'No labels in the master yet.':'Nothing in this view — switch to <b>All labels</b> to see the full stock list.'}</td></tr>`;
   h+=`</tbody><tfoot><tr><th colspan="10" class="num">Totals</th><th class="num">${totNeed.toLocaleString('en-PH')}</th><th class="num">${totOrder.toLocaleString('en-PH')}</th><th colspan="3" class="num">est. ₱${(Math.round(totVal*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2})}</th></tr></tfoot></table></div>
     <div class="pager" id="stkRoTot"></div></div>`;
+  /* The two explanations used to sit between the buttons and the table, pushing
+     the numbers below the fold. They are reference material — read once, then in
+     the way — so they live under the table, folded up. */
+  h+=`<details style="margin-top:10px"><summary style="cursor:pointer;font-weight:700;font-size:12.5px;color:var(--muted)">How Need is worked out, and why to trust PAR</summary>
+    <div class="hint" style="margin:0 0 8px">One label per pack. <b>Need</b> is the larger of <b>production</b> (packs planned − on hand) and <b>PAR top-up</b> (PAR − on hand) — not the sum, because the same label serves both. Rounded up to whole <b>sheets</b> where a product says how many print per sheet. Production demand comes from ${planTag}; labels are pulled at <b>${esc(planProduceLoc())}</b>, so the other site only ever shows PAR top-up.
+      <b>Every custom order shares one label</b> — the Custom Name Sticker, under Custom Orders below. Only an order flagged for a printed name gets its own line.</div>
+    <div style="margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);background:#f6f8f4;border-radius:6px;font-size:12.5px">
+      <b>Trust PAR over On hand.</b> Label stock only moved at a count, so the figures drifted. From this build, confirming a production run deducts the labels it used (Production Plan → <b>Packaging &amp; labels used</b>), so On hand becomes reliable from the next run onward. Until then, plan against PAR — the <b>PAR top-up</b> column ignores production entirely.</div>
+  </details>`;
   $('content').innerHTML=h;
   _stkRoTotals();
 }
