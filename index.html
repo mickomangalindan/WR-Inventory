@@ -97,6 +97,16 @@
   .b-true{background:#dbeddb;color:#1e6b2e}.b-false{background:#f3e3e0;color:#9a3b2e}
   /* form */
   .formwrap{max-width:920px;margin:0 auto}
+  /* A record whose body is a TABLE of lines — a PO, a transfer, a batch — was
+     squeezed into 920px minus a 320px side column, i.e. ~580px for a six-column
+     table. Ingredient names truncated to "Pork lo" and ₱/kg to "2:" while a
+     third of the screen sat empty. Those records get the room instead. */
+  .formwrap.wide{max-width:1480px}
+  /* …but a field label + box does not get better at 700px wide, so on a wide
+     record the header fields go to three columns instead of stretching. */
+  .formwrap.wide .groups{grid-template-columns:repeat(3,minmax(260px,1fr))}
+  @media(max-width:1200px){ .formwrap.wide .groups{grid-template-columns:1fr 1fr} }
+  @media(max-width:760px){ .formwrap.wide .groups{grid-template-columns:1fr} }
   .sheet{background:#fff;border:1px solid var(--line);border-radius:8px;padding:0 0 18px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
   .statusbar{display:flex;justify-content:flex-end;gap:0;padding:10px 16px;border-bottom:1px solid var(--line2);flex-wrap:wrap}
   .stg{padding:5px 14px;font-size:12px;color:#8a8a99;border:1px solid var(--line);border-left:none;position:relative;background:#fff}
@@ -118,8 +128,13 @@
   .nbtabs{display:flex;gap:2px;margin-top:8px}
   .nbtabs button{background:none;border:none;border-bottom:2px solid transparent;padding:8px 14px;cursor:pointer;font-weight:600;color:#6b6b77;font-size:13px}
   .nbtabs button.on{color:var(--berry);border-bottom-color:var(--berry)}
-  .lines table{border:1px solid var(--line);border-radius:6px;margin-top:10px}
+  .lines table{border:1px solid var(--line);border-radius:6px;margin-top:10px;table-layout:auto}
   .lines td{padding:4px 6px}
+  /* The name / SKU column takes the slack; numeric columns keep a floor wide
+     enough for a five-figure price rather than collapsing to their header. */
+  .lines td:first-child,.lines th:first-child{min-width:240px;width:36%}
+  .lines td.num,.lines th.num{min-width:96px}
+  .lines input[type=number]{text-align:right}
   .lines input,.lines select{width:100%;border:1px solid transparent;border-radius:4px;padding:5px 6px;font-size:13px;background:none}
   .lines input:focus,.lines select:focus{outline:none;border-color:var(--teal);background:#fff}
   .lines .addrow{color:var(--link);font-weight:600;cursor:pointer;padding:7px 8px;display:inline-block}
@@ -464,7 +479,7 @@ const MODULES = [
   {id:'plan',   label:'Planning',    items:['mrp']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
-  {id:'inv',    label:'Inventory',    items:['inventory_movements','stock_balance','variance_log']},
+  {id:'inv',    label:'Inventory',    items:['stock_balance','inventory_movements','variance_log']},
   {id:'help',   label:'Help', items:['guides']},
   {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
   {id:'admin',  label:'Administration', items:['connection','users','approvals','fieldacl','refs','automations','notif','studio','selftest','cleanser']},
@@ -603,7 +618,10 @@ const MODELS = {
       {n:'delivery_provider',l:'Fleet / courier name',t:'text'},
       {n:'payment_status',l:'Payment',t:'text',ro:true}],
     list:['po_ref','supplier_name','order_date','status','payment_status'],
-    groups:[['po_ref','order_date'],['created_by','discount','delivery_fee','delivery_payee','delivery_provider']], full:['supplier_name'],
+    // Discount, delivery fee, who the fee is owed to and the courier's name are NOT
+    // repeated up here — they all live in the 💵 Payments & delivery section below,
+    // which is where they are actually settled. One field, one place.
+    groups:[['po_ref','order_date'],['created_by','expected_delivery']], full:['supplier_name'],
     o2m:{ field:'lines', model:'po_lines', fk:'po_ref', label:'Order Lines',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Requested (kg)',t:'number'},{n:'available_kg',l:'Order qty · vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
 
@@ -1138,22 +1156,39 @@ async function relOptions(model){
   if(relCache[model]) return relCache[model];
   const m=MODELS[model]; let rows=await db.list(model,{});
   if(m.archivable) rows=rows.filter(r=>r.active!==false);   // don't offer archived records in pickers
-  let list=rows.map(r=>({v:r[m.pk], t:r[m.name]+(r[m.pk]!==r[m.name]?` (${r[m.pk]})`:''), g1:r.group_1, g2:r.group_2, cat:r.category, rg:r.ingredient_group, so:_so(r)}));
+  // `t` keeps the "Name (SKU)" form for places that show one line; `n` is the plain
+  // name, for line tables that already print the SKU underneath — showing the code
+  // twice on the same row is noise, not information.
+  let list=rows.map(r=>({v:r[m.pk], n:String(r[m.name]==null?r[m.pk]:r[m.name]), t:r[m.name]+(r[m.pk]!==r[m.name]?` (${r[m.pk]})`:''), g1:r.group_1, g2:r.group_2, cat:r.category, rg:r.ingredient_group, so:_so(r), _gr:0}));
   // Products & ingredients get ordered + group tags so line pickers can show grouped optgroups.
   if(model==='products'){ list.sort((a,b)=>a.so-b.so||String(a.t).localeCompare(b.t)); list.forEach(o=>{ o.g1=o.g1||'Products'; o.g2=o.g2||'Other'; }); }
-  else if(model==='ingredients'){ list.sort((a,b)=>a.so-b.so||String(a.t).localeCompare(b.t)); list.forEach(o=>{ o.g1=o.rg||o.cat||'Ingredients'; o.g2=null; }); }
+  else if(model==='ingredients'){
+    // Group ingredients the way the count sheet does — category › base material —
+    // instead of one flat "Ingredients" bucket with no subgroup at all.
+    const ctxRows=_outIngRows(rows, rows); const cl={};
+    ctxRows.forEach(x=>{ cl[x.sku]={g1:x._g1, g2:x._g2, nm:x._nm, gr:x._grank}; });
+    list.forEach(o=>{ const c=cl[o.v]||{}; o.g1=c.g1||o.rg||o.cat||'Ingredients'; o.g2=c.g2||null; o.n=c.nm||o.n; o._gr=c.gr||0; });
+    list.sort((a,b)=>(a._gr-b._gr)||a.so-b.so||String(a.n).localeCompare(b.n));
+  }
   relCache[model]=list;
   return list;
 }
 // Build <option>/<optgroup> markup — grouped (Group › Subgroup) when the options carry group tags.
-function relOptsHTML(opts,v){
-  if(!opts.some(o=>o.g1)) return opts.map(o=>`<option value="${esc(o.v)}" ${v===o.v?'selected':''}>${esc(o.t)}</option>`).join('');
+function relOptsHTML(opts,v,plain){
+  const lbl=o=>plain?(o.n||o.t):o.t;
+  if(!opts.some(o=>o.g1)) return opts.map(o=>`<option value="${esc(o.v)}" ${v===o.v?'selected':''}>${esc(lbl(o))}</option>`).join('');
   const byG1={}; opts.forEach(o=>{ const k=o.g1||o.cat||'Other'; (byG1[k]=byG1[k]||[]).push(o); });
   let h='';
-  Object.keys(byG1).forEach(g1=>{
+  // Groups in the master's own reading order, not whatever order the rows arrived in.
+  const gkeys=Object.keys(byG1).sort((x,y)=>{
+    const rx=Math.min(...byG1[x].map(o=>o._gr||o.so||0)), ry=Math.min(...byG1[y].map(o=>o._gr||o.so||0));
+    return (rx-ry)||x.localeCompare(y); });
+  gkeys.forEach(g1=>{
     const byG2={}; byG1[g1].forEach(o=>{ const k=o.g2||''; (byG2[k]=byG2[k]||[]).push(o); });
-    Object.keys(byG2).forEach(g2=>{ const lbl=g2?(g1+' › '+g2):g1;
-      h+=`<optgroup label="${esc(lbl)}">`+byG2[g2].map(o=>`<option value="${esc(o.v)}" ${v===o.v?'selected':''}>${esc(o.t)}</option>`).join('')+`</optgroup>`; });
+    Object.keys(byG2).sort((x,y)=>{
+      const rx=Math.min(...byG2[x].map(o=>o._gr||o.so||0)), ry=Math.min(...byG2[y].map(o=>o._gr||o.so||0));
+      return (rx-ry)||x.localeCompare(y); }).forEach(g2=>{ const lb=g2?(g1+' › '+g2):g1;
+      h+=`<optgroup label="${esc(lb)}">`+byG2[g2].map(o=>`<option value="${esc(o.v)}" ${v===o.v?'selected':''}>${esc(lbl(o))}</option>`).join('')+`</optgroup>`; });
   });
   return h;
 }
@@ -1233,7 +1268,7 @@ async function renderForm(){
         ${t.html}<div class="pager">${t.n} sticker(s) · ${t.linked} with artwork link · ${t.n-t.linked} pending · <span style="color:var(--muted)">manage links in Master Data → Products (sticker fields)</span></div></div></div>`;
     } else {
       notebook=`<div class="notebook"><div class="nbtabs"><button class="on">${o.label}</button></div><div class="lines">
-      <table class="autow"><thead><tr>${o.cols.map((c,ci)=>`<th data-ci="${ci}">${c.l}<span class="colgrip" onmousedown="colDragStart(event,this)" title="drag to resize"></span></th>`).join('')}<th></th></tr></thead><tbody id="lineBody"></tbody></table>
+      <table class="autow"><thead><tr>${o.cols.map((c,ci)=>`<th data-ci="${ci}" class="${c.t==='number'?'num':''}">${c.l}<span class="colgrip" onmousedown="colDragStart(event,this)" title="drag to resize"></span></th>`).join('')}<th style="width:28px"></th></tr></thead><tbody id="lineBody"></tbody></table>
       ${m.o2mLoader?`<button class="btn sm sec" style="margin-right:8px" onclick="${m.o2mLoader.fn}()">${m.o2mLoader.label}</button>`:''}<span class="addrow" onclick="addLine()">＋ Add a line</span></div></div>`;
     }
   }
@@ -1249,7 +1284,7 @@ async function renderForm(){
     if(m.archivable){ safeActions += formRec.active===false
         ? `<button class="btn sec" onclick="archiveForm(false)">♻ Restore</button>`
         : `<button class="btn sec" onclick="archiveForm(true)">🗄 Archive</button>`; }
-    else if(m.cancelable && m.status && cur!=='cancelled'){ safeActions += `<button class="btn sec" style="color:var(--earth)" onclick="cancelForm()">✖ Cancel</button>`; }
+    else if(m.cancelable && m.status && cur!=='cancelled'){ safeActions += `<button class="btn sec" style="color:var(--earth)" onclick="cancelForm()">✖ Cancel</button><span onclick="openKB('_cancel')" title="What Cancel actually does" style="cursor:pointer;color:var(--muted);font-size:13px;padding:0 4px">❔</span>`; }
     if(curRole()==='Admin') safeActions += `<button class="btn sec" style="color:var(--danger)" onclick="deleteForm()">Delete</button>`;
   }
   const stateBadge = (m.archivable && formRec.active===false) ? '<span class="badge b-draft" style="margin-left:8px">Archived</span>'
@@ -1278,7 +1313,8 @@ async function renderForm(){
     ${(state.model==='purchase_orders'&&!formIsNew)?poPaymentsPanel(formRec,formChildren):''}
     ${!formIsNew?`<div style="padding:4px 22px 14px">${attachHtml()}</div>`:''}</div>`;
   const left=sheet+formbar;
-  $('content').innerHTML=`<div class="formwrap">${ !formIsNew ? `<div class="formcols"><div>${left}</div><div class="sidecol">${notesPanelHtml()}${chatterHtml()}</div></div>` : left }</div>`;
+  const _wide=m.o2m?' wide':'';   // line-item records use the full screen
+  $('content').innerHTML=`<div class="formwrap${_wide}">${ !formIsNew ? `<div class="formcols"><div>${left}</div><div class="sidecol">${notesPanelHtml()}${chatterHtml()}</div></div>` : left }</div>`;
   if(m.o2m) renderLines();
 }
 function fSet(n,v){ formRec[n]=v; }
@@ -1294,15 +1330,18 @@ function renderLines(){
     const ro=(typeof c.ro==='function'?c.ro(ln,formRec):c.ro)?'disabled':'';
     if(ro&&(c.n==='received_packs'||c.n==='received_kg')&&(v===''||v==null)) v=0; // captured at receiving
     // Product picker: show the SKU under the name so both are visible on the line.
-    if(c.t==='rel'){const opts=relCache[c.rel]||[]; const skuHint=(c.n==='product_sku'&&v)?`<div class="mini"><code>${esc(v)}</code></div>`:'';
-      return `<td><select onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}><option value="">—</option>${relOptsHTML(opts,v)}</select>${skuHint}</td>`;}
+    if(c.t==='rel'){const opts=relCache[c.rel]||[];
+      // The code goes UNDER the box, once. It used to appear inside the option text
+      // as well — "Meatballs Rabbit (RASPGCMB0045)" above "RASPGCMB0045".
+      const skuHint=v?`<div class="mini"><code>${esc(v)}</code></div>`:'';
+      return `<td><select onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}><option value="">—</option>${relOptsHTML(opts,v,true)}</select>${skuHint}</td>`;}
     if(c.t==='select')return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}>${(c.o||[]).map(op=>`<option ${v===op?'selected':''}>${op}</option>`).join('')}</select></td>`;
     // Transfer "Sent" packs: case-packed finished goods entered as boxes + loose packs (like receiving & count).
     if(c.n==='sent_packs' && !ro){ const box=(PM[ln.product_sku]||{}).box||1;
       if(box>1){ const tot=(v===''||v==null)?null:+v; const bx=(ln._sbx!=null&&ln._sbx!=='')?ln._sbx:(tot!=null?Math.floor(tot/box):''); const lo=(ln._slo!=null&&ln._slo!=='')?ln._slo:(tot!=null?(tot-Math.floor(tot/box)*box):'');
         return `<td style="white-space:nowrap"><input type="number" step="1" value="${esc(bx)}" oninput="trSetBoxLoose(${i},this.value,null)" style="width:44px;text-align:right" title="boxes"> box ×${box} + <input type="number" step="1" value="${esc(lo)}" oninput="trSetBoxLoose(${i},null,this.value)" style="width:44px;text-align:right" title="loose"> loose</td>`; } }
     if(c.t==='number'){ const sc=+c.scale||1; const disp=(v===''||v==null)?'':(sc!==1?(Math.round((+v/sc)*1e6)/1e6):v);
-      return `<td><input type="number" step="any" value="${esc(disp)}" oninput="lSetNum(${i},'${c.n}',this.value,${sc})" ${ro} ${ro?'title="From the recipe" style="background:#f4f5f8;color:#8a93a5"':''}></td>`; }
+      return `<td class="num"><input type="number" step="any" value="${esc(disp)}" oninput="lSetNum(${i},'${c.n}',this.value,${sc})" ${ro} ${ro?'title="From the recipe" style="background:#f4f5f8;color:#8a93a5"':''}></td>`; }
     return `<td><input value="${esc(v)}" oninput="lSet(${i},'${c.n}',this.value)" ${ro}></td>`;
   }).join('')}<td><span class="btn link" style="color:var(--danger)" onclick="delLine(${i})">✕</span></td></tr>`).join('');
 }
@@ -1381,7 +1420,8 @@ async function archiveForm(on){ const m=MODELS[state.model];
   try{ await db.update(state.model,m.pk,formRec[m.pk],{active:!on}); formRec.active=!on; relCache={};
     sysLog(state.model,formRec[m.pk],(on?'🗄 Archived by ':'♻ Restored by ')+CURRENT_USER); toast(on?'Archived — kept for history':'Restored'); renderForm(); }
   catch(e){ toast(e.message,true); } }
-async function cancelForm(){ const m=MODELS[state.model]; if(!confirm('Cancel '+formRec[m.pk]+'? The record is kept for audit; it just will not be actioned.'))return;
+async function cancelForm(){ const m=MODELS[state.model];
+  if(!confirm('Cancel '+formRec[m.pk]+'?\n\n• The record and all its lines are KEPT, for audit\n• Its status becomes "cancelled" and it stops being actioned — demand, payables, on-order and the reports all skip it\n• Stock already received or posted is NOT reversed; correct that with a count or a movement\n\nThis is reversible: set the status back on the form.'))return;
   try{ await db.update(state.model,m.pk,formRec[m.pk],{[m.status.f]:'cancelled'}); formRec[m.status.f]='cancelled';
     sysLog(state.model,formRec[m.pk],'✖ Cancelled by '+CURRENT_USER); toast('Cancelled — record kept'); renderForm(); }
   catch(e){ toast(e.message,true); } }
@@ -2145,6 +2185,36 @@ function recordPrintHtml(m, r, children){
     const tot=numCols.map(c=>rows.reduce((s,r)=>s+(+r[c.n]||0),0));
     const foot=`<tr class="tot"><td colspan="3" style="text-align:right">Total · ${n} item(s)</td>`+tot.map(v=>`<td style="text-align:right">${num(Math.round(v*100)/100)}</td>`).join('')+`</tr>`;
     lines=`<h3>${esc(m.o2m.label)}</h3><table class="lines"><thead><tr>${head}</tr></thead><tbody>${body}${foot}</tbody></table>`;
+  } else if(m.o2m && m.o2m.cols.some(c=>c.n==='ingredient_sku')){
+    /* Ingredient-line documents (a purchase order). It used to print the bare SKU
+       in a flat list — a supplier cannot read RAW-BEEF-RAW-MEATY-BONES, and neither
+       can the person checking the delivery in. Same treatment as a product
+       document: category › base material › item, name first, code beside it. */
+    const cols=m.o2m.cols.filter(c=>c.n!=='ingredient_sku'); const kids=children||[];
+    const I=window._ingLineMap||{};
+    const numCols=cols.filter(c=>['number','currency'].includes(c.t));
+    const rows=kids.map(l=>{ const g=I[l.ingredient_sku]||{}; return {...l, sku:l.ingredient_sku,
+      name:(g.name||ingName(l.ingredient_sku)||l.ingredient_sku),
+      group_1:(g.g1||'Ingredients'), group_2:(g.g2||''), sort_order:g.so}; });
+    const qCol=cols.find(c=>/qty|ordered_kg|available_kg/.test(c.n)); const pCol=cols.find(c=>/price/.test(c.n));
+    const showAmt=!!(qCol&&pCol); let total=0;
+    const span=3+numCols.length+(showAmt?1:0); let n=0, body='';
+    hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+      body+=`<tr class="grp"><td colspan="${span}"><b>${esc(G.g1)}</b></td></tr>`;
+      G.subs.forEach(S=>{
+        if(S.g2) body+=`<tr class="cat"><td colspan="${span}">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`;
+        body+=S.items.map(r=>{ n++; let amt=0; if(showAmt){ amt=(+r[qCol.n]||0)*(+r[pCol.n]||0); total+=amt; }
+          return `<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.sku)}</td>`+
+            numCols.map(c=>`<td style="text-align:right">${esc(r[c.n]==null?'':r[c.n])}</td>`).join('')+
+            (showAmt?`<td style="text-align:right">${amt.toLocaleString('en-PH',{minimumFractionDigits:2})}</td>`:'')+`</tr>`; }).join('');
+      });
+    });
+    const head=`<th>#</th><th>Item</th><th>SKU</th>`+numCols.map(c=>`<th style="text-align:right">${esc(c.l)}</th>`).join('')+(showAmt?'<th style="text-align:right">Amount</th>':'');
+    const tot=numCols.map(c=>rows.reduce((a2,r)=>a2+(+r[c.n]||0),0));
+    const foot=`<tr class="tot"><td colspan="3" style="text-align:right">Total · ${n} item(s)</td>`+
+      tot.map(v=>`<td style="text-align:right">${num(Math.round(v*100)/100)}</td>`).join('')+
+      (showAmt?`<td style="text-align:right">₱${total.toLocaleString('en-PH',{minimumFractionDigits:2})}</td>`:'')+`</tr>`;
+    lines=`<h3>${esc(m.o2m.label)}</h3><table class="lines"><thead><tr>${head}</tr></thead><tbody>${body}${foot}</tbody></table>`;
   } else if(m.o2m){
     const cols=m.o2m.cols; const kids=children||[];
     const isNum=c=>['number','currency'].includes(c.t);
@@ -2186,6 +2256,11 @@ async function printForm(){ const m=MODELS[state.model], r=formRec;
   // Make sure the product map is loaded (name/SKU/group) for grouped product-line prints.
   if(m.o2m && m.o2m.cols.some(c=>c.n==='product_sku') && !window._prodLineMap){ window._prodLineMap={};
     try{ (await db.list('products',{})).forEach(p=>window._prodLineMap[p.sku]={name:p.name,variant:p.variant,box:(+p.box_size||1),group_1:p.group_1,group_2:p.group_2,family:p.family,sort_order:p.sort_order}); }catch(e){} }
+  // …and the same for ingredient lines, so a printed PO reads in names and groups.
+  if(m.o2m && m.o2m.cols.some(c=>c.n==='ingredient_sku')){ window._ingLineMap={};
+    try{ const ai=await listIngredients();
+      _outIngRows(ai,ai).forEach(x=>{ window._ingLineMap[x.sku]={name:x._nm||x.name, g1:x._g1, g2:x._g2, so:x._grank}; });
+    }catch(e){} }
   try{ w.document.open(); w.document.write(recordPrintHtml(m,r,formChildren)); w.document.close(); w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},250); }catch(e){ toast('Print failed: '+e.message,true); } }
 
 /* ✉ Send Purchase Order — build a copyable draft (summary + PDF link) for email / Viber / Messenger. */
@@ -2526,8 +2601,22 @@ async function renderMRP(){
   // for. This is the "I locked the order but the MRP shows zero" case, made visible.
   const coAll=await coOpenDemand().catch(()=>({}));
   window._mrpCoAll=coAll;
+  /* Which of these are ALREADY on a saved demand plot or a live production plan.
+     An order does not leave the list when it is plotted — the packs are still
+     owed until they are made, and dropping it would mean an order that was
+     plotted once and never produced quietly disappears from planning. But it
+     does not belong in the "what do I plan today" table either, so it moves to
+     its own collapsed group with the plan it is sitting on.                     */
+  const coEv=await coPlanEvidence().catch(()=>({planned:{},inDemand:{}}));
+  const coDone={}, coFresh={};
+  Object.keys(coAll).forEach(k=>{
+    const w=coWhyText(coEv,k);
+    if(w) coDone[k]=w; else coFresh[k]=true;
+  });
+  window._mrpCoEv=coEv; window._mrpCoDone=coDone;
   const coPend={};
-  Object.keys(coAll).forEach(s=>{ if((+mrpDemand[s]||0)!==coAll[s].packs) coPend[s]=coAll[s].packs; });
+  // "Add all" only ever pulls the ones that are NOT already planned somewhere.
+  Object.keys(coAll).forEach(s=>{ if(coFresh[s] && (+mrpDemand[s]||0)!==coAll[s].packs) coPend[s]=coAll[s].packs; });
   window._mrpCoPend=coPend;
   const nCoPend=Object.keys(coPend).length;
   const _pName={}; prods.forEach(p=>{ _pName[p.sku]=p.name||p.sku; });
@@ -2542,14 +2631,19 @@ async function renderMRP(){
   let dh='';
   if(coSkus.length){
     const totPacks=coSkus.reduce((s,k)=>s+coAll[k].packs,0);
-    const inPlan=coSkus.filter(k=>(+mrpDemand[k]||0)>0).length;
     const orders=[]; coSkus.forEach(k=>coAll[k].orders.forEach(o=>{ if(!orders.includes(o.ref)) orders.push(o.ref); }));
-    const rows=coSkus.sort((a,b)=>String(coAll[a].needed||'9999').localeCompare(String(coAll[b].needed||'9999'))).map(sku=>{
+    const byNeed=(x,y)=>String(coAll[x].needed||'9999').localeCompare(String(coAll[y].needed||'9999'));
+    const freshSkus=coSkus.filter(k=>!coDone[k]).sort(byNeed);
+    const doneSkus =coSkus.filter(k=>coDone[k]).sort(byNeed);
+    const nFreshOrders=new Set(); freshSkus.forEach(k=>coAll[k].orders.forEach(o=>nFreshOrders.add(o.ref)));
+    const nDoneOrders =new Set(); doneSkus.forEach(k=>coAll[k].orders.forEach(o=>nDoneOrders.add(o.ref)));
+    const _corow=(sku,planned)=>{
       const c=coAll[sku]; const inD=+mrpDemand[sku]||0;
       const late=c.needed && c.needed<todayISO();
-      const state = inD>=c.packs ? '<span class="badge b-received">in the plan</span>'
-                  : (inD>0 ? '<span class="badge b-invoiced">part in plan</span>'
-                           : '<span class="badge b-open">not in the plan</span>');
+      const state = planned ? `<span class="badge b-invoiced">${esc(coDone[sku])}</span>`
+                  : (inD>=c.packs ? '<span class="badge b-received">in this run</span>'
+                  : (inD>0 ? '<span class="badge b-invoiced">part in this run</span>'
+                           : '<span class="badge b-open">not planned yet</span>'));
       return `<tr>
         <td>${esc(c.orders.map(o=>o.customer).filter((v,i,a)=>a.indexOf(v)===i).join(', ')||'—')}
           <div class="mini" style="color:var(--muted)">${esc(c.orders.map(o=>o.ref).join(', '))}</div></td>
@@ -2557,18 +2651,25 @@ async function renderMRP(){
         <td class="mini" style="white-space:nowrap;${late?'color:var(--danger);font-weight:700':''}">${esc(c.needed||'—')}${late?' · overdue':''}</td>
         <td class="num"><b>${c.packs}</b></td>
         <td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${mrpDemand[sku]||''}" onchange="mrpDemand['${sku}']=+this.value||0;renderMRP()"></td>
-        <td>${state}</td></tr>`; }).join('');
+        <td>${state}</td></tr>`; };
+    const _cohead=`<thead><tr><th>Customer / order</th><th>Product</th><th>Needed</th><th class="num">Ordered</th><th class="num">In this run</th><th>Where it stands</th></tr></thead>`;
     dh+=`<div class="repcard" style="border-left:4px solid var(--berry)">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <h3 style="margin:0">🧑‍🍳 Custom orders — ${orders.length} order(s), ${totPacks} pack(s)</h3>
-        ${nCoPend?`<button class="btn sm" onclick="mrpPullCustom()">＋ Add all to the plan</button>`:'<span class="badge b-received">all in the plan</span>'}
+        <h3 style="margin:0">🧑‍🍳 Custom orders — ${nFreshOrders.size} to plan${nDoneOrders.size?(', '+nDoneOrders.size+' already planned'):''}</h3>
+        ${nCoPend?`<button class="btn sm" onclick="mrpPullCustom()">＋ Add the ${nCoPend} unplanned to this run</button>`:''}
       </div>
-      <div class="hint" style="margin:6px 0 8px">Every <b>locked</b> order that still owes packs, <b>whatever week it is scheduled for</b> — once an order is locked the packs have to be made. Ordered is what the customer bought; In plan is what this MRP run will make. They are kept out of the catalogue table below so there is only one place to set them.</div>
-      <div style="overflow-x:auto"><table><thead><tr><th>Customer / order</th><th>Product</th><th>Needed</th><th class="num">Ordered</th><th class="num">In plan</th><th>Status</th></tr></thead>
-      <tbody>${rows}</tbody></table></div>
-      <div class="pager">${inPlan} of ${coSkus.length} custom SKU(s) in this plan</div></div>`;
+      <div class="hint" style="margin:6px 0 8px">Every <b>locked</b> order that still owes packs, <b>whatever week it is scheduled for</b>. An order already on a saved demand plot or a live production plan drops out of the table below — it is not new work — but it stays listed underneath, because <b>the packs are still owed until they are actually produced</b>. Only confirmed production clears an order from here for good.</div>
+      ${freshSkus.length
+        ? `<div style="overflow-x:auto"><table>${_cohead}<tbody>${freshSkus.map(k=>_corow(k,false)).join('')}</tbody></table></div>
+           <div class="pager">${freshSkus.length} custom SKU(s) need planning · ${freshSkus.reduce((n,k)=>n+coAll[k].packs,0)} pack(s)</div>`
+        : `<div class="hint" style="background:#eef5ee;border-color:#cfe0cf;margin:0"><b>✅ Nothing new to plan.</b> All ${coSkus.length} custom SKU(s), ${totPacks} pack(s), are already on a demand plot or a production plan — listed below.</div>`}
+      ${doneSkus.length?`<details style="margin-top:10px"${freshSkus.length?'':' open'}>
+        <summary style="cursor:pointer;font-weight:700;font-size:13px">Already planned — ${doneSkus.length} custom SKU(s), ${doneSkus.reduce((n,k)=>n+coAll[k].packs,0)} pack(s) still owed</summary>
+        <div class="hint" style="margin:8px 0">These are counted already. Adding them again here would buy the ingredients twice. They clear when the production run is <b>confirmed</b>.</div>
+        <div style="overflow-x:auto"><table>${_cohead}<tbody>${doneSkus.map(k=>_corow(k,true)).join('')}</tbody></table></div>
+      </details>`:''}
+      </div>`;
   }
-
   if(!coSkus.length){
     const d=await coDemandDiag().catch(()=>({rows:[],err:'',counted:0}));
     if(d.err || d.rows.length){
@@ -3448,7 +3549,7 @@ function poPaymentsPanel(rec, lines){
   }
   return `<div style="padding:6px 22px 14px"><div class="repcard" style="margin:0">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
-      <h3 style="margin:0">💵 Payments</h3>
+      <h3 style="margin:0">💵 Payments &amp; delivery</h3>
       <span class="badge" style="background:rgba(0,0,0,.05);color:${st.c};font-weight:700">${st.t.toUpperCase()}</span>
       <span style="flex:1"></span>
       <span class="mini">Billable <b>${P(billable)}</b> · Paid <b>${P(paid)}</b> · Balance <b style="color:${bal>0.5?'var(--danger)':'#4e7a3e'}">${P(bal)}</b></span>
@@ -3457,6 +3558,10 @@ function poPaymentsPanel(rec, lines){
     <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin:0 0 10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12px">
       <label>Discount ₱&nbsp;<input id="poDisc" type="number" step="any" value="${+rec.discount||0}" style="width:100px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></label>
       <label>Delivery fee ₱&nbsp;<input id="poFee" type="number" step="any" value="${+rec.delivery_fee||0}" style="width:100px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></label>
+      <label>Payable to&nbsp;<select id="poPayee" onchange="poChargeToggle()" style="padding:4px;border:1px solid var(--line);border-radius:5px">
+        <option value="Supplier" ${poFeeToFleet(rec)?'':'selected'}>Supplier</option>
+        <option value="Fleet service" ${poFeeToFleet(rec)?'selected':''}>Fleet service</option></select></label>
+      <label id="poProvWrap" style="${poFeeToFleet(rec)?'':'display:none'}">Courier&nbsp;<input id="poProv" value="${esc(rec.delivery_provider||'')}" placeholder="fleet / courier name" style="width:160px;padding:4px;border:1px solid var(--line);border-radius:5px"></label>
       <button class="btn sec sm" onclick="poUpdateCharges()">💾 Update charges</button>
       <span class="mini" style="color:var(--muted)">Adjust anytime — even after the PO is confirmed / received.</span>
     </div>
@@ -3465,11 +3570,16 @@ function poPaymentsPanel(rec, lines){
     <div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Method</th><th class="num">Amount</th><th>By</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>
   </div></div>`;
 }
+// Show the courier box only when the fee is actually owed to one.
+function poChargeToggle(){ const sel=($('poPayee')||{}).value||'Supplier'; const w=$('poProvWrap');
+  if(w) w.style.display=/fleet/i.test(sel)?'':'none'; }
 async function poUpdateCharges(){
   const d=Math.max(0,+($('poDisc')||{}).value||0), f=Math.max(0,+($('poFee')||{}).value||0);
-  try{ await db.update('purchase_orders','po_ref',formRec.po_ref,{discount:d,delivery_fee:f});
-    formRec.discount=d; formRec.delivery_fee=f;
-    sysLog('purchase_orders',formRec.po_ref,'💵 Charges updated — discount ₱'+d+' · delivery ₱'+f+' by '+CURRENT_USER);
+  const payee=($('poPayee')||{}).value||'Supplier';
+  const prov=/fleet/i.test(payee)?(($('poProv')||{}).value||'').trim():'';
+  try{ await db.update('purchase_orders','po_ref',formRec.po_ref,{discount:d,delivery_fee:f,delivery_payee:payee,delivery_provider:prov});
+    formRec.discount=d; formRec.delivery_fee=f; formRec.delivery_payee=payee; formRec.delivery_provider=prov;
+    sysLog('purchase_orders',formRec.po_ref,'💵 Charges updated — discount ₱'+d+' · delivery ₱'+f+' payable to '+payee+(prov?' ('+prov+')':'')+' by '+CURRENT_USER);
     toast('Charges updated — billing recalculated'); renderForm();
   }catch(e){ toast(e.message,true); }
 }
@@ -4138,7 +4248,7 @@ const CO_FLOW=[
   {k:'draft',          l:'Draft',                b:'open',      d:'Editable quote. Nothing reserved, nothing in demand.'},
   {k:'for_production', l:'For Production',       b:'confirmed', d:'Locked. Its packs go into the demand run.'},
   {k:'in_demand',      l:'Added in Demand',      b:'invoiced',  d:'Counted in a demand plan / MRP.'},
-  {k:'in_production',  l:'In Production',        b:'invoiced',  d:'On a production plan for the kitchen.'},
+  {k:'in_production',  l:'In Production',        b:'invoiced',  d:'On a DRAFT production plan whose date has not passed. Nothing is produced yet — confirming the run moves it on. An abandoned draft in the past does not count.'},
   {k:'partial',        l:'Partially Fulfilled',  b:'invoiced',  d:'At least one confirmed production, not all packs yet.'},
   {k:'completed',      l:'Completed',            b:'received',  d:'Every ordered pack has been produced.'},
   {k:'cancelled',      l:'Cancelled',            b:'cancelled', d:'Voided.'}
@@ -4246,6 +4356,52 @@ async function coDemandDiag(){
   return {rows, err, counted:rows.filter(r=>!r.reason).length};
 }
 
+/* ---- WHERE IS THIS ORDER ACTUALLY PLANNED? ---------------------------------
+   One shared reading of the facts, used by the status sync AND by the demand
+   run — so the badge on a card and the grouping in the MRP can never disagree.
+
+   Two things count as "planned":
+     • a row in the `demand` table (a saved demand plot), with its plan date
+     • a line on a production plan that is still a DRAFT, with its run reference
+
+   The draft test is deliberately narrow. Before this, ANY draft batch row for a
+   SKU — including one from a plan dated weeks ago that the kitchen abandoned and
+   never confirmed — held the order at "In Production" for ever, which is how an
+   order with nothing produced ends up looking like it is being made right now.
+   A draft only counts while its production date is still ahead of us, and only
+   if it actually plans packs.                                                  */
+async function coPlanEvidence(){
+  const _today=todayISO();
+  const planned={}, inDemand={};
+  try{ let rows;
+    if(isLive()) rows=await sb('production_batches?select=product_sku,status,planned_packs,good_packs,production_date,run_ref,batch_ref&status=eq.draft');
+    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='draft');
+    (rows||[]).forEach(b=>{
+      if(!((+b.planned_packs||0)>0 || (+b.good_packs||0)>0)) return;     // a zero line plans nothing
+      const d=String(b.production_date||'').slice(0,10);
+      if(d && d<_today) return;                                          // abandoned draft — not "in production"
+      const cur=planned[b.product_sku];
+      if(!cur || (d && (!cur.date || d<cur.date))) planned[b.product_sku]={ref:b.run_ref||b.batch_ref||'', date:d};
+    });
+  }catch(e){}
+  try{ let rows;
+    if(isLive()) rows=await sb('demand?select=sku,qty,plan_date');
+    else rows=(DEMO.demand||[]);
+    (rows||[]).forEach(r=>{ if(!((+r.qty||0)>0)) return;
+      const d=String(r.plan_date||'').slice(0,10); const cur=inDemand[r.sku];
+      if(!cur || (d && (!cur.date || d>cur.date))) inDemand[r.sku]={date:d, qty:+r.qty||0};
+    });
+  }catch(e){}
+  return {planned, inDemand};
+}
+// Plain-English "why is it at this status", for the card and the demand run.
+function coWhyText(ev, sku){
+  const p=(ev.planned||{})[sku], d=(ev.inDemand||{})[sku];
+  if(p) return 'on production plan '+(p.ref||'(draft)')+(p.date?' for '+p.date:'');
+  if(d) return 'on the demand plot'+(d.date?' for '+d.date:'')+(d.qty?' · '+d.qty+' pack(s)':'');
+  return '';
+}
+
 /* Recompute every custom order's status from what is actually true, and persist
    the ones that moved. Called when the Custom Orders list renders, after a demand
    pull and after a production post — so the board is never stale.
@@ -4261,21 +4417,11 @@ async function coSyncStatuses(){
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
     (rows||[]).forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
-  // SKUs sitting on a production plan that has not been confirmed yet
-  const planned={};
-  try{ let rows;
-    if(isLive()) rows=await sb('production_batches?select=product_sku,status&status=eq.draft');
-    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='draft');
-    (rows||[]).forEach(b=>{ planned[b.product_sku]=true; });
-  }catch(e){}
-  // SKUs that appear in the demand table (any week) or the demand map on screen
-  const inDemand={};
-  try{ let rows;
-    if(isLive()) rows=await sb('demand?select=sku,qty');
-    else rows=(DEMO.demand||[]);
-    (rows||[]).forEach(r=>{ if((+r.qty||0)>0) inDemand[r.sku]=true; });
-  }catch(e){}
-  Object.keys(mrpDemand||{}).forEach(s=>{ if((+mrpDemand[s]||0)>0) inDemand[s]=true; });
+  // one shared reading of what is planned where — see coPlanEvidence
+  const ev=await coPlanEvidence();
+  const planned=ev.planned, inDemand=ev.inDemand;
+  // plus whatever is typed into the demand run on screen right now
+  Object.keys(mrpDemand||{}).forEach(s=>{ if((+mrpDemand[s]||0)>0 && !inDemand[s]) inDemand[s]={date:(typeof MRPDATE!=='undefined'?MRPDATE:''), qty:+mrpDemand[s]||0}; });
 
   const byOrder={}; (lines||[]).forEach(l=>{ if(l.product_sku) (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
   // attribute produced packs soonest-needed-first so a shared SKU cannot complete two orders at once
@@ -4289,24 +4435,31 @@ async function coSyncStatuses(){
     fulfilled[o.order_ref]={ord,got};
   });
 
-  const moved={};
+  const moved={}; const why={};
   for(const o of (orders||[])){
     // draft / cancelled / completed are terminal here — an order that is already
     // finished must not be reopened just because the batch history was cleared.
     const cur=coStat(o.status); if(cur==='draft'||cur==='cancelled'||cur==='completed') continue;
     const ls=byOrder[o.order_ref]||[]; const f=fulfilled[o.order_ref]||{ord:0,got:0};
     let next;
-    if(f.ord>0 && f.got>=f.ord) next='completed';
-    else if(f.got>0)            next='partial';
-    else if(ls.some(l=>planned[l.product_sku]))  next='in_production';
-    else if(ls.some(l=>inDemand[l.product_sku])) next='in_demand';
-    else next='for_production';
+    if(f.ord>0 && f.got>=f.ord){ next='completed'; why[o.order_ref]=f.got+' of '+f.ord+' pack(s) produced'; }
+    else if(f.got>0){             next='partial';   why[o.order_ref]=f.got+' of '+f.ord+' pack(s) produced'; }
+    else if(ls.some(l=>planned[l.product_sku])){
+      next='in_production';
+      why[o.order_ref]=coWhyText({planned},(ls.find(l=>planned[l.product_sku])||{}).product_sku);
+    }
+    else if(ls.some(l=>inDemand[l.product_sku])){
+      next='in_demand';
+      why[o.order_ref]=coWhyText({inDemand},(ls.find(l=>inDemand[l.product_sku])||{}).product_sku);
+    }
+    else { next='for_production'; why[o.order_ref]='locked, not on any plan yet'; }
     if(next!==cur){
       moved[o.order_ref]=next;
       try{ await db.update('custom_orders','order_ref',o.order_ref,{status:next}); o.status=next; }catch(e){}
-      try{ sysLog('custom_orders',o.order_ref,'→ '+coStatLabel(next)); }catch(e){}
+      try{ sysLog('custom_orders',o.order_ref,'→ '+coStatLabel(next)+(why[o.order_ref]?' ('+why[o.order_ref]+')':'')); }catch(e){}
     }
   }
+  window._coWhy=why;
   return moved;
 }
 
@@ -4327,7 +4480,11 @@ async function renderCustomOrders(){
   orders.forEach(o=>{ o._total=Math.max(0,(lt[o.order_ref]||0)-(+o.discount||0)+(+o.delivery_fee||0)); });
   orders.sort((a,b)=>String(b.order_date||'').localeCompare(String(a.order_date||''))||String(b.order_ref).localeCompare(String(a.order_ref)));
   const fbadge=o=>{ if(!coIsOpen(o.status)) return ''; return _ready(o.order_ref)?' <span class="badge b-received">stock ready</span>':''; };
-  let rows=orders.map(o=>`<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.needed_date||'—')}</td><td>${coStatBadge(o.status)}${fbadge(o)}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td></tr>`).join('');
+  /* Every status after "For Production" is DERIVED, so the card must say what it
+     was derived FROM. "In Production" with nothing produced is a fair question;
+     the answer — which draft run put it there — belongs on the row, not in my head. */
+  const _why=window._coWhy||{};
+  let rows=orders.map(o=>`<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.needed_date||'—')}</td><td>${coStatBadge(o.status)}${fbadge(o)}${_why[o.order_ref]?`<div class="mini" style="color:var(--muted)">${esc(_why[o.order_ref])}</div>`:''}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td></tr>`).join('');
   // Board counts, in flow order — the answer to "where is everything right now".
   const tally={}; orders.forEach(o=>{ const k=coStat(o.status); tally[k]=(tally[k]||0)+1; });
   const flowStrip=CO_FLOW.filter(f=>tally[f.k]).map(f=>`<span class="badge b-${f.b}" title="${esc(f.d)}" style="margin-right:6px">${esc(f.l)} · ${tally[f.k]}</span>`).join('');
@@ -4405,7 +4562,7 @@ function drawCOForm(){
       <td class="num" id="coLT${i}">${wpeso(_coLineTotal(l))}</td>
       <td>${locked?'':`<span style="cursor:pointer;color:var(--danger)" onclick="coDelLine(${i})">✕</span>`}</td></tr>`;
   }).join('');
-  $('content').innerHTML=`<div class="formwrap"><div class="sheet">
+  $('content').innerHTML=`<div class="formwrap wide"><div class="sheet">
     <div class="hd"><input class="ttl" value="${esc(coRec.order_ref||'')}" disabled placeholder="(reference set on save)"><div class="sub">Custom order ${badge}</div></div>
     <div class="groups">
       <div><div class="fld"><label>Customer</label><div class="val"><input ${dis} value="${esc(coRec.customer_name||'')}" oninput="coRec.customer_name=this.value" style="width:100%"></div></div>
@@ -5325,7 +5482,7 @@ function drawProdPlan(){
   const totRemain=prodPlanLines.reduce((s,l)=>s+_prodRemain(l.product_sku,l.good_packs),0);
   const inLines=new Set(prodPlanLines.map(l=>l.product_sku));
   const _avail=(window._prodAllProducts||[]).filter(p=>!inLines.has(p.sku));
-  const pickOpts=hierGroups(_avail,{g1:'group_1',g2:'group_2'}).map(G=>G.subs.map(S=>`<optgroup label="${esc(G.g1+' › '+S.g2)}">`+S.items.map(p=>`<option value="${esc(p.sku)}">${esc(p.name)}${prodTargetMap[p.sku]?' · target '+prodTargetMap[p.sku]:''}</option>`).join('')+`</optgroup>`).join('')).join('');
+  // (the old quick-add <select> is gone — 🔎 Search & add products is the picker)
   let h=`<div class="repcard"><div class="repbar"><span>Production date</span>
     <input type="date" value="${prodPlanDate}" onchange="prodPlanDate=this.value;renderProdPlan()">
     ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
@@ -5667,8 +5824,19 @@ function drawOutPickBody(){
    row. Nothing is posted; the ledger already has it.                          */
 function prodDrawMade(){
   const oh=window._prodSupOh||{};
-  const ings=(window._prodAllIngredients||[]).filter(i=>i.is_intermediate && (oh[i.sku]||0)>0);
-  if(!ings.length){ toast('No processed stock on hand at '+planProduceLoc()+' to draw',true); return; }
+  const all=(window._prodAllIngredients||[]);
+  /* Widened deliberately. The first version only offered items with is_intermediate
+     ticked — so a processed output loaded by SQL, or one whose flag was never set,
+     had stock in the ledger and in every report but could not be drawn here, which
+     looks exactly like the app losing it. Anything with an OUT- code counts too,
+     and the row says which flag is missing so the master can be fixed. */
+  const looksProcessed=i=>!!i.is_intermediate || /^OUT-/i.test(String(i.sku||'')) || !!i.source_sku;
+  const ings=all.filter(i=>looksProcessed(i) && (oh[i.sku]||0)>0);
+  // What is on hand somewhere ELSE — the other reason an item seems to be missing.
+  const elsewhereN=all.filter(i=>looksProcessed(i) && !(oh[i.sku]>0)).length;
+  if(!ings.length){
+    const other=Object.keys(oh).filter(k=>oh[k]>0).length;
+    toast('Nothing processed on hand at '+planProduceLoc()+((other)?(' — '+other+' item(s) have stock there, but none are processed outputs. Check ⚙ Planning locations, and the Intermediate flag on the ingredient.'):' — check ⚙ Planning locations'),true); return; }
   const onPlan=new Set(prodOutLines.map(l=>l.ingredient_sku));
   window._dmPick={}; ings.forEach(i=>{ if(!onPlan.has(i.sku)) window._dmPick[i.sku]=true; });
   const rows=_outIngRows(window._prodAllIngredients||[], ings);
@@ -5678,12 +5846,14 @@ function prodDrawMade(){
     G.subs.forEach(S=>{
       if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="4" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(i=>{ const kg=Math.round((oh[i.sku]||0)/10)/100; const already=onPlan.has(i.sku);
+        const noFlag=!i.is_intermediate;
         body+=`<tr><td style="width:34px;padding-left:26px"><input type="checkbox" ${already?'disabled':(window._dmPick[i.sku]?'checked':'')} onchange="window._dmPick['${esc(i.sku)}']=this.checked"></td>
-          <td><span class="tagf tagf-proc">Processed</span> ${esc(i._nm)}<div class="mini" style="color:var(--muted)"><code>${esc(i.sku)}</code>${i._raw?' · from '+esc(i._raw):''}</div></td>
+          <td><span class="tagf tagf-proc">Processed</span> <b>${esc(i._nm||i.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(i.sku)}</code>${i._raw?' · from '+esc(i._raw):''}</div></td>
           <td class="num"><b>${kg}</b> kg</td>
-          <td class="mini">${already?'<span style="color:var(--muted)">already on this plan</span>':''}</td></tr>`; }); }); });
+          <td class="mini">${already?'<span style="color:var(--muted)">already on this plan</span>':(noFlag?'<span style="color:var(--earth,#b5762a)">not ticked <b>Intermediate</b> — tick it on the ingredient so it appears everywhere else too</span>':'')}</td></tr>`; }); }); });
   $('modal').innerHTML=`<div><h3>📥 Draw already-made stock</h3>
     <p class="mini">Processed ingredients that are <b>already in inventory</b> at <b>${esc(planProduceLoc())}</b>. Tick the ones that belong to this run and they join the output list as <b>already made</b> — visible on the plan and the kitchen sheet, and <b>skipped on confirm</b> so the stock is never posted twice.</p>
+    ${elsewhereN?`<div class="hint" style="margin:0 0 8px">Not finding something you know you made? <b>${elsewhereN}</b> processed item(s) have no stock at <b>${esc(planProduceLoc())}</b>. It was either posted to the other site — change it under <b>⚙ Planning locations</b> in Demand/MRP — or the Raw→Process log was never confirmed. <b>Live Stock</b> shows where each one actually sits.</div>`:''}
     <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th style="width:34px"></th><th>Processed ingredient</th><th class="num">On hand</th><th></th></tr></thead><tbody>${body}</tbody></table></div>
     <div class="mfoot"><button class="btn" onclick="prodDrawMadeApply()">📥 Add to the plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on');
@@ -6629,7 +6799,7 @@ function _paRow(x,i){
     ? `<td class="num">${_paNum(i,'procUsedKg',76,'drawn from existing processed stock — on hand '+x.ohKg+' kg')}</td>
        <td class="num mini" id="pash${i}" style="color:var(--muted)">${_pa2(c.shortfall)}</td>`
     : `<td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">${_pa2(c.needed)}</td>`;
-  return `<tr><td>${esc(x.name)}${x.parent?`<div class="mini" style="color:var(--muted)">from ${esc(ingName(x.parent))}</div>`:' <span class="mini" style="color:var(--danger)">no raw parent</span>'}</td>
+  return `<tr><td><b>${esc(x.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(x.sku)}</code></div>${x.parent?`<div class="mini" style="color:var(--muted)">from ${esc(ingName(x.parent))}</div>`:'<span class="mini" style="color:var(--danger)">no raw parent</span>'}</td>
     <td class="num"><b>${_pa2(c.needed)}</b>${x.type==='A'?`<div class="mini" style="color:var(--muted)">stock ${x.ohKg}</div>`:''}</td>
     ${procCell}
     <td class="num"><input type="number" step="any" inputmode="decimal" id="parw${i}" value="${x.actualRawKg}" oninput="_paEdit(${i},'actualRawKg',this.value)" style="width:76px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
@@ -6931,7 +7101,7 @@ function drawCountForm(){
       lineRows+=`<tr><td colspan="7" style="background:#f6f8f4;font-weight:600;color:#4e7a3e;padding:4px 8px 4px 22px">▸ ${esc(g2)} <span style="opacity:.6;font-weight:400">(${_bg2[g2].length})</span></td></tr>`+order.map(i=>rowFor(i,++_no)).join('');
     });
   });
-  $('content').innerHTML=`<div class="formwrap"><div class="sheet">
+  $('content').innerHTML=`<div class="formwrap wide"><div class="sheet">
     <div class="statusbar">${MODELS.count_sessions.status.stages.map(s=>`<div class="stg ${countRec.status===s?'on':''}">${s}</div>`).join('')}</div>
     <div class="hd"><input class="ttl" value="${esc(countRec.count_ref||'')}" ${approved?'disabled':''} oninput="countRec.count_ref=this.value"><div class="sub">Physical count · book qty is auto-generated &amp; locked</div></div>
     <div class="groups">
@@ -8015,7 +8185,7 @@ function parseDemandCSV(text){ const map={}; text.split(/\r?\n/).forEach(line=>{
 function applyDemandMap(map){ Object.keys(map).forEach(sku=>{ mrpDemand[sku]=+map[sku]||0; }); renderMRP(); }
 // One click for the banner: put the locked custom orders' packs into the demand boxes.
 async function mrpPullCustom(){ const m=window._mrpCoPend||{}; const n=Object.keys(m).length;
-  if(!n){ toast('Nothing to pull — every locked custom order is already in the demand'); return; }
+  if(!n){ toast('Nothing to pull — every locked custom order is already on a demand plot or a production plan'); return; }
   applyDemandMap(m); await coSyncStatuses();
   toast('Pulled '+n+' custom-order SKU(s) into the demand for '+MRPDATE); }
 function mrpImport(){ const t=prompt('Paste demand lines — SKU,qty (one per line):'); if(!t)return; applyDemandMap(parseDemandCSV(t)); toast('Demand imported by SKU'); }
@@ -8855,6 +9025,17 @@ async function renderSelfTest(){
 
 /* ============ Knowledge base (per-module guide) ============ */
 const KB = {
+  /* Cancel vs Archive vs Delete — asked often enough to be written down.
+     Reached from the ✖ Cancel confirmation and from any form's ❔. */
+  _cancel:{d:'Cancel, Archive and Delete are three different things, on purpose.',
+    h:['CANCEL — for documents (purchase order, transfer, production batch, custom order). Sets the status to "cancelled". The record and all its lines stay exactly as they were, and the change is written to the activity log with who and when.',
+       'ARCHIVE — for master data (supplier, ingredient, product). Sets active = false, so it drops out of every list and every picker and nobody can choose it again, while records that already reference it keep working. Reversible with Restore.',
+       'DELETE — Admin only, and it really removes the row. It is blocked whenever anything else references the record, and it tells you what is using it.'],
+    l:['A cancelled document is inert: demand, payables, the on-order column and every report skip it. It is not deleted, because the trail of what you ordered and then called off is worth keeping.',
+       'Cancelling a purchase order does NOT reverse stock that was already received. Receiving posted an inventory movement, and a status change never edits the ledger — correct received stock with a count or a returning movement.',
+       'A cancelled custom order stops owing packs straight away, so it leaves Demand/MRP on the next run.',
+       'Cancelled purchase orders are hidden from the PO list by default; the eye button shows them again.',
+       'Nothing here is automatic. Cancel only happens when somebody presses the button, and the activity log records who did it.']},
   home:{d:'Your landing page — KPI tiles and quick links into every module.',h:['Glance at counts (ingredients, products, suppliers, open POs)','Click a card to jump into that module','Use the search box or ⌘K to find anything'],l:['KPIs are live counts from the database','Nothing is entered here — it summarizes other modules']},
   ingredients:{d:'Master list of everything you buy or make into product: raw meats, organs, veg, fruit, seeds, supplies, plus live animals and internal intermediates.',h:['Open a row to edit price, category, storage, par, lead time','Set the processing method + yield so costing is accurate','Mark live-animal / intermediate items with their flags'],l:['₱/kg usable = raw price ÷ processing yield — the true cost in a pack','moving_avg_cost auto-updates from goods receipts (perpetual costing)','Intermediates (e.g. Rabbit Ground Meat) derive cost from their source × dress-out yield']},
   products:{d:'Sellable finished goods, grouped into families with size variants, each with its own SKU, price and recipe (BOM).',h:['Open a product to edit price, pack size, feeding style','Edit the Recipe (BOM) lines — usable grams per pack','Add variants as separate products under the same family'],l:['BOM grams are USABLE grams in the pack','Raw needed for production = usable ÷ ingredient yield','Cost/pack is computed from actual ingredients issued at production']},
@@ -8888,8 +9069,10 @@ const KB = {
   automations:{d:'One-stop hub for the n8n-powered integrations (Sheets, Drive, Shopify, Telegram, MRP schedule).',h:['Toggle an automation on','Paste its webhook / sheet / folder URL','Save — the workflow runs in n8n'],l:['This stores config; the actual workflows live in n8n','The Drive folder here powers attachment links across records']},
   selftest:{d:'In-app unit tests that verify the whole app is healthy.',h:['Click Run tests','Read the ✅/❌ table and the pass count','Run after connecting Supabase or changing Studio'],l:['Checks data, relations, formulas, MRP, counts, access & modules','Adds a live Supabase connection test when connected']},
 };
+const KB_TITLE={_cancel:'✖ Cancel, Archive &amp; Delete'};
 function openKB(key){ key=key||state.model||'home'; const k=KB[key]||{d:'Module guide.',h:[],l:[]}; const m=MODELS[key];
-  $('modal').innerHTML=`<h3>${m?m.icon+' ':''}${m?m.label:'Guide'} — Guide</h3><p>${esc(k.d)}</p>
+  const title=KB_TITLE[key]||((m?m.icon+' ':'')+(m?m.label:'Guide')+' — Guide');
+  $('modal').innerHTML=`<h3>${title}</h3><p>${esc(k.d)}</p>
     <div style="margin-top:10px"><div style="font-weight:700;color:var(--berry);font-size:12px;text-transform:uppercase;letter-spacing:.05em">How to use</div><ul style="margin:6px 0 0;padding-left:20px">${(k.h||[]).map(x=>`<li>${esc(x)}</li>`).join('')||'<li>—</li>'}</ul></div>
     <div style="margin-top:14px"><div style="font-weight:700;color:var(--berry);font-size:12px;text-transform:uppercase;letter-spacing:.05em">The logic behind it</div><ul style="margin:6px 0 0;padding-left:20px">${(k.l||[]).map(x=>`<li>${esc(x)}</li>`).join('')||'<li>—</li>'}</ul></div>
     <div style="display:flex;margin-top:18px"><span style="flex:1"></span><button class="btn" onclick="closeModal()">Got it</button></div>`;
