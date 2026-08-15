@@ -4122,6 +4122,9 @@ function drawCOForm(){
       <div><div class="fld"><label>Customer</label><div class="val"><input ${dis} value="${esc(coRec.customer_name||'')}" oninput="coRec.customer_name=this.value" style="width:100%"></div></div>
         <div class="fld"><label>Contact</label><div class="val"><input ${dis} value="${esc(coRec.contact||'')}" oninput="coRec.contact=this.value" style="width:100%"></div></div></div>
       <div><div class="fld"><label>Order date</label><div class="val"><input type="date" ${dis} value="${esc(coRec.order_date||'')}" oninput="coRec.order_date=this.value"></div></div>
+        <div class="fld"><label>Personalised name label</label><div class="val"><select ${dis} onchange="coRec.personalized_sticker=this.value==='true'">
+          <option value="false" ${coRec.personalized_sticker?'':'selected'}>No — uses the shared Custom Name Sticker</option>
+          <option value="true" ${coRec.personalized_sticker?'selected':''}>Yes — printed with the customer's name</option></select></div></div>
         <div class="fld"><label>Needed (demand week)</label><div class="val"><input type="date" ${dis} value="${esc(coRec.needed_date||'')}" oninput="coRec.needed_date=this.value"></div></div></div>
     </div>
     <div class="notebook"><div class="nbtabs"><button class="on">Order lines (${coLines.length})</button></div>
@@ -4188,7 +4191,7 @@ async function coSave(){
   if(!coLines.length){ toast('Add at least one line',true); return; }
   if(!coRec.order_ref){ try{ coRec.order_ref=(await genRef('CO',{date:coRec.order_date})).ref; }catch(e){ coRec.order_ref='CO-'+_mmddyyyy(coRec.order_date)+'-'+String(Date.now()).slice(-4); } }
   try{
-    const hdr={order_ref:coRec.order_ref, customer_name:coRec.customer_name||'', contact:coRec.contact||'', order_date:coRec.order_date||todayISO(), needed_date:coRec.needed_date||coRec.order_date||todayISO(), status:coRec.status||'draft', notes:coRec.notes||'', discount:+coRec.discount||0, delivery_fee:+coRec.delivery_fee||0, created_by:coRec.created_by||CURRENT_USER};
+    const hdr={order_ref:coRec.order_ref, customer_name:coRec.customer_name||'', contact:coRec.contact||'', order_date:coRec.order_date||todayISO(), needed_date:coRec.needed_date||coRec.order_date||todayISO(), status:coRec.status||'draft', notes:coRec.notes||'', discount:+coRec.discount||0, delivery_fee:+coRec.delivery_fee||0, personalized_sticker:!!coRec.personalized_sticker, created_by:coRec.created_by||CURRENT_USER};
     const exists=(await db.list('custom_orders',{})).some(o=>o.order_ref===coRec.order_ref);
     if(exists) await db.update('custom_orders','order_ref',coRec.order_ref,hdr); else await db.create('custom_orders',hdr);
     await _coSaveLines();
@@ -4889,6 +4892,13 @@ async function renderProdPlan(){
   try{ window._prodAllIngredients=await listIngredients(); }catch(e){ window._prodAllIngredients=[]; }
   await prodLoadTargets();
   if(!prodPlanLines.length && !prodRunRef) await prodLoadDraft();   // restore the saved plan (survives browser change)
+  // supply stock at the production site, for the packaging card
+  try{ const oh={};
+    if(isLive()){ (await db.list('stock_balance',{})).forEach(b=>{ if(b.kind==='ingredient'&&String(b.location_code||'')===planProduceLoc()) oh[b.ref_sku]=(oh[b.ref_sku]||0)+(+b.on_hand||0); }); }
+    else { (DEMO.inventory_movements||[]).forEach(mv=>{ if(mv.kind==='ingredient'&&String(mv.location_code||'')===planProduceLoc()) oh[mv.ref_sku]=(oh[mv.ref_sku]||0)+(+mv.qty||0); }); }
+    window._prodSupOh=oh;
+  }catch(e){ window._prodSupOh={}; }
+  await prodPackSync();
   drawProdPlan();
 }
 // Load the most-recent SAVED DRAFT plan for the production date, so the plan/cart persist across browsers.
@@ -4902,6 +4912,8 @@ async function prodLoadDraft(){
       prodRunRef=d.run_ref;
       prodPlanLines=(data.lines||[]).map(l=>({...l}));
       prodOutLines=(data.outs||[]).map(l=>({...l}));
+      prodPackStk=(data.packStk||[]).map(l=>({...l}));
+      prodPackSup=(data.packSup||[]).map(l=>({...l}));
       window._prodSub={...(data.subs||{})};
       if(prodPlanLines.length||prodOutLines.length) return;
     }
@@ -5004,7 +5016,120 @@ function drawProdPlan(){
     </tbody></table></div>
     <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button><span class="addrow">＋ quick add</span>
       <select id="prodOutAdd" onchange="prodAddOut(this.value)"><option value="">— pick an output ingredient —</option>${outPick}</select></div></div>`;
+  h+=prodPackHtml();
   $('content').innerHTML=h;
+}
+
+/* ---- Packaging & labels used on this run --------------------------------------
+   Stickers and kitchen supplies were never recorded anywhere, which is why the
+   label counts drift: they are decremented by nothing and only corrected at the
+   next count. The kitchen already writes these numbers on the paper sheet, so
+   capture them here and post them with the run.
+
+   Which label a pack uses:
+     ordinary product   its own product label  (products.sticker_<site>_on_hand)
+     custom order       the shared CUSTOM NAME label, one supply item for all of
+                        them — unless the order is flagged as needing a
+                        personalised printed-name label, which is its own line.  */
+let prodPackStk=[], prodPackSup=[];   // [{sku,name,kind,qty,oh,unit,note}]
+const CUSTOM_STICKER_SKU='SUP-CUSTOM-NAME-STICKER';
+function _isLabelSupply(i){ return isSupplyItem(i) && /sticker|label/i.test(String(i.name||'')+' '+String(i.category||'')); }
+// Rebuild the suggested label list from the plan's packs. Keeps any qty already edited.
+async function prodPackSync(){
+  const prods=window._prodAllProducts||[]; const pm={}; prods.forEach(p=>pm[p.sku]=p);
+  const ings=window._prodAllIngredients||[]; const im={}; ings.forEach(i=>im[i.sku]=i);
+  const loc=planProduceLoc();
+  const prev={}; prodPackStk.forEach(r=>{ prev[r.sku]=r.qty; });
+  // which custom orders want a personalised label
+  let personal={};
+  try{ (await db.list('custom_orders',{})).forEach(o=>{ if(o.personalized_sticker) personal[o.order_ref]=o.customer_name||o.order_ref; }); }catch(e){}
+  let coLinesAll=[]; try{ coLinesAll=await db.list('custom_order_lines',{}); }catch(e){}
+  const custOrderOf={}; coLinesAll.forEach(l=>{ if(l.product_sku) custOrderOf[l.product_sku]=l.order_ref; });
+
+  const rows=[]; let generic=0;
+  prodPlanLines.forEach(l=>{
+    const packs=+l.good_packs||0; if(packs<=0) return;
+    const p=pm[l.product_sku]||{};
+    if(p.is_custom || /^CUST-/.test(l.product_sku)){
+      const ref=custOrderOf[l.product_sku];
+      if(ref && personal[ref]){
+        rows.push({sku:'PERSONAL:'+l.product_sku, name:'Personalised label — '+personal[ref], kind:'personal',
+                   qty:packs, oh:null, unit:'pcs', note:esc(ref)+' · printed name'});
+      } else generic+=packs;                        // everything else shares one label
+      return;
+    }
+    rows.push({sku:l.product_sku, name:(p.variant||p.name||l.name), kind:'product',
+               qty:packs, oh:+p['sticker_'+loc+'_on_hand']||0, unit:'pcs', note:''});
+  });
+  if(generic>0){
+    const g=im[CUSTOM_STICKER_SKU]||{};
+    rows.push({sku:CUSTOM_STICKER_SKU, name:g.name||'Custom Name Sticker', kind:'supply',
+               qty:generic, oh:+(window._prodSupOh||{})[CUSTOM_STICKER_SKU]||0, unit:g.uom||'pcs',
+               note:'shared by every custom order'});
+  }
+  rows.forEach(r=>{ if(prev[r.sku]!=null) r.qty=prev[r.sku]; });
+  prodPackStk=rows;
+}
+function prodPackHtml(){
+  const loc=planProduceLoc();
+  const line=(r,i,arr)=>{
+    const after=(r.oh==null)?null:(r.oh-(+r.qty||0));
+    return `<tr><td>${esc(r.name)}${r.note?`<div class="mini" style="color:var(--muted)">${r.note}</div>`:''}
+        <div class="mini"><code>${esc(String(r.sku).replace(/^PERSONAL:/,''))}</code></div></td>
+      <td class="mini">${r.kind==='product'?'product label':(r.kind==='personal'?'<span style="color:var(--berry)">personalised</span>':'supply')}</td>
+      <td class="num mini" style="color:var(--muted)">${r.oh==null?'—':r.oh}</td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" value="${r.qty||''}" onchange="${arr}[${i}].qty=+this.value||0;drawProdPlan()" style="width:80px;text-align:right"></td>
+      <td class="mini">${esc(r.unit||'pcs')}</td>
+      <td class="num mini" style="${after!=null&&after<0?'color:var(--danger);font-weight:700':'color:var(--muted)'}">${after==null?'—':after}${after!=null&&after<0?' short':''}</td>
+      <td><span style="cursor:pointer;color:var(--danger)" onclick="${arr}.splice(${i},1);drawProdPlan()">✕</span></td></tr>`;
+  };
+  const short=prodPackStk.concat(prodPackSup).filter(r=>r.oh!=null && (r.oh-(+r.qty||0))<0).length;
+  return `<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Packaging &amp; labels used</span>
+      <span style="color:var(--muted);font-size:12px">One label per pack, prefilled from the plan. Confirming the run <b>deducts these from stock at ${esc(loc)}</b> — which is what keeps the label counts honest between counts.</span></div>
+    ${short?`<div style="margin:8px 0;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px"><b>${short} item(s) go negative</b> at the quantities entered — order them, or correct the count.</div>`:''}
+    <div style="overflow-x:auto"><table><thead><tr><th>Item</th><th>Kind</th><th class="num">On hand</th><th class="num">Used</th><th>Unit</th><th class="num">After</th><th></th></tr></thead><tbody>
+    ${prodPackStk.map((r,i)=>line(r,i,'prodPackStk')).join('')||'<tr><td colspan="7" class="empty">Enter good packs above and the labels appear here.</td></tr>'}
+    ${prodPackSup.length?`<tr style="background:#f6f8f4"><td colspan="7" style="padding-left:10px" class="mini"><b>Kitchen supplies</b></td></tr>`+prodPackSup.map((r,i)=>line(r,i,'prodPackSup')).join(''):''}
+    </tbody></table></div>
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn sec sm" onclick="prodPackAddSupply()">＋ Add a supply used</button>
+      <button class="btn sec sm" onclick="prodPackReset()">↺ Reset labels from the plan</button>
+      <span class="mini" style="color:var(--muted)">vacuum bags, pouches, boxes, gloves — anything consumed by this run</span></div></div>`;
+}
+async function prodPackReset(){ prodPackStk=[]; await prodPackSync(); drawProdPlan(); }
+async function prodPackAddSupply(){
+  const ings=(window._prodAllIngredients||[]).filter(isSupplyItem);
+  if(!ings.length){ toast('No kitchen supplies in the master',true); return; }
+  const oh=window._prodSupOh||{};
+  window._psSel={}; window._psQ='';
+  $('modal').innerHTML=`<div><h3>＋ Supplies used on this run</h3>
+    <p class="mini">Whatever the run consumed — vacuum bags, spout pouches, styro boxes, gloves. Quantity is in the item's own unit. Confirming the run posts these as a deduction at <b>${esc(planProduceLoc())}</b>.</p>
+    <input placeholder="🔎 search…" oninput="window._psQ=this.value;drawPsBody()" style="width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;margin-bottom:8px">
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Supply</th><th class="num">On hand</th><th class="num">Used</th><th>Unit</th></tr></thead><tbody id="psBody"></tbody></table></div>
+    <div class="mfoot"><button class="btn" onclick="prodPackSupApply()">✅ Add</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  window._psIngs=ings; window._psOh=oh;
+  modalWide(true); $('overlay').classList.add('on'); drawPsBody();
+}
+function drawPsBody(){
+  const ings=window._psIngs||[], oh=window._psOh||{};
+  const q=(window._psQ||'').toLowerCase().split(/\s+/).filter(Boolean);
+  const list=ings.filter(i=>!q.length||q.every(w=>[i.name,i.sku,i.category,i.uom].filter(Boolean).join(' ').toLowerCase().includes(w)));
+  const body=hierGroups(list.map(i=>({...i,_g1:(i.category||'Supplies'),_g2:''})),{g1:'_g1'}).map(G=>
+    `<tr class="grp"><td colspan="4" style="padding-left:10px"><b>${esc(G.g1)}</b></td></tr>`+
+    G.all.slice().sort(cmpItems).map(i=>{ const v=(window._psSel&&window._psSel[i.sku]!=null)?window._psSel[i.sku]:'';
+      return `<tr><td style="padding-left:26px">${esc(i.name)}<div class="mini"><code>${esc(i.sku)}</code></div></td>
+        <td class="num mini">${(+oh[i.sku]||0)||'—'}</td>
+        <td><input type="number" step="any" inputmode="decimal" value="${v}" oninput="window._psSel['${esc(i.sku)}']=this.value===''?'':(+this.value||0)" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+        <td class="mini">${esc(i.uom||'units')}</td></tr>`; }).join('')).join('');
+  const el=$('psBody'); if(el) el.innerHTML=body||'<tr><td colspan="4" class="empty">Nothing matches.</td></tr>';
+}
+function prodPackSupApply(){
+  const sel=window._psSel||{}; const ings=window._psIngs||[]; const oh=window._psOh||{}; let n=0;
+  Object.keys(sel).forEach(sku=>{ const q=+sel[sku]||0; if(!(q>0)) return;
+    const i=ings.find(x=>x.sku===sku)||{}; const ex=prodPackSup.find(r=>r.sku===sku);
+    if(ex) ex.qty=q; else prodPackSup.push({sku,name:i.name||sku,kind:'supply',qty:q,oh:+oh[sku]||0,unit:i.uom||'units',note:''});
+    n++; });
+  closeModal(); drawProdPlan(); toast(n?('Added '+n+' supply line(s)'):'Nothing added');
 }
 function prodAddOut(sku){ if(!sku)return; if(prodOutLines.some(l=>l.ingredient_sku===sku)){ drawProdPlan(); return; }
   const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{}; prodOutLines.push({ingredient_sku:sku,name:i.name||sku,needed_kg:0}); drawProdPlan(); }
@@ -5772,7 +5897,8 @@ async function prodSaveDraft(){ const r=await prodPersist('draft'); if(r){ await
 async function prodSavePlanDoc(status){
   if(!prodRunRef) return;
   const doc={ run_ref:prodRunRef, plan_date:prodPlanDate, status:status||'draft',
-    data:{ lines:prodPlanLines, outs:prodOutLines, subs:(window._prodSub||{}), by:CURRENT_USER },
+    data:{ lines:prodPlanLines, outs:prodOutLines, subs:(window._prodSub||{}),
+           packStk:prodPackStk, packSup:prodPackSup, by:CURRENT_USER },
     saved_by:CURRENT_USER };
   if(isLive()){
     try{ await sb('production_plans?on_conflict=run_ref',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify(doc)}); }
@@ -5827,13 +5953,15 @@ async function prodLoadPlanDoc(refEnc){
   prodRunRef=d.run_ref; prodPlanDate=d.plan_date||prodPlanDate;
   prodPlanLines=(data.lines||[]).map(l=>({...l}));
   prodOutLines=(data.outs||[]).map(l=>({...l}));
+  prodPackStk=(data.packStk||[]).map(l=>({...l}));
+  prodPackSup=(data.packSup||[]).map(l=>({...l}));
   window._prodSub={...(data.subs||{})};
   closeModal(); await renderProdPlan();
   toast('Opened '+ref+' · '+prodPlanLines.length+' product(s), '+prodOutLines.length+' output(s)');
 }
 async function prodLoadRun(refEnc,date){
   const ref=decodeURIComponent(refEnc);
-  prodRunRef=''; prodPlanLines=[]; prodOutLines=[];
+  prodRunRef=''; prodPlanLines=[]; prodOutLines=[]; prodPackStk=[]; prodPackSup=[];
   if(date) prodPlanDate=date;
   closeModal(); await renderProdPlan();
   if(prodRunRef!==ref){ prodRunRef=ref; await prodLoadDraft(); drawProdPlan(); }
@@ -6073,13 +6201,42 @@ async function prodActualsApply(){
         try{ await db.create('batch_issues',{batch_ref:r.batch_ref,ingredient_sku:line.ingredient_sku,expected_raw_g:Math.round(line.raw_g*packs*100)/100,actual_raw_g:actRawB,expected_processed_g:procG,actual_processed_g:(madeB||procG),uom:'kg'}); }catch(e){}
       }
     }
+    /* Packaging & labels — the run consumed them, so take them out of stock.
+       Product labels live on the product row (sticker_<site>_on_hand); supplies
+       are ordinary ingredient stock, so they post as a negative movement.
+       A personalised label has no stock record to draw from; it is recorded on
+       the batch note only. */
+    let _lblDone=0, _supDone=0;
+    try{
+      const _loc=planProduceLoc();
+      for(const r of prodPackStk){
+        const q=+r.qty||0; if(!(q>0)) continue;
+        if(r.kind==='product'){
+          const cur=+(((window._prodAllProducts||[]).find(p=>p.sku===r.sku)||{})['sticker_'+_loc+'_on_hand'])||0;
+          try{ await db.update('products','sku',r.sku,{['sticker_'+_loc+'_on_hand']:Math.round(cur-q)}); _lblDone++; }catch(e){}
+        } else if(r.kind==='supply'){
+          try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:r.sku,location_code:_loc,qty:-q,
+                 unit_cost:0,movement_type:'production',note:'Labels used · '+prodRunRef}); _lblDone++; }catch(e){}
+        }
+      }
+      for(const r of prodPackSup){
+        const q=+r.qty||0; if(!(q>0)) continue;
+        try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:r.sku,location_code:_loc,qty:-q,
+               unit_cost:0,movement_type:'production',note:'Supplies used · '+prodRunRef}); _supDone++; }catch(e){}
+      }
+      const _pers=prodPackStk.filter(r=>r.kind==='personal'&&(+r.qty||0)>0);
+      if(_lblDone||_supDone||_pers.length)
+        sysLog('production_batches',prodRunRef,'🏷️ Packaging posted — '+_lblDone+' label line(s), '+_supDone+' supply line(s)'+
+          (_pers.length?(' · personalised: '+_pers.map(x=>x.name+' ×'+x.qty).join(', ')):'')+' at '+_loc);
+    }catch(e){ console.warn('packaging post failed',String(e&&e.message||e)); }
     const nOut=(acts.filter(x=>x.type==='B')).length;
     sysLog('production_batches',prodRunRef,'✅ Production confirmed with actuals ('+recs.length+' product batch(es)'+(nOut?', '+nOut+' output ingredient(s)':'')+') — processed+produced by '+CURRENT_USER);
     if(recs.length) notifyRecordDone('production_batches', prodRunRef, {batch_ref:prodRunRef,status:'confirmed',operator:CURRENT_USER,production_date:prodPlanDate}, recs);
     try{ await prodSavePlanDoc('confirmed'); }catch(e){}
     try{ await coSyncStatuses(); }catch(e){}   // packs made → Partially Fulfilled / Completed
-    toast('Confirmed · '+posted+' product(s)'+(nOut?', '+nOut+' output ingredient(s)':'')+', '+drawn+' issue(s), yield captured'+(failed?(' · ⚠ '+failed+' failed'):''), failed>0);
-    prodRunRef=''; prodPlanLines=[]; prodOutLines=[]; window._prodAct=null; window._prodSub={}; closeModal(); await renderProdPlan();
+    toast('Confirmed · '+posted+' product(s)'+(nOut?', '+nOut+' output ingredient(s)':'')+', '+drawn+' issue(s), yield captured'
+      +((_lblDone||_supDone)?(' · '+_lblDone+' label + '+_supDone+' supply line(s) deducted'):'')+(failed?(' · ⚠ '+failed+' failed'):''), failed>0);
+    prodRunRef=''; prodPlanLines=[]; prodOutLines=[]; prodPackStk=[]; prodPackSup=[]; window._prodAct=null; window._prodSub={}; closeModal(); await renderProdPlan();
   }catch(e){ toast(e.message,true); } finally{ _postLock=false; }
 }
 // Two-bin: production consumes the PROCESSED (output) bin — each recipe line uses its usable
@@ -7715,21 +7872,58 @@ async function renderStickerReorder(){
   // production labels are pulled at the site that makes them
   const madeHere=(_stkRoLoc===planProduceLoc());
 
-  _stkRoRows=prods.map(p=>{
+  /* Custom orders all pack behind ONE shared label, so they must not each raise a
+     label line of their own — that was inventing SKUs that are never printed. Their
+     packs roll into the shared Custom Name Sticker instead. The exception is an
+     order flagged as needing a personalised printed name; those are listed
+     separately because someone has to physically print them. */
+  let personal={}, custOrderOf={};
+  try{ (await db.list('custom_orders',{})).forEach(o=>{ if(o.personalized_sticker) personal[o.order_ref]=o.customer_name||o.order_ref; }); }catch(e){}
+  try{ (await db.list('custom_order_lines',{})).forEach(l=>{ if(l.product_sku) custOrderOf[l.product_sku]=l.order_ref; }); }catch(e){}
+  let sharedPacks=0; const personalRows=[];
+  const _mk=(o)=>{
+    const perSheet=+o.perSheet||0;
+    const need=Math.max(o.forProd||0, o.forPar||0);
+    const sheets=perSheet>0?Math.ceil(need/perSheet):0;
+    return {...o, need, sheets, order:(perSheet>0?sheets*perSheet:need)};   // printers charge by the sheet
+  };
+  _stkRoRows=prods.filter(p=>{
+    if(!(p.is_custom||/^CUST-/.test(p.sku))) return true;
+    const packs=madeHere?(+planned[p.sku]||0):0;
+    const ref=custOrderOf[p.sku];
+    if(ref && personal[ref]){
+      if(packs>0) personalRows.push(_mk({sku:'PERSONAL:'+p.sku, name:'Personalised — '+personal[ref], variant:'Personalised — '+personal[ref],
+        group_1:'Custom Orders', group_2:'Personalised name', sort_order:p.sort_order, oh:0, par:0,
+        packs, forProd:packs, forPar:0, perSheet:0, price:+p.sticker_price||0,
+        supplier:(p.sticker_supplier||'').trim(), link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'',
+        note:ref+' · printed name, no stock held'}));
+    } else sharedPacks+=packs;
+    return false;
+  }).map(p=>{
     const oh=+p['sticker_'+_stkRoLoc+'_on_hand']||0;
     const par=+p['sticker_'+_stkRoLoc+'_par']||0;
     const packs=madeHere?(+planned[p.sku]||0):0;
-    const forProd=Math.max(0, packs-oh);          // one label per pack
-    const forPar =Math.max(0, par-oh);
-    const need=Math.max(forProd, forPar);
-    const perSheet=+p.sticker_per_sheet||0;
-    const sheets=perSheet>0?Math.ceil(need/perSheet):0;
-    const order=perSheet>0?sheets*perSheet:need;  // printers charge by the sheet
-    return {sku:p.sku, name:p.name, variant:p.variant||'', group_1:p.group_1||'Other', group_2:p.group_2||p.family||'Other',
-            sort_order:p.sort_order, oh, par, packs, forProd, forPar, need, perSheet, sheets, order,
-            price:+p.sticker_price||0, supplier:(p.sticker_supplier||'').trim(), link:(p.sticker_art_url||'').trim(),
-            dim:p.sticker_dimension||''};
+    return _mk({sku:p.sku, name:p.name, variant:p.variant||'', group_1:p.group_1||'Other', group_2:p.group_2||p.family||'Other',
+      sort_order:p.sort_order, oh, par, packs, forProd:Math.max(0,packs-oh), forPar:Math.max(0,par-oh),
+      perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0, supplier:(p.sticker_supplier||'').trim(),
+      link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'', note:''});
   });
+  // the shared custom label is a SUPPLY item — PAR and stock live on the ingredients row
+  try{
+    const sups=(await listIngredients()).filter(_isLabelSupply);
+    const oh={};
+    if(isLive()){ (await db.list('stock_balance',{})).forEach(b=>{ if(b.kind==='ingredient'&&String(b.location_code||'')===_stkRoLoc) oh[b.ref_sku]=(oh[b.ref_sku]||0)+(+b.on_hand||0); }); }
+    else { (DEMO.inventory_movements||[]).forEach(mv=>{ if(mv.kind==='ingredient'&&String(mv.location_code||'')===_stkRoLoc) oh[mv.ref_sku]=(oh[mv.ref_sku]||0)+(+mv.qty||0); }); }
+    sups.forEach(i=>{
+      const on=+oh[i.sku]||0, par=+i.par_g||0;
+      const packs=(i.sku===CUSTOM_STICKER_SKU)?sharedPacks:0;
+      _stkRoRows.push(_mk({sku:i.sku, name:i.name, variant:i.name, group_1:'Custom Orders', group_2:'Shared labels',
+        sort_order:9e8, oh:on, par, packs, forProd:Math.max(0,packs-on), forPar:Math.max(0,par-on),
+        perSheet:0, price:+i.list_price_kg||0, supplier:(i.supplier||'').trim(), link:'', dim:'',
+        note:(i.sku===CUSTOM_STICKER_SKU?'used by every custom order':'')}));
+    });
+  }catch(e){}
+  _stkRoRows=_stkRoRows.concat(personalRows);
   if(!Object.keys(_stkRoQty).length) _stkRoRows.forEach(r=>{ if(r.order>0) _stkRoQty[r.sku]=r.order; });
   drawStickerReorder();
 }
@@ -7751,21 +7945,25 @@ function drawStickerReorder(){
   const noArt=short.filter(r=>!r.link).length;
   const planTag=window._stkRoPlanRef?`<b>${esc(window._stkRoPlanRef)}</b> (${esc(window._stkRoPlanDate||'')})`:'<span style="color:var(--earth,#b5762a)">no locked demand plan — production need reads zero</span>';
   let h=`<div class="repcard">
-    <div class="hint" style="margin:0 0 8px">One label per pack. <b>Need</b> is the larger of <b>production</b> (packs planned − labels on hand) and <b>PAR top-up</b> (PAR − on hand) — not the sum, because the same label serves both. Rounded up to whole <b>sheets</b> where a product says how many print per sheet. Production demand comes from ${planTag}; labels are pulled at <b>${esc(planProduceLoc())}</b>, so the other site only ever shows PAR top-up.</div>
+    <div class="hint" style="margin:0 0 8px">One label per pack. <b>Need</b> is the larger of <b>production</b> (packs planned − on hand) and <b>PAR top-up</b> (PAR − on hand) — not the sum, because the same label serves both. Rounded up to whole <b>sheets</b> where a product says how many print per sheet. Production demand comes from ${planTag}; labels are pulled at <b>${esc(planProduceLoc())}</b>, so the other site only ever shows PAR top-up.
+      <b>Every custom order shares one label</b> — the Custom Name Sticker, under Custom Orders below. Only an order flagged for a printed name gets its own line.</div>
+    <div style="margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);background:#f6f8f4;border-radius:6px;font-size:12.5px">
+      <b>Trust PAR over On hand.</b> Label stock only moved at a count, so the figures drifted. From this build, confirming a production run deducts the labels it used (Production Plan → <b>Packaging &amp; labels used</b>), so On hand becomes reliable from the next run onward. Until then, plan against PAR — the <b>PAR top-up</b> column ignores production entirely.</div>
     ${(noPrice||noSup||noArt)?`<div style="margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
       Before sending: ${[noPrice?`<b>${noPrice}</b> with no price per piece`:'',noSup?`<b>${noSup}</b> with no label supplier`:'',noArt?`<b>${noArt}</b> with no artwork link`:''].filter(Boolean).join(' · ')}.
       Set them on the product's <b>🏷️ Stickers</b> tab — a PO with no price still generates, it just cannot be valued.</div>`:''}
     <div style="overflow-x:auto"><table><thead><tr>
-      <th>Product</th><th>SKU</th><th class="num">On hand</th><th class="num">Packs planned</th><th class="num">For production</th><th class="num">PAR top-up</th><th class="num">Need</th><th class="num">Sheets</th><th class="num">Order</th><th class="num">₱/pc</th><th>Supplier</th><th>Artwork</th>
+      <th>Product</th><th>SKU</th><th class="num">PAR</th><th class="num">On hand</th><th class="num">Packs planned</th><th class="num">For production</th><th class="num">PAR top-up</th><th class="num">Need</th><th class="num">Sheets</th><th class="num">Order</th><th class="num">₱/pc</th><th>Supplier</th><th>Artwork</th>
     </tr></thead><tbody>`;
   hierGroups(rows.filter(r=>r.order>0||_stkRoQty[r.sku]),{g1:'group_1',g2:'group_2'}).forEach(G=>{
-    h+=`<tr style="background:#e7f0e9"><td colspan="12"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
+    h+=`<tr style="background:#e7f0e9"><td colspan="13"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
     G.subs.forEach(S=>{
-      h+=`<tr style="background:#f6f8f4"><td colspan="12" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
+      h+=`<tr style="background:#f6f8f4"><td colspan="13" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(r=>{
-        h+=`<tr><td>${esc(r.variant||r.name)}${r.dim?`<div class="mini" style="color:var(--muted)">${esc(r.dim)}</div>`:''}</td>
-          <td><code>${esc(r.sku)}</code></td>
-          <td class="num">${r.oh||'—'}</td>
+        h+=`<tr><td>${esc(r.variant||r.name)}${r.note?`<div class="mini" style="color:var(--berry)">${esc(r.note)}</div>`:''}${r.dim?`<div class="mini" style="color:var(--muted)">${esc(r.dim)}</div>`:''}</td>
+          <td><code>${esc(String(r.sku).replace(/^PERSONAL:/,''))}</code></td>
+          <td class="num"><b>${r.par||'—'}</b></td>
+          <td class="num" style="color:var(--muted)">${r.oh||'—'}</td>
           <td class="num mini">${r.packs||'—'}</td>
           <td class="num mini" style="${r.forProd>0?'color:var(--berry);font-weight:600':'color:var(--muted)'}">${r.forProd||'—'}</td>
           <td class="num mini" style="color:var(--muted)">${r.forPar||'—'}</td>
@@ -7779,7 +7977,7 @@ function drawStickerReorder(){
     });
   });
   if(!short.length && !Object.keys(_stkRoQty).length)
-    h+=`<tr><td colspan="12" class="empty">No labels short at ${esc(_stkRoLoc)}. Set a Label PAR on the product's 🏷️ Stickers tab, or lock a demand plan so production need is counted.</td></tr>`;
+    h+=`<tr><td colspan="13" class="empty">No labels short at ${esc(_stkRoLoc)}. Set a Label PAR on the product's 🏷️ Stickers tab, or lock a demand plan so production need is counted.</td></tr>`;
   h+=`</tbody></table></div><div class="pager" id="stkRoTot"></div></div>`;
   $('content').innerHTML=h;
   _stkRoTotals();
@@ -7803,7 +8001,10 @@ async function generateStickerPO(){
       try{
         await db.create('purchase_orders',rec);
         // a sticker line is counted in PIECES and keyed by the PRODUCT sku
-        const pl=bySup[sup].map(l=>({po_ref:ref, ingredient_sku:l.sku, ordered_kg:l.qty, available_kg:l.qty, price_kg:+l.price||0, received_kg:0}));
+        // a personalised label has no stock SKU — strip the marker so the line
+        // still points at the real product the printer needs artwork for
+        const pl=bySup[sup].map(l=>({po_ref:ref, ingredient_sku:String(l.sku).replace(/^PERSONAL:/,''),
+          ordered_kg:l.qty, available_kg:l.qty, price_kg:+l.price||0, received_kg:0}));
         await db.replaceChildren({model:'po_lines',fk:'po_ref'}, ref, pl);
         sysLog('purchase_orders',ref,'🏷️ Sticker reorder for '+_stkRoLoc+' — '+bySup[sup].length+' label(s), '+
           bySup[sup].reduce((s,l)=>s+l.qty,0)+' pcs by '+CURRENT_USER);
@@ -7832,25 +8033,29 @@ function _stkRowsFrom(lines, prods, ings){
       name:(p.variant||p.name||String(ing.name||'').replace(/ — Sticker$/,'')||l.ingredient_sku),
       fam:(p.family||p.feeding_style||'Other'), group_1:(p.group_1||'Other'), group_2:(p.group_2||p.family||'Other'),
       net:(p.sticker_net||''), dim:(p.sticker_dimension||''), link:(p.sticker_art_url||''),
+      par:(+p['sticker_'+(window._stkPoLoc||'bulacan')+'_par']||+p.sticker_bulacan_par||0),
+      oh:(+p['sticker_'+(window._stkPoLoc||'bulacan')+'_on_hand']||+p.sticker_bulacan_on_hand||0),
       sort_order:p.sort_order, per_sheet:(+p.sticker_per_sheet||0),
       ordered:(+l.ordered_kg||0), received:(+l.received_kg||0) }; });
 }
 function _stkTableHTML(rows){
   let n=0, totO=0, totR=0, linked=0;
-  let h=`<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th><th class="num">Qty Ordered</th><th class="num">Sheets</th><th class="num">Qty Received</th></tr></thead><tbody>`;
+  let h=`<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th><th class="num">PAR</th><th class="num">On hand</th><th class="num">Qty Ordered</th><th class="num">Sheets</th><th class="num">Qty Received</th></tr></thead><tbody>`;
   hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
-    h+=`<tr style="background:#d7e7db"><td colspan="9"><b style="font-size:13.5px">${esc(G.g1)}</b></td></tr>`;
+    h+=`<tr style="background:#d7e7db"><td colspan="11"><b style="font-size:13.5px">${esc(G.g1)}</b></td></tr>`;
     G.subs.forEach(S=>{
-      h+=`<tr style="background:#eef3ea"><td colspan="9" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
+      h+=`<tr style="background:#eef3ea"><td colspan="11" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(r=>{ n++; totO+=r.ordered; totR+=r.received; if(r.link) linked++;
         const sh=stickerSheets(r.ordered,r.per_sheet); const shTxt=r.per_sheet>0?(sh.sheets+' × '+r.per_sheet):'—';
         h+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)||'—'}</td><td><code>${esc(r.sku)}</code></td>`+
           `<td>${r.link?`<a href="${esc(r.link)}" target="_blank" rel="noopener">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>`+
-          `<td>${esc(r.dim)||'—'}</td><td class="num">${r.ordered||'—'}</td><td class="num mini">${shTxt}</td><td class="num">${r.received||'—'}</td></tr>`;
+          `<td>${esc(r.dim)||'—'}</td>`+
+          `<td class="num">${r.par||'—'}</td><td class="num mini" style="color:var(--muted)">${r.oh||'—'}</td>`+
+          `<td class="num">${r.ordered||'—'}</td><td class="num mini">${shTxt}</td><td class="num">${r.received||'—'}</td></tr>`;
       });
     });
   });
-  h+=`</tbody><tfoot><tr><th colspan="6" class="num">Totals</th><th class="num">${totO}</th><th></th><th class="num">${totR}</th></tr></tfoot></table></div>`;
+  h+=`</tbody><tfoot><tr><th colspan="8" class="num">Totals</th><th class="num">${totO}</th><th></th><th class="num">${totR}</th></tr></tfoot></table></div>`;
   return {html:h, n, linked, totO, totR};
 }
 function _isStickerPO(rec){ return !!rec && /\[STICKERS\]/i.test(String(rec.po_ref||'')); }
