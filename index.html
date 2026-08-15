@@ -4560,6 +4560,7 @@ async function coSyncStatuses(){
 async function renderCustomOrders(){
   try{ (await db.list('products',{})).forEach(p=>_coProd[p.sku]=p); }catch(e){}
   try{ _coIng=(await listIngredients()).filter(i=>!isSupplyItem(i)); }catch(e){ _coIng=[]; }
+  _coCatMap=null;   // re-classify against the master that was just loaded
   if(_coView==='form') return drawCOForm();
   try{ await coSyncStatuses(); }catch(e){}      // move every card to where the facts say it is
   $('cp').innerHTML=`<div class="title">Custom Orders <span onclick="openKB('custom_orders')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
@@ -4702,7 +4703,7 @@ function _coIngOptions(sel){ return _ingGroupOptions(_coIng, _coIng, {selected:s
    its own running grams and share of the pack, next to the standard target.
    Colours and targets are lifted from the calculator so the two read alike.   */
 const CO_CATS=[
-  {k:'muscle',   l:'Muscle meat',             c:'#1D9E75', pct:.45, re:/muscle\s*meat|whole\s*dressed|^meat|fish|sardine|mackerel|source\s*material/i},
+  {k:'muscle',   l:'Muscle meat',             c:'#1D9E75', pct:.45, re:/muscle\s*meat|whole\s*dressed|^meat|fish|sardine|mackerel/i},
   {k:'organ',    l:'Muscle organ',            c:'#7F77DD', pct:.25, re:/muscle\s*organ|^organ/i},
   {k:'bones',    l:'Raw meaty bones',         c:'#D85A30', pct:.10, re:/bone/i},
   {k:'liver',    l:'Liver',                   c:'#BA7517', pct:.05, re:/liver/i},
@@ -4715,27 +4716,70 @@ const CO_CATS=[
 /* Order matters: "Other secreting organs" contains the word "organ", and
    "raw meaty bones" contains "meat". Test the specific ones first. */
 const _CO_CAT_ORDER=['bones','liver','secreting','organ','veggies','seeds','fruit','muscle'];
-function _coCatOf(ing){
-  const t=String((ing&&ing.category)||'')+' '+String((ing&&ing.ingredient_group)||'');
+function _coSectionOf(category){
+  const t=String(category||'');
   for(const k of _CO_CAT_ORDER){ const c=CO_CATS.find(x=>x.k===k); if(c&&c.re&&c.re.test(t)) return k; }
   return 'other';
 }
+
+/* ---- Which section an ingredient belongs to --------------------------------
+   The PMR category lives on the PROCESSED rows. Every RAW- row in the master
+   carries the same placeholder category — "Raw Material" — so reading
+   `category` straight off the row filed all 46 raw ingredients under
+   "Supplements & other": Live rabbit, Buffalo trimmings and Beef liver all sat
+   in the same bucket, which is what made the dropdown useless.
+
+   A raw ingredient's real category is the one its PROCESSED children carry, so
+   that is what it inherits — but only when the children agree. Live rabbit
+   becomes muscle, liver, bone and secreting organs once it is broken down, so
+   there is no single honest answer for the whole animal; it stays unassigned
+   rather than being filed somewhere convenient.                              */
+let _coCatMap=null;
+function _coBuildCats(){
+  const list=_coIng||[]; const m={}, kids={}, childOf={};
+  list.forEach(i=>{ m[i.sku]=_coSectionOf(i.category);
+    const src=String(i.source_sku||'').trim();
+    if(src){ (kids[src]=kids[src]||[]).push(i); childOf[src]=true; } });
+  // raw inherits from its processed children, when they all say the same thing
+  list.forEach(i=>{
+    if(m[i.sku]!=='other') return;
+    const set=[...new Set((kids[i.sku]||[]).map(c=>_coSectionOf(c.category)).filter(x=>x!=='other'))];
+    if(set.length===1) m[i.sku]=set[0];
+  });
+  _coHasChild=childOf;
+  _coCatMap=m;
+}
+let _coHasChild={};
+function _coCatOf(ing){ if(!ing) return 'other'; if(!_coCatMap) _coBuildCats(); return _coCatMap[ing.sku]||'other'; }
 function _coCat(k){ return CO_CATS.find(c=>c.k===k)||CO_CATS[CO_CATS.length-1]; }
 // The bucket a row sits in: whatever its ingredient is, or the section it was added under.
 function _coRowCat(r){
   const ing=(_coIng||[]).find(i=>i.sku===r.ingredient_sku);
   return ing?_coCatOf(ing):(r._cat||'other');
 }
-// Options for one section — that category first, everything else still reachable below.
+/* What a section may offer. A recipe consumes the PROCESSED bin — production
+   draws the processed form, never the raw — so a raw ingredient that has a
+   processed child is not a recipe ingredient and is left out. Raws with no
+   processed form (there are none today, but the master changes) stay. */
+function _coSectionItems(cat){
+  if(!_coCatMap) _coBuildCats();
+  return (_coIng||[]).filter(i=>_coCatOf(i)===cat)
+    .filter(i=>isProcessedItem(i) || !_coHasChild[i.sku])
+    .sort((a,b)=>String(a.name||a.sku).localeCompare(String(b.name||b.sku)));
+}
+/* A DEPENDENT dropdown: pick a section, get that section's ingredients and
+   nothing else. The previous version listed the whole master under an
+   "everything else" heading, which defeated the point of sectioning it. The
+   escape hatch is explicit (⚙ show every ingredient) for the case where the
+   master has an item filed under the wrong category. */
 function _coIngOptionsFor(cat, sel){
-  const mine=(_coIng||[]).filter(i=>_coCatOf(i)===cat);
-  const rest=(_coIng||[]).filter(i=>_coCatOf(i)!==cat);
-  let h=`<option value="">— pick an ingredient —</option>`;
-  if(mine.length) h+=`<optgroup label="${esc(_coCat(cat).l.replace(/&amp;/g,'&'))}">`+
-    mine.map(i=>`<option value="${esc(i.sku)}" ${sel===i.sku?'selected':''}>${esc((i.is_intermediate?'Processed: ':'Raw: ')+(i.name||i.sku))}</option>`).join('')+`</optgroup>`;
-  h+=`<optgroup label="── everything else ──">`+
-    rest.map(i=>`<option value="${esc(i.sku)}" ${sel===i.sku?'selected':''}>${esc(_coCat(_coCatOf(i)).l.replace(/&amp;/g,'&')+' · '+(i.name||i.sku))}</option>`).join('')+`</optgroup>`;
-  return h;
+  const showAll=!!window._coAllIng;
+  let list=showAll?(_coIng||[]).slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''))):_coSectionItems(cat);
+  // never lose a value that is already on the recipe, wherever it came from
+  if(sel && !list.some(i=>i.sku===sel)){ const cur=(_coIng||[]).find(i=>i.sku===sel); if(cur) list=[cur].concat(list); }
+  const opt=i=>`<option value="${esc(i.sku)}" ${sel===i.sku?'selected':''}>${esc(i.name||i.sku)}${(showAll&&_coCatOf(i)!==cat)?'  ·  '+esc(_coCat(_coCatOf(i)).l.replace(/&amp;/g,'&')):''}</option>`;
+  if(!list.length) return `<option value="">— nothing in ${esc(_coCat(cat).l.replace(/&amp;/g,'&'))} —</option>`;
+  return `<option value="">— pick an ingredient —</option>`+list.map(opt).join('');
 }
 function _coAddTo(cat){ _coEditRows.push({ingredient_sku:'',grams:0,_cat:cat}); drawCoRecipe(); }
 function drawCoRecipe(){
@@ -4752,6 +4796,7 @@ function drawCoRecipe(){
       <td style="width:24px"><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="_coEditRows.splice(${j},1);drawCoRecipe()">✕</span></td></tr>`; };
   const sections=CO_CATS.map(c=>{
     const rows=byCat[c.k]||[];
+    const avail=_coSectionItems(c.k).length;
     if(!rows.length && c.k==='other') return '';                 // don't show an empty catch-all
     const g=rows.reduce((n,x)=>n+(+x.r.grams||0),0);
     const pctNow=packG>0?(g/packG*100):0;
@@ -4761,16 +4806,21 @@ function drawCoRecipe(){
     return `<div style="border:1px solid var(--line);border-left:4px solid ${c.c};border-radius:8px;margin:0 0 10px;overflow:hidden">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 10px;background:#fbfbf8">
         <b style="color:${c.c}">${c.l}</b>
-        <span class="mini" style="color:var(--muted)">${rows.length} item${rows.length===1?'':'s'}</span>
+        <span class="mini" style="color:var(--muted)">${rows.length} in the mix · ${avail} to choose from</span>
         <div style="flex:1"></div>
         <span class="mini"><b>${Math.round(g*10)/10} g</b>${packG>0?` · <span style="color:${col};font-weight:700">${pctNow.toFixed(1)}%</span>`:''}${c.pct?` <span style="color:var(--muted)">of ${tgt}% standard</span>`:''}</span>
       </div>
       ${rows.length?`<table style="margin:0"><tbody>${rows.map(x=>rowHtml(x,c.k)).join('')}</tbody></table>`:''}
-      <div style="padding:6px 10px"><span class="addrow" onclick="_coAddTo('${c.k}')">＋ Add ${c.l.replace(/&amp;/g,'&').toLowerCase()}</span></div>
+      <div style="padding:6px 10px">${avail
+        ? `<span class="addrow" onclick="_coAddTo('${c.k}')">＋ Add ${c.l.replace(/&amp;/g,'&').toLowerCase()}</span>`
+        : `<span class="mini" style="color:var(--earth,#b5762a)">No ingredient in the master is categorised as <b>${c.l}</b> — set the PMR category on the processed item in Master Data → Ingredients, or tick <b>show every ingredient</b> below.</span>`}</div>
     </div>`; }).join('');
   $('modal').innerHTML=`<div><h3>🧪 Custom recipe — ${esc(coLines[_coEditIdx].description||'')||'(unnamed)'}</h3>
-    <p class="mini">Built the way the <b>Fresh Food Calculator</b> builds it — one section per PMR category, grams <b>per pack</b>. Each header shows what that section adds up to against the standard raw ratio, so an unbalanced mix is obvious before you save. This becomes the sellable SKU's BOM when the order is locked. Pack size: <b>${packG||'—'} g</b>.${nUnm?` <b style="color:var(--danger)">${nUnm} calculator ingredient(s) need a match</b> — pick the equivalent from your master list; the app <b>remembers it</b> for next time.`:''}</p>
+    <p class="mini">Built the way the <b>Fresh Food Calculator</b> builds it — one section per PMR category, grams <b>per pack</b>. Each header shows what that section adds up to against the standard raw ratio, so an unbalanced mix is obvious before you save. <b>Each picker offers only that section's ingredients</b>, in their processed form — that is what production draws. This becomes the sellable SKU's BOM when the order is locked. Pack size: <b>${packG||'—'} g</b>.${nUnm?` <b style="color:var(--danger)">${nUnm} calculator ingredient(s) need a match</b> — pick the equivalent from your master list; the app <b>remembers it</b> for next time.`:''}</p>
     <div style="max-height:52vh;overflow:auto;padding-right:2px">${sections}</div>
+    <label class="mini" style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;color:var(--muted)">
+      <input type="checkbox" ${window._coAllIng?'checked':''} onchange="window._coAllIng=this.checked;drawCoRecipe()" style="margin:0">
+      ⚙ show every ingredient in each picker <span style="opacity:.7">— only needed when something is filed under the wrong category</span></label>
     <div id="coRecSum" style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px">${_coRecipeSummaryHtml()}</div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" id="coRecSaveBtn" onclick="coSaveRecipe()">💾 Save recipe (${now})</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on');
