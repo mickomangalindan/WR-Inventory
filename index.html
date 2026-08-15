@@ -78,6 +78,16 @@
         padding:1px 6px;border-radius:4px;vertical-align:1px;margin-right:5px}
   .tagf-proc{background:#dbeddb;color:#1e6b2e}
   .tagf-raw{background:#f0ece3;color:#7a6432}
+  /* Record tables sized to their content instead of an even split — a PO's SKU
+     column no longer gets the same width as a one-character flag. Each header
+     carries a grip you can drag; the width is remembered per model+column. */
+  table.autow{table-layout:auto;width:100%}
+  table.autow th{position:relative;white-space:nowrap}
+  table.autow td{white-space:normal;word-break:break-word;vertical-align:top}
+  table.autow td code{white-space:nowrap}
+  .colgrip{position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize;user-select:none}
+  .colgrip:hover{background:rgba(0,0,0,.12)}
+  body.colresizing{cursor:col-resize;user-select:none}
   /* Production actuals: a recap line under every row that spells the arithmetic out. */
   table.pa tr.parecap td{border-top:none;padding:0 8px 9px 8px;font-size:11.5px;color:#5b5851;background:#fbfbf8}
   table.pa tr.parecap b{color:#22201c}
@@ -561,9 +571,11 @@ const MODELS = {
       {n:'order_date',l:'Order date',t:'date'},{n:'expected_delivery',l:'Expected delivery',t:'date'},{n:'status',l:'Status',t:'select',o:['open','rfq','quoted','confirmed','received','cancelled']},
       {n:'created_by',l:'Created by',t:'text'},
       {n:'discount',l:'Discount ₱',t:'currency'},{n:'delivery_fee',l:'Delivery fee ₱',t:'currency'},
+      {n:'delivery_payee',l:'Delivery fee payable to',t:'select',o:['Supplier','Fleet service']},
+      {n:'delivery_provider',l:'Fleet / courier name',t:'text'},
       {n:'payment_status',l:'Payment',t:'text',ro:true}],
     list:['po_ref','supplier_name','order_date','status','payment_status'],
-    groups:[['po_ref','order_date'],['created_by','discount','delivery_fee']], full:['supplier_name'],
+    groups:[['po_ref','order_date'],['created_by','discount','delivery_fee','delivery_payee','delivery_provider']], full:['supplier_name'],
     o2m:{ field:'lines', model:'po_lines', fk:'po_ref', label:'Order Lines',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Requested (kg)',t:'number'},{n:'available_kg',l:'Order qty · vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
 
@@ -1033,9 +1045,10 @@ async function renderList(){
   }
   const foot = numCols.length&&rows.length? `<tfoot><tr style="background:#faf9f4">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td style="font-weight:700">Total · ${rows.length}</td>`; return numCols.includes(f)?sumCell(f,sumOf(rows,f)):'<td></td>'; }).join('')+`</tr></tfoot>`:'';
   $('content').innerHTML = `<div id="bulkbar" class="bulkbar" style="display:none"></div><div class="listcard">
-    <table class="mcards"><thead><tr>${bulk?'<th style="width:34px"><input type="checkbox" onclick="selAll(this.checked)"></th>':''}${cols.map(f=>`<th class="${['currency','number'].includes(f.t)?'num':''}">${f.l}</th>`).join('')}</tr></thead>
+    <table class="mcards autow"><thead><tr>${bulk?'<th style="width:34px"><input type="checkbox" onclick="selAll(this.checked)"></th>':''}${cols.map((f,ci)=>`<th class="${['currency','number'].includes(f.t)?'num':''}" data-ci="${ci}">${f.l}<span class="colgrip" onmousedown="colDragStart(event,this)" title="drag to resize"></span></th>`).join('')}</tr></thead>
     <tbody>${body||`<tr><td colspan="${cols.length+(bulk?1:0)}" class="empty">No records</td></tr>`}</tbody>${foot}</table>
-    <div class="pager">${rows.length} record${rows.length!==1?'s':''}</div></div>`;
+    <div class="pager">${rows.length} record${rows.length!==1?'s':''} <span class="mini" style="color:var(--muted)">· drag a column edge to resize, double-click it to go back to automatic</span></div></div>`;
+  applyColWidths();
   bulkBar();
 }
 
@@ -1140,7 +1153,7 @@ async function renderForm(){
         ${t.html}<div class="pager">${t.n} sticker(s) · ${t.linked} with artwork link · ${t.n-t.linked} pending · <span style="color:var(--muted)">manage links in Master Data → Products (sticker fields)</span></div></div></div>`;
     } else {
       notebook=`<div class="notebook"><div class="nbtabs"><button class="on">${o.label}</button></div><div class="lines">
-      <table><thead><tr>${o.cols.map(c=>`<th>${c.l}</th>`).join('')}<th></th></tr></thead><tbody id="lineBody"></tbody></table>
+      <table class="autow"><thead><tr>${o.cols.map((c,ci)=>`<th data-ci="${ci}">${c.l}<span class="colgrip" onmousedown="colDragStart(event,this)" title="drag to resize"></span></th>`).join('')}<th></th></tr></thead><tbody id="lineBody"></tbody></table>
       ${m.o2mLoader?`<button class="btn sm sec" style="margin-right:8px" onclick="${m.o2mLoader.fn}()">${m.o2mLoader.label}</button>`:''}<span class="addrow" onclick="addLine()">＋ Add a line</span></div></div>`;
     }
   }
@@ -1194,6 +1207,7 @@ function switchFormTab(i){ formTab=i; const m=MODELS[state.model];
   document.querySelectorAll('.ftabs button').forEach((b,j)=>b.classList.toggle('on',j===i)); }
 function renderLines(){
   const o=MODELS[state.model].o2m; const tb=$('lineBody'); if(!tb) return;
+  setTimeout(applyColWidths,0);   // saved widths survive a line re-render
   const PM=window._prodLineMap||{};
   tb.innerHTML=formChildren.map((ln,i)=>`<tr>${o.cols.map(c=>{
     let v=ln[c.n]==null?'':ln[c.n];
@@ -1455,6 +1469,36 @@ function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.em
   try{ Object.keys(localStorage).forEach(k=>{ if(/^chatter:/.test(k)||/^attach:/.test(k)||k==='wr_notes') localStorage.removeItem(k); }); }catch(e){}
   updateMode(); renderSide();
   if(REQUIRE_AUTH && isLive()){ closeModal(); showGate('Signed out.'); } else { toast('Signed out (anon)'); openSettings(); } }
+/* ---- Draggable column widths -------------------------------------------------
+   Auto layout gets the proportions right; this is for when you disagree. The
+   width is stored per model + column index, so it survives a re-render and the
+   next visit. Double-click a grip to hand the column back to auto. */
+function colWidthKey(){ return 'wr_colw_'+(state&&state.model||'x'); }
+function colWidths(){ try{ return JSON.parse(localStorage.getItem(colWidthKey())||'{}'); }catch(e){ return {}; } }
+function applyColWidths(){
+  const w=colWidths(); const t=document.querySelector('table.autow'); if(!t) return;
+  t.querySelectorAll('thead th[data-ci]').forEach(th=>{ const v=w[th.dataset.ci];
+    if(v){ th.style.width=v+'px'; th.style.minWidth=v+'px'; th.style.maxWidth=v+'px'; } });
+}
+function colDragStart(e,grip){
+  e.preventDefault(); e.stopPropagation();
+  const th=grip.closest('th'); if(!th) return;
+  const startX=e.clientX, startW=th.getBoundingClientRect().width;
+  document.body.classList.add('colresizing');
+  const move=(ev)=>{ const w=Math.max(40, Math.round(startW+(ev.clientX-startX)));
+    th.style.width=w+'px'; th.style.minWidth=w+'px'; th.style.maxWidth=w+'px'; };
+  const up=()=>{ document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up);
+    document.body.classList.remove('colresizing');
+    const all=colWidths(); all[th.dataset.ci]=Math.round(th.getBoundingClientRect().width);
+    try{ localStorage.setItem(colWidthKey(),JSON.stringify(all)); }catch(e){} };
+  document.addEventListener('mousemove',move); document.addEventListener('mouseup',up);
+}
+document.addEventListener('dblclick',e=>{ const g=e.target.closest&&e.target.closest('.colgrip'); if(!g) return;
+  const th=g.closest('th'); if(!th) return;
+  th.style.width=th.style.minWidth=th.style.maxWidth='';
+  const all=colWidths(); delete all[th.dataset.ci];
+  try{ localStorage.setItem(colWidthKey(),JSON.stringify(all)); }catch(e){}
+  toast('Column back to automatic width'); });
 function modalWide(on){ const m=$('modal'); if(m) m.classList.toggle('wide',!!on); }
 function _urlChip(field,val){ const el=$('urlchip_'+field); if(!el) return; const u=safeUrl(val);
   el.innerHTML=(val&&u!=='#')?`<a class="btn sm sec" href="${esc(u)}" target="_blank" rel="noopener noreferrer">Open ↗</a>`
@@ -2482,21 +2526,32 @@ async function renderMRP(){
   // "Raw input (what you buy)" text to a purchasable ingredient's name.
   const bySku={}, byName={};
   ings.forEach(it=>{ bySku[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm) byName[nm]=it; });
-  const need={}; const _unmapped={};
+  /* PROCESSED STOCK COUNTS. A recipe asking for 10 kg of processed broccoli when
+     10 kg is already sitting processed needs NO raw broccoli bought — production
+     draws the processed bin first (that is the processed-first rule the kitchen
+     already follows). Before this, the roll-up converted the whole recipe need to
+     raw and ordered it, so every processed item held in stock was bought twice. */
+  const need={}, _unmapped={}, procUse={}, procAvail={};
+  ings.forEach(i=>{ if(i.is_intermediate) procAvail[i.sku]=Math.max(0, +stock[i.sku]||0); });
   boms.forEach(b=>{ const dem=+mrpDemand[b.product_sku]||0; if(!dem) return;
     const g=(+b.usable_g||0)*dem; if(!g) return;
     const it=bySku[b.ingredient_sku];
     if(!it){ need[b.ingredient_sku]=(need[b.ingredient_sku]||0)+g; return; }
-    const y=(+it.yield_pct||100)/100; const asPurch=(y>0? g/y : g);   // recipe grams → as-purchased grams
-    let rootSku=b.ingredient_sku;
+    const y=(+it.yield_pct||100)/100;
+    let recipeG=g, rootSku=b.ingredient_sku;
     if(it.is_intermediate){
+      // draw the processed bin first; only the shortfall becomes raw to buy
+      const take=Math.min(recipeG, procAvail[it.sku]||0);
+      if(take>0){ procAvail[it.sku]-=take; procUse[it.sku]=(procUse[it.sku]||0)+take; recipeG-=take; }
       const bySrc = it.source_sku && bySku[it.source_sku] ? bySku[it.source_sku] : null;
       const ri=(it.raw_input||'').trim().toLowerCase(); const byRi = (ri && byName[ri] && byName[ri].sku!==it.sku) ? byName[ri] : null;
       const parent = bySrc || byRi;
       if(parent) rootSku=parent.sku; else _unmapped[it.name||b.ingredient_sku]=1;
     }
-    need[rootSku]=(need[rootSku]||0)+asPurch;
+    if(recipeG<=0) return;                                     // fully covered by processed stock
+    need[rootSku]=(need[rootSku]||0)+(y>0? recipeG/y : recipeG);
   });
+  window._mrpProcUse=procUse;
   window._mrpUnmapped=Object.keys(_unmapped);
   // build plan lines. Raw-ingredient reorder RULE (per WR):
   //   Reorder a raw when demand outstrips stock (projected ending inv < 0)
@@ -2543,7 +2598,9 @@ async function renderMRP(){
   });
   plan.sort((a,b)=>b.final-a.final);
   window._mrpPlan=plan;
+  const _pu=window._mrpProcUse||{}; const _puN=Object.keys(_pu).length;
   let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">2 · Replenishment plan</h3>
+    ${_puN?`<div class="hint" style="margin:0 0 6px">Processed stock counts: <b>${_puN} processed ingredient(s)</b> covered part of this demand from stock already made (${Object.keys(_pu).slice(0,3).map(k=>esc(ingName(k))+' '+(Math.round(_pu[k]/10)/100)+' kg').join(', ')}${_puN>3?', …':''}), so no raw is ordered for that portion.</div>`:''}
     <div class="hint" style="margin:0 0 8px">Raws reorder when demand outstrips <b>stock + what is already on order</b>, or ending stock is low (≤ 5 kg). <b>On order</b> = confirmed POs not yet received, so you don't re-buy a shipment that is already coming; it drops out the moment you receive it. Order qty = weekly need + 5 kg buffer + lead-time buffer − on hand − on order, then ± your manual adjustment, rounded up to the <b>min order</b> and to a whole <b>ordering pack</b> (both set per ingredient in Master Data). (Custom PAR stocking is for the sellable products.) Processed forms (deboned, ground, liver…) are rolled up into the whole-dressed / raw ingredient you actually buy. Supplier = each item's default.</div>
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
     <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num">On hand</th><th class="num">On order</th><th class="num">End inv</th><th class="num">+Buffer</th><th class="num">+Lead</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
@@ -2786,18 +2843,39 @@ async function confirmSaveMRPPlan(hasExisting){
 }
 function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; mrpAdd={...(d.add||{})}; mrpRemarks={...(d.remarks||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
 // A saved demand plot is immutable — VIEW it read-only, then print or download.
-function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p;
+async function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p;
   const date=p.plan_date||p.date||''; const ref=d.ref||p.ref||''; window._viewPlan={date,ref,d};
   const lines=(d.lines||[]).filter(l=>l.final>0);
   const dem=d.demand||{}; const demKeys=Object.keys(dem).filter(k=>+dem[k]>0);
   const totVal=lines.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
-  const demRows=demKeys.map(k=>`<tr><td><code>${esc(k)}</code></td><td class="num">${esc(dem[k])}</td></tr>`).join('')||'<tr><td colspan="2" class="empty">—</td></tr>';
+  /* The demand side used to print as a bare SKU list — no product name, no
+     grouping, and no way to tell a custom order from a catalogue line. It is the
+     half of the plot anyone actually reviews, so it now reads like the screen it
+     was saved from. */
+  let pm={}; try{ (await db.list('products',{})).forEach(x=>pm[x.sku]=x); }catch(e){}
+  let coOwner={}; try{ (await db.list('custom_order_lines',{})).forEach(l=>{ if(l.product_sku) coOwner[l.product_sku]=l.order_ref; }); }catch(e){}
+  let coCust={}; try{ (await db.list('custom_orders',{})).forEach(o=>{ coCust[o.order_ref]=o.customer_name||o.order_ref; }); }catch(e){}
+  const demItems=demKeys.map(k=>{ const pr=pm[k]||{};
+    return {sku:k, qty:+dem[k]||0, name:pr.name||k, variant:pr.variant||'',
+            group_1:pr.group_1||'Other', group_2:pr.group_2||pr.family||'Other', sort_order:pr.sort_order,
+            cust:(pr.is_custom||/^CUST-/.test(k))?(coCust[coOwner[k]]||'Custom order'):''};});
+  window._viewPlanDem=demItems;
+  const totPacks=demItems.reduce((a,x)=>a+x.qty,0);
+  let demRows='';
+  hierGroups(demItems,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    demRows+=`<tr style="background:#e7f0e9"><td colspan="3"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.reduce((a,x)=>a+x.qty,0)} packs</span></td></tr>`;
+    G.subs.forEach(S=>{
+      demRows+=`<tr style="background:#f6f8f4"><td colspan="3" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
+      S.items.forEach(x=>{ demRows+=`<tr><td>${esc(x.name)}${x.variant&&x.variant!==x.name?`<div class="mini" style="color:var(--muted)">▸ ${esc(x.variant)}</div>`:''}${x.cust?`<div class="mini" style="color:var(--berry)">custom order · ${esc(x.cust)}</div>`:''}</td><td><code>${esc(x.sku)}</code></td><td class="num">${x.qty}</td></tr>`; });
+    });
+  });
+  if(!demRows) demRows='<tr><td colspan="3" class="empty">—</td></tr>';
   const lineRows=lines.map(l=>`<tr><td>${esc(l.name)}</td><td><code>${esc(l.sku)}</code></td><td class="num">${kgf(l.final)}</td><td>${esc(l.supplier||'')}</td><td class="num">₱${((l.final/1000)*(+l.price||0)).toLocaleString('en-PH',{minimumFractionDigits:2})}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">—</td></tr>';
   $('modal').innerHTML=`<h3>📋 Demand plot ${esc(ref)} <span class="badge b-approved" style="margin-left:6px">locked</span></h3>
     <div class="mini">Plan date ${esc(date)} · ${esc(weekOf(date))} · saved by ${esc(d.by||p.created_by||'—')} — read-only snapshot</div>
     <div style="max-height:50vh;overflow:auto;margin-top:10px">
-      <h4 style="margin:6px 0">Demand (packs)</h4>
-      <table><thead><tr><th>SKU</th><th class="num">Packs</th></tr></thead><tbody>${demRows}</tbody></table>
+      <h4 style="margin:6px 0">Demand — ${demItems.length} SKU(s) · ${totPacks} packs${demItems.some(x=>x.cust)?' · includes custom orders':''}</h4>
+      <table><thead><tr><th>Product</th><th>SKU</th><th class="num">Packs</th></tr></thead><tbody>${demRows}</tbody></table>
       <h4 style="margin:14px 0 6px">Replenishment (${lines.length} item(s) · est. ₱${Math.round(totVal).toLocaleString('en-PH')})</h4>
       <table><thead><tr><th>Ingredient</th><th>SKU</th><th class="num">Order (kg)</th><th>Supplier</th><th class="num">Est ₱</th></tr></thead><tbody>${lineRows}</tbody></table>
     </div>
@@ -2810,11 +2888,24 @@ function demandPlotHtml(date, ref, d){
   const lines=(d.lines||[]).filter(l=>l.final>0);
   const total=lines.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
   const dem=d.demand||{}; const demKeys=Object.keys(dem).filter(k=>+dem[k]>0);
-  const demRows=demKeys.map(k=>`<tr><td>${esc(k)}</td><td style="text-align:right">${esc(dem[k])}</td></tr>`).join('')||'<tr><td colspan="2">—</td></tr>';
+  // print the demand the way it is reviewed: grouped, named, custom orders marked
+  const items=(window._viewPlanDem||[]).length?window._viewPlanDem
+    :demKeys.map(k=>({sku:k,qty:+dem[k]||0,name:k,variant:'',group_1:'Other',group_2:'Other',cust:''}));
+  let demRows='';
+  hierGroups(items,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    demRows+=`<tr><td colspan="3" style="background:#e7f0e9;font-weight:700">${esc(G.g1)} — ${G.all.reduce((a,x)=>a+x.qty,0)} packs</td></tr>`;
+    G.subs.forEach(S=>{
+      demRows+=`<tr><td colspan="3" style="background:#f4f7f2;padding-left:18px">▸ ${esc(S.g2)}</td></tr>`;
+      S.items.forEach(x=>{ demRows+=`<tr><td>${esc(x.name)}${x.variant&&x.variant!==x.name?' ▸ '+esc(x.variant):''}${x.cust?' <i style="color:#8a3b52">· custom · '+esc(x.cust)+'</i>':''}</td><td>${esc(x.sku)}</td><td style="text-align:right">${x.qty}</td></tr>`; });
+    });
+  });
+  if(!demRows) demRows='<tr><td colspan="3">—</td></tr>';
+  const demTot=items.reduce((a,x)=>a+x.qty,0);
   const body=lines.map(l=>`<tr><td>${esc(l.name)}</td><td>${esc(l.sku)}</td><td style="text-align:right">${kgf(l.final)}</td><td>${esc(l.supplier||'')}</td><td style="text-align:right">${((l.final/1000)*(+l.price||0)).toLocaleString('en-PH',{minimumFractionDigits:2})}</td></tr>`).join('')||'<tr><td colspan="5">—</td></tr>';
   return `<html><head><meta charset="utf-8"><title>${esc(ref)}</title><style>@page{margin:16mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:4px 0 14px}h3{color:#4e7a3e;font-size:13px;margin:16px 0 6px}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #eee}tr.tot td{font-weight:700;border-top:2px solid #4e7a3e}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Demand Plot</h1><h2>${esc(ref)} · ${esc(date)} (${esc(weekOf(date))})</h2>
-    <h3>Demand (packs)</h3><table><thead><tr><th>SKU</th><th style="text-align:right">Packs</th></tr></thead><tbody>${demRows}</tbody></table>
+    <h3>Demand — ${items.length} SKU(s) · ${demTot} packs</h3><table><thead><tr><th>Product</th><th>SKU</th><th style="text-align:right">Packs</th></tr></thead><tbody>${demRows}
+    <tr class="tot"><td colspan="2" style="text-align:right">Total packs</td><td style="text-align:right">${demTot}</td></tr></tbody></table>
     <h3>Replenishment</h3><table><thead><tr><th>Ingredient</th><th>SKU</th><th style="text-align:right">Order (kg)</th><th>Supplier</th><th style="text-align:right">Est ₱</th></tr></thead><tbody>${body}
     <tr class="tot"><td colspan="4" style="text-align:right">Total</td><td style="text-align:right">₱${Math.round(total).toLocaleString('en-PH')}</td></tr></tbody></table>
     <p style="margin-top:22px;color:#888;font-size:11px">Locked snapshot · ${new Date().toLocaleString()}</p></body></html>`;
@@ -3233,18 +3324,29 @@ async function poPayments(ref){ if(!ref) return [];
 function poOrderQty(l){ return (l&&l.available_kg!=null&&l.available_kg!=='')?(+l.available_kg||0):(+((l||{}).ordered_kg)||0); }
 // Billable = received qty × price (falls back to the ORDER qty — vendor avail — until anything is
 // received) − discount + delivery fee.
+/* A delivery fee charged by a third-party fleet is NOT owed to the supplier —
+   it is its own payable, to a different party, usually on different terms.
+   Rolling it into the supplier's bill overstates what you owe them and hides
+   the courier spend entirely. */
+function poFeeToFleet(rec){ return /fleet/i.test(String((rec||{}).delivery_payee||'')); }
 function poBillable(rec, lines){ lines=lines||[];
   const ordTot=lines.reduce((s,l)=>s+poOrderQty(l)*(+l.price_kg||0),0);
   const recvTot=lines.reduce((s,l)=>s+(+l.received_kg||0)*(+l.price_kg||0),0);
   const anyRecv=lines.some(l=>+l.received_kg>0);
-  const disc=+rec.discount||0, fee=+rec.delivery_fee||0;
+  const disc=+rec.discount||0, fee=poFeeToFleet(rec)?0:(+rec.delivery_fee||0);
   return Math.max(0,(anyRecv?recvTot:ordTot) - disc + fee); }
+// what a fleet/courier is owed on this PO, if anyone
+function poFleetDue(rec){ return poFeeToFleet(rec)?(+((rec||{}).delivery_fee)||0):0; }
 function poPaymentsPanel(rec, lines){
   const pays=window._poPay||[];
   const billable=poBillable(rec,lines); const paid=pays.reduce((s,p)=>s+(+p.amount||0),0); const bal=billable-paid;
+  const fleetDue=poFleetDue(rec);
   const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
   const st = paid<=0.005 ? {t:'unpaid',c:'var(--danger)'} : (bal>0.5 ? {t:'partial',c:'var(--earth,#b5762a)'} : {t:'paid',c:'#4e7a3e'});
   const canPay = ['confirmed','received'].includes(rec.status);
+  const fleetHtml = fleetDue>0 ? `<div style="margin:6px 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
+      <b>Separate payable — ${P(fleetDue)} to ${esc(rec.delivery_provider||'the fleet service')}.</b>
+      The delivery fee on this PO is owed to a courier, not to ${esc(rec.supplier_name||'the supplier')}, so it is excluded from the supplier balance above. Record it as its own payment line, or against the fleet's own PO.</div>` : '';
   const rows = pays.length ? pays.map(p=>`<tr><td>${esc(p.paid_at||'')}</td><td>${esc(p.method||'—')}</td><td class="num">${P(+p.amount||0)}</td><td>${esc(p.paid_by||'')}</td><td class="mini">${esc(p.note||'')}</td></tr>`).join('')
     : `<tr><td colspan="5" class="empty" style="padding:8px">No payments yet.</td></tr>`;
   // Payment schedule from the supplier's terms (downpayment / on-receiving / term) applied to the billable.
@@ -3272,6 +3374,7 @@ function poPaymentsPanel(rec, lines){
       <button class="btn sec sm" onclick="poUpdateCharges()">💾 Update charges</button>
       <span class="mini" style="color:var(--muted)">Adjust anytime — even after the PO is confirmed / received.</span>
     </div>
+    ${fleetHtml}
     ${schedHtml}
     <div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Method</th><th class="num">Amount</th><th>By</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>
   </div></div>`;
@@ -3919,8 +4022,28 @@ async function coOpenDemand(){
   try{ orders=await db.list('custom_orders',{}); lines=await db.list('custom_order_lines',{}); }catch(e){ return map; }
   const keep={};
   (orders||[]).forEach(o=>{ if(coIsOpen(o.status)) keep[o.order_ref]=o; });
-  (lines||[]).forEach(l=>{ const o=keep[l.order_ref]; if(!o||!l.product_sku) return;
+  /* Only what is STILL OWED. Packs already produced come off, so an order that
+     has been made does not queue up again in the next demand run — and a
+     partially fulfilled one asks for the remainder, not the whole order.
+     Attribution is soonest-needed-first, the same order coSyncStatuses uses,
+     so two orders sharing a recipe cannot both claim the same packs. */
+  const made={};
+  try{ let rows;
+    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status&status=eq.confirmed');
+    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
+    (rows||[]).forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
+  }catch(e){}
+  const pool={...made}, owed={};
+  const byNeed=Object.values(keep).sort((a,b)=>
+    String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))||String(a.order_ref).localeCompare(b.order_ref));
+  byNeed.forEach(o=>{ (lines||[]).forEach(l=>{ if(l.order_ref!==o.order_ref||!l.product_sku) return;
     const q=+l.packs||0; if(!(q>0)) return;
+    const take=Math.min(q, pool[l.product_sku]||0);
+    pool[l.product_sku]=(pool[l.product_sku]||0)-take;
+    owed[o.order_ref+'|'+l.product_sku]=(owed[o.order_ref+'|'+l.product_sku]||0)+(q-take);
+  }); });
+  (lines||[]).forEach(l=>{ const o=keep[l.order_ref]; if(!o||!l.product_sku) return;
+    const q=owed[l.order_ref+'|'+l.product_sku]||0; if(!(q>0)) return;
     const needed=String(o.needed_date||o.order_date||'').slice(0,10);
     const e=map[l.product_sku]=map[l.product_sku]||{packs:0,needed:'',orders:[]};
     e.packs+=q;
@@ -4991,9 +5114,12 @@ function drawProdPlan(){
       <td><input style="width:110px" value="${esc(l.output_lot||'')}" oninput="prodPlanLines[${i}].output_lot=this.value"></td>
       <td><span style="cursor:pointer;color:var(--danger)" title="Remove line" onclick="prodDelLine(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="9" class="empty">Add a product below to start the run.</td></tr>'}
     </tbody></table></div>
-    <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><button class="btn sec sm" onclick="prodKitchenCart()">🔎 Search &amp; add products</button><span class="addrow">＋ quick add</span>
-      <select id="prodAdd" onchange="prodAddLine(this.value)"><option value="">— pick a product —</option>${pickOpts}</select></div>
-    <div class="pager">${prodPlanLines.length} product(s) · ${totGood} good packs this run · ${totRemain} remaining to make</div></div>`;
+    <div style="margin-top:8px"><button class="btn sec sm" onclick="prodKitchenCart()">🔎 Search &amp; add products</button></div>
+    <div class="pager">${prodPlanLines.length} product(s) · ${totGood} good packs this run · ${totRemain} remaining to make${(()=>{const o=prodOutLines.filter(l=>(+l.needed_kg||0)>0);return o.length?(' · plus '+o.length+' output ingredient(s), '+(Math.round(o.reduce((s,l)=>s+(+l.needed_kg||0),0)*1000)/1000)+' kg'):'';})()}</div>
+    ${(()=>{const o=prodOutLines.filter(l=>(+l.needed_kg||0)>0); if(!o.length) return '';
+      return `<div style="margin-top:8px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12.5px">
+        <b>Also on this run — output ingredients</b> (detail below):
+        ${o.map(l=>esc(l.name)+' <b>'+(+l.needed_kg||0)+' kg</b>').join(' · ')}</div>`;})()}</div>`;
   // ---- Output ingredients (make processed stock directly, no finished product) ----
   const _allIng=window._prodAllIngredients||[];
   const outAll=_allIng.filter(i=>i.is_intermediate);
@@ -5008,15 +5134,19 @@ function drawProdPlan(){
   const outRows=_outIngRows(_allIng, prodOutLines.map(l=>_bs[l.ingredient_sku]||{sku:l.ingredient_sku,name:l.name}));
   h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Output ingredients</span>
     <span style="color:var(--muted);font-size:12px">Make processed stock directly from raw (prep ahead of a run). Raw used = needed ÷ yield%. Confirm records the actuals.</span></div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Needed qty (kg)</th><th></th></tr></thead><tbody>
+    <div style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Raw used (kg)</th><th class="num">Output made (kg)</th><th class="num">Yield</th><th></th></tr></thead><tbody>
     ${prodOutLines.map((l,i)=>{ const r=outRows[i]||{};
+      const y=((+r.yield_pct||100)/100)||1;
+      const raw=(l.raw_kg!=null&&l.raw_kg!=='')?l.raw_kg:(Math.round(((+l.needed_kg||0)/y)*1000)/1000||'');
+      const a=(parseFloat(raw)>0)?Math.round(((+l.needed_kg||0)/parseFloat(raw))*1000)/10:0;
       return `<tr><td><span class="tagf tagf-proc">Processed</span> ${esc(r._nm||l.name)}<div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''} · <code>${esc(l.ingredient_sku)}</code></div></td>
       <td class="mini">${r._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(r._raw)}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
-      <td class="num"><input type="number" step="any" style="width:90px;text-align:right" value="${l.needed_kg||''}" oninput="prodOutLines[${i}].needed_kg=+this.value||0"></td>
-      <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="4" class="empty">Optional — add a processed ingredient to make to stock.</td></tr>'}
+      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:92px;text-align:right" value="${raw}" oninput="prodOutLines[${i}].raw_kg=this.value;prodOutYield(${i})" title="raw pulled from the chiller"></td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:98px;text-align:right" value="${l.needed_kg||''}" oninput="prodOutLines[${i}].needed_kg=+this.value||0;prodOutYield(${i})" title="processed output that came off it"></td>
+      <td class="num" id="poy${i}">${a?`<b style="color:${a<70?'var(--danger)':'#4e7a3e'}">${a}%</b>`:`<span class="mini" style="color:var(--muted)">std ${Math.round(y*1000)/10}%</span>`}</td>
+      <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="6" class="empty">Optional — add a processed ingredient to make to stock.</td></tr>'}
     </tbody></table></div>
-    <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button><span class="addrow">＋ quick add</span>
-      <select id="prodOutAdd" onchange="prodAddOut(this.value)"><option value="">— pick an output ingredient —</option>${outPick}</select></div></div>`;
+    <div style="margin-top:8px"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button></div></div>`;
   h+=prodPackHtml();
   $('content').innerHTML=h;
 }
@@ -5202,6 +5332,11 @@ function prodPackSupApply(){
 function prodAddOut(sku){ if(!sku)return; if(prodOutLines.some(l=>l.ingredient_sku===sku)){ drawProdPlan(); return; }
   const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{}; prodOutLines.push({ingredient_sku:sku,name:i.name||sku,needed_kg:0}); drawProdPlan(); }
 function prodDelOut(i){ prodOutLines.splice(i,1); drawProdPlan(); }
+// live yield beside the two boxes, without redrawing (a redraw eats the decimal point)
+function prodOutYield(i){ const l=prodOutLines[i]; const el=$('poy'+i); if(!l||!el) return;
+  const raw=parseFloat(l.raw_kg), out=+l.needed_kg||0;
+  const a=(raw>0)?Math.round((out/raw)*1000)/10:0;
+  el.innerHTML=a?`<b style="color:${a<70?'var(--danger)':'#4e7a3e'}">${a}%</b>`:'<span class="mini" style="color:var(--muted)">—</span>'; }
 
 /* ---- Kitchen cart: searchable/filterable picker for what to produce (#2/#7/#8) ---- */
 function prodKitchenCart(){
@@ -6889,6 +7024,88 @@ async function rptLossMap(){
      'the biggest <b>₱ at risk</b> rows, and any location or check type that keeps recurring. A high <b>Open</b> count means gaps aren\'t being explained or resolved — work them to <i>explained</i> then <i>resolved</i>. <b>1a · Supply shortfall</b> is ₱0 on purpose: it flags availability, not money lost.')+`</div>`;
 }
 // Q6 — what is stock really worth, by stage
+/* ---- Inventory valuation: what is understating it, and by how much ----------
+   Three columns, because they answer three different questions:
+     As posted     qty × the unit_cost actually on the movement. This is the
+                   book number. A zero-cost movement contributes nothing.
+     At cost       the same qty priced from master data, filling the gaps:
+                     raw / supply   moving-average, else list price
+                     PROCESSED      its raw parent's cost ÷ yield%  ← the rule
+                                    you asked about: 1 kg of processed eats
+                                    1/yield kg of raw, so that is what it cost
+                     product        tot_cost_ref
+     At selling    products at sell_price. Not an accounting number — it is the
+                   revenue the shelf represents, useful next to cost, never in
+                   the books.
+   Negative quantities are shown separately because they are not a valuation
+   problem, they are a counting problem: you cannot hold −4 kg of anything. */
+function _valProcCost(it, bySku, byName){
+  const y=((+it.yield_pct||100)/100)||1;
+  const p=_procParent(it, bySku, byName);
+  const raw=p?(+p.moving_avg_cost_kg||+p.list_price_kg||0):0;
+  return raw>0 ? (raw/y) : 0;                      // per kg of PROCESSED output
+}
+async function rptStockGaps(){
+  const bal=await _L('stock_balance'), ing=await _L('ingredients'), prod=await _L('products');
+  const bySku={}, byName={}; ing.forEach(i=>{ bySku[i.sku]=i; const n=(i.name||'').trim().toLowerCase(); if(n) byName[n]=i; });
+  const pm={}; prod.forEach(p=>pm[p.sku]=p);
+  const rows=[]; let posted=0, atCost=0, atSell=0, negQty=0, negVal=0;
+  const zero=[], neg=[], derived=[];
+  bal.forEach(b=>{
+    const qty=+b.on_hand||0; if(!qty) return;
+    const isProd=(b.kind==='product');
+    const it=isProd?(pm[b.ref_sku]||{}):(bySku[b.ref_sku]||{});
+    const name=it.name||b.ref_sku;
+    const post=+b.stock_value||0;
+    let cost=0, how='';
+    if(isProd){ cost=(+it.tot_cost_ref||0)*qty; how='product cost'; }
+    else if(isSupplyItem(it)){ cost=(+it.list_price_kg||+it.moving_avg_cost_kg||0)*qty; how='supply unit price'; }
+    else if(it.is_intermediate){ const c=_valProcCost(it,bySku,byName); cost=c*(qty/1000); how=c?'raw ÷ yield':''; if(c) derived.push({name,sku:b.ref_sku,c}); }
+    else { cost=((+it.moving_avg_cost_kg||+it.list_price_kg||0))*(qty/1000); how='moving average'; }
+    const sell=isProd?((+it.sell_price||0)*qty):0;
+    posted+=post; atCost+=cost; atSell+=sell;
+    if(qty<0){ negQty++; negVal+=post; neg.push({name,sku:b.ref_sku,loc:b.location_code,qty,post}); }
+    else if(Math.abs(post)<0.005 && cost>0.005) zero.push({name,sku:b.ref_sku,loc:b.location_code,qty,cost,how});
+    rows.push({name,sku:b.ref_sku,kind:b.kind,loc:b.location_code,qty,post,cost,sell,how});
+  });
+  const gap=atCost-posted;
+  const m=v=>_mnum(v);
+  const tile=(v,l,c)=>`<div class="stile"><div class="v"${c?` style="color:${c}"`:''}>${v}</div><div class="l">${l}</div></div>`;
+  const zeroTot=zero.reduce((a,x)=>a+x.cost,0);
+  const zTop=zero.sort((a,b)=>b.cost-a.cost).slice(0,15);
+  const nTop=neg.sort((a,b)=>a.qty-b.qty).slice(0,15);
+  const dTop=derived.slice(0,10);
+  return `<div class="repcard"><h3 style="margin:0 0 4px">Inventory valuation — where the value is going missing</h3>
+    <div class="hint" style="margin-bottom:8px">Book value is <b>qty × the unit cost on each movement</b>. Anything posted at zero cost counts as zero, forever, which is what understates the total. This prices the same stock from master data to show the gap.</div>
+    <div class="smart" style="margin-bottom:10px">
+      ${tile(m(posted),'As posted (book)')}
+      ${tile(m(atCost),'At cost (master)', gap>0?'#4e7a3e':'')}
+      ${tile(m(gap),'Understated by', gap>0?'var(--berry)':'#4e7a3e')}
+      ${tile(m(atSell),'At selling price')}
+      ${tile(negQty,'Negative qty lines', negQty?'var(--danger)':'#4e7a3e')}
+    </div>
+    <h4 style="margin:12px 0 4px">1 · Posted at zero cost — ${zero.length} line(s), worth ${m(zeroTot)}</h4>
+    <div class="hint" style="margin:0 0 6px">These carry real stock at no book value. Fix the master price, then re-run <code>wr_opening_cost_backfill.sql</code> to reprice the movements already posted.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Item</th><th>SKU</th><th>Site</th><th class="num">Qty</th><th class="num">Should be</th><th>Priced from</th></tr></thead><tbody>
+    ${zTop.map(x=>`<tr><td>${esc(x.name)}</td><td><code>${esc(x.sku)}</code></td><td class="mini">${esc(x.loc||'')}</td><td class="num">${Math.round(x.qty)}</td><td class="num">${m(x.cost)}</td><td class="mini">${esc(x.how)}</td></tr>`).join('')
+      ||'<tr><td colspan="6" class="empty">Nothing posted at zero cost ✅</td></tr>'}
+    ${zero.length>15?`<tr><td colspan="6" class="mini" style="color:var(--muted)">…and ${zero.length-15} more</td></tr>`:''}
+    </tbody></table></div>
+    <h4 style="margin:14px 0 4px">2 · Negative quantities — ${negQty} line(s)</h4>
+    <div class="hint" style="margin:0 0 6px">You cannot hold less than nothing. Each of these is a movement posted that the stock could not cover — production drawing an ingredient never received, or an opening balance missed. They drag the total down by ${m(negVal)}. Fix by counting the item and posting the correction, not by editing the value.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Item</th><th>SKU</th><th>Site</th><th class="num">Qty</th><th class="num">Book value</th></tr></thead><tbody>
+    ${nTop.map(x=>`<tr><td>${esc(x.name)}</td><td><code>${esc(x.sku)}</code></td><td class="mini">${esc(x.loc||'')}</td><td class="num" style="color:var(--danger)">${Math.round(x.qty)}</td><td class="num">${m(x.post)}</td></tr>`).join('')
+      ||'<tr><td colspan="5" class="empty">No negative stock ✅</td></tr>'}
+    </tbody></table></div>
+    <h4 style="margin:14px 0 4px">3 · Processed ingredients priced from raw ÷ yield — ${derived.length} item(s)</h4>
+    <div class="hint" style="margin:0 0 6px">A processed ingredient rarely has a purchase price of its own, because you never buy it — you make it. Its cost is the raw parent's cost divided by the yield: at 50% yield, 1 kg of processed consumed 2 kg of raw, so it is worth twice the raw price per kilo.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Processed</th><th>SKU</th><th class="num">Derived ₱/kg</th></tr></thead><tbody>
+    ${dTop.map(x=>`<tr><td>${esc(x.name)}</td><td><code>${esc(x.sku)}</code></td><td class="num">${m(x.c)}</td></tr>`).join('')
+      ||'<tr><td colspan="3" class="empty">No processed stock on hand.</td></tr>'}
+    </tbody></table></div>`+
+    _repNote('Three valuations of the same stock: <b>as posted</b> (the book), <b>at cost</b> (repriced from master, with processed derived from raw ÷ yield), and <b>at selling price</b> (products only — revenue potential, never an accounting figure).',
+      'the <b>Understated by</b> figure and section 1 — every line there is stock you own carrying no value. Section 2 is a counting error, not a pricing one; fix it with a count, not a price.')+`</div>`;
+}
 async function rptStockStage(){
   const sb=await _L('stock_balance'), b=await _L('production_batches'), iss=await _L('batch_issues'), ing=await _L('ingredients');
   const ic={}; ing.forEach(i=>ic[i.sku]=+i.moving_avg_cost_kg||+i.list_price_kg||0);
@@ -6926,7 +7143,8 @@ async function renderStdReports(){
     ['q_pasig','Produced → Pasig','Did everything produced reach Pasig?',false],
     ['q_deliv','Dispatched → delivered','Did everything sent reach the customer?',false],
     ['q_loss','Loss & shrinkage map','Where are waste, loss & theft happening?',true],
-    ['q_stock','Stock value by stage','Raw, in production, finished — what is it worth?',true]];
+    ['q_stock','Stock value by stage','Raw, in production, finished — what is it worth?',true],
+    ['q_val','Inventory valuation — gaps','Zero cost, negative qty, and value at selling price',true]];
   cards+=OWNER.filter(o=>!(mh&&o[3])).map(o=>`<div class="qcard" onclick="runStd('${o[0]}')"><div class="ic">🔍</div><div><div class="t">${o[1]}</div><div class="d">${o[2]}</div></div></div>`).join('');
   let result='';
   if(repActive==='recipe'){ result= mh?'<div class="repcard"><div class="hint">Cost &amp; margin are hidden for your role.</div></div>' : await recipeCostHtml(); }
@@ -6942,6 +7160,7 @@ async function renderStdReports(){
   else if(repActive==='q_deliv'){ result=await rptDelivery(); }
   else if(repActive==='q_loss'){ result=await rptLossMap(); }
   else if(repActive==='q_stock'){ result=await rptStockStage(); }
+  else if(repActive==='q_val'){ result=await rptStockGaps(); }
   else if(repActive){ const r=STD_REPORTS.find(x=>x.id===repActive); if(r){ const {data,rows,m}=await pivot(r.source,r.cfg); result=pivotTable(r.name,data,rows,r.cfg,m); } }
   $('content').innerHTML=`<div class="dash"><div class="qcards">${cards}</div><div style="margin-top:16px">${result}</div></div>`;
 }
@@ -7960,7 +8179,7 @@ async function renderStickerReorder(){
     const packs=madeHere?(+planned[p.sku]||0):0;
     const ref=custOrderOf[p.sku];
     if(ref && personal[ref]){
-      if(packs>0) personalRows.push(_mk({sku:'PERSONAL:'+p.sku, name:'Personalised — '+personal[ref], variant:'Personalised — '+personal[ref],
+      if(packs>0) personalRows.push(_mk({sku:'PERSONAL:'+p.sku, name:(p.name||p.sku), variant:'Personalised — '+personal[ref],
         group_1:'Custom Orders', group_2:'Personalised name', sort_order:p.sort_order, oh:0, par:0,
         packs, forProd:packs, forPar:0, perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0,
         supplier:(p.sticker_supplier||'').trim(), link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'',
@@ -7971,7 +8190,7 @@ async function renderStickerReorder(){
     const oh=+p['sticker_'+_stkRoLoc+'_on_hand']||0;
     const par=+p['sticker_'+_stkRoLoc+'_par']||0;
     const packs=madeHere?(+planned[p.sku]||0):0;
-    return _mk({sku:p.sku, name:p.name, variant:p.variant||'', group_1:p.group_1||'Other', group_2:p.group_2||p.family||'Other',
+    return _mk({sku:p.sku, name:p.name||p.sku, variant:p.variant||'', group_1:p.group_1||'Other', group_2:p.group_2||p.family||'Other',
       sort_order:p.sort_order, oh, par, packs, forProd:Math.max(0,packs-oh), forPar:Math.max(0,par-oh),
       perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0, supplier:(p.sticker_supplier||'').trim(),
       link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'', net:p.sticker_net||'', kind:'product', note:''});
@@ -7985,7 +8204,7 @@ async function renderStickerReorder(){
     sups.forEach(i=>{
       const on=+oh[i.sku]||0, par=+i.par_g||0;
       const packs=(i.sku===CUSTOM_STICKER_SKU)?sharedPacks:0;
-      _stkRoRows.push(_mk({sku:i.sku, name:i.name, variant:i.name, group_1:'Custom Orders', group_2:'Shared labels',
+      _stkRoRows.push(_mk({sku:i.sku, name:i.name, variant:'', group_1:'Custom Orders', group_2:'Shared labels',
         sort_order:9e8, oh:on, par, packs, forProd:Math.max(0,packs-on), forPar:Math.max(0,par-on),
         perSheet:0, price:+i.list_price_kg||0, supplier:(i.supplier||'').trim(), link:_firstUrl(i.sticker_art_url||i.notes||i.source||''),
         dim:'', net:i.uom||'pcs', kind:'shared',
@@ -8074,7 +8293,7 @@ function drawStickerReorder(){
         const sh=stickerSheets(q, r.perSheet); const shTxt=r.perSheet>0?(sh.sheets+' × '+r.perSheet):'—';
         const bare=String(r.sku).replace(/^PERSONAL:/,'');
         h+=`<tr><td>${n}</td>
-          <td>${esc(r.variant||r.name)}${r.note?`<div class="mini" style="color:var(--berry)">${esc(r.note)}</div>`:''}</td>
+          <td><b>${esc(r.name||bare)}</b>${r.variant&&String(r.variant)!==String(r.name)?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}${r.note?`<div class="mini" style="color:var(--berry)">${esc(r.note)}</div>`:''}</td>
           <td class="mini">${esc(r.net||'')||'—'}</td>
           <td><code>${esc(bare)}</code></td>
           <td>${r.link&&safeUrl(r.link)!=='#'?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener noreferrer">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>
@@ -8146,7 +8365,8 @@ function _stkPoErr(e){ const m=String((e&&e.message)||e||'');
 function _stkRowsFrom(lines, prods, ings){
   return (lines||[]).map(l=>{ const p=prods[l.ingredient_sku]||{}; const ing=ings[l.ingredient_sku]||{};
     return { sku:l.ingredient_sku,
-      name:(p.variant||p.name||String(ing.name||'').replace(/ — Sticker$/,'')||l.ingredient_sku),
+      name:(p.name||String(ing.name||'').replace(/ — Sticker$/,'')||l.ingredient_sku),
+      variant:(p.variant||''),
       fam:(p.family||p.feeding_style||'Other'), group_1:(p.group_1||'Other'), group_2:(p.group_2||p.family||'Other'),
       net:(p.sticker_net||''), dim:(p.sticker_dimension||''), link:(p.sticker_art_url||''),
       par:(+p['sticker_'+(window._stkPoLoc||'bulacan')+'_par']||+p.sticker_bulacan_par||0),
@@ -8163,7 +8383,7 @@ function _stkTableHTML(rows){
       h+=`<tr style="background:#eef3ea"><td colspan="11" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(r=>{ n++; totO+=r.ordered; totR+=r.received; if(r.link) linked++;
         const sh=stickerSheets(r.ordered,r.per_sheet); const shTxt=r.per_sheet>0?(sh.sheets+' × '+r.per_sheet):'—';
-        h+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)||'—'}</td><td><code>${esc(r.sku)}</code></td>`+
+        h+=`<tr><td>${n}</td><td><b>${esc(r.name)}</b>${r.variant&&r.variant!==r.name?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}</td><td>${esc(r.net)||'—'}</td><td><code>${esc(r.sku)}</code></td>`+
           `<td>${r.link?`<a href="${esc(r.link)}" target="_blank" rel="noopener">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>`+
           `<td>${esc(r.dim)||'—'}</td>`+
           `<td class="num">${r.par||'—'}</td><td class="num mini" style="color:var(--muted)">${r.oh||'—'}</td>`+
