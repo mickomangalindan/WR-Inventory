@@ -542,6 +542,44 @@ const PO_LIVE=['confirmed','partial','received'];
 /* Hidden from the PO list unless you ask for them: a cancelled order is dead, a
    fully received one is history. Both stay one click away. */
 const PO_DONE=['received','cancelled'];
+/* ---- Cancelled documents are INERT ----------------------------------------
+   A cancelled purchase order, transfer or batch never happened as far as every
+   number in the app is concerned: it is not payable, not on order, not part of
+   a fulfilment percentage, not work in progress. It stays only as an audit
+   trail. One test, used everywhere, so no report can quietly disagree. */
+function isCancelled(rec){ return String((rec||{}).status||'').toLowerCase()==='cancelled'; }
+
+/* ---- One way to write a product's name -------------------------------------
+   The house format is  {SKU}: {Name} ({Variant})  —
+   "DUPKBARWGW0500: Raw Feeding - BARF Mix (Duck + Pork)".
+
+   Two things stop that being a pure formatting job today:
+     • `variant` in the master holds the PACK SIZE ("500g", "45g", "700ml"),
+       which the SKU already ends in and pack_g already stores. Printing it as
+       the variant gives "…BARF Duck+Pork (Raw) (500g)" — noise, not information.
+     • the distinguishing part ("Duck + Pork") is buried inside `name`.
+   So: the variant is shown ONLY when it says something the name does not.
+   Fix the master (see wr_20260818_variants.sql) and this formats itself. */
+function _isSizeOnly(v){ return /^\s*\d+(\.\d+)?\s*(g|kg|ml|l|pc|pcs|pack|packs)?\s*$/i.test(String(v||'')); }
+function prodLabel(p, opts){
+  opts=opts||{};
+  if(!p) return '';
+  const sku=String(p.sku||'').trim();
+  const name=String(p.name||sku).trim();
+  const v=String(p.variant||'').trim();
+  const useV = v && !_isSizeOnly(v) && name.toLowerCase().indexOf(v.toLowerCase())<0;
+  const body=name+(useV?' ('+v+')':'');
+  if(opts.noSku || !sku) return body;
+  return sku+': '+body;
+}
+// the same thing, escaped, for templates
+function prodLabelHtml(p,opts){ return esc(prodLabel(p,opts)); }
+function dropCancelled(rows){ return (rows||[]).filter(r=>!isCancelled(r)); }
+// lines belonging to cancelled parents, out — a line carries no status of its own
+function _liveLines(lines, parents, fk){
+  const dead=new Set((parents||[]).filter(isCancelled).map(p=>p[fk]));
+  return (lines||[]).filter(l=>!dead.has(l[fk]));
+}
 const MODELS = {
   suppliers:{ label:'Suppliers', icon:'🏢', name:'name', pk:'name', archivable:true,
     searchOn:['name','supplier_id','contact','mobile','c1_email','c2_name','payment_term'],
@@ -1027,7 +1065,9 @@ function copyRecordLink(){ const u=location.href; (navigator.clipboard&&navigato
 
 /* -------- control panel -------- */
 function controlPanel(){
-  const m=MODELS[state.model];
+  // The dashboard is not a model. Anything that re-renders a form while the
+  // dashboard is showing used to crash here on a missing MODELS entry.
+  const m=MODELS[state.model]; if(!m) return;
   const views=['list']; if(!m.readonly) {} if(m.o2m||true){}
   const canForm=!m.readonly;
   const vbtn=(v,ic,lbl)=>`<button class="${state.view===v?'on':''}" title="${lbl}" onclick="switchView('${v}')">${ic}</button>`;
@@ -1149,7 +1189,8 @@ async function renderList(){
       const stkPO=new Set(rows.filter(r=>_isStickerPO(r)).map(r=>r.po_ref));
       const agg={};
       pls.forEach(l=>{ const a=agg[l.po_ref]=agg[l.po_ref]||{q:0,v:0}; const q=poOrderQty(l); let pr=(+l.price_kg||0)||ip[l.ingredient_sku]||0; if(!pr && stkPO.has(l.po_ref)) pr=stkCost; a.q+=q; a.v+=q*pr; });
-      rows.forEach(r=>{ const a=agg[r.po_ref]||{q:0,v:0}; r._total_qty=Math.round(a.q*100)/100; r._total_val=Math.round(a.v*100)/100; });
+      // a cancelled order is worth nothing — showing its value invites it into a total
+      rows.forEach(r=>{ const a=(isCancelled(r)?{q:0,v:0}:(agg[r.po_ref]||{q:0,v:0})); r._total_qty=Math.round(a.q*100)/100; r._total_val=Math.round(a.v*100)/100; });
       cols.push({n:'_total_qty',l:'Total kg',t:'number'},{n:'_total_val',l:'Est. value',t:'currency'});
     }catch(e){}
   }
@@ -1221,7 +1262,9 @@ async function relOptions(model){
   // twice on the same row is noise, not information.
   let list=rows.map(r=>({v:r[m.pk], n:String(r[m.name]==null?r[m.pk]:r[m.name]), t:r[m.name]+(r[m.pk]!==r[m.name]?` (${r[m.pk]})`:''), g1:r.group_1, g2:r.group_2, cat:r.category, rg:r.ingredient_group, so:_so(r), _gr:0}));
   // Products & ingredients get ordered + group tags so line pickers can show grouped optgroups.
-  if(model==='products'){ list.sort((a,b)=>a.so-b.so||String(a.t).localeCompare(b.t)); list.forEach(o=>{ o.g1=o.g1||'Products'; o.g2=o.g2||'Other'; }); }
+  if(model==='products'){
+    rows.forEach(r=>{ const o=list.find(x=>x.v===r.sku); if(o){ o.t=prodLabel(r); o.n=prodLabel(r,{noSku:true}); } });
+    list.sort((a,b)=>a.so-b.so||String(a.t).localeCompare(b.t)); list.forEach(o=>{ o.g1=o.g1||'Products'; o.g2=o.g2||'Other'; }); }
   else if(model==='ingredients'){
     // Group ingredients the way the count sheet does — category › base material —
     // instead of one flat "Ingredients" bucket with no subgroup at all.
@@ -1280,6 +1323,7 @@ async function openForm(idEnc){
   renderForm(); syncHash();
 }
 async function renderForm(){
+  if(!MODELS[state.model]) return;   // nothing to draw a form against
   controlPanel();
   const m=MODELS[state.model]; const r=formRec;
   // Modules with their own form renderer (the weekly count) come through here on every
@@ -1427,15 +1471,46 @@ function lSetNum(i,n,v,sc){ sc=+sc||1; formChildren[i][n]=(v===''||v==null)?'':(
 function discardForm(){ state.view='list'; route(); }
 const AUTO_REF={ purchase_orders:async()=>{ const dd=_mmddyyyy(); return 'PO-'+dd+' V'+_p2(await nextSeq('PO-'+dd))+'.01'; },
                  transfers:async()=>(await genRef('DR',{})).ref };
+/* Every write this session makes to an open record, by stamp. A stamp in here
+   is ours; anything else really is another person. */
+const _mineStamps=new Set();
+function _rememberStamp(model,pkval,stamp){ if(stamp) _mineStamps.add(model+'|'+pkval+'|'+stamp); }
+/* Update the record the form is showing, and keep the in-memory copy honest:
+   apply the patch AND refresh `updated_at`, so the next Save is comparing like
+   with like. Use this instead of db.update() anywhere inside a form. */
+async function formUpdate(model, pk, pkval, patch){
+  const res=await db.update(model, pk, pkval, patch);
+  Object.assign(formRec, patch);
+  let stamp=res&&res.updated_at;
+  if(!stamp && isLive()){
+    // masked writes come back as return=minimal, so read the stamp on its own
+    try{ const cur=await sb(model+'?select=updated_at&'+pk+'=eq.'+encodeURIComponent(pkval)+'&limit=1');
+         stamp=cur&&cur[0]&&cur[0].updated_at; }catch(e){}
+  }
+  if(stamp){ formRec.updated_at=stamp; _rememberStamp(model,pkval,stamp); }
+  return res;
+}
 async function saveForm(){
   const m=MODELS[state.model]; let pkval=formRec[m.pk];
   // assign the document reference now (at save), not on form-open → no burned numbers on discard
   if(formIsNew && !pkval && AUTO_REF[state.model]){ try{ pkval=await AUTO_REF[state.model](); formRec[m.pk]=pkval; }catch(e){ toast(e.message,true); return; } }
   if(!pkval){ toast('Enter '+ (m.fields.find(f=>f.n===m.pk)||{}).l, true); return; }
-  // optimistic lock: if someone else changed this record since it was opened, don't silently overwrite
+  /* Optimistic lock. The point is to stop TWO PEOPLE overwriting each other —
+     but it was firing for one person working alone, because every in-form action
+     that writes (a status button, receiving, updating charges, archiving) bumped
+     `updated_at` in the database while the copy in memory kept the stamp from
+     when the form was opened. The next Save compared the two and reported a
+     conflict this session had caused itself.
+
+     Two fixes: formUpdate() now carries the new stamp back (below), and every
+     stamp this session wrote is remembered here, so its own writes are never
+     mistaken for somebody else's. */
   if(!formIsNew && isLive() && formRec.updated_at){ try{
       const cur=await sb(state.model+'?select=updated_at&'+m.pk+'=eq.'+encodeURIComponent(pkval)+'&limit=1');
-      if(cur&&cur[0]&&cur[0].updated_at&&cur[0].updated_at!==formRec.updated_at){ toast('This record was changed by someone else since you opened it. Reload and re-apply your edit.',true); return; }
+      const live=cur&&cur[0]&&cur[0].updated_at;
+      if(live && live!==formRec.updated_at && !_mineStamps.has(state.model+'|'+pkval+'|'+live)){
+        if(!confirm('This record was changed since you opened it.\n\nSomeone else may be working on '+pkval+'. Saving now would overwrite their change.\n\nOK = save anyway (your version wins)\nCancel = stop, reload the record and re-apply your edit')) return;
+      }
     }catch(e){} }
   try{
     // validate numeric fields: no NaN, no negatives (quantities/prices/counts are never < 0)
@@ -1487,12 +1562,12 @@ async function countDependents(model, pkval){
   return {total, detail:parts.join(', '), checkFailed};
 }
 async function archiveForm(on){ const m=MODELS[state.model];
-  try{ await db.update(state.model,m.pk,formRec[m.pk],{active:!on}); formRec.active=!on; relCache={};
+  try{ await formUpdate(state.model,m.pk,formRec[m.pk],{active:!on}); relCache={};
     sysLog(state.model,formRec[m.pk],(on?'🗄 Archived by ':'♻ Restored by ')+CURRENT_USER); toast(on?'Archived — kept for history':'Restored'); renderForm(); }
   catch(e){ toast(e.message,true); } }
 async function cancelForm(){ const m=MODELS[state.model];
   if(!confirm('Cancel '+formRec[m.pk]+'?\n\n• The record and all its lines are KEPT, for audit\n• Its status becomes "cancelled" and it stops being actioned — demand, payables, on-order and the reports all skip it\n• Stock already received or posted is NOT reversed; correct that with a count or a movement\n\nThis is reversible: set the status back on the form.'))return;
-  try{ await db.update(state.model,m.pk,formRec[m.pk],{[m.status.f]:'cancelled'}); formRec[m.status.f]='cancelled';
+  try{ await formUpdate(state.model,m.pk,formRec[m.pk],{[m.status.f]:'cancelled'});
     sysLog(state.model,formRec[m.pk],'✖ Cancelled by '+CURRENT_USER); toast('Cancelled — record kept'); renderForm(); }
   catch(e){ toast(e.message,true); } }
 async function deleteForm(){
@@ -3358,7 +3433,7 @@ function smartTiles(model, rec, children){
   return [];
 }
 async function wfAction(to){ const m=MODELS[state.model]; const from=formRec[m.status.f]; formRec[m.status.f]=to;
-  if(!formIsNew){ try{ await db.update(state.model,m.pk,formRec[m.pk],{[m.status.f]:to}); sysLog(state.model,formRec[m.pk],`🔄 Status ${from} → ${to} by ${CURRENT_USER}`); toast('Status → '+to);
+  if(!formIsNew){ try{ await formUpdate(state.model,m.pk,formRec[m.pk],{[m.status.f]:to}); sysLog(state.model,formRec[m.pk],`🔄 Status ${from} → ${to} by ${CURRENT_USER}`); toast('Status → '+to);
       // NOTE: receiving posts to the ledger via the dedicated modals (openPOReceive / openTransferReceive),
       // never here — that kept a document from posting stock twice.
       if(['received','closed','invoiced','confirmed','approved','resolved'].includes(to)) notifyRecordDone(state.model, formRec[m.pk]);  // record done → PDF/Drive/notify
@@ -3411,7 +3486,7 @@ async function postTransfer(t){ try{
   if(await movementExists('Transfer '+t.transfer_ref)){ toast('This transfer was already received — not posted again.',true); return; }
   const lines=await db.children(MODELS.transfers.o2m, t.transfer_ref); const cm=await prodCostMap();
   // Soft best-before warning — flag products that have finished stock already past best-before.
-  try{ const _today=todayISO(); const _bad={}; (await db.list('production_batches',{})).forEach(b=>{ const bb=b.best_before?String(b.best_before).slice(0,10):''; if(bb && bb<_today && (!_bad[b.product_sku]||bb<_bad[b.product_sku])) _bad[b.product_sku]=bb; });
+  try{ const _today=todayISO(); const _bad={}; dropCancelled(await db.list('production_batches',{})).forEach(b=>{ const bb=b.best_before?String(b.best_before).slice(0,10):''; if(bb && bb<_today && (!_bad[b.product_sku]||bb<_bad[b.product_sku])) _bad[b.product_sku]=bb; });
     const _mv=[...new Set(lines.map(l=>l.product_sku))].filter(s=>_bad[s]);
     if(_mv.length){ const _pn={}; (await db.list('products',{})).forEach(p=>_pn[p.sku]=p.name);
       if(!confirm('⚠ Best-before warning — these products have finished stock past best-before:\n\n'+_mv.map(s=>'• '+(_pn[s]||s)+' (best before '+_bad[s]+')').join('\n')+'\n\nMake sure you are not shipping expired packs. Proceed with the transfer?')) return; } }catch(e){}
@@ -3432,7 +3507,7 @@ async function sendRFQ(){
   if(!lines.length){ toast('Add & save order lines first',true); return; }
   try{
     formRec.status='rfq';
-    await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'rfq'});
+    await formUpdate('purchase_orders','po_ref',formRec.po_ref,{status:'rfq'});
     sysLog('purchase_orders',formRec.po_ref,'📤 RFQ sent to '+(formRec.supplier_name||'vendor')+' — requesting availability + pricing, by '+CURRENT_USER);
     renderForm();
     sendPODraft();   // status is now 'rfq' → renders the RFQ draft
@@ -3481,7 +3556,7 @@ async function poQuoteApply(){
   try{
     await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
     formChildren=updated; formRec.status='quoted';
-    await db.update('purchase_orders','po_ref',formRec.po_ref,{status:'quoted'});
+    await formUpdate('purchase_orders','po_ref',formRec.po_ref,{status:'quoted'});
     sysLog('purchase_orders',formRec.po_ref,'📝 Vendor quotation recorded'+(notes.length?(' — short: '+notes.join('; ')):' — full availability')+' by '+CURRENT_USER);
     for(const v of _vars){ try{ await db.create('variance_log',v); }catch(e){} }   // log vendor-availability shortfalls (non-costed)
     closeModal(); toast('Quotation saved'+(_vars.length?(' · '+_vars.length+' supply shortfall(s) flagged'):'')+' — review, then Issue PO'); renderForm();
@@ -3556,7 +3631,7 @@ async function poConfirmApply(){
     formChildren=updated; formRec.status='confirmed';
     if(eta) formRec.expected_delivery=eta;
     const _upd={status:'confirmed'}; if(eta) _upd.expected_delivery=eta;
-    await db.update('purchase_orders','po_ref',formRec.po_ref,_upd);
+    await formUpdate('purchase_orders','po_ref',formRec.po_ref,_upd);
     if(eta) changes.push('expected delivery '+eta);
     sysLog('purchase_orders',formRec.po_ref, (changes.length?('🧾 PO issued with adjustments — '+changes.join('; ')):'🧾 PO issued from quotation — qty = vendor availability')+' by '+CURRENT_USER);
     notifyRecordDone('purchase_orders', formRec.po_ref);   // issued → generate PDF → Drive → notify
@@ -3648,7 +3723,7 @@ async function poUpdateCharges(){
   const d=Math.max(0,+($('poDisc')||{}).value||0), f=Math.max(0,+($('poFee')||{}).value||0);
   const payee=($('poPayee')||{}).value||'Supplier';
   const prov=/fleet/i.test(payee)?(($('poProv')||{}).value||'').trim():'';
-  try{ await db.update('purchase_orders','po_ref',formRec.po_ref,{discount:d,delivery_fee:f,delivery_payee:payee,delivery_provider:prov});
+  try{ await formUpdate('purchase_orders','po_ref',formRec.po_ref,{discount:d,delivery_fee:f,delivery_payee:payee,delivery_provider:prov});
     formRec.discount=d; formRec.delivery_fee=f; formRec.delivery_payee=payee; formRec.delivery_provider=prov;
     sysLog('purchase_orders',formRec.po_ref,'💵 Charges updated — discount ₱'+d+' · delivery ₱'+f+' payable to '+payee+(prov?' ('+prov+')':'')+' by '+CURRENT_USER);
     toast('Charges updated — billing recalculated'); renderForm();
@@ -3666,19 +3741,40 @@ function openPayment(){
     <div class="fld"><label>Method</label><div class="val"><select id="pay_method" style="width:180px">${PO_PAY_METHODS.map(x=>`<option>${x}</option>`).join('')}</select></div></div>
     <div class="fld"><label>Date</label><div class="val"><input id="pay_date" type="date" value="${today}" style="width:180px"></div></div>
     <div class="fld"><label>Note</label><div class="val"><input id="pay_note" placeholder="reference / remarks (optional)" style="width:100%"></div></div>
+    ${(window._poPay||[]).length?`<div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12.5px">
+      <b>Already recorded on this PO</b> — check before adding another:
+      <table style="margin-top:4px"><tbody>${(window._poPay||[]).map(x=>`<tr><td class="mini">${esc(String(x.paid_at||'').slice(0,10))}</td><td class="mini">${esc(x.method||'—')}</td><td class="num mini"><b>${P(+x.amount||0)}</b></td><td class="mini" style="color:var(--muted)">${esc(x.paid_by||'')}${x.note?' · '+esc(x.note):''}</td></tr>`).join('')}</tbody></table></div>`:''}
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="paymentApply()">💾 Save payment</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   $('overlay').classList.add('on');
 }
 async function paymentApply(){
   const amt=+($('pay_amt')||{}).value||0; if(!(amt>0)){ toast('Enter a payment amount',true); return; }
   const method=($('pay_method')||{}).value||''; const paid_at=($('pay_date')||{}).value||todayISO(); const note=($('pay_note')||{}).value||'';
+  const _amt=Math.round(amt*100)/100;
+  /* Double-encoding guard. Two people settle the same bill, or one person clicks
+     twice on a slow connection, and the PO reads as paid twice — which quietly
+     understates payables and is painful to unpick later. A payment for the same
+     PO, the same amount and the same method on the same day is almost certainly
+     the same payment, so say so and make confirming it deliberate. Genuine
+     split payments still go through — you just have to mean it. */
+  const _dupes=(window._poPay||[]).filter(x=>
+    Math.abs((+x.amount||0)-_amt)<0.005 &&
+    String(x.method||'')===String(method) &&
+    String(x.paid_at||'').slice(0,10)===String(paid_at).slice(0,10));
+  if(_dupes.length){
+    const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
+    const lines=_dupes.map(x=>'• '+P(+x.amount||0)+' · '+(x.method||'—')+' · '+(String(x.paid_at||'').slice(0,10))
+      +(x.paid_by?(' · recorded by '+x.paid_by):'')+(x.note?(' · '+x.note):'')).join('\n');
+    if(!confirm('This looks like a payment you have already recorded.\n\n'+_dupes.length+' existing payment'+(_dupes.length>1?'s':'')+' on '+formRec.po_ref+' with the same amount, method and date:\n\n'+lines
+      +'\n\nOK = record it anyway (a genuine second payment)\nCancel = stop, nothing is saved')) return;
+  }
   try{
-    await db.create('po_payments',{po_ref:formRec.po_ref, amount:Math.round(amt*100)/100, method, paid_at, note, paid_by:CURRENT_USER});
+    await db.create('po_payments',{po_ref:formRec.po_ref, amount:_amt, method, paid_at, note, paid_by:CURRENT_USER});
     window._poPay = await poPayments(formRec.po_ref);
     const billable=poBillable(formRec,formChildren); const paid=(window._poPay||[]).reduce((s,p)=>s+(+p.amount||0),0);
     const ps = paid<=0.005?'unpaid':((billable-paid)>0.5?'partial':'paid');
     formRec.payment_status=ps;
-    await db.update('purchase_orders','po_ref',formRec.po_ref,{payment_status:ps});
+    await formUpdate('purchase_orders','po_ref',formRec.po_ref,{payment_status:ps});
     sysLog('purchase_orders',formRec.po_ref,'💵 Payment ₱'+(Math.round(amt*100)/100).toLocaleString('en-PH')+' ('+method+') by '+CURRENT_USER+' — now '+ps+' (paid ₱'+Math.round(paid).toLocaleString('en-PH')+' of ₱'+Math.round(billable).toLocaleString('en-PH')+')');
     closeModal(); toast('Payment recorded — '+ps); renderForm();
   }catch(e){ toast(e.message,true); }
@@ -3779,7 +3875,7 @@ async function _poReceiveApply(){
     if(deltas.length){ const res=await postReceiptDelta(formRec, deltas, loc); }
     // A PO with one delivery in and another still to come now says so.
     formRec.status = willClose ? 'received' : 'partial';
-    await db.update('purchase_orders','po_ref',formRec.po_ref,{status:formRec.status});
+    await formUpdate('purchase_orders','po_ref',formRec.po_ref,{status:formRec.status});
     const batchQty=deltas.reduce((s,d)=>s+(+d.recvKg||0),0);
     sysLog('purchase_orders',formRec.po_ref, '📦 '+(willClose?'Final receipt':'Batch receipt')+' by '+CURRENT_USER+' — '+Math.round(batchQty*100)/100+' unit(s) this batch'+(willClose?' · PO closed':' · still open for more')+(notes.length?(' — '+notes.join('; ')):''));
     for(const v of _vars){ try{ await db.create('variance_log',v); }catch(e){} }
@@ -3824,7 +3920,7 @@ async function _transferReceiveApply(){
   try{
     await db.replaceChildren(MODELS.transfers.o2m, formRec.transfer_ref, updated);
     formChildren=updated; formRec.status='received';
-    await db.update('transfers','transfer_ref',formRec.transfer_ref,{status:'received'});
+    await formUpdate('transfers','transfer_ref',formRec.transfer_ref,{status:'received'});
     sysLog('transfers',formRec.transfer_ref, '📥 Received by '+CURRENT_USER+(short?(' — '+short+' line(s) short'):' — all lines complete'));
     await postTransfer(formRec);
     notifyRecordDone('transfers', formRec.transfer_ref);   // PDF → Drive → notify
@@ -3911,7 +4007,8 @@ async function renderDashboard(){
   const siteArr=Object.keys(siteVal).map(k=>({label:(LOCNAME[k]||k)+(k==='pasig'?' (finished goods)':k==='bulacan'?' (raw materials)':''),value:siteVal[k]})).sort((a,b)=>b.value-a.value);
   const mh=moneyHidden();
   // ---- owner 6 questions ----
-  let _tl=[],_pb=[],_bi=[],_pol=[],_dl=[];
+  let _tl=[],_pb=[],_bi=[],_pol=[],_dl=[],_tr=[];
+  try{_tr=await db.list('transfers',{})}catch(e){}
   try{_tl=await db.list('transfer_lines',{})}catch(e){}
   try{_pb=await db.list('production_batches',{})}catch(e){}
   try{_bi=await db.list('batch_issues',{})}catch(e){}
@@ -3953,13 +4050,22 @@ async function renderDashboard(){
     let v=0; (_lineByPo[p.po_ref]||[]).forEach(l=>{ let pr=(+l.price_kg||0)||_ingP[l.ingredient_sku]||0; if(!pr && _stkPO.has(p.po_ref)) pr=_stkCost; v+=poRemainQty(l)*pr; });
     if(v>0){ estPO+=v; estPOcount++; } });
   const _sum=(a,f)=>a.reduce((s,x)=>s+(+f(x)||0),0);
-  const q1o=_sum(_pol,l=>poOrderQty(l)), q1r=_sum(_pol,l=>l.received_kg); const q1=q1o?Math.round(q1r/q1o*100):null;
-  const q2=_sum(_bi,z=>z.actual_raw_g)-_sum(_bi,z=>z.expected_raw_g);
-  const q3s=_sum(_tl,l=>l.sent_packs), q3r=_sum(_tl,l=>l.received_packs); const q3=q3s?Math.round(q3r/q3s*100):null;
+  /* Cancelled documents must not drag these percentages down. An order that was
+     called off because the supplier had nothing was never going to be received,
+     so counting it as 0% delivered is a lie about the supplier. Same for a
+     cancelled transfer and a cancelled batch. */
+  const _polLive=_liveLines(_pol, po, 'po_ref');
+  const _tlLive =_liveLines(_tl, _tr, 'transfer_ref');
+  const _pbLive =dropCancelled(_pb);
+  const _biLive =_liveLines(_bi, _pb, 'batch_ref');
+  const q1o=_sum(_polLive,l=>poOrderQty(l)), q1r=_sum(_polLive,l=>l.received_kg); const q1=q1o?Math.round(q1r/q1o*100):null;
+  const q2=_sum(_biLive,z=>z.actual_raw_g)-_sum(_biLive,z=>z.expected_raw_g);
+  const q3s=_sum(_tlLive,l=>l.sent_packs), q3r=_sum(_tlLive,l=>l.received_packs); const q3=q3s?Math.round(q3r/q3s*100):null;
   const q4d=_sum(_dl,l=>l.dispatched_packs), q4c=_sum(_dl,l=>l.confirmed_packs); const q4=q4d?Math.round(q4c/q4d*100):null;
   const _ic={}; ing.forEach(i=>_ic[i.sku]=+i.moving_avg_cost_kg||+i.list_price_kg||0);
-  const _openB=new Set(_pb.filter(b=>b.status!=='confirmed').map(b=>b.batch_ref)); let wipV=0;
-  _bi.forEach(z=>{ if(_openB.has(z.batch_ref)) wipV+=(+z.actual_raw_g||+z.expected_raw_g||0)/1000*(_ic[z.ingredient_sku]||0); });
+  // WIP is work that will still finish — a cancelled batch is not work in progress
+  const _openB=new Set(_pbLive.filter(b=>b.status!=='confirmed').map(b=>b.batch_ref)); let wipV=0;
+  _biLive.forEach(z=>{ if(_openB.has(z.batch_ref)) wipV+=(+z.actual_raw_g||+z.expected_raw_g||0)/1000*(_ic[z.ingredient_sku]||0); });
   const _lossLocs=new Set(openVars.map(v=>v.location||'—')); const _na='<span class="hint">no data yet</span>';
   const qrow=(q,ans,tone)=>`<div class="qrow" onclick="openModel('reporting')"><span class="qmark">?</span><span class="qq">${q}</span><span class="qa"${tone?` style="color:${tone}"`:''}>${ans}</span></div>`;
   const ownerCard=`<div class="card" style="margin-bottom:14px"><h2>The 6 questions — answered from live data</h2>
@@ -6148,6 +6254,9 @@ const KSHEET_CSS=`  :root{
     display:flex;flex-direction:column;
   }
   .mix-block .mix-title{font-size:17px;font-weight:800;margin:0 0 2px;}
+  .mix-block .mix-prot{font-size:13px;font-weight:700;color:#1D9E75;margin:0 0 3px;letter-spacing:.01em}
+  td.mix .prot{font-size:11px;font-weight:700;color:#1D9E75;margin-top:1px}
+  td.mix .sku{font-size:9.5px;font-family:ui-monospace,Menlo,Consolas,monospace;color:#6b675f;margin-top:1px;letter-spacing:.02em}
   .mix-block .mix-sub{color:var(--sub);font-size:11.5px;margin-bottom:8px;}
   .mix-block .mix-sub b{color:var(--ink);}
 
@@ -6386,6 +6495,43 @@ function _ksCat(cat){ const s=String(cat||'');
   for(const c of KSHEET_CATS) if(c.re.test(s)) return c;
   return KSHEET_CATS[KSHEET_CATS.length-1]; }
 function _ksDot(cat){ return `<span class="cat-dot" style="background:${_ksCat(cat).c}"></span>`; }
+/* WHAT IS ACTUALLY IN THE MIX.
+   The kitchen should read "Duck + Pork" off the sheet without decoding a SKU or
+   reading nine ingredient lines. `source` is null on every ingredient in the
+   master, so the animal comes from the ingredient NAME — "Pork shoulder",
+   "Duck with bones" — across the MEAT categories only; vegetables, seeds and
+   fruit are not what anyone means by "the mix".
+
+   Order matters to how the team says it: if the product's name or SKU mentions
+   the animals, follow that order ("BARF Duck+Pork" → Duck + Pork); otherwise
+   lead with whichever contributes the most weight. */
+const _KS_MEAT_CATS=['muscle','organ','bones','liver','secreting'];
+const _KS_NOT_ANIMAL=/^(spinach|broccoli|carrot|squash|chia|strawberr|blackberr|apple|shiitake|mushroom|water|eggshell|kelp|pumpkin|banana|blueberr)/i;
+function _ksProteins(ings, hint){
+  const g={};
+  (ings||[]).forEach(function(i){
+    if(_KS_MEAT_CATS.indexOf(i.cat)<0) return;
+    const nm=String(i.name||'').replace(/\(.*?\)/g,' ').trim();
+    if(!nm || _KS_NOT_ANIMAL.test(nm)) return;
+    const parts=nm.split(/[\s,.\u00b7\u2013\u2014-]+/).filter(Boolean);
+    let a=parts[0]||'';
+    if(/^(whole|raw|ground|fresh|live)$/i.test(a)) a=parts[1]||a;
+    if(!a) return;
+    a=a.charAt(0).toUpperCase()+a.slice(1).toLowerCase();
+    g[a]=(g[a]||0)+(+i.grams||0);
+  });
+  const names=Object.keys(g);
+  if(!names.length) return '';
+  const h=String(hint||'').toLowerCase();
+  names.sort(function(x,y){
+    const ix=h.indexOf(x.toLowerCase()), iy=h.indexOf(y.toLowerCase());
+    if(ix>=0 && iy>=0) return ix-iy;
+    if(ix>=0) return -1;
+    if(iy>=0) return 1;
+    return g[y]-g[x];
+  });
+  return names.join(' + ');
+}
 const _ksKg=g=>(Math.round((+g||0))/1000).toFixed(3)+' kg';
 // Tagalog prep notes, keyed off the feeding format exactly as the dashboard does,
 // plus any either/or ingredient (a "/" in the name) and a bone-handling reminder.
@@ -6430,8 +6576,14 @@ async function prodKitchenSheet(){
     const perPack=bom.reduce((s,x)=>s+x.grams,0);
     const packG=+p.pack_g||Math.round(perPack);
     dayPacks+=packs; dayKg+=(packG*packs)/1000;
+    /* The printed sheet used to title each mix with `p.variant` — which in this
+       master is the PACK SIZE ("500g", "45g", "700ml"). So the kitchen received
+       a sheet headed "Raw Feeding — BARF Mix — 500g" and had to work out which
+       mix that was. Use the product's real name, with the variant appended only
+       when it says something the name does not. */
     return {sku:l.product_sku, packs, packG, perPack,
-      fmt:p.group_1||'', mixCat:p.group_2||'', name:p.variant||p.family||l.name||l.product_sku,
+      fmt:p.group_1||'', mixCat:p.group_2||'',
+      name:prodLabel({...p, sku:l.product_sku, name:(p.name||l.name||l.product_sku)},{noSku:true}),
       animal:p.animal||'Dog', ings:bom};
   });
   // Standalone output ingredients get their own block so the prep team sees them on the same sheet.
@@ -6443,7 +6595,7 @@ async function prodKitchenSheet(){
 
   const fill=n=>Array.from({length:n},()=>'<div class="line"></div>').join('');
   const summaryRows=items.map(x=>`<tr>
-      <td class="mix">${esc2([x.fmt,x.mixCat,x.name].filter(Boolean).join(' — '))}</td>
+      <td class="mix">${esc2([x.fmt,x.mixCat,x.name].filter(Boolean).join(' — '))}${(()=>{const pr=_ksProteins(x.ings,(x.name||"")+" "+(x.sku||"")); return pr?`<div class="prot">${esc2(pr)}</div>`:"";})()}<div class="sku">${esc2(x.sku)}</div></td>
       <td class="num">${x.packs}</td>
       <td class="num">${x.packG} g</td></tr>`).join('')
     + outItems.map(x=>`<tr><td class="mix">Output ingredient — ${esc2(x.name)}</td><td class="num">—</td><td class="num">${_ksKg(x.needG)}</td></tr>`).join('');
@@ -6499,6 +6651,7 @@ async function prodKitchenSheet(){
     const legend=usedCats.map(k=>{ const c=KSHEET_CATS.find(z=>z.k===k); return `<span class="legend-item">${_ksDot(k)}${esc2(c.l)}</span>`; }).join('');
     return `<div class="mix-block">
       <div class="mix-title">${esc2([x.fmt,x.mixCat,x.name].filter(Boolean).join(' — '))}</div>
+      ${(()=>{const pr=_ksProteins(x.ings,(x.name||"")+" "+(x.sku||"")); return pr?`<div class="mix-prot">${esc2(pr)}</div>`:"";})()}
       <div class="mix-sub"><b>${x.packs} packs</b> × ${_ksKg(x.packG)} (${esc2(x.animal)}) planned<span class="sku-badge">${esc2(x.sku)}</span></div>
       <div class="mix-content">
         <div class="ingred-col">
@@ -6971,7 +7124,7 @@ async function prodActualsApply(){
        writes its own batch, marked kind='output', alongside the product batches
        of the same run. Quantities live in their own kg columns so nothing that
        counts PACKS is disturbed. */
-    let outRecs=[];
+    let outRecs=[]; const _outFail=[];
     try{
       // re-confirming a run must not duplicate the prep rows
       if(isLive()){ try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef)+'&kind=eq.output',{method:'DELETE',prefer:'return=minimal'}); }catch(e){} }
@@ -6991,7 +7144,7 @@ async function prodActualsApply(){
           output_kg:madeKg, raw_used_kg:rawKg, from_stock_kg:procKg,
           yield_pct:(rawKg>0?Math.round((madeKg/rawKg)*1000)/10:null) };
         try{ await db.create('production_batches',rec); outRecs.push(rec); }
-        catch(e){ console.warn('output batch failed',rec.batch_ref,String(e&&e.message||e)); }
+        catch(e){ _outFail.push(rec.batch_ref); console.warn('output batch failed',rec.batch_ref,String(e&&e.message||e)); }
       }
     }catch(e){ console.warn('output batches failed',String(e&&e.message||e)); }
 
@@ -7045,6 +7198,13 @@ async function prodActualsApply(){
     if(recs.length) notifyRecordDone('production_batches', prodRunRef, {batch_ref:prodRunRef,status:'confirmed',operator:CURRENT_USER,production_date:prodPlanDate}, recs);
     try{ await prodSavePlanDoc('confirmed'); }catch(e){}
     try{ await coSyncStatuses(); }catch(e){}   // packs made → Partially Fulfilled / Completed
+    if(_outFail.length){
+      // the stock moved either way; what is missing is the RECORD of the prep
+      sysLog('production_batches',prodRunRef,'⚠ '+_outFail.length+' prep batch record(s) could not be written — run sql/wr_20260818_prep_batches.sql');
+      alert('⚠ The stock movements posted correctly, but '+_outFail.length+' PREP BATCH record(s) could not be saved to the Production list.\n\n'
+        +'This almost always means the database is missing the columns a prep batch needs (kind, output_kg, raw_used_kg, yield_pct).\n\n'
+        +'Fix: run sql/wr_20260818_prep_batches.sql in Supabase → SQL editor, then confirm the run again — section 4 of that script also rebuilds any prep already posted, straight from the ledger.');
+    }
     toast('Confirmed · '+posted+' product(s)'+(nOut?', '+nOut+' output ingredient(s)':'')+', '+drawn+' issue(s), yield captured'
       +((_lblDone||_supDone)?(' · '+_lblDone+' label + '+_supDone+' supply line(s) deducted'):'')+(failed?(' · ⚠ '+failed+' failed'):''), failed>0);
     prodRunRef=''; prodPlanLines=[]; prodOutLines=[]; prodPackStk=[]; prodPackSup=[]; window._prodAct=null; window._prodSub={}; closeModal(); await renderProdPlan();
@@ -7457,6 +7617,16 @@ async function _countApprove(){
   let flags=0, failed=0;
   for(const l of countLines){ if(l.counted_qty===''||l.counted_qty==null) continue; const gap=(+l.counted_qty)-(+l.book_qty||0); if(Math.abs(gap)<0.0001) continue; flags++;
     const isStk = l.sticker || String(l.ref_sku).startsWith('STK-');
+    /* What the adjustment is WORTH. This used to post at unit_cost 0, and
+       stock_balance values stock as SUM(qty × unit_cost) — so counting 100 kg
+       down to 60 removed the 40 kg but left every peso of it on the books. A
+       count that corrects an overstated opening would fix the quantity and
+       leave the value overstated, which is the harder half to notice.
+       Same figure the variance log already used; now the movement uses it too. */
+    const _kind = isStk ? 'sticker' : (prodSkus.has(l.ref_sku)?'product':'ingredient');
+    let uc=0;
+    if(_kind==='ingredient') uc=(+(ings[l.ref_sku]||{}).moving_avg_cost_kg||+(ings[l.ref_sku]||{}).list_price_kg||0)/1000;
+    else if(_kind==='product') uc=cm[l.ref_sku]||0;
     if(isStk){
       // stickers live on the product per site — write the counted value straight back
       const psku=l.product_sku||String(l.ref_sku).slice(4);
@@ -7464,11 +7634,9 @@ async function _countApprove(){
       try{ await db.update('products','sku',psku,{[field]:+l.counted_qty}); }catch(e){ failed++; }
     } else {
       const kind = prodSkus.has(l.ref_sku)?'product':'ingredient';
-      try{ await db.create('inventory_movements',{kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:0,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){ failed++; }
+      try{ await db.create('inventory_movements',{kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:uc,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){ failed++; }
     }
-    // value the shrinkage so "₱ at risk" reflects real loss (ingredient moving-avg per g, or product recipe cost)
-    const kind2 = (l.sticker||String(l.ref_sku).startsWith('STK-'))?'sticker':(prodSkus.has(l.ref_sku)?'product':'ingredient');
-    let uc=0; if(kind2==='ingredient'){ uc=(+(ings[l.ref_sku]||{}).moving_avg_cost_kg||0)/1000; } else if(kind2==='product'){ uc=cm[l.ref_sku]||0; }
+    const kind2=_kind;
     const gval=Math.round(gap*uc*100)/100;
     try{ await db.create('variance_log',{check_type:'3.5 · Shrinkage',source_ref:countRec.count_ref,expected:+l.book_qty||0,actual:+l.counted_qty,gap_qty:gap,gap_value:gval,location:countRec.location_code,responsible_user:CURRENT_USER,status:'open',note:(l.name||l.ref_sku)+' book vs counted'}); }catch(e){}
   }
@@ -7555,7 +7723,9 @@ function _repNote(meaning, watch){
 function _tfoot(cells){ return '<tbody style="border-top:2px solid var(--line,#ddd)"><tr>'+cells.map(c=>'<td'+(c.n?' class="num"':'')+'><b>'+c.v+'</b></td>').join('')+'</tr></tbody>'; }
 // Q1 — ordered vs received vs paid (3-way match, Check 1)
 async function rptReceiving(){
-  const po=await _L('purchase_orders'), pol=await _L('po_lines'), gr=await _L('goods_receipts'), grl=await _L('gr_lines'), inv=await _L('supplier_invoices');
+  // a called-off order was never going to arrive — scoring it as 0% received
+  // makes an honest supplier look unreliable
+  const po=dropCancelled(await _L('purchase_orders')), pol=await _L('po_lines'), gr=await _L('goods_receipts'), grl=await _L('gr_lines'), inv=await _L('supplier_invoices');
   const grefPo={}; gr.forEach(g=>grefPo[g.gr_ref]=g.po_ref);
   const grVal={}; grl.forEach(l=>{ const p=grefPo[l.gr_ref]; if(p) grVal[p]=(grVal[p]||0)+((+l.received_kg||0)*(+l.price_kg||0)); });
   const invVal={}; inv.forEach(i=>{ if(i.po_ref) invVal[i.po_ref]=(invVal[i.po_ref]||0)+(+i.amount||0); });
@@ -7579,7 +7749,7 @@ async function rptReceiving(){
 }
 // Q2 — ingredients fully used, or skimmed/wasted (Check 2/3)
 async function rptUsage(){
-  const b=await _L('production_batches'), iss=await _L('batch_issues'), prod=await _L('products'), ing=await _L('ingredients');
+  const b=dropCancelled(await _L('production_batches')), iss=await _L('batch_issues'), prod=await _L('products'), ing=await _L('ingredients');
   const pn={}; prod.forEach(p=>pn[p.sku]=p.name); const ic={}; ing.forEach(i=>ic[i.sku]=+i.moving_avg_cost_kg||+i.list_price_kg||0);
   const rows=b.map(x=>{ const li=iss.filter(z=>z.batch_ref===x.batch_ref);
     const exp=li.reduce((s,z)=>s+(+z.expected_raw_g||0),0), act=li.reduce((s,z)=>s+(+z.actual_raw_g||0),0);
@@ -7600,7 +7770,7 @@ async function rptUsage(){
 }
 // Q3 — did everything produced reach Pasig (Check 4)
 async function rptToPasig(){
-  const tl=await _L('transfer_lines'), mov=await _L('inventory_movements'), prod=await _L('products');
+  const tl=_liveLines(await _L('transfer_lines'), await _L('transfers'), 'transfer_ref'), mov=await _L('inventory_movements'), prod=await _L('products');
   const pn={}; prod.forEach(p=>pn[p.sku]=p.name);
   const produced={}; mov.forEach(m=>{ if(m.movement_type==='batch_output') produced[m.ref_sku]=(produced[m.ref_sku]||0)+(+m.qty||0); });
   const rows=tl.map(l=>({ref:l.transfer_ref,sku:l.product_sku,prod:pn[l.product_sku]||l.product_sku,sent:+l.sent_packs||0,rcv:+l.received_packs||0,gap:(+l.received_packs||0)-(+l.sent_packs||0)}));
@@ -8659,12 +8829,51 @@ async function openingExportXlsx(){ const rows=_openingRowsForOut(); if(!rows.le
   try{ await _excelStyled(_openingTabs(S),'WR_Opening_balance'+suffix+'.xlsx',_opCols(false)); toast('Opening balance saved ('+_opLoc+') — 4 styled tabs'); }
   catch(e){ if(typeof XLSX!=='undefined'){ _openingWriteXlsx(S,'WR_opening_balance'+suffix+'.xlsx'); } else { _openingWriteCsv(S,'WR_opening_balance'+suffix+'.csv'); } toast('Opening balance saved ('+_opLoc+') — 4 tabs'); }
 }
+/* Has this site already been TRADING? An opening balance is a photograph of the
+   shelf on day one. Re-uploading one after receipts, production and transfers
+   have been posted double-counts every item that was received before the count
+   was taken: the PO put it in, and the opening declares it is there again.
+   The upload itself is safe to repeat — it replaces the previous opening for
+   that site — but nothing can make it safe to declare an opening AFTER the
+   ledger has moved. That is what a count is for. */
+async function _openingActivity(loc){
+  const out={receipts:0, production:0, transfers:0, first:'', last:''};
+  try{
+    let rows;
+    if(isLive()) rows=await sb('inventory_movements?select=movement_type,created_at&location_code=eq.'+encodeURIComponent(loc)+'&movement_type=neq.opening&limit=2000');
+    else rows=(DEMO.inventory_movements||[]).filter(m=>m.location_code===loc && m.movement_type!=='opening');
+    (rows||[]).forEach(r=>{
+      const t=String(r.movement_type||'');
+      if(/receipt/.test(t)) out.receipts++;
+      else if(/batch|processing|production|issue/.test(t)) out.production++;
+      else if(/transfer/.test(t)) out.transfers++;
+      const d=String(r.created_at||'').slice(0,10);
+      if(d){ if(!out.first||d<out.first) out.first=d; if(!out.last||d>out.last) out.last=d; }
+    });
+  }catch(e){}
+  out.total=out.receipts+out.production+out.transfers;
+  return out;
+}
 async function openingDoImport(){ if(!_opReport)return;
   if(curRole&&curRole()!=='Admin'){ toast('Only an Admin can post opening balances',true); return; }
   const valid=_opReport.filter(d=>d.st==='ok');
   if(!valid.length){ toast('Nothing to post',true); return; }
+  const upLoc0=(_opLoc==='pasig'?'pasig':'bulacan');
+  const act=await _openingActivity(upLoc0);
+  if(act.total>0){
+    const msg='⚠ '+upLoc0.toUpperCase()+' HAS ALREADY BEEN TRADING.\n\n'
+      +act.total+' movement(s) are posted there that are not opening balances:\n'
+      +'  • '+act.receipts+' purchase receipt(s)\n  • '+act.production+' production movement(s)\n  • '+act.transfers+' transfer(s)\n'
+      +(act.first?('  (between '+act.first+' and '+act.last+')\n'):'')
+      +'\nAn opening balance says "this is what is on the shelf before anything happened". Posting one now DOUBLE-COUNTS every item that arrived on a PO before you counted it — the receipt put it in, and this declares it is there again.\n\n'
+      +'What you almost certainly want instead:\n'
+      +'  Operations → Weekly Inventory → new count at '+upLoc0+'.\n'
+      +'  A count compares what you physically have against the book figure and posts only the DIFFERENCE, so nothing is counted twice and the gap is recorded as a variance.\n\n'
+      +'OK = post the opening anyway (you have checked the dates yourself)\nCancel = stop, and use a count instead';
+    if(!confirm(msg)) return;
+  }
   if(_postLock){ toast('Still posting…',true); return; } _postLock=true;
-  const upLoc=(_opLoc==='pasig'?'pasig':'bulacan');
+  const upLoc=upLoc0;
   const note='Opening upload '+upLoc+' '+todayISO();
   /* Value the opening stock. stock_balance is SUM(qty × unit_cost), so posting 0 here
      makes every opening item worth nothing. The ledger's unit basis is not uniform:
