@@ -2780,19 +2780,47 @@ function stickerSheets(pieces, perSheet){ pieces=+pieces||0; perSheet=+perSheet|
    on hand is.
    ============================================================================ */
 let _wdtDate='', _wdtRows=[], _wdtCo=[], _wdtRaw=[], _wdtSrc={};
+/* Which SAVED plot to read, and the date to read the world as at. Defaulting to
+   "the latest plot" is right most days, but a week is often reviewed after the
+   fact — and then "how much had we made by Friday" is a different question from
+   "how much have we made now". _wdtAsOf answers the first. */
+let _wdtPlotRef='', _wdtAsOf='', _wdtPlots=[];
 function wdtWeekOf(d){ return d||MRPDATE||todayISO(); }
 async function wdtLoad(){
-  const date=wdtWeekOf(_wdtDate);
+  // every saved plot, newest first — this is the list the picker offers
+  const plots=(await mrpPlans().catch(()=>[])||[]).slice()
+    .sort((a,b)=>String(b.plan_date||b.date||'').localeCompare(String(a.plan_date||a.date||'')));
+  _wdtPlots=plots.map(x=>({ref:(x.data&&x.data.ref)||x.ref||'', date:String(x.plan_date||x.date||'').slice(0,10),
+                           locked:!!(x.data&&x.data.locked)}));
+  /* Which plot are we looking at? An explicit choice wins; otherwise the plot
+     for the chosen week; otherwise the most recent one saved. */
+  let plot=null;
+  if(_wdtPlotRef) plot=plots.find(x=>(((x.data&&x.data.ref)||x.ref||'')===_wdtPlotRef))||null;
+  if(!plot && _wdtDate) plot=plots.find(x=>String(x.plan_date||x.date||'').slice(0,10)===String(_wdtDate))||null;
+  if(!plot && !_wdtDate && !_wdtPlotRef) plot=plots[0]||null;
+  const date=plot?String(plot.plan_date||plot.date||'').slice(0,10):wdtWeekOf(_wdtDate);
+  /* "As of" is an explicit choice, not a silent default. Left blank the report
+     is live and counts everything, which is what it did before this existed —
+     defaulting it to today would have quietly dropped any batch someone posted
+     with a forward date. Set it, and the whole page reads as at that day. */
+  const asOf=_wdtAsOf||'';
+  const histor=!!asOf;
   const prods=await db.list('products',{});
   const pBy={}; prods.forEach(p=>pBy[p.sku]=p);
   const stock={}; try{
-    if(isLive()) (await db.list('stock_balance',{})).forEach(b=>{ if(b.kind==='product') stock[b.ref_sku]=(stock[b.ref_sku]||0)+(+b.on_hand||0); });
+    /* As-of stock has to come off the LEDGER — stock_balance only ever knows
+       today. Reading a past Friday off today's balance would quietly answer a
+       different question than the one asked. */
+    if(histor){ (await db.list('inventory_movements',{})).forEach(m=>{
+        if(m.kind!=='product') return;
+        const d=String(m.created_at||m.production_date||'').slice(0,10);
+        if(d && d>asOf) return;
+        stock[m.ref_sku]=(stock[m.ref_sku]||0)+(+m.qty||0); }); }
+    else if(isLive()) (await db.list('stock_balance',{})).forEach(b=>{ if(b.kind==='product') stock[b.ref_sku]=(stock[b.ref_sku]||0)+(+b.on_hand||0); });
     else (DEMO.inventory_movements||[]).forEach(m=>{ if(m.kind==='product') stock[m.ref_sku]=(stock[m.ref_sku]||0)+(+m.qty||0); });
   }catch(e){}
   // 1 · the locked plot for this week, 2 · the demand table, 3 · custom orders
   const dem={}, src={};
-  const plots=await mrpPlans().catch(()=>[]);
-  const plot=(plots||[]).find(x=>String(x.plan_date||x.date||'').slice(0,10)===String(date));
   if(plot && plot.data && plot.data.demand){
     Object.keys(plot.data.demand).forEach(sku=>{ const q=+plot.data.demand[sku]||0; if(q>0){ dem[sku]=(dem[sku]||0)+q; src[sku]=(src[sku]||[]).concat(['plot '+(plot.data.ref||plot.ref||'')]); } });
   }
@@ -2807,7 +2835,9 @@ async function wdtLoad(){
   const made={}; try{ let rows;
     if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,production_date,kind&status=eq.confirmed&production_date=gte.'+encodeURIComponent(date));
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed'&&String(b.production_date||'')>=String(date));
-    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
+    (rows||[]).filter(b=>b.kind!=='output')
+      .filter(b=>!asOf || String(b.production_date||'')<=asOf)   // as-of: nothing after the date counts
+      .forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
   _wdtRows=Object.keys(dem).map(sku=>{
     const p=pBy[sku]||{sku,name:sku};
@@ -2848,7 +2878,7 @@ async function wdtLoad(){
               rawSku:p?p.sku:'', rawName:p?p.name:'', ohRawG:p?(+ohI[p.sku]||0):0, yieldPct:Math.round(y*1000)/10};
     }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat)||b.procG-a.procG);
   }catch(e){}
-  _wdtSrc={plot:plot?(plot.data&&plot.data.ref||plot.ref||''):'', date};
+  _wdtSrc={plot:plot?(plot.data&&plot.data.ref||plot.ref||''):'', date, asOf, histor};
 }
 function _wdtCover(r){
   if(!r.remaining) return '<span class="badge b-received">done</span>';
@@ -3265,6 +3295,13 @@ function wpPrint(){
   w.document.close(); w.focus(); setTimeout(()=>w.print(),250);
 }
 
+function wdtPickPlot(ref){
+  _wdtPlotRef=ref||'';
+  // choosing a plot moves the week with it, so the two controls never disagree
+  const p=(_wdtPlots||[]).find(x=>x.ref===_wdtPlotRef);
+  _wdtDate=p?p.date:'';
+  renderWDT();
+}
 async function renderWDT(){
   $('cp').innerHTML=`<div class="title">Weekly Demand Target <span onclick="openKB('wdt')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn sec" onclick="wdtPrint('products')">🖨 Product target</button>
@@ -3276,9 +3313,19 @@ async function renderWDT(){
   const tot=_wdtRows.reduce((s,r)=>s+r.target,0), rem=_wdtRows.reduce((s,r)=>s+r.remaining,0);
   const none=_wdtRows.filter(r=>r.remaining>0&&r.oh<=0).length;
   const cust=_wdtRows.filter(r=>r.isCustom).length;
-  let h=`<div class="repcard"><div class="repbar"><span>Week of</span>
-      <input type="date" value="${esc(_wdtSrc.date)}" onchange="_wdtDate=this.value;renderWDT()">
-      ${_wdtSrc.plot?`<span class="mini">from locked plot <b>${esc(_wdtSrc.plot)}</b></span>`:'<span class="mini" style="color:var(--earth,#b5762a)">no locked plot for this week — showing the demand table and custom orders only</span>'}</div>
+  let h=`<div class="repcard"><div class="repbar" style="flex-wrap:wrap;gap:10px">
+      <span>Demand plot</span>
+      <select onchange="wdtPickPlot(this.value)" style="max-width:340px">
+        <option value="" ${!_wdtPlotRef?'selected':''}>— latest saved plot —</option>
+        ${_wdtPlots.map(x=>`<option value="${esc(x.ref)}" ${_wdtPlotRef===x.ref?'selected':''}>${esc(x.ref||'(no ref)')} · ${esc(x.date)}${x.locked?' · locked':''}</option>`).join('')}
+      </select>
+      <span class="mini" style="color:var(--muted)">week of</span>
+      <input type="date" value="${esc(_wdtSrc.date)}" onchange="_wdtPlotRef='';_wdtDate=this.value;renderWDT()" title="Or pick the week directly — the plot saved for that date is used if there is one">
+      <span class="mini" style="color:var(--muted)">as of</span>
+      <input type="date" value="${esc(_wdtSrc.asOf||'')}" onchange="_wdtAsOf=this.value;renderWDT()" title="Leave blank for live. Set it to read the week as it stood on that day — packs made after it, and stock moved after it, are ignored.">
+      ${_wdtSrc.histor?`<button class="btn sec sm" onclick="_wdtAsOf='';renderWDT()">↺ live</button>`:'<span class="mini" style="color:var(--muted)">live</span>'}
+      ${_wdtSrc.plot?`<span class="mini">from plot <b>${esc(_wdtSrc.plot)}</b></span>`:'<span class="mini" style="color:var(--earth,#b5762a)">no saved plot for this week — showing the demand table and custom orders only</span>'}
+      ${_wdtSrc.histor?`<span class="tagf" style="background:#fff3d6;color:#7a5a10">as at ${esc(_wdtSrc.asOf)} — not today</span>`:''}</div>
     <div class="smart" style="margin:8px 0">
       <div class="stile"><div class="v">${tot}</div><div class="l">Packs demanded</div></div>
       <div class="stile"><div class="v" style="color:${rem?'var(--berry)':'#4e7a3e'}">${rem}</div><div class="l">Still to make</div></div>
@@ -3323,21 +3370,36 @@ async function renderWDT(){
 }
 function wdtPrint(which){
   const w=window.open('','_wdt','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; }
-  const css=`@page{size:A4;margin:14mm} *{box-sizing:border-box}
-    body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:12.5px}
-    h1{color:#4e7a3e;margin:0 0 2px;font-size:20px} .sub{color:#666;margin:0 0 14px;font-size:12px}
-    table{width:100%;border-collapse:collapse;margin-bottom:14px}
-    th{background:#4e7a3e;color:#fff;text-align:left;padding:6px 8px;font-size:11px}
-    td{padding:5px 8px;border-bottom:1px solid #eee}
-    td.n,th.n{text-align:right} tr.grp td{color:#fff;font-weight:800;padding:5px 8px}
-    tr.urgent td{background:#fdf3f0}
-    .tot{font-weight:700;border-top:2px solid #4e7a3e;background:#f6f8f4}
-    thead{display:table-header-group} tr{break-inside:avoid}`;
-  const hd=(t,s)=>`<h1>${esc(t)}</h1><div class="sub">Wholesome Rabbit · week of ${esc(_wdtSrc.date)}${_wdtSrc.plot?(' · '+esc(_wdtSrc.plot)):''} · printed ${esc(todayISO())}</div>`;
+  /* The layout used to fall apart on paper: the browser strips table and row
+     backgrounds unless print-color-adjust says otherwise, so the green headers,
+     the category bands and the red urgency rows all printed white — and a row
+     background set on <tr> is dropped by most print engines even then. Colours
+     are forced, backgrounds moved onto the cells, and the columns pinned so a
+     long product name can no longer squeeze the numbers into two lines. */
+  const css=`@page{size:A4;margin:12mm} *{box-sizing:border-box}
+    html,body{-webkit-print-color-adjust:exact;print-color-adjust:exact;color-adjust:exact}
+    body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:12px}
+    h1{color:#4e7a3e;margin:0 0 2px;font-size:20px}
+    .sub{color:#666;margin:0 0 14px;font-size:11.5px;line-height:1.5}
+    table{width:100%;border-collapse:collapse;margin-bottom:14px;table-layout:fixed}
+    th{background:#4e7a3e !important;color:#fff !important;text-align:left;padding:6px 8px;font-size:10.5px;
+       letter-spacing:.02em;vertical-align:bottom}
+    td{padding:5px 8px;border-bottom:1px solid #eee;vertical-align:top;
+       overflow-wrap:anywhere;word-break:break-word}
+    td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+    tr.grp td{color:#fff !important;font-weight:800;padding:5px 8px;border-bottom:none}
+    tr.urgent td{background:#fdf3f0 !important}
+    tr.tot td{font-weight:700;border-top:2px solid #4e7a3e;background:#f2f5ef !important}
+    col.w-n{width:8%} col.w-nn{width:11%} col.w-s{width:6%} col.w-d{width:12%}
+    thead{display:table-header-group} tfoot{display:table-footer-group} tr{break-inside:avoid}
+    @media print{ a{text-decoration:none;color:inherit} }`;
+  const hd=(t,s)=>`<h1>${esc(t)}</h1><div class="sub">Wholesome Rabbit · week of ${esc(_wdtSrc.date)}${_wdtSrc.plot?(' · plot '+esc(_wdtSrc.plot)):''}`
+    +`${_wdtSrc.histor?(' · <b>as at '+esc(_wdtSrc.asOf)+'</b>, not today'):''} · printed ${esc(todayISO())}</div>`;
   let body='';
   if(which==='products'){
     body=hd('Product target — by priority')+
-      `<table><thead><tr><th>#</th><th>Product</th><th>SKU</th><th class="n">Target</th><th class="n">Made</th><th class="n">Still to make</th><th class="n">On hand</th><th>Priority</th></tr></thead><tbody>`+
+      `<table><colgroup><col class="w-s"><col style="width:28%"><col style="width:17%"><col class="w-n"><col class="w-n"><col class="w-nn"><col class="w-n"><col class="w-d"></colgroup>
+       <thead><tr><th>#</th><th>Product</th><th>SKU</th><th class="n">Target</th><th class="n">Made</th><th class="n">Still to make</th><th class="n">On hand</th><th>Priority</th></tr></thead><tbody>`+
       _wdtRows.map((r,i)=>`<tr class="${r.remaining>0&&r.oh<=0?'urgent':''}"><td>${i+1}</td><td>${esc(r.name)}${r.isCustom?' (custom)':''}</td><td>${esc(r.sku)}</td>
         <td class="n">${r.target}</td><td class="n">${r.done||''}</td><td class="n"><b>${r.remaining}</b></td><td class="n">${r.oh}</td>
         <td>${r.remaining<=0?'done':(r.oh<=0?'NOTHING ON HAND':(r.cover<1?Math.round(r.cover*100)+'% covered':'covered'))}</td></tr>`).join('')+
@@ -3345,7 +3407,8 @@ function wdtPrint(which){
       `</tbody></table><div class="sub">Sorted least-covered first: a product with none on hand against an outstanding order is what stops a delivery, whatever the quantity.</div>`;
   } else if(which==='custom'){
     body=hd('Custom orders — this week')+
-      `<table><thead><tr><th>Needed</th><th>Customer</th><th>Order</th><th>Product</th><th class="n">Packs</th><th class="n">On hand</th><th>Status</th></tr></thead><tbody>`+
+      `<table><colgroup><col class="w-d"><col style="width:20%"><col style="width:18%"><col style="width:26%"><col class="w-n"><col class="w-n"><col class="w-d"></colgroup>
+       <thead><tr><th>Needed</th><th>Customer</th><th>Order</th><th>Product</th><th class="n">Packs</th><th class="n">On hand</th><th>Status</th></tr></thead><tbody>`+
       (_wdtCo.map(c=>`<tr class="${c.needed&&c.needed<todayISO()?'urgent':''}"><td>${esc(c.needed||'—')}</td><td>${esc(c.customer)}</td><td>${esc(c.ref)}</td>
         <td>${esc(c.product)}</td><td class="n">${c.packs}</td><td class="n">${c.oh}</td><td>${c.oh>=c.packs?'ready':'to make'}</td></tr>`).join('')
         ||'<tr><td colspan="7">No custom orders owing packs.</td></tr>')+
@@ -3354,9 +3417,10 @@ function wdtPrint(which){
     body=hd('Raw ingredients — behind the outstanding target');
     let rows='',last='';
     _wdtRaw.forEach(r=>{ if(r.cat!==last){ last=r.cat; const c=KSHEET_CATS.find(z=>z.k===r.cat)||{l:r.cat,c:'#5C5C5C'};
-        rows+=`<tr class="grp" style="background:${c.c}"><td colspan="5">${esc(c.l)}</td></tr>`; }
+        rows+=`<tr class="grp"><td colspan="5" style="background:${c.c} !important">${esc(c.l)}</td></tr>`; }
       rows+=`<tr><td>${esc(r.name)}${r.rawName?' — from '+esc(r.rawName):''}</td><td class="n">${_kgs(r.procG)}</td><td class="n">${r.ohProcG>0?_kgs(r.ohProcG):'—'}</td><td class="n">${_kgs(r.rawG)}</td><td class="n">${r.rawSku?_kgs(r.ohRawG):'—'}</td></tr>`; });
-    body+=`<table><thead><tr><th>Ingredient</th><th class="n">Processed needed</th><th class="n">Processed on hand</th><th class="n">As-purchased raw</th><th class="n">Raw on hand</th></tr></thead><tbody>${rows||'<tr><td colspan="5">Nothing outstanding.</td></tr>'}
+    body+=`<table><colgroup><col style="width:36%"><col style="width:16%"><col style="width:16%"><col style="width:16%"><col style="width:16%"></colgroup>
+      <thead><tr><th>Ingredient</th><th class="n">Processed needed</th><th class="n">Processed on hand</th><th class="n">As-purchased raw</th><th class="n">Raw on hand</th></tr></thead><tbody>${rows||'<tr><td colspan="5">Nothing outstanding.</td></tr>'}
       <tr class="tot"><td>Total</td><td class="n">${_kgs(_wdtRaw.reduce((s,r)=>s+r.procG,0))}</td><td class="n"></td><td class="n">${_kgs(_wdtRaw.reduce((s,r)=>s+r.rawG,0))}</td><td class="n"></td></tr></tbody></table>
       <div class="sub">Processed = what the kitchen weighs out of the bin. As-purchased raw = the same quantity before yield — that is the buying figure.</div>`;
   }
@@ -6528,16 +6592,25 @@ async function prodNeedRows(){
   prodPlanLines.filter(l=>(+l.good_packs||0)>0).forEach(l=>{
     const packs=+l.good_packs||0;
     (bm[l.product_sku]||[]).forEach(line=>{
-      const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{sku:line.ingredient_sku, procG:0, forProducts:[]};
-      a.procG+=line.processed_g*packs;
-      if(a.forProducts.indexOf(l.name||l.product_sku)<0) a.forProducts.push(l.name||l.product_sku);
+      const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{sku:line.ingredient_sku, procG:0, forProducts:[], split:[]};
+      const g=line.processed_g*packs;
+      a.procG+=g;
+      const nm=l.name||l.product_sku;
+      if(a.forProducts.indexOf(nm)<0) a.forProducts.push(nm);
+      /* WHICH product each kilo is for. The aggregate answers "how much to weigh
+         out"; it does not answer "and where does it go", which is the question
+         the kitchen actually asks when a mix runs short. */
+      const s=a.split.find(x=>x.sku===l.product_sku);
+      if(s) s.g+=g; else a.split.push({sku:l.product_sku, name:nm, packs, g});
     });
   });
   // output ingredients being made to stock need their raw too
   prodOutLines.filter(l=>(+l.needed_kg||0)>0).forEach(l=>{
-    const a=agg[l.ingredient_sku]=agg[l.ingredient_sku]||{sku:l.ingredient_sku, procG:0, forProducts:[]};
-    a.procG+=(+l.needed_kg||0)*1000;
+    const a=agg[l.ingredient_sku]=agg[l.ingredient_sku]||{sku:l.ingredient_sku, procG:0, forProducts:[], split:[]};
+    const g=(+l.needed_kg||0)*1000;
+    a.procG+=g;
     if(a.forProducts.indexOf('(to stock)')<0) a.forProducts.push('(to stock)');
+    a.split.push({sku:'', name:'To stock (not for a product)', packs:0, g});
   });
   return Object.keys(agg).map(sku=>{
     const it=im[sku]||{}; const cl=_countIngClass(it,ctx)||{};
@@ -6560,35 +6633,54 @@ async function prodNeedRows(){
       rawSku:parent?parent.sku:'',
       rawName:parent?parent.name:'',
       ohRawG:parent?(+oh[parent.sku]||0):0,
-      forProducts:agg[sku].forProducts
+      forProducts:agg[sku].forProducts,
+      /* the per-product split, scaled if the needed qty was overridden — so an
+         edit up or down still says where the extra (or the shortfall) lands */
+      split:(agg[sku].split||[]).map(s=>({...s, useG:base>0?(s.g*(need/base)):s.g}))
+                                .sort((a,b)=>b.useG-a.useG)
     };
   }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat) || b.needG-a.needG);
 }
 /* The prep list, on screen, in the printed sheet's own colours and order. */
+function prodNeedSplitToggle(sku){ window._prodSplitOpen=window._prodSplitOpen||{};
+  window._prodSplitOpen[sku]=!window._prodSplitOpen[sku];
+  const el=$('needBody'); if(el) el.innerHTML=prodNeedBody(); }
+const _NEED_COLS=6;
 function prodNeedBody(){
   const rows=window._prodNeedRows||[];
-  if(!rows.length) return '<tr><td colspan="8" class="empty">Enter good packs on a product above, and everything the run needs appears here.</td></tr>';
+  if(!rows.length) return `<tr><td colspan="${_NEED_COLS}" class="empty">Enter good packs on a product above, and everything the run needs appears here.</td></tr>`;
+  const open=window._prodSplitOpen||{};
   let h=''; let lastCat='';
   rows.forEach((r,i)=>{
     if(r.cat!==lastCat){ lastCat=r.cat;
       const c=KSHEET_CATS.find(z=>z.k===r.cat)||{l:r.cat,c:'#5C5C5C'};
-      h+=`<tr class="grp"><td colspan="8" style="background:${c.c};color:#fff;font-weight:800;letter-spacing:.02em">${esc(c.l)}</td></tr>`;
+      h+=`<tr class="grp"><td colspan="${_NEED_COLS}" style="background:${c.c};color:#fff;font-weight:800;letter-spacing:.02em">${esc(c.l)}</td></tr>`;
     }
     const shortProc=r.ohProcG>0 && r.ohProcG<r.needG;
     const shortRaw =r.rawSku && r.ohRawG < (r.needG-Math.min(r.ohProcG,r.needG))/((r.yieldPct/100)||1);
+    const nSplit=(r.split||[]).length;
     h+=`<tr style="box-shadow:inset 4px 0 0 ${r.color}">
       <td><b>${esc(r.name)}</b>${r.bones?' <span class="tagf" style="background:#f7dcd6;color:#8a2b1c">BONE</span>':''}
-        <div class="mini" style="color:var(--muted)">${esc(r.forProducts.join(' · '))}</div></td>
+        ${nSplit?`<div class="mini"><span class="btn link" style="font-size:11.5px" onclick="prodNeedSplitToggle('${esc(r.sku)}')">${open[r.sku]?'▾':'▸'} ${nSplit} product${nSplit===1?'':'s'}</span>
+          <span style="color:var(--muted)"> · ${esc(r.forProducts.join(' · '))}</span></div>`:''}</td>
       <td class="num mini" style="color:var(--muted)">${_kgs(r.recipeG)}</td>
-      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:88px;text-align:right${r.overridden?';border-color:var(--berry);font-weight:700':''}"
-          value="${r.overridden?(Math.round(r.needG)/1000):''}" placeholder="${_kgs(r.recipeG)}"
+      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:104px;text-align:right;font-weight:700${r.overridden?';border-color:var(--berry);background:#fdf7f9':''}"
+          value="${Math.round(r.needG)/1000}"
           oninput="prodNeedSet('${esc(r.sku)}',this.value)"
-          title="What the kitchen will actually pull. Leave blank to follow the recipe; type a figure to use more or less of this ingredient to complete the pack."></td>
-      <td class="num"><b>${_kgs(r.needG)}</b></td>
+          title="What the kitchen will actually pull. Starts at the recipe figure${r.overridden?' — you have changed it; ↺ Back to the recipe restores it':''}. Type over it to use more or less of this ingredient."/>
+        ${r.overridden?`<div class="mini" style="color:var(--berry)">changed from ${_kgs(r.recipeG)}</div>`:''}</td>
       <td class="num mini" style="color:${r.ohProcG>0?(shortProc?'var(--earth,#b5762a)':'#1e6b2e'):'var(--muted)'}">${r.ohProcG>0?_kgs(r.ohProcG):'—'}</td>
-      <td class="num mini" style="color:var(--muted)">${_kgs(r.rawG)}<div class="mini" style="opacity:.7">@${r.yieldPct}%</div></td>
-      <td class="num mini" style="color:${r.ohRawG>0?(shortRaw?'var(--danger)':'#7a6432'):'var(--muted)'}">${r.rawSku?_kgs(r.ohRawG):'<span title="no raw parent set">—</span>'}</td>
+      <td class="num mini" style="color:${r.ohRawG>0?(shortRaw?'var(--danger)':'#7a6432'):'var(--muted)'}">${r.rawSku?_kgs(r.ohRawG):'<span title="no raw parent set">—</span>'}
+        ${r.rawSku?`<div class="mini" style="opacity:.7">${_kgs(r.rawG)} raw @${r.yieldPct}%</div>`:''}</td>
       <td class="mini" style="color:var(--muted)">${esc(r.rawName||'')}</td></tr>`;
+    if(open[r.sku]) (r.split||[]).forEach(s=>{
+      h+=`<tr style="background:#fafaf7;font-size:12px">
+        <td style="padding-left:26px;color:var(--muted)">→ ${esc(s.name)}${s.packs?` <span class="mini">${s.packs} packs</span>`:''}</td>
+        <td class="num mini" style="color:var(--muted)">${_kgs(s.g)}</td>
+        <td class="num mini" style="color:var(--muted)">${_kgs(s.useG)}</td>
+        <td class="num mini" style="color:var(--muted)">—</td>
+        <td class="num mini" style="color:var(--muted)">—</td><td></td></tr>`;
+    });
   });
   return h;
 }
@@ -6605,14 +6697,33 @@ const _kgs=g=>(Math.round((+g||0)/10)/100).toLocaleString('en-PH',{minimumFracti
 function prodNeedSet(sku,v){
   window._prodNeed=window._prodNeed||{};
   if(v===''||v==null) delete window._prodNeed[sku];
-  else window._prodNeed[sku]=Math.max(0,(+v||0))*1000;   // typed in kg, held in grams
+  else {
+    const g=Math.max(0,(+v||0))*1000;                    // typed in kg, held in grams
+    /* The cell now shows the recipe figure by default, so "typed" is not the
+       same as "changed" — a value that matches the recipe is not an override,
+       and must not be flagged as one. */
+    const row=(window._prodNeedRows||[]).find(r=>r.sku===sku);
+    if(row && Math.abs(g-row.recipeG)<0.5) delete window._prodNeed[sku];
+    else window._prodNeed[sku]=g;
+  }
   return prodNeedRefresh();
 }
 function prodNeedReset(){ window._prodNeed={}; return prodNeedRefresh(); }
 async function prodNeedRefresh(){
+  /* The Needed cell is now the field people type in, so a blind innerHTML swap
+     would eat the caret halfway through "12.5". Remember where they were and
+     put them back — without re-writing the value they are mid-way through. */
+  const a=document.activeElement;
+  const wasIn=(a && a.tagName==='INPUT' && a.closest && a.closest('#needBody'));
+  const mark=wasIn?String(a.getAttribute('oninput')||'').match(/prodNeedSet\('([^']+)'/):null;
+  const keepSku=mark?mark[1]:'', keepVal=wasIn?a.value:'', keepPos=wasIn?a.selectionStart:0;
   try{ window._prodNeedRows=await prodNeedRows(); }catch(e){ window._prodNeedRows=[]; }
   const el=$('needBody'); if(el) el.innerHTML=prodNeedBody();
   const f=$('needFoot'); if(f) f.innerHTML=prodNeedFoot();
+  if(keepSku && el){
+    const back=[...el.querySelectorAll('input')].find(x=>String(x.getAttribute('oninput')||'').indexOf("prodNeedSet('"+keepSku+"'")===0);
+    if(back){ back.value=keepVal; back.focus(); try{ back.setSelectionRange(keepPos,keepPos); }catch(e){} }
+  }
 }
 function _prodRemain(sku,thisGood){ const t=+prodTargetMap[sku]||0, p=+prodProducedMap[sku]||0; return Math.max(0, t-p-(+thisGood||0)); }
 function drawProdPlan(){
@@ -6686,10 +6797,13 @@ function drawProdPlan(){
      prints, in the same colours and the same order (item 5), with the needed
      quantity editable (item 2) and the two stock columns beside it (item 3). */
   h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Ingredients needed — the prep list</span>
-    <span style="color:var(--muted);font-size:12px">Grouped and coloured like the printed sheet. <b>Needed</b> is what the kitchen weighs out of the processed bin; <b>As-purchased raw</b> is the same quantity before yield. Type over <b>Use instead</b> to pull more or less of an ingredient.</span></div>
-    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr>
-      <th>Ingredient</th><th class="num">Recipe says</th><th class="num">Use instead</th><th class="num">Needed</th>
-      <th class="num">Processed on hand</th><th class="num">As-purchased raw</th><th class="num">Raw on hand</th><th>From raw</th>
+    <span style="color:var(--muted);font-size:12px">Grouped and coloured like the printed sheet. <b>Needed Qty</b> starts at the recipe figure and is <b>editable</b> — type over it to pull more or less. Open an ingredient to see which product each kilo is for.</span></div>
+    <div style="overflow-x:auto" class="stickyhead"><table style="table-layout:fixed;min-width:920px">
+      <colgroup><col style="width:32%"><col style="width:12%"><col style="width:14%"><col style="width:14%"><col style="width:16%"><col style="width:12%"></colgroup>
+      <thead><tr>
+      <th>Ingredient</th><th class="num">Recipe says</th><th class="num">Needed Qty</th>
+      <th class="num">Stock on Hand<div class="mini" style="font-weight:400;opacity:.75">Processed</div></th>
+      <th class="num">Stock on Hand<div class="mini" style="font-weight:400;opacity:.75">Raw</div></th><th>From raw</th>
     </tr></thead><tbody id="needBody">${prodNeedBody()}</tbody></table></div>
     <div class="pager"><span id="needFoot">${prodNeedFoot()}</span>
       <button class="btn sec sm" onclick="prodNeedReset()" title="Clear every override and go back to what the recipes say">↺ Back to the recipe</button></div></div>`;
@@ -7199,7 +7313,28 @@ const KSHEET_CSS=`  :root{
     display:flex;justify-content:space-between;font-weight:800;font-size:15px;
   }
 
+  /* ---- Combined list: every category is its own <table>, so without fixed
+     column widths each group sized itself and the numbers zig-zagged down the
+     page. Fixed widths make one continuous column the eye can run down. ---- */
+  .combined-section table.cmb{table-layout:fixed;}
+  .combined-section table.cmb col.c1{width:40%;}
+  .combined-section table.cmb col.c2{width:20%;}
+  .combined-section table.cmb col.c3{width:20%;}
+  .combined-section table.cmb col.c4{width:20%;}
+  .combined-section table.cmb th,
+  .combined-section table.cmb td{vertical-align:middle;}
+  .combined-section table.cmb th.num,
+  .combined-section table.cmb td.num{text-align:right;font-variant-numeric:tabular-nums;}
+  .combined-section table.cmb th .sub{display:block;font-weight:400;opacity:.72;font-size:9.5px;letter-spacing:0;}
+
   /* ---- Ingredient Yield Record: boxes to write in, sized for a pen ---- */
+  .yield-record table.yr{table-layout:fixed;}
+  .yield-record table.yr th,
+  .yield-record table.yr td{vertical-align:middle;}
+  .yield-record table.yr th:first-child,
+  .yield-record table.yr td:first-child{width:26%;}
+  .yield-record table.yr th.num,
+  .yield-record table.yr td.num{text-align:right;width:10.5%;font-variant-numeric:tabular-nums;}
   .yield-record{page-break-before:always;}
   .yield-record .yr-box{
     display:inline-block;min-width:74px;height:22px;
@@ -7644,15 +7779,14 @@ async function prodKitchenSheet(){
     const c=KSHEET_CATS.find(z=>z.k===k);
     return `<div class="cat-group">
       <div class="cat-group-header" style="background:${c.c}">${esc2(c.l)}</div>
-      <table class="ingred"><thead><tr><th>Ingredient</th><th class="num">Kailangan (processed)</th><th class="num">Processed stock</th><th class="num">Bilhin (raw)</th><th class="num">Raw stock</th></tr></thead>
+      <table class="ingred cmb"><colgroup><col class="c1"><col class="c2"><col class="c3"><col class="c4"></colgroup>
+      <thead><tr><th>Ingredient</th><th class="num">Needed Qty</th><th class="num">Stock on Hand<span class="sub">Processed</span></th><th class="num">Stock on Hand<span class="sub">Raw</span></th></tr></thead>
       <tbody>${entries.map(([name,v])=>{ const n=_needBySku[v.sku]||{};
         const need=(n.needG!=null)?n.needG:v.grams;
-        const rawG=(n.rawG!=null)?n.rawG:null;
         const shortRaw=n.rawSku && n.ohRawG < (need-Math.min(n.ohProcG||0,need))/(((n.yieldPct||100)/100)||1);
         return `<tr><td><span class="ingred-name">${esc2(name)}${v.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span>${n.overridden?'<div class="ingred-note">binago mula sa recipe: '+_ksKg(n.recipeG)+'</div>':''}</td>
         <td class="num"><b>${_ksKg(need)}</b></td>
         <td class="num" style="color:${(n.ohProcG||0)>0?'#1D9E75':'#9a9a93'}">${(n.ohProcG||0)>0?_ksKg(n.ohProcG):'—'}</td>
-        <td class="num">${rawG!=null?_ksKg(rawG):'—'}</td>
         <td class="num" style="color:${shortRaw?'#b23b2e':((n.ohRawG||0)>0?'#7a6432':'#9a9a93')}">${n.rawSku?_ksKg(n.ohRawG):'—'}${shortRaw?' ⚠':''}</td></tr>`; }).join('')}</tbody></table>
     </div>`;
   }).join('');
@@ -7699,8 +7833,7 @@ async function prodKitchenSheet(){
       <h2>Combined Shopping / Prep List</h2>
       <p class="hint">Lahat ng sangkap sa araw na ito, pinagsama at nakagrupo ayon sa kategorya.</p>
       <div id="combinedList">${combinedHtml}
-        <div class="totals-line"><span>Grand total — processed to weigh out</span><span>${_ksKg(grand)}</span></div>
-        <div class="totals-line"><span>Grand total — as-purchased raw (÷ yield)</span><span>${_ksKg(grandRaw)}</span></div>
+        <div class="totals-line"><span>Grand total — needed qty (processed to weigh out)</span><span>${_ksKg(grand)}</span></div>
       </div>
     </div>
     <div class="card combined-section yield-record">
@@ -8080,6 +8213,8 @@ function _paRefresh(){
 // Recompute raw + output defaults from the edited Processed-used (keeps processed-first sound).
 function _paSync(i){ const x=(window._prodAct||[])[i]; if(!x)return; const short=Math.max(0,(+x.neededKg||0)-(+x.procUsedKg||0));
   x.actualMadeKg=Math.round(short*1000)/1000; x.actualRawKg=Math.round((short/(x.yield||1))*1000)/1000; }
+function paSplitToggle(sku){ window._paSplitOpen=window._paSplitOpen||{};
+  window._paSplitOpen[sku]=!window._paSplitOpen[sku]; drawProdActuals(); }
 function _paRow(x,i){
   const c=_paCalc(x);
   const procCell = x.type==='A'
@@ -8090,7 +8225,13 @@ function _paRow(x,i){
     : `<td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">${_pa2(c.needed)}</td>`;
   const _c=(window._prodNeedRows||[]).find(r=>r.sku===x.sku);
   const _col=_c?_c.color:'#5C5C5C';
-  return `<tr style="box-shadow:inset 4px 0 0 ${_col}"><td><span class="cat-dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${_col};margin-right:6px"></span><b>${esc(x.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(x.sku)}</code></div>${x.parent?`<div class="mini" style="color:var(--muted)">from ${esc(ingName(x.parent))}</div>`:'<span class="mini" style="color:var(--danger)">no raw parent</span>'}</td>
+  /* Which product each kilo is for. The aggregate says how much to weigh out;
+     this says where it goes, which is what gets asked when a mix runs short. */
+  const _sp=(_c&&_c.split)||[];
+  const _spOpen=(window._paSplitOpen||{})[x.sku];
+  const _spLine=_sp.length?`<div class="mini"><span class="btn link" style="font-size:11.5px" onclick="paSplitToggle('${esc(x.sku)}')">${_spOpen?'▾':'▸'} for ${_sp.length} product${_sp.length===1?'':'s'}</span></div>
+    ${_spOpen?`<div class="mini" style="color:var(--muted);margin-top:3px;line-height:1.7">${_sp.map(s=>`→ ${esc(s.name)}${s.packs?' ('+s.packs+' packs)':''} <b>${_pa2(s.useG/1000)}</b> kg`).join('<br>')}</div>`:''}`:'';
+  return `<tr style="box-shadow:inset 4px 0 0 ${_col}"><td><span class="cat-dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${_col};margin-right:6px"></span><b>${esc(x.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(x.sku)}</code></div>${x.parent?`<div class="mini" style="color:var(--muted)">from ${esc(ingName(x.parent))}</div>`:'<span class="mini" style="color:var(--danger)">no raw parent</span>'}${_spLine}</td>
     <td class="num"><b>${_pa2(c.needed)}</b>${x.type==='A'?`<div class="mini" style="color:var(--muted)">stock ${x.ohKg}</div>`:''}</td>
     ${procCell}
     <td class="num"><input type="number" step="any" inputmode="decimal" id="parw${i}" value="${x.actualRawKg}" oninput="_paEdit(${i},'actualRawKg',this.value)" style="width:76px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
@@ -8124,6 +8265,35 @@ function drawProdActuals(){
       <span style="flex:1"></span><span class="mini" style="color:var(--muted);align-self:center">${a.length} ingredient(s) in this run</span></div></div>`;
   modalWide(true); $('overlay').classList.add('on');
 }
+/* Read the run back before it posts. Deliberately a summary in words rather than
+   a "are you sure?" — a prompt nobody reads is a prompt that stops nothing. */
+function prodConfirmPrompt(acts){
+  acts=acts||[];
+  const packs=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
+  const nPacks=packs.reduce((s,l)=>s+(+l.good_packs||0),0);
+  const k=v=>(Math.round((+v||0)*1000)/1000);
+  let drip=0, raw=0, made=0, thawed=0, excess=0; const short=[], big=[];
+  acts.forEach(x=>{ const c=_paCalc(x);
+    drip+=c.thaw; raw+=c.raw; made+=c.made; thawed+=c.proc; excess+=c.excess;
+    if(c.excess<-0.0005) short.push(`${x.name} — ${k(-c.excess)} kg short`);
+    if(c.raw>0 && c.yieldPct && c.stdYield && c.yieldPct < c.stdYield-10)
+      big.push(`${x.name} — yield ${c.yieldPct}% against a ${c.stdYield}% standard`);
+    if(c.thaw<-0.0005) big.push(`${x.name} — thawed weight is ABOVE the frozen weight, check the two figures`);
+  });
+  const lines=[];
+  lines.push(`Confirm production for ${prodPlanDate||'today'}${prodRunRef?(' · '+prodRunRef):''}`);
+  lines.push('');
+  if(packs.length) lines.push(`• ${nPacks} pack(s) across ${packs.length} product(s)`);
+  if(acts.length)  lines.push(`• ${acts.length} ingredient(s): ${k(thawed)} kg thawed from stock + ${k(made)} kg newly processed from ${k(raw)} kg raw`);
+  if(drip>0.0005)  lines.push(`• ${k(drip)} kg lost thawing, posted separately from yield`);
+  if(Math.abs(excess)>0.0005) lines.push(`• ${excess>0?'+':''}${k(excess)} kg ${excess>0?'excess back to processed stock':'SHORT against what the run needs'}`);
+  if(short.length){ lines.push(''); lines.push('⚠ Coming up short:'); short.forEach(s=>lines.push('   '+s)); }
+  if(big.length){ lines.push(''); lines.push('⚠ Worth a second look:'); big.forEach(s=>lines.push('   '+s)); }
+  lines.push('');
+  lines.push('This posts the stock movements, rolls the ingredient costs and closes the run.');
+  lines.push('It cannot be undone. Post it?');
+  return Promise.resolve(confirm(lines.join('\n')));
+}
 async function prodActualsApply(){
   if(_postLock){ toast('Still posting…',true); return; }
   const acts=window._prodAct||[]; const actBy={}; acts.forEach(x=>actBy[x.sku]=x);
@@ -8133,6 +8303,12 @@ async function prodActualsApply(){
     const shortRaw=Object.keys(needRaw).filter(sku=>(needRaw[sku]-(oh[sku]||0))>0.5).map(sku=>'• '+ingName(sku)+' — need '+(Math.round(needRaw[sku]/10)/100)+' kg raw, have '+(Math.round((oh[sku]||0)/10)/100)+' kg');
     if(shortRaw.length){ if(!confirm('⚠ Not enough RAW stock for:\n\n'+shortRaw.join('\n')+'\n\nProceed anyway (raw will go negative)?')) return; }
   }
+  /* ---- The last stop before it is real ----------------------------------
+     Confirming posts stock movements, rolls costs and closes the run; there is
+     no undo button. So the figures get read back in plain language first — the
+     packs, the kilos, the drip, the excess and anything short — and the person
+     pressing the button has to agree with the sentence. */
+  if(!(await prodConfirmPrompt(acts))) return;
   const anyProd=prodPlanLines.some(l=>(+l.good_packs||0)>0);
   _postLock=true;
   try{
@@ -10478,17 +10654,37 @@ async function renderSelfTest(){
     const orph=mv.filter(m=>{ const n=String(m.note||''); if(n.indexOf('PO ')!==0) return false; return !po.has(n.slice(3).replace(/ R\d+$/,'')); });
     return [orph.length===0, orph.length?(orph.length+' receipt movement(s) from a deleted order — stock is on the books with no order behind it'):mv.length+' receipts OK'];
   });
-  T('Nothing received more than it was ordered', async()=>{
+  /* The stock ledger agrees with the order line.
+     NOT "received ≤ ordered" — over-delivery is a normal fact of buying meat
+     (the bones nobody ordered still turned up, and 27 kg of trimmings arrived
+     against 18 ordered). Flagging those forever would train everyone to ignore
+     this check. What is never normal is the LEDGER disagreeing with the
+     received quantity recorded on the line: that is the signature of the same
+     delivery being posted twice. */
+  T('Stock posted matches what the order says was received', async()=>{
     const po=(await db.list('purchase_orders',{})).filter(o=>o.status!=='cancelled');
     const bad=[];
     for(const o of po){
       let ls=[]; try{ ls=await db.children(MODELS.purchase_orders.o2m, o.po_ref); }catch(e){ continue; }
       if(!ls.length) continue;
       const led=await poReceivedFromLedger(o.po_ref);
-      ls.forEach(l=>{ const oq=poOrderQty(l), got=+led[l.ingredient_sku]||0;
-        if(oq>0 && got>oq*1.5+0.0001) bad.push(o.po_ref+' · '+ingName(l.ingredient_sku)+' ordered '+oq+', ledger has '+Math.round(got*100)/100); });
+      ls.forEach(l=>{ const rec=+l.received_kg||0, got=+led[l.ingredient_sku]||0;
+        if(Math.abs(got-rec)>Math.max(0.01, rec*0.005))
+          bad.push(o.po_ref+' · '+ingName(l.ingredient_sku)+' — line says '+rec+', ledger has '+Math.round(got*100)/100); });
     }
-    return [bad.length===0, bad.length?(bad.length+' line(s) look double-posted — '+bad.slice(0,3).join('; ')+(bad.length>3?' …':'')):'every line within its order'];
+    return [bad.length===0, bad.length?(bad.length+' line(s) disagree with the ledger — '+bad.slice(0,3).join('; ')+(bad.length>3?' …':'')):'ledger agrees with every line'];
+  });
+  // Over-delivery is worth SEEING, but it is a buying fact, not a data fault —
+  // so it reports as information and never fails the check.
+  T('Over-deliveries (information only)', async()=>{
+    const po=(await db.list('purchase_orders',{})).filter(o=>o.status!=='cancelled');
+    const over=[];
+    for(const o of po){
+      let ls=[]; try{ ls=await db.children(MODELS.purchase_orders.o2m, o.po_ref); }catch(e){ continue; }
+      ls.forEach(l=>{ const oq=poOrderQty(l), rec=+l.received_kg||0;
+        if(rec>oq+0.005) over.push(ingName(l.ingredient_sku)+' +'+(Math.round((rec-oq)*100)/100)+' kg on '+o.po_ref); });
+    }
+    return [true, over.length?(over.length+' line(s) came in over: '+over.slice(0,3).join('; ')+(over.length>3?' …':'')):'nothing over-delivered'];
   });
   T('Orders with lines still attached', async()=>{
     const po=(await db.list('purchase_orders',{})).filter(o=>!['cancelled','open','draft'].includes(o.status||''));
