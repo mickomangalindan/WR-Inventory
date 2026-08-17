@@ -514,9 +514,9 @@
    buy it, make it, count it. Master Data is reference material you set up once,
    so it sits with Administration at the bottom rather than at the top. */
 const MODULES = [
-  {id:'analytics', label:'Analytics', items:['stock_balance','reporting','margin','momentum']},
+  {id:'analytics', label:'Analytics', items:['stock_balance','payables','yields','reporting','margin','momentum']},
   {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc','ffprofiles']},
-  {id:'plan',   label:'Planning',    items:['mrp']},
+  {id:'plan',   label:'Planning',    items:['mrp','wdt']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','variance_log']},
@@ -619,6 +619,7 @@ const MODELS = {
       {n:'moving_avg_cost_kg',l:'Moving avg ₱/kg',t:'currency'},
       {n:'shelf_life_days',l:'Shelf life (d)',t:'number'},{n:'lead_time_days',l:'Lead time (d)',t:'number'},
       {n:'par_g',l:'Par / week (g)',t:'number'},{n:'reorder_g',l:'Reorder (g)',t:'number'},{n:'min_order_kg',l:'Min order (kg)',t:'number'},{n:'pack_size_kg',l:'Order pack (kg)',t:'number'},
+      {n:'thaw_loss_pct',l:'Thaw / drip loss %',t:'number'},
       {n:'is_live_animal',l:'Live animal',t:'bool'},{n:'is_intermediate',l:'Intermediate',t:'bool'},
       {n:'is_supply',l:'Kitchen supply (not a food ingredient)',t:'bool'},
       {n:'uom',l:'Unit / pack',t:'text'},
@@ -626,7 +627,7 @@ const MODELS = {
     list:['name','processing_method','category','gently_cooked','cookable','raw_feeding','yield_pct','list_price_kg','supplier1'],
     groups:[['sku','name','ingredient_group','sort_order','raw_input','processing_method','category','uom','source','storage','yield_pct','costing_override','approved_alt'],
             ['list_price_kg','price_kg_processed','price_g_raw','price_g_processed','moving_avg_cost_kg','supplier1','supplier2','supplier'],
-            ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','pack_size_kg','lead_time_days','shelf_life_days','is_live_animal','is_intermediate','is_supply']],
+            ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','pack_size_kg','lead_time_days','shelf_life_days','thaw_loss_pct','is_live_animal','is_intermediate','is_supply']],
     tabs:[{l:'🥩 Item & yield', groups:[0]},{l:'₱ Costing', groups:[1]},{l:'⚙ Flags & stock', groups:[2]}],
     full:['notes'] },
 
@@ -775,6 +776,9 @@ const MODELS = {
     groups:[['check_type','source_ref','location','responsible_user'],['expected','actual','gap_qty','gap_value','status']], full:['note'] },
 
   mrp:{ label:'Demand / MRP', icon:'📉', special:'mrp' },
+  wdt:{ label:'Weekly Demand Target', icon:'🎯', special:'wdt' },
+  yields:{ label:'Yield & Loss', icon:'💧', special:'yields' },
+  payables:{ label:'Weekly Payables', icon:'💳', special:'payables' },
   reporting:{ label:'Reports', icon:'📊', special:'reporting' },
   users:{ label:'Users & Access', icon:'👤', special:'users' },
   studio:{ label:'Studio (beta)', icon:'🛠️', special:'studio' },
@@ -1011,6 +1015,9 @@ function route(){
   const m=MODELS[state.model];
   if(m.special){ setCrumb(); syncHash();   // special views also get a unique URL (they return early below)
     if(m.special==='mrp') return renderMRP();
+    if(m.special==='wdt') return renderWDT();
+    if(m.special==='yields') return renderYields();
+    if(m.special==='payables') return renderPayables();
     if(m.special==='customorders') return renderCustomOrders();
     if(m.special==='ffcalc') return renderFFCalc();
     if(m.special==='ffprofiles') return renderFFProfiles();
@@ -1401,14 +1408,28 @@ async function renderForm(){
   }
   const stateBadge = (m.archivable && formRec.active===false) ? '<span class="badge b-draft" style="margin-left:8px">Archived</span>'
                     : (m.status && cur==='cancelled') ? '<span class="badge b-draft" style="margin-left:8px">Cancelled</span>' : '';
+  /* Move between records without a round trip to the list. state._rows is the
+     list exactly as it was filtered and sorted, so ‹ › walk the same order the
+     user is looking at, not the table's natural order. */
+  const _nav=(()=>{
+    if(formIsNew) return '';
+    const rows=state._rows||[]; if(rows.length<2) return '';
+    const idx=rows.findIndex(x=>String(x[m.pk])===String(formRec[m.pk]));
+    if(idx<0) return '';
+    const prev=idx>0?rows[idx-1]:null, next=idx<rows.length-1?rows[idx+1]:null;
+    const btn=(r,lbl,ttl)=>r?`<button class="btn sec sm" title="${esc(ttl)}: ${esc(String(r[m.pk]))}" onclick="gotoRecord('${state.model}','${esc(String(r[m.pk])).replace(/'/g,"&#39;")}')">${lbl}</button>`
+                            :`<button class="btn sec sm" disabled style="opacity:.4">${lbl}</button>`;
+    return `${btn(prev,'‹','Previous')}<span class="mini" style="color:var(--muted);padding:0 2px">${idx+1} of ${rows.length}</span>${btn(next,'›','Next')}`;
+  })();
   const formbar = !m.readonly?`<div class="formbar">
+     ${_nav}
      <button class="btn" onclick="saveForm()">💾 Save</button>
      <button class="btn sec" onclick="discardForm()">Discard</button>
      ${!formIsNew?`<button class="btn sec" onclick="printForm()">🖨 Print</button>`:''}
      ${(state.model==='purchase_orders'&&!formIsNew)?`<button class="btn sec" onclick="sendPODraft()">✉ Send PO</button>`:''}
      ${safeActions}
      <span style="flex:1"></span><span style="color:var(--muted)">${isLive()?'Live · Supabase':'Demo (local only)'}</span>
-   </div>`:`<div class="formbar"><button class="btn sec" onclick="printForm()">🖨 Print</button><span style="flex:1"></span><span style="color:var(--muted)">Read-only view</span></div>`;
+   </div>`:`<div class="formbar">${_nav}<button class="btn sec" onclick="printForm()">🖨 Print</button><span style="flex:1"></span><span style="color:var(--muted)">Read-only view</span></div>`;
   let fieldsArea;
   if(m.tabs){
     if(formTab>=m.tabs.length) formTab=0;
@@ -1469,7 +1490,22 @@ function lSet(i,n,v){ formChildren[i][n]=v; }
 // number line-setter with an optional display scale (e.g. show kg, store grams)
 function lSetNum(i,n,v,sc){ sc=+sc||1; formChildren[i][n]=(v===''||v==null)?'':(sc!==1?(+v*sc):+v); }
 function discardForm(){ state.view='list'; route(); }
-const AUTO_REF={ purchase_orders:async()=>{ const dd=_mmddyyyy(); return 'PO-'+dd+' V'+_p2(await nextSeq('PO-'+dd))+'.01'; },
+/* PO references live in ONE namespace, PO-<date> V<XX>.<ZZ>, but two things mint
+   into it: the plot generator (XX = the demand plot's iteration, ZZ = the supplier's
+   place in that run) and the New-PO button (its own counter). Nothing checked that
+   the result was free, so a counter that had drifted — or a plot generated twice —
+   handed out a reference that already belonged to a live order. This asks the table
+   what is taken and returns the first slot that is not. */
+async function poFreeRef(dd, xx){
+  const taken=new Set();
+  try{ (await db.list('purchase_orders',{})).forEach(o=>{ if(o&&o.po_ref) taken.add(String(o.po_ref)); }); }catch(e){}
+  for(let z=1; z<=99; z++){ const r='PO-'+dd+' V'+_p2(xx)+'.'+_p2(z); if(!taken.has(r)) return r; }
+  for(let x=(+xx||1)+1; x<=99; x++){ const r='PO-'+dd+' V'+_p2(x)+'.01'; if(!taken.has(r)) return r; }
+  throw new Error('No free PO reference left for '+dd+' — that is 99×99 orders in one day, something is wrong.');
+}
+const AUTO_REF={ purchase_orders:async()=>{ const dd=_mmddyyyy();
+                   let xx=1; try{ xx=await nextSeq('PO-'+dd); }catch(e){ xx=1; }
+                   return await poFreeRef(dd, xx); },
                  transfers:async()=>(await genRef('DR',{})).ref };
 /* Every write this session makes to an open record, by stamp. A stamp in here
    is ours; anything else really is another person. */
@@ -1521,6 +1557,17 @@ async function saveForm(){
     const rec={}; m.fields.forEach(f=>{ if(f.t==='formula')return; let v=formRec[f.n]; if((f.t==='number'||f.t==='currency')&&v!==''&&v!=null)v=+v; if(v!==undefined)rec[f.n]=v; });
     const uf=['created_by','counted_by','operator'].find(x=>m.fields.some(f=>f.n===x));
     if(formIsNew && uf && !rec[uf]) rec[uf]=CURRENT_USER;
+    /* The charges strip lives in the Payments & delivery panel with its own
+       "Update charges" button, so a user who typed a delivery fee and pressed
+       Save lost it. Save now takes whatever is in those boxes too — one button
+       doing what the person plainly meant. */
+    if(state.model==='purchase_orders' && !formIsNew && $('poFee')){
+      const _d=Math.max(0,+($('poDisc')||{}).value||0), _f=Math.max(0,+($('poFee')||{}).value||0);
+      const _payee=($('poPayee')||{}).value||'Supplier';
+      const _prov=/fleet/i.test(_payee)?(($('poProv')||{}).value||'').trim():'';
+      rec.discount=_d; rec.delivery_fee=_f; rec.delivery_payee=_payee; rec.delivery_provider=_prov;
+      Object.assign(formRec,{discount:_d,delivery_fee:_f,delivery_payee:_payee,delivery_provider:_prov});
+    }
     if(formIsNew) await db.create(state.model, rec);
     else await db.update(state.model, m.pk, pkval, rec);
     if(m.o2m){
@@ -2460,8 +2507,25 @@ function copyPODraft(){ const t=$('poDraft'); const txt=t?t.value:(window._poDra
 
 // Fire-and-forget POST to an n8n webhook. no-cors so a static app can reach n8n
 // without CORS setup; n8n does the work and writes results back to Supabase.
+/* ---- Which channels a notification may use -----------------------------------
+   The app cannot silence Telegram by itself — the message is sent by the n8n
+   flow, not from here. What it CAN do is state the preference on every payload,
+   so the flow has something to branch on: `channels:{email:true,telegram:false}`.
+   Set it per event in Administration → Automations; the n8n flow must read it.
+   Backups default to EMAIL ONLY. */
+const NOTIFY_DEFAULT={email:true, telegram:true};
+function notifyChannels(kind){
+  const cfg=(typeof AUTOS!=='undefined'&&AUTOS.channels&&AUTOS.channels.map)||{};
+  const k=String(kind||'').toLowerCase();
+  let key='default';
+  if(/backup/.test(k)) key='backup';
+  else if(/digest|report/.test(k)) key='digest';
+  return {...NOTIFY_DEFAULT, ...(cfg[key]||{})};
+}
 async function postWebhook(url, payload){ if(!url) return false;
-  try{ await fetch(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify(payload)}); return true; }
+  const body={...(payload||{})};
+  if(!body.channels) body.channels=notifyChannels(body.kind);
+  try{ await fetch(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify(body)}); return true; }
   catch(e){ console.warn('webhook post failed', e); return false; } }
 function autoCfg(k){ return (typeof AUTOS!=='undefined'&&AUTOS[k])?AUTOS[k]:null; }
 // On completion: send the record to n8n → PDF → Drive folder → link back + notify (with Internal Ref).
@@ -2703,6 +2767,602 @@ function stickerSheets(pieces, perSheet){ pieces=+pieces||0; perSheet=+perSheet|
   if(perSheet>0 && pieces>0){ const sheets=Math.ceil((pieces-1e-9)/perSheet); return {sheets, pieces:sheets*perSheet}; }
   return {sheets:0, pieces}; }
 
+/* ============================================================================
+   WEEKLY DEMAND TARGET
+   Everything the week owes, in one place, from the three sources that generate
+   it: the saved (locked) demand plots, the demand table, and every locked
+   custom order. The MRP screen is where you BUILD a week; this is where you
+   read what the week has already committed to, and hand it to the floor.
+
+   Priority is by cover, not by size: the product with the least stock against
+   its target is the one that stops a delivery, whatever the quantity. A big
+   order that is already in the freezer is not urgent; twelve packs with none
+   on hand is.
+   ============================================================================ */
+let _wdtDate='', _wdtRows=[], _wdtCo=[], _wdtRaw=[], _wdtSrc={};
+function wdtWeekOf(d){ return d||MRPDATE||todayISO(); }
+async function wdtLoad(){
+  const date=wdtWeekOf(_wdtDate);
+  const prods=await db.list('products',{});
+  const pBy={}; prods.forEach(p=>pBy[p.sku]=p);
+  const stock={}; try{
+    if(isLive()) (await db.list('stock_balance',{})).forEach(b=>{ if(b.kind==='product') stock[b.ref_sku]=(stock[b.ref_sku]||0)+(+b.on_hand||0); });
+    else (DEMO.inventory_movements||[]).forEach(m=>{ if(m.kind==='product') stock[m.ref_sku]=(stock[m.ref_sku]||0)+(+m.qty||0); });
+  }catch(e){}
+  // 1 · the locked plot for this week, 2 · the demand table, 3 · custom orders
+  const dem={}, src={};
+  const plots=await mrpPlans().catch(()=>[]);
+  const plot=(plots||[]).find(x=>String(x.plan_date||x.date||'').slice(0,10)===String(date));
+  if(plot && plot.data && plot.data.demand){
+    Object.keys(plot.data.demand).forEach(sku=>{ const q=+plot.data.demand[sku]||0; if(q>0){ dem[sku]=(dem[sku]||0)+q; src[sku]=(src[sku]||[]).concat(['plot '+(plot.data.ref||plot.ref||'')]); } });
+  }
+  try{ let rows;
+    if(isLive()) rows=await sb('demand?select=sku,qty,plan_date&plan_date=eq.'+encodeURIComponent(date));
+    else rows=(DEMO.demand||[]).filter(r=>String(r.plan_date||'')===String(date));
+    (rows||[]).forEach(r=>{ const q=+r.qty||0; if(q>0 && !(dem[r.sku]>=q)){ dem[r.sku]=Math.max(dem[r.sku]||0,q); src[r.sku]=(src[r.sku]||[]).concat(['demand table']); } });
+  }catch(e){}
+  const co=await coOpenDemand().catch(()=>({}));
+  Object.keys(co).forEach(sku=>{ if(!dem[sku]){ dem[sku]=co[sku].packs; src[sku]=(src[sku]||[]).concat(['custom order']); } });
+  // produced so far this week comes off the target
+  const made={}; try{ let rows;
+    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,production_date,kind&status=eq.confirmed&production_date=gte.'+encodeURIComponent(date));
+    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed'&&String(b.production_date||'')>=String(date));
+    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
+  }catch(e){}
+  _wdtRows=Object.keys(dem).map(sku=>{
+    const p=pBy[sku]||{sku,name:sku};
+    const target=+dem[sku]||0, oh=+stock[sku]||0, done=+made[sku]||0;
+    const remaining=Math.max(0,target-done);
+    // cover: what is on hand as a share of what is still owed. 0 = nothing in
+    // the freezer against an outstanding order; that is what leads the list.
+    const cover=remaining>0?(oh/remaining):99;
+    return {sku, name:prodLabel(p,{noSku:true}), label:prodLabel(p),
+            g1:p.group_1||'Products', g2:p.group_2||p.family||'Other',
+            target, done, remaining, oh, cover,
+            isCustom:/^CUST-/.test(sku), src:(src[sku]||[]).join(', ')};
+  }).sort((a,b)=> a.cover-b.cover || b.remaining-a.remaining);
+  _wdtCo=[];
+  const coAll=co; Object.keys(coAll).forEach(sku=>{ (coAll[sku].orders||[]).forEach(o=>{
+    _wdtCo.push({sku, product:(pBy[sku]&&prodLabel(pBy[sku],{noSku:true}))||sku, ref:o.ref, customer:o.customer||'—',
+      packs:o.packs, needed:o.needed||coAll[sku].needed||'', oh:+stock[sku]||0}); }); });
+  _wdtCo.sort((a,b)=>String(a.needed||'9999').localeCompare(String(b.needed||'9999'))||String(a.customer).localeCompare(b.customer));
+  // the raw behind it, via the same roll-up the MRP uses
+  _wdtRaw=[];
+  try{
+    const boms=await db.list('bom_lines',{}); const ings=await listIngredients();
+    const im={}; ings.forEach(i=>im[i.sku]=i);
+    const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
+    const {ctx}=_outIngCtx(ings);
+    const need={};
+    boms.forEach(b=>{ const r=_wdtRows.find(x=>x.sku===b.product_sku); if(!r||!r.remaining) return;
+      need[b.ingredient_sku]=(need[b.ingredient_sku]||0)+(+b.usable_g||0)*r.remaining; });
+    const ohI={}; try{
+      if(isLive()) (await db.list('stock_balance',{})).forEach(b=>{ if(b.kind==='ingredient') ohI[b.ref_sku]=(ohI[b.ref_sku]||0)+(+b.on_hand||0); });
+      else (DEMO.inventory_movements||[]).forEach(m=>{ if(m.kind==='ingredient') ohI[m.ref_sku]=(ohI[m.ref_sku]||0)+(+m.qty||0); });
+    }catch(e){}
+    _wdtRaw=Object.keys(need).map(sku=>{ const it=im[sku]||{}; const cl=_countIngClass(it,ctx)||{};
+      const cat=_ksCat(cl.g1||it.category||''); const y=((+it.yield_pct||100)/100)||1;
+      const p=_procParent(it,bySku,byName);
+      return {sku, name:_outName(it,cl)||it.name||sku, cat:cat.k, catLabel:cat.l, color:cat.c,
+              procG:need[sku], rawG:need[sku]/y, ohProcG:+ohI[sku]||0,
+              rawSku:p?p.sku:'', rawName:p?p.name:'', ohRawG:p?(+ohI[p.sku]||0):0, yieldPct:Math.round(y*1000)/10};
+    }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat)||b.procG-a.procG);
+  }catch(e){}
+  _wdtSrc={plot:plot?(plot.data&&plot.data.ref||plot.ref||''):'', date};
+}
+function _wdtCover(r){
+  if(!r.remaining) return '<span class="badge b-received">done</span>';
+  if(r.oh<=0) return '<span class="badge b-cancelled" style="background:#f7dcd6;color:#8a2b1c">nothing on hand</span>';
+  if(r.cover<1) return `<span class="badge b-invoiced">${Math.round(r.cover*100)}% covered</span>`;
+  return '<span class="badge b-received">covered</span>';
+}
+/* ============ Yield & Loss — the three rates, kept apart =====================
+   A run loses weight three times, at three different steps, and until now they
+   were all one number called "yield":
+
+     drip      frozen processed stock → what actually reached the mix
+     trimming  raw as-purchased       → processed output (the classic yield)
+     recipe    what the run produced  → what the recipe asked for
+
+   A single figure covering all three tells you something went wrong and nothing
+   about where. Split, each one points at a different person's work: drip at how
+   long it sat out, trimming at the butcher, recipe at the plan. This report is
+   the split.                                                                */
+let _ylFrom='', _ylTo='', _ylRows=[], _ylRuns=[], _ylOpen={};
+async function ylLoad(){
+  const all=(await db.list('production_batches',{})||[]).filter(b=>b&&b.kind==='output'&&b.status==='confirmed');
+  const rows=all.filter(b=>{ const d=String(b.production_date||'');
+    return (!_ylFrom||d>=_ylFrom)&&(!_ylTo||d<=_ylTo); });
+  const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+  const ctxAll=_outIngCtx(ings); const ctx=ctxAll.ctx;
+  _ylRuns=rows.map(b=>{
+    const it=im[b.product_sku]||{};
+    const cl=_countIngClass(it,ctx)||{}; const cat=_ksCat(cl.g1||it.category||'');
+    const frozen=+b.frozen_out_kg||0, thawed=(b.thawed_kg!=null?+b.thawed_kg:+b.from_stock_kg)||0;
+    const drip=Math.max(0,Math.round((frozen-thawed)*1000)/1000);
+    const raw=+b.raw_used_kg||0, made=+b.output_kg||0;
+    const need=+b.needed_kg||0;
+    const fin=(b.final_output_kg!=null)?+b.final_output_kg:Math.round((thawed+made)*1000)/1000;
+    const exc=(b.excess_kg!=null)?+b.excess_kg:Math.round((fin-need)*1000)/1000;
+    const std=(b.std_yield_pct!=null)?+b.std_yield_pct:((+it.yield_pct||100));
+    const costKg=+it.moving_avg_cost_kg||+it.list_price_kg||0;
+    return { date:b.production_date||'', run:b.run_ref||b.batch_ref||'', batch:b.batch_ref||'',
+      sku:b.product_sku, name:_outName(it,cl)||it.name||b.product_sku,
+      cat:cat.k, catLabel:cat.l, color:cat.c, by:b.operator||'',
+      frozen, thawed, drip, dripPct:frozen>0?Math.round((drip/frozen)*1000)/10:null,
+      thawYield:frozen>0?Math.round((thawed/frozen)*1000)/10:null,
+      raw, made, yieldPct:raw>0?Math.round((made/raw)*1000)/10:null, std,
+      need, fin, exc, dripPhp:Math.round(drip*costKg*100)/100, costKg };
+  }).sort((a,b)=>(b.date||'').localeCompare(a.date||'')||a.name.localeCompare(b.name));
+
+  const by={};
+  _ylRuns.forEach(r=>{ const a=by[r.sku]=by[r.sku]||{sku:r.sku,name:r.name,cat:r.cat,catLabel:r.catLabel,color:r.color,
+      runs:0,frozen:0,thawed:0,drip:0,raw:0,made:0,need:0,fin:0,exc:0,dripPhp:0,std:r.std,hist:[]};
+    a.runs++; a.frozen+=r.frozen; a.thawed+=r.thawed; a.drip+=r.drip; a.raw+=r.raw; a.made+=r.made;
+    a.need+=r.need; a.fin+=r.fin; a.exc+=r.exc; a.dripPhp+=r.dripPhp;
+    if(r.yieldPct!=null) a.hist.push(r.yieldPct); });
+  _ylRows=Object.values(by).map(a=>({...a,
+    dripPct:a.frozen>0?Math.round((a.drip/a.frozen)*1000)/10:null,
+    thawYield:a.frozen>0?Math.round((a.thawed/a.frozen)*1000)/10:null,
+    yieldPct:a.raw>0?Math.round((a.made/a.raw)*1000)/10:null,
+    gap:a.raw>0?Math.round(((a.made/a.raw)*100-a.std)*10)/10:null,
+    recipePct:a.need>0?Math.round((a.fin/a.need)*1000)/10:null,
+    hist:a.hist.slice(-6).reverse()
+  })).sort((x,y)=>KSHEET_ORDER.indexOf(x.cat)-KSHEET_ORDER.indexOf(y.cat)||y.drip-x.drip);
+}
+// One horizontal bar: actual yield against the standard, so the gap is a picture.
+function _ylBar(actual,std){
+  if(actual==null) return '<span class="mini" style="color:var(--muted)">—</span>';
+  const w=120, sc=v=>Math.max(0,Math.min(1,(+v||0)/100))*w;
+  const good=actual>=std-0.05, col=good?'#4e7a3e':'var(--danger)';
+  return `<svg width="${w}" height="15" viewBox="0 0 ${w} 15" style="vertical-align:middle">
+    <rect x="0" y="4" width="${w}" height="7" rx="3.5" fill="#eceae2"/>
+    <rect x="0" y="4" width="${sc(actual).toFixed(1)}" height="7" rx="3.5" fill="${col}"/>
+    <line x1="${sc(std).toFixed(1)}" y1="1" x2="${sc(std).toFixed(1)}" y2="14" stroke="#5c5c5c" stroke-width="1.5"/>
+  </svg>`;
+}
+const _ylKg=v=>(Math.round((+v||0)*1000)/1000).toLocaleString('en-PH',{minimumFractionDigits:0,maximumFractionDigits:3})+' kg';
+function _ylPct(v,warnAbove,warnBelow){
+  if(v==null) return '<span style="color:var(--muted)">—</span>';
+  let c='inherit';
+  if(warnAbove!=null && v>warnAbove) c='var(--danger)';
+  if(warnBelow!=null && v<warnBelow) c='var(--danger)';
+  return `<b style="color:${c}">${v}%</b>`;
+}
+function ylToggle(sku){ _ylOpen[sku]=!_ylOpen[sku]; const el=$('ylBody'); if(el) el.innerHTML=ylBody(); }
+function ylBody(){
+  if(!_ylRows.length) return '<tr><td colspan="11" class="empty">No confirmed prep batches in this range. Confirm a production run and its yields land here.</td></tr>';
+  let h='', lastCat='';
+  _ylRows.forEach(r=>{
+    if(r.cat!==lastCat){ lastCat=r.cat;
+      h+=`<tr class="grp"><td colspan="11" style="background:${r.color};color:#fff;font-weight:700;padding:5px 9px">${esc(r.catLabel)}</td></tr>`; }
+    h+=`<tr style="box-shadow:inset 4px 0 0 ${r.color};cursor:pointer" onclick="ylToggle('${esc(r.sku)}')">
+      <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)">${r.runs} run${r.runs===1?'':'s'} · ${_ylOpen[r.sku]?'▾ hide':'▸ show'} each</div></td>
+      <td class="num">${_ylKg(r.frozen)}</td>
+      <td class="num">${_ylKg(r.thawed)}</td>
+      <td class="num" style="color:var(--earth,#b5762a)">${r.drip?_ylKg(r.drip):'—'}</td>
+      <td class="num">${_ylPct(r.dripPct,6,null)}</td>
+      <td class="num">${_ylKg(r.raw)}</td>
+      <td class="num">${_ylKg(r.made)}</td>
+      <td class="num">${_ylPct(r.yieldPct,null,r.std)} <span class="mini" style="color:var(--muted)">/ ${r.std}%</span></td>
+      <td>${_ylBar(r.yieldPct,r.std)}</td>
+      <td class="num">${_ylPct(r.recipePct,null,99.5)}</td>
+      <td class="num" style="color:${r.exc<-0.0005?'var(--danger)':(r.exc>0.0005?'#4e7a3e':'var(--muted)')}">${r.exc?((r.exc>0?'+':'')+_ylKg(r.exc)):'0'}</td></tr>`;
+    if(_ylOpen[r.sku]) _ylRuns.filter(x=>x.sku===r.sku).forEach(x=>{
+      h+=`<tr style="background:#fafaf7;font-size:12px"><td style="padding-left:22px">${esc(x.date)} · <code>${esc(x.run)}</code>${x.by?' <span style="color:var(--muted)">'+esc(x.by)+'</span>':''}</td>
+        <td class="num">${_ylKg(x.frozen)}</td><td class="num">${_ylKg(x.thawed)}</td>
+        <td class="num" style="color:var(--earth,#b5762a)">${x.drip?_ylKg(x.drip):'—'}</td><td class="num">${_ylPct(x.dripPct,6,null)}</td>
+        <td class="num">${_ylKg(x.raw)}</td><td class="num">${_ylKg(x.made)}</td>
+        <td class="num">${_ylPct(x.yieldPct,null,x.std)}</td><td>${_ylBar(x.yieldPct,x.std)}</td>
+        <td class="num">${x.need>0?_ylPct(Math.round((x.fin/x.need)*1000)/10,null,99.5):'—'}</td>
+        <td class="num">${x.exc?((x.exc>0?'+':'')+_ylKg(x.exc)):'0'}</td></tr>`;
+    });
+  });
+  return h;
+}
+async function renderYields(){
+  $('crumb').innerHTML='<b>Yield &amp; Loss</b>';
+  if(!_ylFrom){ const d=new Date(); const t=new Date(d.getTime()-27*864e5);
+    _ylTo=todayISO(); _ylFrom=t.toISOString().slice(0,10); }
+  $('cp').innerHTML=`<div class="title">Yield &amp; Loss <span onclick="openKB('yields')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <label class="mini">From <input type="date" id="ylF" value="${esc(_ylFrom)}" onchange="_ylFrom=this.value;renderYields()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px"></label>
+    <label class="mini">To <input type="date" id="ylT" value="${esc(_ylTo)}" onchange="_ylTo=this.value;renderYields()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px"></label>
+    <button class="btn sec sm" onclick="ylPrint()">🖨 Print</button>
+    <button class="btn sec sm" onclick="ylCsv()">⬇ CSV</button>
+    <div class="sp"></div><span style="color:var(--muted)">three losses, three numbers</span>`;
+  $('content').innerHTML='<div class="repcard"><div class="empty">Reading the prep batches…</div></div>';
+  try{ await ylLoad(); }catch(e){ $('content').innerHTML='<div class="repcard"><div class="empty">'+esc(e.message||'could not load')+'</div></div>'; return; }
+  const T=_ylRows.reduce((a,r)=>({frozen:a.frozen+r.frozen,thawed:a.thawed+r.thawed,drip:a.drip+r.drip,
+    raw:a.raw+r.raw,made:a.made+r.made,need:a.need+r.need,fin:a.fin+r.fin,exc:a.exc+r.exc,php:a.php+r.dripPhp}),
+    {frozen:0,thawed:0,drip:0,raw:0,made:0,need:0,fin:0,exc:0,php:0});
+  const dripPct=T.frozen>0?Math.round((T.drip/T.frozen)*1000)/10:0;
+  const yPct=T.raw>0?Math.round((T.made/T.raw)*1000)/10:0;
+  const stdW=T.raw>0?Math.round(_ylRows.reduce((s,r)=>s+r.std*r.raw,0)/T.raw*10)/10:0;
+  const recPct=T.need>0?Math.round((T.fin/T.need)*1000)/10:0;
+  const worstDrip=[..._ylRows].filter(r=>r.dripPct!=null).sort((a,b)=>b.dripPct-a.dripPct)[0];
+  const worstYield=[..._ylRows].filter(r=>r.gap!=null).sort((a,b)=>a.gap-b.gap)[0];
+  $('content').innerHTML=`
+  <div class="repcard">
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px">
+      <div class="kpi" style="min-width:168px"><div class="l">Drip loss</div>
+        <div class="v" style="color:${dripPct>6?'var(--danger)':'var(--earth,#b5762a)'}">${dripPct}%</div>
+        <div class="s">${_ylKg(T.drip)} · ${fmt(T.php)} thawed away</div></div>
+      <div class="kpi" style="min-width:168px"><div class="l">Trimming yield</div>
+        <div class="v" style="color:${yPct<stdW-0.05?'var(--danger)':'#4e7a3e'}">${yPct}%</div>
+        <div class="s">standard ${stdW}% · ${yPct<stdW?(Math.round((stdW-yPct)*10)/10+' pts under'):'on or above'}</div></div>
+      <div class="kpi" style="min-width:168px"><div class="l">Recipe coverage</div>
+        <div class="v" style="color:${recPct<99.5?'var(--danger)':'#4e7a3e'}">${recPct}%</div>
+        <div class="s">${_ylKg(T.fin)} made vs ${_ylKg(T.need)} needed</div></div>
+      <div class="kpi" style="min-width:168px"><div class="l">Back to stock</div>
+        <div class="v" style="color:${T.exc<-0.0005?'var(--danger)':'#4e7a3e'}">${(T.exc>0?'+':'')+_ylKg(T.exc)}</div>
+        <div class="s">excess over what the runs needed</div></div>
+    </div>
+    <div class="hint" style="margin:8px 0 0">
+      <b>Drip</b> is frozen weight that never reached the mix — it is measured, not estimated: the team weighs out of the freezer and again after thawing.
+      <b>Trimming yield</b> is processed made ÷ raw used, against the standard on the ingredient master.
+      <b>Recipe coverage</b> is what the run ended up with against what it asked for. Keeping them apart is the point — one number cannot honestly carry all three.
+      ${worstDrip?`<br>Worst drip: <b>${esc(worstDrip.name)}</b> at ${worstDrip.dripPct}%.`:''}
+      ${worstYield&&worstYield.gap<0?` Furthest under standard: <b>${esc(worstYield.name)}</b>, ${Math.abs(worstYield.gap)} pts.`:''}
+    </div>
+  </div>
+  <div class="repcard" style="margin-top:14px">
+    <div class="repbar"><span>By ingredient — ${_ylRows.length} item(s), ${_ylRuns.length} run(s)</span>
+      <span class="mini" style="color:var(--muted)">click a row to see each run</span></div>
+    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr>
+      <th>Ingredient</th><th class="num">Frozen out</th><th class="num">Thawed</th><th class="num">Drip</th><th class="num">Drip %</th>
+      <th class="num">Raw used</th><th class="num">Processed made</th><th class="num">Yield</th><th>vs standard</th>
+      <th class="num">Recipe</th><th class="num">Excess</th></tr></thead>
+      <tbody id="ylBody">${ylBody()}</tbody></table></div>
+  </div>`;
+}
+function ylCsv(){
+  const aoa=[['Ingredient','Category','Runs','Frozen out kg','Thawed kg','Drip kg','Drip %','Raw used kg','Processed made kg','Actual yield %','Standard %','Gap pts','Needed kg','Final output kg','Recipe %','Excess kg','Drip PHP']]
+    .concat(_ylRows.map(r=>[r.name,r.catLabel,r.runs,r.frozen,r.thawed,r.drip,r.dripPct,r.raw,r.made,r.yieldPct,r.std,r.gap,r.need,r.fin,r.recipePct,r.exc,r.dripPhp]));
+  const csv=aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':(c==null?'':c)).join(',')).join('\n');
+  dlBlob(csv,'WR_yields_'+_ylFrom+'_'+_ylTo+'.csv','text/csv'); toast('Downloaded');
+}
+function ylPrint(){
+  const w=window.open('','_pr','width=1000,height=980'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  const rows=_ylRows.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.catLabel)}</td><td class="n">${r.runs}</td>
+    <td class="n">${r.frozen?r.frozen.toFixed(3):'—'}</td><td class="n">${r.thawed?r.thawed.toFixed(3):'—'}</td>
+    <td class="n">${r.drip?r.drip.toFixed(3):'—'}</td><td class="n">${r.dripPct!=null?r.dripPct+'%':'—'}</td>
+    <td class="n">${r.raw?r.raw.toFixed(3):'—'}</td><td class="n">${r.made?r.made.toFixed(3):'—'}</td>
+    <td class="n">${r.yieldPct!=null?r.yieldPct+'%':'—'}</td><td class="n">${r.std}%</td>
+    <td class="n">${r.gap!=null?((r.gap>0?'+':'')+r.gap):'—'}</td>
+    <td class="n">${r.recipePct!=null?r.recipePct+'%':'—'}</td>
+    <td class="n">${r.exc?((r.exc>0?'+':'')+r.exc.toFixed(3)):'0'}</td></tr>`).join('')||'<tr><td colspan="14">—</td></tr>';
+  w.document.write(`<html><head><meta charset="utf-8"><title>Yield &amp; Loss</title><style>
+    @page{margin:14mm;size:A4 landscape}body{font-family:Arial;color:#222;font-size:11px}
+    h1{color:#4e7a3e;margin:0;font-size:19px}h2{margin:3px 0 12px;font-size:13px;font-weight:400;color:#666}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th{background:#4e7a3e;color:#fff;padding:5px 6px;text-align:left;font-size:10px}
+    td{padding:4px 6px;border-bottom:1px solid #eee}.n{text-align:right}
+    .note{margin-top:14px;font-size:10px;color:#666;line-height:1.6}</style></head><body>
+    <h1>🐇 Wholesome Rabbit — Yield &amp; Loss</h1>
+    <h2>${esc(_ylFrom)} to ${esc(_ylTo)} · ${_ylRows.length} ingredient(s) over ${_ylRuns.length} confirmed run(s)</h2>
+    <table><thead><tr><th>Ingredient</th><th>Category</th><th class="n">Runs</th><th class="n">Frozen out</th><th class="n">Thawed</th>
+      <th class="n">Drip</th><th class="n">Drip %</th><th class="n">Raw used</th><th class="n">Made</th><th class="n">Yield</th>
+      <th class="n">Std</th><th class="n">Gap</th><th class="n">Recipe</th><th class="n">Excess</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="note"><b>Drip %</b> = (frozen out − thawed) ÷ frozen out. Measured on the bench with two weighings.<br>
+      <b>Yield</b> = processed made ÷ raw used, against the standard on the ingredient master. <b>Gap</b> is in percentage points.<br>
+      <b>Recipe</b> = final output ÷ what the run needed. Under 100% means the run did not fully cover its own plan.</div>
+    <p style="margin-top:18px;color:#888;font-size:10px">Printed ${new Date().toLocaleString()}</p></body></html>`);
+  w.document.close(); w.focus(); setTimeout(()=>w.print(),250);
+}
+
+/* ============ Weekly Payables — what each week owes, and to whom ============
+   Purchase orders answer "what did we buy". They do not answer "how much is
+   going out this week, how much of it is already gone, and what is still owed
+   on goods that have not even arrived". That last one matters most: money
+   committed against an undelivered order is exposure, not a bill, and it should
+   never be read the same way.
+
+   Weeks run Monday–Sunday off the ORDER date, because that is when the
+   commitment was made.                                                       */
+let _wpWeeks=[], _wpRows=[], _wpOpen={}, _wpN=8;
+function _wpMonday(d){ const t=new Date(String(d)+'T00:00:00'); if(isNaN(t.getTime())) return '';
+  const dow=(t.getDay()+6)%7; t.setDate(t.getDate()-dow); return t.toISOString().slice(0,10); }
+function _wpLabel(mon){ if(!mon) return 'No order date';
+  const a=new Date(mon+'T00:00:00'), b=new Date(a.getTime()+6*864e5);
+  const f=(x,full)=>x.toLocaleDateString(undefined,{month:'short',day:'numeric',...(full?{year:'numeric'}:{})});
+  return f(a)+' – '+f(b,true); }
+const wpPeso=n=>'₱'+(Math.round((+n||0)*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2});
+async function wpLoad(){
+  const orders=dropCancelled(await db.list('purchase_orders',{})||[]);
+  const lines=await db.list('po_lines',{})||[];
+  const pays =await db.list('po_payments',{})||[];
+  const byPo={}; lines.forEach(l=>{ (byPo[l.po_ref]=byPo[l.po_ref]||[]).push(l); });
+  const payBy={}; pays.forEach(p=>{ (payBy[p.po_ref]=payBy[p.po_ref]||[]).push(p); });
+  _wpRows=orders.map(o=>{
+    const ls=byPo[o.po_ref]||[]; const ps=payBy[o.po_ref]||[];
+    const gross=ls.reduce((s,l)=>s+poOrderQty(l)*(+l.price_kg||0),0);
+    const recvVal=ls.reduce((s,l)=>s+(+l.received_kg||0)*(+l.price_kg||0),0);
+    const anyRecv=ls.some(l=>(+l.received_kg||0)>0);
+    const disc=+o.discount||0;
+    const net=poBillable(o,ls);                     // net of discount, plus any fee owed to the supplier
+    const paid=sumSupplierPaid(ps);
+    const fleetDue=poFleetDue(o);
+    const fleetPaid=ps.filter(p=>!payToSupplier(p)).reduce((s,p)=>s+(+p.amount||0),0);
+    const bal=Math.round((net-paid)*100)/100;
+    // goods ordered that have not arrived — money committed, not yet a bill
+    const pendVal=Math.max(0,Math.round((gross-recvVal)*100)/100);
+    const pendKg =Math.round(ls.reduce((s,l)=>s+Math.max(0,poOrderQty(l)-(+l.received_kg||0)),0)*1000)/1000;
+    const fullyIn=o.status==='received';
+    const last=[...ps].sort((a,b)=>String(b.created_at||b.paid_at||'').localeCompare(String(a.created_at||a.paid_at||'')))[0];
+    const payStat = paid<=0.005 ? 'unpaid' : (bal>0.5 ? 'part-paid' : 'settled');
+    return { ref:o.po_ref, supplier:o.supplier_name||'(unassigned)', status:o.status||'', statusL:statusLabel('purchase_orders',o.status),
+      date:o.order_date||'', week:_wpMonday(o.order_date||''),
+      gross:Math.round(gross*100)/100, disc, net:Math.round(net*100)/100, paid:Math.round(paid*100)/100, bal,
+      fee:+o.delivery_fee||0, feeTo:(poFeeToFleet(o)?(o.delivery_provider||'Fleet service'):'Supplier'),
+      fleetDue, fleetPaid, method:(last&&last.method)||'', payStat,
+      last:(last&&(last.paid_at||String(last.created_at||'').slice(0,10)))||'',
+      pendVal, pendKg, fullyIn, lines:ls.length };
+  });
+  const g={}; _wpRows.forEach(r=>{ (g[r.week]=g[r.week]||[]).push(r); });
+  _wpWeeks=Object.keys(g).sort((a,b)=>b.localeCompare(a)).map(w=>{
+    const rs=g[w];
+    const t=(f)=>Math.round(rs.reduce((s,r)=>s+(+r[f]||0),0)*100)/100;
+    return { week:w, label:_wpLabel(w), rows:rs.sort((a,b)=>b.bal-a.bal||a.supplier.localeCompare(b.supplier)),
+      orders:rs.length, gross:t('gross'), disc:t('disc'), net:t('net'), paid:t('paid'), bal:t('bal'),
+      fee:t('fee'), fleetDue:t('fleetDue'), pendVal:t('pendVal'), pendKg:Math.round(rs.reduce((s,r)=>s+r.pendKg,0)*1000)/1000,
+      pendOrders:rs.filter(r=>r.pendVal>0.5).length,
+      suppliers:[...new Set(rs.map(r=>r.supplier))].length,
+      last:rs.map(r=>r.last).filter(Boolean).sort().pop()||'' };
+  });
+}
+function _wpChip(s){
+  const m={unpaid:['#f7dcd6','#8a2b1c','unpaid'],'part-paid':['#fff3d6','#7a5a10','part-paid'],settled:['#e2f0e4','#2d5c22','settled']}[s]||['#eee','#555',s];
+  return `<span style="background:${m[0]};color:${m[1]};border-radius:20px;padding:1px 9px;font-size:11px;font-weight:700;white-space:nowrap">${m[2]}</span>`;
+}
+// Paid vs still owed vs not-yet-delivered, as one bar per week.
+function _wpBar(w,maxV){
+  const W=190, sc=v=>maxV>0?(Math.max(0,v)/maxV)*W:0;
+  const a=sc(w.paid), b=sc(w.bal), c=sc(w.pendVal);
+  return `<svg width="${W}" height="16" viewBox="0 0 ${W} 16" style="vertical-align:middle">
+    <rect x="0" y="4" width="${W}" height="9" rx="4.5" fill="#f0efe9"/>
+    <rect x="0" y="4" width="${a.toFixed(1)}" height="9" fill="#4e7a3e"/>
+    <rect x="${a.toFixed(1)}" y="4" width="${b.toFixed(1)}" height="9" fill="#c9482f"/>
+    <rect x="${(a+b).toFixed(1)}" y="4" width="${c.toFixed(1)}" height="9" fill="#d9c48a"/>
+  </svg>`;
+}
+function wpToggle(w){ _wpOpen[w]=!_wpOpen[w]; const el=$('wpBody'); if(el) el.innerHTML=wpBody(); }
+function wpBody(){
+  const shown=_wpWeeks.slice(0,_wpN);
+  if(!shown.length) return '<tr><td colspan="10" class="empty">No purchase orders yet.</td></tr>';
+  const maxV=Math.max(1,...shown.map(w=>w.paid+w.bal+w.pendVal));
+  let h='';
+  shown.forEach(w=>{
+    const open=_wpOpen[w.week];
+    h+=`<tr style="cursor:pointer;font-weight:600" onclick="wpToggle('${esc(w.week)}')">
+      <td>${open?'▾':'▸'} <b>${esc(w.label)}</b><div class="mini" style="color:var(--muted);font-weight:400">${w.orders} order(s) · ${w.suppliers} supplier(s)</div></td>
+      <td class="num">${wpPeso(w.net)}<div class="mini" style="color:var(--muted);font-weight:400">${w.disc>0.005?('less '+wpPeso(w.disc)+' disc'):'no discount'}</div></td>
+      <td class="num" style="color:#4e7a3e">${wpPeso(w.paid)}</td>
+      <td class="num" style="color:${w.bal>0.5?'var(--danger)':'var(--muted)'}"><b>${wpPeso(w.bal)}</b></td>
+      <td class="num">${w.fee>0.005?wpPeso(w.fee):'—'}${w.fleetDue>0.005?`<div class="mini" style="color:var(--earth,#b5762a);font-weight:400">${wpPeso(w.fleetDue)} to fleet</div>`:''}</td>
+      <td class="num" style="color:${w.pendVal>0.5?'var(--earth,#b5762a)':'var(--muted)'}">${w.pendVal>0.5?wpPeso(w.pendVal):'—'}<div class="mini" style="color:var(--muted);font-weight:400">${w.pendOrders?(w.pendOrders+' order(s) · '+w.pendKg+' kg'):'all delivered'}</div></td>
+      <td>${_wpBar(w,maxV)}</td>
+      <td class="mini" style="color:var(--muted);font-weight:400">${esc(w.last||'—')}</td></tr>`;
+    if(open) w.rows.forEach(r=>{
+      h+=`<tr style="background:#fafaf7;font-size:12.5px">
+        <td style="padding-left:20px"><span class="btn link" onclick="event.stopPropagation();openModel('purchase_orders');setTimeout(()=>openForm('${encodeURIComponent(r.ref)}'),320)"><code>${esc(r.ref)}</code></span>
+          <div class="mini" style="color:var(--muted)">${esc(r.supplier)} · ${esc(r.statusL)} · ${esc(r.date)}</div></td>
+        <td class="num">${wpPeso(r.net)}</td>
+        <td class="num" style="color:#4e7a3e">${wpPeso(r.paid)}</td>
+        <td class="num" style="color:${r.bal>0.5?'var(--danger)':'var(--muted)'}">${wpPeso(r.bal)} ${_wpChip(r.payStat)}</td>
+        <td class="num">${r.fee>0.005?(wpPeso(r.fee)+'<div class="mini" style="color:var(--muted)">to '+esc(r.feeTo)+'</div>'):'—'}</td>
+        <td class="num" style="color:${r.pendVal>0.5?'var(--earth,#b5762a)':'var(--muted)'}">${r.pendVal>0.5?(wpPeso(r.pendVal)+'<div class="mini" style="color:var(--muted)">'+r.pendKg+' kg to come</div>'):'complete'}</td>
+        <td class="mini" style="color:var(--muted)">${esc(r.method||'—')}</td>
+        <td class="mini" style="color:var(--muted)">${esc(r.last||'—')}</td></tr>`;
+    });
+  });
+  return h;
+}
+async function renderPayables(){
+  $('crumb').innerHTML='<b>Weekly Payables</b>';
+  $('cp').innerHTML=`<div class="title">Weekly Payables <span onclick="openKB('payables')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <label class="mini">Show <select onchange="_wpN=+this.value;renderPayables()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+      ${[4,8,13,26,52].map(n=>`<option value="${n}" ${_wpN===n?'selected':''}>${n} weeks</option>`).join('')}</select></label>
+    <button class="btn sec sm" onclick="wpPrint()">🖨 Print</button>
+    <button class="btn sec sm" onclick="wpCsv()">⬇ CSV</button>
+    <div class="sp"></div><span style="color:var(--muted)">cancelled orders excluded</span>`;
+  $('content').innerHTML='<div class="repcard"><div class="empty">Adding it up…</div></div>';
+  try{ await wpLoad(); }catch(e){ $('content').innerHTML='<div class="repcard"><div class="empty">'+esc(e.message||'could not load')+'</div></div>'; return; }
+  const shown=_wpWeeks.slice(0,_wpN);
+  const T=shown.reduce((a,w)=>({net:a.net+w.net,paid:a.paid+w.paid,bal:a.bal+w.bal,fee:a.fee+w.fee,
+    fleet:a.fleet+w.fleetDue,pend:a.pend+w.pendVal,disc:a.disc+w.disc,orders:a.orders+w.orders}),
+    {net:0,paid:0,bal:0,fee:0,fleet:0,pend:0,disc:0,orders:0});
+  const thisWeek=_wpWeeks.find(w=>w.week===_wpMonday(todayISO()));
+  const owing=_wpRows.filter(r=>r.bal>0.5).sort((a,b)=>b.bal-a.bal);
+  const bySup={}; owing.forEach(r=>{ bySup[r.supplier]=(bySup[r.supplier]||0)+r.bal; });
+  const supList=Object.entries(bySup).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  const maxSup=Math.max(1,...supList.map(s=>s[1]));
+  const undelivered=_wpRows.filter(r=>r.pendVal>0.5).sort((a,b)=>b.pendVal-a.pendVal);
+  const paidPct=T.net>0?Math.round((T.paid/T.net)*100):0;
+  $('content').innerHTML=`
+  <div class="repcard">
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px">
+      <div class="kpi" style="min-width:170px"><div class="l">Net payable</div><div class="v">${wpPeso(T.net)}</div>
+        <div class="s">${T.orders} order(s) · net of ${wpPeso(T.disc)} discount</div></div>
+      <div class="kpi" style="min-width:170px"><div class="l">Paid</div><div class="v" style="color:#4e7a3e">${wpPeso(T.paid)}</div>
+        <div class="s">${paidPct}% of the net</div></div>
+      <div class="kpi" style="min-width:170px"><div class="l">Still owed</div><div class="v" style="color:${T.bal>0.5?'var(--danger)':'#4e7a3e'}">${wpPeso(T.bal)}</div>
+        <div class="s">${owing.length} order(s) with a balance</div></div>
+      <div class="kpi" style="min-width:170px"><div class="l">Not yet delivered</div><div class="v" style="color:var(--earth,#b5762a)">${wpPeso(T.pend)}</div>
+        <div class="s">${undelivered.length} order(s) still to arrive</div></div>
+      <div class="kpi" style="min-width:170px"><div class="l">Delivery fees</div><div class="v">${wpPeso(T.fee)}</div>
+        <div class="s">${T.fleet>0.5?(wpPeso(T.fleet)+' owed to couriers'):'all payable to suppliers'}</div></div>
+    </div>
+    <div class="hint" style="margin:8px 0 0">
+      <b>Not yet delivered</b> is money committed against goods that have not arrived — it is exposure, not a bill, and it is deliberately kept out of "still owed".
+      A fee marked payable to a fleet service is a <b>separate</b> payable and never reduces the supplier's balance.
+      ${thisWeek?`This week (${esc(thisWeek.label)}): ${wpPeso(thisWeek.net)} net, ${wpPeso(thisWeek.bal)} still owed.`:''}
+    </div>
+  </div>
+
+  <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:14px">
+    <div class="repcard" style="flex:1;min-width:330px">
+      <div class="repbar"><span>Who is owed</span><span class="mini" style="color:var(--muted)">balance by supplier</span></div>
+      ${supList.length?`<table><tbody>${supList.map(([s,v])=>`<tr>
+        <td>${esc(s)}</td>
+        <td style="width:180px"><svg width="170" height="14" viewBox="0 0 170 14"><rect x="0" y="3" width="170" height="8" rx="4" fill="#f0efe9"/><rect x="0" y="3" width="${(v/maxSup*170).toFixed(1)}" height="8" rx="4" fill="#c9482f"/></svg></td>
+        <td class="num"><b>${wpPeso(v)}</b></td></tr>`).join('')}</tbody></table>`
+        :'<div class="empty">Nothing outstanding ✅</div>'}
+    </div>
+    <div class="repcard" style="flex:1;min-width:330px">
+      <div class="repbar"><span>Still to arrive</span><span class="mini" style="color:var(--muted)">ordered, not received</span></div>
+      ${undelivered.length?`<table><thead><tr><th>Order</th><th>Supplier</th><th class="num">Value</th><th class="num">Qty</th></tr></thead>
+        <tbody>${undelivered.slice(0,10).map(r=>`<tr><td><code>${esc(r.ref)}</code><div class="mini" style="color:var(--muted)">${esc(r.statusL)}</div></td>
+          <td>${esc(r.supplier)}</td><td class="num">${wpPeso(r.pendVal)}</td><td class="num">${r.pendKg} kg</td></tr>`).join('')}</tbody></table>
+        ${undelivered.length>10?`<div class="mini" style="color:var(--muted);margin-top:6px">+ ${undelivered.length-10} more</div>`:''}`
+        :'<div class="empty">Everything ordered has arrived ✅</div>'}
+    </div>
+  </div>
+
+  <div class="repcard" style="margin-top:14px">
+    <div class="repbar"><span>By week — ${shown.length} of ${_wpWeeks.length}</span>
+      <span class="mini" style="color:var(--muted)">click a week to open its orders · <span style="color:#4e7a3e">■</span> paid <span style="color:#c9482f">■</span> owed <span style="color:#d9c48a">■</span> not yet delivered</span></div>
+    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr>
+      <th>Week (Mon–Sun)</th><th class="num">Net amount</th><th class="num">Paid</th><th class="num">Remaining</th>
+      <th class="num">Delivery fee</th><th class="num">Pending delivery</th><th>Split</th><th>Last payment</th></tr></thead>
+      <tbody id="wpBody">${wpBody()}</tbody></table></div>
+  </div>`;
+}
+function wpCsv(){
+  const aoa=[['Week starting','Week','PO','Supplier','Status','Order date','Gross','Discount','Net payable','Paid','Remaining','Delivery fee','Fee payable to','Payment method','Last updated','Pending delivery value','Pending kg']];
+  _wpWeeks.slice(0,_wpN).forEach(w=>w.rows.forEach(r=>aoa.push([w.week,w.label,r.ref,r.supplier,r.statusL,r.date,r.gross,r.disc,r.net,r.paid,r.bal,r.fee,r.feeTo,r.method,r.last,r.pendVal,r.pendKg])));
+  const csv=aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':(c==null?'':c)).join(',')).join('\n');
+  dlBlob(csv,'WR_payables_'+todayISO()+'.csv','text/csv'); toast('Downloaded');
+}
+function wpPrint(){
+  const w=window.open('','_pr','width=1000,height=980'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  const P=n=>'₱'+(Math.round((+n||0)*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
+  const body=_wpWeeks.slice(0,_wpN).map(k=>`
+    <tr class="wk"><td colspan="9">${esc(k.label)} — ${k.orders} order(s), ${k.suppliers} supplier(s)</td></tr>
+    ${k.rows.map(r=>`<tr><td>${esc(r.ref)}</td><td>${esc(r.supplier)}</td><td>${esc(r.statusL)}</td>
+      <td class="n">${P(r.net)}</td><td class="n">${P(r.paid)}</td><td class="n">${P(r.bal)}</td>
+      <td class="n">${r.fee>0.005?P(r.fee)+' → '+esc(r.feeTo):'—'}</td>
+      <td class="n">${r.pendVal>0.5?P(r.pendVal)+' ('+r.pendKg+' kg)':'—'}</td><td>${esc(r.last||'—')}</td></tr>`).join('')}
+    <tr class="tot"><td colspan="3">Week total</td><td class="n">${P(k.net)}</td><td class="n">${P(k.paid)}</td>
+      <td class="n">${P(k.bal)}</td><td class="n">${P(k.fee)}</td><td class="n">${P(k.pendVal)}</td><td></td></tr>`).join('');
+  w.document.write(`<html><head><meta charset="utf-8"><title>Weekly Payables</title><style>
+    @page{margin:14mm;size:A4 landscape}body{font-family:Arial;color:#222;font-size:11px}
+    h1{color:#4e7a3e;margin:0;font-size:19px}h2{margin:3px 0 12px;font-size:13px;font-weight:400;color:#666}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th{background:#4e7a3e;color:#fff;padding:5px 6px;text-align:left;font-size:10px}
+    td{padding:4px 6px;border-bottom:1px solid #eee}.n{text-align:right}
+    tr.wk td{background:#e7f0e9;font-weight:700;padding:6px}
+    tr.tot td{font-weight:700;border-top:1.5px solid #4e7a3e;background:#fafaf7}
+    .note{margin-top:14px;font-size:10px;color:#666;line-height:1.6}</style></head><body>
+    <h1>🐇 Wholesome Rabbit — Weekly Payables</h1>
+    <h2>Weeks run Monday–Sunday off the order date · cancelled orders excluded · as at ${esc(todayISO())}</h2>
+    <table><thead><tr><th>PO</th><th>Supplier</th><th>Status</th><th class="n">Net payable</th><th class="n">Paid</th>
+      <th class="n">Remaining</th><th class="n">Delivery fee</th><th class="n">Pending delivery</th><th>Last payment</th></tr></thead>
+      <tbody>${body||'<tr><td colspan="9">—</td></tr>'}</tbody></table>
+    <div class="note"><b>Net payable</b> = goods (received value once anything has been received, otherwise ordered value) − discount + any delivery fee owed to the supplier.<br>
+      <b>Pending delivery</b> is ordered value not yet received — money committed, not a bill, and excluded from Remaining.<br>
+      A delivery fee marked payable to a fleet service is a separate payable and does not reduce the supplier's balance.</div>
+    <p style="margin-top:18px;color:#888;font-size:10px">Printed ${new Date().toLocaleString()}</p></body></html>`);
+  w.document.close(); w.focus(); setTimeout(()=>w.print(),250);
+}
+
+async function renderWDT(){
+  $('cp').innerHTML=`<div class="title">Weekly Demand Target <span onclick="openKB('wdt')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <button class="btn sec" onclick="wdtPrint('products')">🖨 Product target</button>
+    <button class="btn sec" onclick="wdtPrint('custom')">🖨 Custom orders</button>
+    <button class="btn sec" onclick="wdtPrint('raw')">🖨 Raw ingredients</button>
+    <div class="sp"></div><span style="color:var(--muted)">everything the week owes, priced by what is closest to running out</span>`;
+  $('content').innerHTML='<div class="empty">Loading…</div>';
+  await wdtLoad();
+  const tot=_wdtRows.reduce((s,r)=>s+r.target,0), rem=_wdtRows.reduce((s,r)=>s+r.remaining,0);
+  const none=_wdtRows.filter(r=>r.remaining>0&&r.oh<=0).length;
+  const cust=_wdtRows.filter(r=>r.isCustom).length;
+  let h=`<div class="repcard"><div class="repbar"><span>Week of</span>
+      <input type="date" value="${esc(_wdtSrc.date)}" onchange="_wdtDate=this.value;renderWDT()">
+      ${_wdtSrc.plot?`<span class="mini">from locked plot <b>${esc(_wdtSrc.plot)}</b></span>`:'<span class="mini" style="color:var(--earth,#b5762a)">no locked plot for this week — showing the demand table and custom orders only</span>'}</div>
+    <div class="smart" style="margin:8px 0">
+      <div class="stile"><div class="v">${tot}</div><div class="l">Packs demanded</div></div>
+      <div class="stile"><div class="v" style="color:${rem?'var(--berry)':'#4e7a3e'}">${rem}</div><div class="l">Still to make</div></div>
+      <div class="stile"><div class="v" style="color:${none?'var(--danger)':'#4e7a3e'}">${none}</div><div class="l">With nothing on hand</div></div>
+      <div class="stile"><div class="v">${cust}</div><div class="l">Custom SKUs</div></div></div>
+    <div class="hint" style="margin:0 0 8px"><b>Priority is by cover, not by size.</b> A product with none in the freezer against an outstanding order leads the list, whatever the quantity — that is the one that stops a delivery. Sorted least-covered first.</div>
+    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr><th>#</th><th>Product</th><th class="num">Target</th><th class="num">Made</th><th class="num">Still to make</th><th class="num">On hand</th><th>Cover</th><th>Where it came from</th></tr></thead><tbody>
+    ${_wdtRows.map((r,i)=>`<tr${r.remaining>0&&r.oh<=0?' style="background:#fdf3f0"':''}>
+      <td class="mini" style="color:var(--muted)">${i+1}</td>
+      <td><b>${esc(r.name)}</b>${r.isCustom?' <span class="tagf" style="background:#f3e8f7;color:#6b3f7a">CUSTOM</span>':''}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code> · ${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div></td>
+      <td class="num"><b>${r.target}</b></td><td class="num mini" style="color:var(--muted)">${r.done||'—'}</td>
+      <td class="num"><b style="color:${r.remaining?'var(--berry)':'#4e7a3e'}">${r.remaining}</b></td>
+      <td class="num">${r.oh}</td><td>${_wdtCover(r)}</td>
+      <td class="mini" style="color:var(--muted)">${esc(r.src)}</td></tr>`).join('')
+      ||'<tr><td colspan="8" class="empty">No demand for this week yet — build and save a plot in Demand/MRP, or lock a custom order.</td></tr>'}
+    </tbody></table></div><div class="pager">${_wdtRows.length} product(s)</div></div>`;
+  h+=`<div class="repcard" style="margin-top:14px;border-left:4px solid var(--berry)"><div class="repbar"><span>🧑‍🍳 Custom orders in this week</span>
+      <span style="color:var(--muted);font-size:12px">Named customers with a date to hit — they cannot be swapped for another product.</span></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Needed</th><th>Customer</th><th>Order</th><th>Product</th><th class="num">Packs</th><th class="num">On hand</th><th>Status</th></tr></thead><tbody>
+    ${_wdtCo.map(c=>{ const late=c.needed&&c.needed<todayISO();
+      return `<tr><td class="mini" style="white-space:nowrap;${late?'color:var(--danger);font-weight:700':''}">${esc(c.needed||'—')}${late?' · overdue':''}</td>
+      <td><b>${esc(c.customer)}</b></td><td class="mini"><code>${esc(c.ref)}</code></td>
+      <td>${esc(c.product)}</td><td class="num"><b>${c.packs}</b></td><td class="num">${c.oh}</td>
+      <td>${c.oh>=c.packs?'<span class="badge b-received">ready</span>':'<span class="badge b-open">to make</span>'}</td></tr>`; }).join('')
+      ||'<tr><td colspan="7" class="empty">No custom orders owing packs.</td></tr>'}
+    </tbody></table></div><div class="pager">${_wdtCo.length} order line(s)</div></div>`;
+  h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Raw ingredients behind the target</span>
+      <span style="color:var(--muted);font-size:12px">Only what is still to make. Processed = what the kitchen weighs out; raw = the same quantity before yield.</span></div>
+    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr><th>Ingredient</th><th class="num">Processed needed</th><th class="num">Processed on hand</th><th class="num">As-purchased raw</th><th class="num">Raw on hand</th></tr></thead><tbody>
+    ${(()=>{ let out='',last='';
+      _wdtRaw.forEach(r=>{ if(r.cat!==last){ last=r.cat; const c=KSHEET_CATS.find(z=>z.k===r.cat)||{l:r.cat,c:'#5C5C5C'};
+          out+=`<tr class="grp"><td colspan="5" style="background:${c.c};color:#fff;font-weight:800">${esc(c.l)}</td></tr>`; }
+        const short=r.rawSku && r.ohRawG < (r.procG-Math.min(r.ohProcG,r.procG))/((r.yieldPct/100)||1);
+        out+=`<tr style="box-shadow:inset 4px 0 0 ${r.color}"><td><b>${esc(r.name)}</b>${r.rawName?`<div class="mini" style="color:var(--muted)">from ${esc(r.rawName)}</div>`:''}</td>
+          <td class="num"><b>${_kgs(r.procG)}</b></td>
+          <td class="num mini" style="color:${r.ohProcG>0?'#1e6b2e':'var(--muted)'}">${r.ohProcG>0?_kgs(r.ohProcG):'—'}</td>
+          <td class="num mini" style="color:var(--muted)">${_kgs(r.rawG)}</td>
+          <td class="num mini" style="color:${short?'var(--danger)':(r.ohRawG>0?'#7a6432':'var(--muted)')}">${r.rawSku?_kgs(r.ohRawG):'—'}${short?' ⚠':''}</td></tr>`; });
+      return out||'<tr><td colspan="5" class="empty">Nothing outstanding.</td></tr>'; })()}
+    </tbody></table></div><div class="pager">${_wdtRaw.length} ingredient(s)</div></div>`;
+  $('content').innerHTML=h;
+}
+function wdtPrint(which){
+  const w=window.open('','_wdt','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  const css=`@page{size:A4;margin:14mm} *{box-sizing:border-box}
+    body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:12.5px}
+    h1{color:#4e7a3e;margin:0 0 2px;font-size:20px} .sub{color:#666;margin:0 0 14px;font-size:12px}
+    table{width:100%;border-collapse:collapse;margin-bottom:14px}
+    th{background:#4e7a3e;color:#fff;text-align:left;padding:6px 8px;font-size:11px}
+    td{padding:5px 8px;border-bottom:1px solid #eee}
+    td.n,th.n{text-align:right} tr.grp td{color:#fff;font-weight:800;padding:5px 8px}
+    tr.urgent td{background:#fdf3f0}
+    .tot{font-weight:700;border-top:2px solid #4e7a3e;background:#f6f8f4}
+    thead{display:table-header-group} tr{break-inside:avoid}`;
+  const hd=(t,s)=>`<h1>${esc(t)}</h1><div class="sub">Wholesome Rabbit · week of ${esc(_wdtSrc.date)}${_wdtSrc.plot?(' · '+esc(_wdtSrc.plot)):''} · printed ${esc(todayISO())}</div>`;
+  let body='';
+  if(which==='products'){
+    body=hd('Product target — by priority')+
+      `<table><thead><tr><th>#</th><th>Product</th><th>SKU</th><th class="n">Target</th><th class="n">Made</th><th class="n">Still to make</th><th class="n">On hand</th><th>Priority</th></tr></thead><tbody>`+
+      _wdtRows.map((r,i)=>`<tr class="${r.remaining>0&&r.oh<=0?'urgent':''}"><td>${i+1}</td><td>${esc(r.name)}${r.isCustom?' (custom)':''}</td><td>${esc(r.sku)}</td>
+        <td class="n">${r.target}</td><td class="n">${r.done||''}</td><td class="n"><b>${r.remaining}</b></td><td class="n">${r.oh}</td>
+        <td>${r.remaining<=0?'done':(r.oh<=0?'NOTHING ON HAND':(r.cover<1?Math.round(r.cover*100)+'% covered':'covered'))}</td></tr>`).join('')+
+      `<tr class="tot"><td colspan="3">Total · ${_wdtRows.length} product(s)</td><td class="n">${_wdtRows.reduce((s,r)=>s+r.target,0)}</td><td class="n">${_wdtRows.reduce((s,r)=>s+r.done,0)}</td><td class="n">${_wdtRows.reduce((s,r)=>s+r.remaining,0)}</td><td class="n">${_wdtRows.reduce((s,r)=>s+r.oh,0)}</td><td></td></tr>`+
+      `</tbody></table><div class="sub">Sorted least-covered first: a product with none on hand against an outstanding order is what stops a delivery, whatever the quantity.</div>`;
+  } else if(which==='custom'){
+    body=hd('Custom orders — this week')+
+      `<table><thead><tr><th>Needed</th><th>Customer</th><th>Order</th><th>Product</th><th class="n">Packs</th><th class="n">On hand</th><th>Status</th></tr></thead><tbody>`+
+      (_wdtCo.map(c=>`<tr class="${c.needed&&c.needed<todayISO()?'urgent':''}"><td>${esc(c.needed||'—')}</td><td>${esc(c.customer)}</td><td>${esc(c.ref)}</td>
+        <td>${esc(c.product)}</td><td class="n">${c.packs}</td><td class="n">${c.oh}</td><td>${c.oh>=c.packs?'ready':'to make'}</td></tr>`).join('')
+        ||'<tr><td colspan="7">No custom orders owing packs.</td></tr>')+
+      `</tbody></table><div class="sub">A named customer with a date. These cannot be substituted for another product.</div>`;
+  } else {
+    body=hd('Raw ingredients — behind the outstanding target');
+    let rows='',last='';
+    _wdtRaw.forEach(r=>{ if(r.cat!==last){ last=r.cat; const c=KSHEET_CATS.find(z=>z.k===r.cat)||{l:r.cat,c:'#5C5C5C'};
+        rows+=`<tr class="grp" style="background:${c.c}"><td colspan="5">${esc(c.l)}</td></tr>`; }
+      rows+=`<tr><td>${esc(r.name)}${r.rawName?' — from '+esc(r.rawName):''}</td><td class="n">${_kgs(r.procG)}</td><td class="n">${r.ohProcG>0?_kgs(r.ohProcG):'—'}</td><td class="n">${_kgs(r.rawG)}</td><td class="n">${r.rawSku?_kgs(r.ohRawG):'—'}</td></tr>`; });
+    body+=`<table><thead><tr><th>Ingredient</th><th class="n">Processed needed</th><th class="n">Processed on hand</th><th class="n">As-purchased raw</th><th class="n">Raw on hand</th></tr></thead><tbody>${rows||'<tr><td colspan="5">Nothing outstanding.</td></tr>'}
+      <tr class="tot"><td>Total</td><td class="n">${_kgs(_wdtRaw.reduce((s,r)=>s+r.procG,0))}</td><td class="n"></td><td class="n">${_kgs(_wdtRaw.reduce((s,r)=>s+r.rawG,0))}</td><td class="n"></td></tr></tbody></table>
+      <div class="sub">Processed = what the kitchen weighs out of the bin. As-purchased raw = the same quantity before yield — that is the buying figure.</div>`;
+  }
+  w.document.open(); w.document.write(`<html><head><meta charset="utf-8"><title>WR — Weekly Demand Target</title><style>${css}</style></head><body>${body}</body></html>`); w.document.close();
+  w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},250);
+}
 async function renderMRP(){
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderMRP()">↻ Compute</button>
@@ -3257,10 +3917,16 @@ async function generatePOsFromMRP(){
   try{
     // XX = the demand plot's iteration; mint one now if the plan wasn't saved first
     let xx=window._mrpDPit; if(!xx){ const g=await genRef('DP',{category:'RAW',date:MRPDATE}); xx=g.it; window._mrpDPit=xx; }
-    let zz=0;
+    // taken refs, read once — so generating the same plot twice never lands on a
+    // live order and silently rewrites its lines
+    const _taken=new Set(); try{ (await db.list('purchase_orders',{})).forEach(o=>{ if(o&&o.po_ref) _taken.add(String(o.po_ref)); }); }catch(e){}
+    const _dd=_mmddyyyy(MRPDATE);
+    let zz=0, slot=0;
     for(const sup of supList){ zz++;
       setBusy('Creating draft PO '+zz+' of '+total+' — '+sup);
-      const ref=(await genRef('PO',{date:MRPDATE,xx,zz})).ref;   // PO-MMDDYYYY VXX.ZZ
+      let ref='';
+      do{ slot++; ref='PO-'+_dd+' V'+_p2(xx)+'.'+_p2(slot); }while(_taken.has(ref)&&slot<99);
+      _taken.add(ref);   // PO-MMDDYYYY VXX.ZZ
       const rec={po_ref:ref, supplier_name:(sup==='(unassigned)'?null:sup), order_date:MRPDATE, status:'open', created_by:CURRENT_USER};
       try{
         await db.create('purchase_orders', rec);
@@ -3419,7 +4085,7 @@ function smartTiles(model, rec, children){
     const disc=+rec.discount||0, fee=+rec.delivery_fee||0;
     const billable=(anyRecv?recvTot:ordTot) - disc + fee;    // invoice follows RECEIVED qty once receiving starts
     const P=n=>'₱'+Math.round(n).toLocaleString('en-PH');
-    const paid=(window._poPay||[]).reduce((s,p)=>s+(+p.amount||0),0);
+    const paid=sumSupplierPaid(window._poPay);
     const bal=billable-paid;
     const tiles=[{v:children.length,l:'Lines'},{v:P(ordTot),l:'Order value'}];
     if(anyRecv) tiles.push({v:P(recvTot),l:'Received'});
@@ -3554,7 +4220,7 @@ async function poQuoteApply(){
       _vars.push({check_type:'1a · Supply shortfall',source_ref:formRec.po_ref,expected:req,actual:na,gap_qty:-g,gap_value:0,location:'procurement',responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' requested '+req+' vs vendor available '+na+' (short '+(Math.round(g*100)/100)+'kg) — raise a backup PO to cover the gap'}); }
     return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:na, price_kg:np, received_kg:l.received_kg||0}; });
   try{
-    await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
+    await poPatchLines(lines, updated, ['available_kg','price_kg']);
     formChildren=updated; formRec.status='quoted';
     await formUpdate('purchase_orders','po_ref',formRec.po_ref,{status:'quoted'});
     sysLog('purchase_orders',formRec.po_ref,'📝 Vendor quotation recorded'+(notes.length?(' — short: '+notes.join('; ')):' — full availability')+' by '+CURRENT_USER);
@@ -3627,7 +4293,7 @@ async function poConfirmApply(){
   if(overs.length) changes.push('⚠ order exceeds availability: '+overs.join('; '));
   const eta=($('pc_eta')||{}).value||'';
   try{
-    await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
+    await poPatchLines(lines, updated, ['available_kg','price_kg']);
     formChildren=updated; formRec.status='confirmed';
     if(eta) formRec.expected_delivery=eta;
     const _upd={status:'confirmed'}; if(eta) _upd.expected_delivery=eta;
@@ -3653,6 +4319,32 @@ async function poPayments(ref){ if(!ref) return [];
 // Effective ORDER qty per line = vendor-available (what we actually order), falling back to the
 // original requested qty until a quotation sets availability. The requested (ordered_kg) is locked.
 function poOrderQty(l){ return (l&&l.available_kg!=null&&l.available_kg!=='')?(+l.available_kg||0):(+((l||{}).ordered_kg)||0); }
+/* ---- Never rewrite an order's lines wholesale --------------------------------
+   Quoting, issuing and receiving each change ONE OR TWO NUMBERS on lines that
+   already exist. All three used to call replaceChildren(), which DELETES every
+   line and re-inserts it — so a failed re-insert, or an empty formChildren when
+   a modal opened, wiped the order and left only a toast behind. That is how a
+   purchase order loses its lines.
+
+   Patch each line by its primary key instead. The wholesale path survives only
+   for rows with no id, and even then it refuses to write an empty set over an
+   order that has lines. */
+async function poPatchLines(orig, updated, fields){
+  const all=(orig||[]);
+  if(all.length && !updated.length) throw new Error('refusing to clear the order lines');
+  const patchable = all.length===updated.length && all.every(l=>l&&l.id!=null);
+  if(patchable){
+    for(let i=0;i<updated.length;i++){
+      const rec={}; fields.forEach(f=>{ if(updated[i][f]!==undefined) rec[f]=updated[i][f]; });
+      if(!Object.keys(rec).length) continue;
+      const id=all[i].id;
+      if(isLive()) await sb('po_lines?id=eq.'+encodeURIComponent(id),{method:'PATCH',prefer:'return=minimal',body:JSON.stringify(rec)});
+      else { const row=(DEMO.po_lines||[]).find(x=>String(x.id)===String(id)); if(row) Object.assign(row,rec); }
+    }
+    return;
+  }
+  await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
+}
 // What a line still owes: ordered minus what has already been received.
 function poRemainQty(l){ return Math.max(0, Math.round((poOrderQty(l)-(+((l||{}).received_kg)||0))*1000)/1000); }
 // Billable = received qty × price (falls back to the ORDER qty — vendor avail — until anything is
@@ -3670,9 +4362,13 @@ function poBillable(rec, lines){ lines=lines||[];
   return Math.max(0,(anyRecv?recvTot:ordTot) - disc + fee); }
 // what a fleet/courier is owed on this PO, if anyone
 function poFleetDue(rec){ return poFeeToFleet(rec)?(+((rec||{}).delivery_fee)||0):0; }
+/* A payment to the courier does not reduce what the supplier is owed. One test,
+   used by the panel, the dashboard and the payables report alike. */
+function payToSupplier(p){ return !/fleet/i.test(String((p||{}).payee||'')); }
+function sumSupplierPaid(pays){ return (pays||[]).filter(payToSupplier).reduce((s,p)=>s+(+p.amount||0),0); }
 function poPaymentsPanel(rec, lines){
   const pays=window._poPay||[];
-  const billable=poBillable(rec,lines); const paid=pays.reduce((s,p)=>s+(+p.amount||0),0); const bal=billable-paid;
+  const billable=poBillable(rec,lines); const paid=sumSupplierPaid(pays); const bal=billable-paid;
   const fleetDue=poFleetDue(rec);
   const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
   const st = paid<=0.005 ? {t:'unpaid',c:'var(--danger)'} : (bal>0.5 ? {t:'partial',c:'var(--earth,#b5762a)'} : {t:'paid',c:'#4e7a3e'});
@@ -3680,8 +4376,8 @@ function poPaymentsPanel(rec, lines){
   const fleetHtml = fleetDue>0 ? `<div style="margin:6px 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
       <b>Separate payable — ${P(fleetDue)} to ${esc(rec.delivery_provider||'the fleet service')}.</b>
       The delivery fee on this PO is owed to a courier, not to ${esc(rec.supplier_name||'the supplier')}, so it is excluded from the supplier balance above. Record it as its own payment line, or against the fleet's own PO.</div>` : '';
-  const rows = pays.length ? pays.map(p=>`<tr><td>${esc(p.paid_at||'')}</td><td>${esc(p.method||'—')}</td><td class="num">${P(+p.amount||0)}</td><td>${esc(p.paid_by||'')}</td><td class="mini">${esc(p.note||'')}</td></tr>`).join('')
-    : `<tr><td colspan="5" class="empty" style="padding:8px">No payments yet.</td></tr>`;
+  const rows = pays.length ? pays.map(p=>`<tr><td>${esc(p.paid_at||'')}</td><td>${esc(p.method||'—')}</td><td>${payToSupplier(p)?'<span class="mini">Supplier</span>':'<span class="mini" style="color:var(--earth,#b5762a);font-weight:700">Fleet</span>'}</td><td class="num">${P(+p.amount||0)}</td><td>${esc(p.paid_by||'')}</td><td class="mini">${esc(p.note||'')}</td></tr>`).join('')
+    : `<tr><td colspan="6" class="empty" style="padding:8px">No payments yet.</td></tr>`;
   // Payment schedule from the supplier's terms (downpayment / on-receiving / term) applied to the billable.
   const sup=window._poSupplier||{}; const dpP=+sup.dp_pct||0, rvP=+sup.receiving_pct||0, tmP=+sup.term_pct||0, tmD=+sup.term_days||0;
   let schedHtml='';
@@ -3713,7 +4409,7 @@ function poPaymentsPanel(rec, lines){
     </div>
     ${fleetHtml}
     ${schedHtml}
-    <div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Method</th><th class="num">Amount</th><th>By</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Date</th><th>Method</th><th>Paid to</th><th class="num">Amount</th><th>By</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>
   </div></div>`;
 }
 // Show the courier box only when the fee is actually owed to one.
@@ -3732,24 +4428,29 @@ async function poUpdateCharges(){
 function openPayment(){
   if(formIsNew){ toast('Save the PO first',true); return; }
   const lines=formChildren||[]; const billable=poBillable(formRec,lines);
-  const paid=(window._poPay||[]).reduce((s,p)=>s+(+p.amount||0),0); const bal=Math.max(0,billable-paid);
+  const paid=sumSupplierPaid(window._poPay); const bal=Math.max(0,billable-paid);
   const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
   const today=todayISO();
   $('modal').innerHTML=`<div><h3>Register payment — ${esc(formRec.po_ref)}</h3>
     <p class="mini">Billable <b>${P(billable)}</b> · already paid <b>${P(paid)}</b> · <b>balance ${P(bal)}</b>. Record a partial or full payment.</p>
     <div class="fld"><label>Amount ₱</label><div class="val"><input id="pay_amt" type="number" step="any" value="${Math.round(bal*100)/100}" style="width:160px"></div></div>
     <div class="fld"><label>Method</label><div class="val"><select id="pay_method" style="width:180px">${PO_PAY_METHODS.map(x=>`<option>${x}</option>`).join('')}</select></div></div>
+    <div class="fld"><label>Paid to</label><div class="val"><select id="pay_payee" style="width:220px">
+      <option value="Supplier">Supplier — ${esc(formRec.supplier_name||'the vendor')}</option>
+      <option value="Fleet service">Fleet / courier${formRec.delivery_provider?(' — '+esc(formRec.delivery_provider)):''}</option>
+      </select><div class="mini" style="color:var(--muted);margin-top:3px">A courier fee is owed to the courier, not the vendor — it is excluded from the supplier balance, so record it here as its own payment.</div></div></div>
     <div class="fld"><label>Date</label><div class="val"><input id="pay_date" type="date" value="${today}" style="width:180px"></div></div>
     <div class="fld"><label>Note</label><div class="val"><input id="pay_note" placeholder="reference / remarks (optional)" style="width:100%"></div></div>
     ${(window._poPay||[]).length?`<div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12.5px">
       <b>Already recorded on this PO</b> — check before adding another:
-      <table style="margin-top:4px"><tbody>${(window._poPay||[]).map(x=>`<tr><td class="mini">${esc(String(x.paid_at||'').slice(0,10))}</td><td class="mini">${esc(x.method||'—')}</td><td class="num mini"><b>${P(+x.amount||0)}</b></td><td class="mini" style="color:var(--muted)">${esc(x.paid_by||'')}${x.note?' · '+esc(x.note):''}</td></tr>`).join('')}</tbody></table></div>`:''}
+      <table style="margin-top:4px"><tbody>${(window._poPay||[]).map(x=>`<tr><td class="mini">${esc(String(x.paid_at||'').slice(0,10))}</td><td class="mini">${esc(x.method||'—')}</td><td class="num mini"><b>${P(+x.amount||0)}</b></td><td class="mini" style="color:var(--muted)">${/fleet/i.test(String(x.payee||''))?'<b style="color:var(--earth,#b5762a)">fleet</b> · ':''}${esc(x.paid_by||'')}${x.note?' · '+esc(x.note):''}</td></tr>`).join('')}</tbody></table></div>`:''}
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="paymentApply()">💾 Save payment</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   $('overlay').classList.add('on');
 }
 async function paymentApply(){
   const amt=+($('pay_amt')||{}).value||0; if(!(amt>0)){ toast('Enter a payment amount',true); return; }
   const method=($('pay_method')||{}).value||''; const paid_at=($('pay_date')||{}).value||todayISO(); const note=($('pay_note')||{}).value||'';
+  const payee=($('pay_payee')||{}).value||'Supplier';
   const _amt=Math.round(amt*100)/100;
   /* Double-encoding guard. Two people settle the same bill, or one person clicks
      twice on a slow connection, and the PO reads as paid twice — which quietly
@@ -3761,6 +4462,22 @@ async function paymentApply(){
     Math.abs((+x.amount||0)-_amt)<0.005 &&
     String(x.method||'')===String(method) &&
     String(x.paid_at||'').slice(0,10)===String(paid_at).slice(0,10));
+  /* The harder duplicate: same bill paid twice through DIFFERENT channels on
+     different days — ₱7,000 by bank transfer on Monday, ₱7,000 by GCash on
+     Wednesday. Amount-and-date matching never sees it. What does see it is the
+     total: a payment that takes the PO past what it is billable for. */
+  if(!/fleet/i.test(payee)){
+    const _bill=poBillable(formRec,formChildren||[]);
+    const _already=sumSupplierPaid(window._poPay);
+    const _after=_already+_amt;
+    if(_bill>0 && _after>_bill+0.5){
+      const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
+      if(!confirm('This payment would take the total paid ABOVE what this order is billable for.\n\n'
+        +'Billable: '+P(_bill)+'\nAlready paid: '+P(_already)+'\nThis payment: '+P(_amt)+'\nWould total: '+P(_after)+'  (over by '+P(_after-_bill)+')\n\n'
+        +'The usual cause is the same bill settled twice through different channels.\n\n'
+        +'OK = record it anyway\nCancel = stop, nothing is saved')) return;
+    }
+  }
   if(_dupes.length){
     const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
     const lines=_dupes.map(x=>'• '+P(+x.amount||0)+' · '+(x.method||'—')+' · '+(String(x.paid_at||'').slice(0,10))
@@ -3769,9 +4486,11 @@ async function paymentApply(){
       +'\n\nOK = record it anyway (a genuine second payment)\nCancel = stop, nothing is saved')) return;
   }
   try{
-    await db.create('po_payments',{po_ref:formRec.po_ref, amount:_amt, method, paid_at, note, paid_by:CURRENT_USER});
+    await db.create('po_payments',{po_ref:formRec.po_ref, amount:_amt, method, paid_at, note, paid_by:CURRENT_USER, payee});
     window._poPay = await poPayments(formRec.po_ref);
-    const billable=poBillable(formRec,formChildren); const paid=(window._poPay||[]).reduce((s,p)=>s+(+p.amount||0),0);
+    const billable=poBillable(formRec,formChildren);
+    // only what went to the SUPPLIER settles the supplier's bill
+    const paid=sumSupplierPaid(window._poPay);
     const ps = paid<=0.005?'unpaid':((billable-paid)>0.5?'partial':'paid');
     formRec.payment_status=ps;
     await formUpdate('purchase_orders','po_ref',formRec.po_ref,{payment_status:ps});
@@ -3781,13 +4500,37 @@ async function paymentApply(){
 }
 
 /* ---- Guided PO receiving: capture the actual received qty per line (#2) ---- */
+/* What this PO has ALREADY put into stock, read back off the ledger.
+   `po_lines.received_kg` is a convenience column: it can be lost when the lines
+   are rewritten, and once it reads 0 the next receipt posts the whole delivery a
+   SECOND time. The ledger cannot lose it — every receipt movement is stamped
+   "PO <ref> R<batch>". So the ledger is the authority for "already received",
+   and the column is only ever the lower bound. Returns kg (or whole units for a
+   supply, matching the basis the receive screen types in). */
+async function poReceivedFromLedger(poRef){
+  const out={}; const pre='PO '+poRef+' R';
+  let rows=[];
+  try{
+    if(isLive()) rows=await sb('inventory_movements?select=ref_sku,qty,note&movement_type=eq.receipt&note=like.'+encodeURIComponent(pre.replace(/[%_]/g,'')+'%'));
+    else rows=(DEMO.inventory_movements||[]).filter(m=>m.movement_type==='receipt');
+  }catch(e){ return out; }
+  const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+  rows.forEach(m=>{ if(String(m.note||'').indexOf(pre)!==0) return;
+    const isSup=/(supply|supplement)/i.test((im[m.ref_sku]||{}).category||'');
+    out[m.ref_sku]=(out[m.ref_sku]||0)+(+m.qty||0)/(isSup?1:1000); });
+  Object.keys(out).forEach(k=>{ out[k]=Math.round(out[k]*1000)/1000; });
+  return out;
+}
+// the honest "already", per line: whichever of the column and the ledger is higher
+function _poAlreadyOf(l,led){ return Math.max(+l.received_kg||0, +(led||{})[l.ingredient_sku]||0); }
 async function openPOReceive(){
   if(formIsNew){ toast('Save the PO first',true); return; }
   let lines=formChildren||[];
   if(!lines.length){ try{ lines=await db.children(MODELS.purchase_orders.o2m, formRec.po_ref); formChildren=lines; }catch(e){} }
   if(!lines.length){ toast('No order lines to receive',true); return; }
+  const _led=await poReceivedFromLedger(formRec.po_ref); window._poLed=_led;
   window._poOrd=lines.map(l=>poOrderQty(l));    // order qty (vendor avail)
-  window._poAlready=lines.map(l=>+l.received_kg||0);   // received so far (accumulated across batches)
+  window._poAlready=lines.map(l=>_poAlreadyOf(l,_led));   // received so far, per the LEDGER
   await loadBins();
   const _isSup=_isStickerPO(formRec) || /\[SUPPLIES\]/i.test(String(formRec.po_ref||''));
   const defLoc=_isSup?'':'bulacan';   // supplies/stickers may go to Pasig — don't presume
@@ -3800,13 +4543,17 @@ async function openPOReceive(){
       <label class="mini">Receive at warehouse&nbsp;<select id="rc_loc" onchange="rcReloadBins()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">${_locSel(defLoc)}</select></label>
       <label class="mini">Set bin for all&nbsp;<input id="rc_binAll" placeholder="e.g. A-1" style="width:90px;padding:4px;border:1px solid var(--line);border-radius:5px"></label>
       <button class="btn sec sm" onclick="rcFillAll()">↧ Apply bin to all</button>
+      <span style="flex:1"></span>
+      <button class="btn sec sm" onclick="rcFillOrdered()" title="Fill every line with what is still outstanding on the order">↧ Received = ordered</button>
     </div>
+    <div class="hint" style="margin:0 0 8px">Quantities start <b>blank on purpose</b> — type only what actually arrived. A blank line receives nothing. Use <b>↧ Received = ordered</b> when the delivery came in full.</div>
     <div style="max-height:320px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Order</th><th class="num">Already</th><th class="num">Receive now</th><th>Bin</th><th></th></tr></thead><tbody>
-    ${lines.map((l,i)=>{ const oq=poOrderQty(l); const already=+l.received_kg||0; const remaining=Math.max(0,Math.round((oq-already)*1000)/1000);
+    ${lines.map((l,i)=>{ const oq=poOrderQty(l); const already=_poAlreadyOf(l,_led); const remaining=Math.max(0,Math.round((oq-already)*1000)/1000);
+      const _drift=already>(+l.received_kg||0)+0.0001;
       return `<tr><td>${esc(ingName(l.ingredient_sku))}</td>
       <td class="num" style="color:var(--muted)">${oq}</td>
-      <td class="num" style="color:var(--muted)">${already||'—'}</td>
-      <td><input id="rc_q${i}" type="number" step="any" value="${remaining}" oninput="rcFlag(${i})" style="width:92px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td class="num" style="color:var(--muted)"${_drift?' title="the order line says '+(+l.received_kg||0)+' but the stock ledger already carries '+already+' — the ledger wins"':''}>${already||'—'}${_drift?' <span style="color:var(--danger)">•</span>':''}</td>
+      <td><input id="rc_q${i}" type="number" step="any" value="" placeholder="0" data-rem="${remaining}" oninput="rcFlag(${i})" style="width:92px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
       <td><input id="rc_bin${i}" value="${esc(binOf(l.ingredient_sku,defLoc))}" placeholder="bin" style="width:72px;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
       <td id="rc_flag${i}" style="font-size:12px;white-space:nowrap"></td></tr>`; }).join('')}
     </tbody></table></div>
@@ -3818,6 +4565,18 @@ async function openPOReceive(){
 }
 // refresh each line's bin to the chosen warehouse's bin
 function rcReloadBins(){ const loc=($('rc_loc')||{}).value||'bulacan'; (window._rcLines||[]).forEach((l,i)=>{ const b=$('rc_bin'+i); if(b) b.value=binOf(l.ingredient_sku,loc); }); }
+/* The shortcut for a full delivery: fill every line with what is still
+   outstanding. Deliberately a button, not the default — a pre-filled quantity
+   is a quantity nobody checked. */
+function rcFillOrdered(){
+  const n=+window._rcN||0; let filled=0;
+  for(let i=0;i<n;i++){ const el=$('rc_q'+i); if(!el) continue;
+    const rem=+el.getAttribute('data-rem')||0;
+    el.value=rem>0?rem:''; if(rem>0) filled++;
+    if(typeof rcFlag==='function') rcFlag(i);
+  }
+  toast(filled?('Filled '+filled+' line(s) with the outstanding quantity — check before you post'):'Nothing outstanding on this order');
+}
 function rcFillAll(){ const bin=($('rc_binAll')||{}).value||''; const n=window._rcN||0;
   for(let i=0;i<n;i++){ if(bin){ const b=$('rc_bin'+i); if(b) b.value=bin; } }
   toast('Applied to all lines'+(bin?' · bin '+bin:'')); }
@@ -3854,7 +4613,17 @@ async function _poReceiveApply(){
   const isFinal=!!($('rc_final')||{}).checked;
   const loc=($('rc_loc')||{}).value||'bulacan';
   let anyNow=false;
-  const updated=lines.map((l,i)=>{ const now=+(($('rc_q'+i)||{}).value)||0; const already=+l.received_kg||0; const oq=poOrderQty(l); const pr=+l.price_kg||0;
+  /* Re-read the ledger at the moment of posting, not when the screen opened —
+     someone else may have received a batch in between. This is what stops the
+     same delivery going in twice after the order lines have been rewritten. */
+  const _led=await poReceivedFromLedger(formRec.po_ref);
+  const _over=[];
+  lines.forEach((l,i)=>{ const now=+(($('rc_q'+i)||{}).value)||0; if(!(now>0)) return;
+    const oq=poOrderQty(l), tot=_poAlreadyOf(l,_led)+now;
+    if(tot>oq*1.5+0.0001 && oq>0) _over.push(ingName(l.ingredient_sku)+': ordered '+oq+', this would make '+(Math.round(tot*100)/100)); });
+  if(_over.length && !confirm('This receipt takes some lines well past what was ordered:\n\n• '+_over.join('\n• ')+
+      '\n\nThat usually means the delivery is being posted a second time. Post it anyway?')) return;
+  const updated=lines.map((l,i)=>{ const now=+(($('rc_q'+i)||{}).value)||0; const already=_poAlreadyOf(l,_led); const oq=poOrderQty(l); const pr=+l.price_kg||0;
     if(now>0){ anyNow=true; deltas.push({ingredient_sku:l.ingredient_sku, recvKg:now, priceKg:pr}); }
     const bv=($('rc_bin'+i)||{}).value; if(bv!==undefined&&bv!==null) setBin(l.ingredient_sku,loc,bv);
     const total=Math.round((already+now)*1000)/1000;
@@ -3870,7 +4639,7 @@ async function _poReceiveApply(){
   const complete=updated.every(u=>(+u.received_kg||0) >= poOrderQty(u)-0.0001);
   const willClose = isFinal || complete;
   try{
-    await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated);
+    await poPatchLines(lines, updated, ['received_kg']);
     formChildren=updated;
     if(deltas.length){ const res=await postReceiptDelta(formRec, deltas, loc); }
     // A PO with one delivery in and another still to come now says so.
@@ -4015,7 +4784,7 @@ async function renderDashboard(){
   try{_pol=await db.list('po_lines',{})}catch(e){}
   try{_dl=await db.list('delivery_lines',{})}catch(e){}
   let _pay=[]; try{_pay=await db.list('po_payments',{})}catch(e){}
-  const _payByPo={}; _pay.forEach(p=>_payByPo[p.po_ref]=(_payByPo[p.po_ref]||0)+(+p.amount||0));
+  const _payByPo={}; _pay.filter(payToSupplier).forEach(p=>_payByPo[p.po_ref]=(_payByPo[p.po_ref]||0)+(+p.amount||0));
   const _lineByPo={}; _pol.forEach(l=>{ (_lineByPo[l.po_ref]=_lineByPo[l.po_ref]||[]).push(l); });
   let payables=0,payCount=0; po.forEach(p=>{ if(PO_LIVE.includes(p.status)){ const bl=poBillable(p,_lineByPo[p.po_ref]||[]); const b=Math.max(0,bl-(_payByPo[p.po_ref]||0)); if(b>0.5){ payables+=b; payCount++; } } });
   // Payables detail: total billable / paid, and the remaining-due schedule from each supplier's terms.
@@ -4407,6 +5176,14 @@ function renderCmd(q){ const el=$('cmdres'); if(!el) return;
 function cmdRun(i){ const it=cmdItems[i]; if(it){ closeCmd(); it.act(); } }
 document.addEventListener('keydown',e=>{
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){ e.preventDefault(); openCmd(); return; }
+  // alt+← / alt+→ walk the list from inside a record
+  if(e.altKey && (e.key==='ArrowLeft'||e.key==='ArrowRight') && state.view==='form' && !$('overlay').classList.contains('on')){
+    const m=MODELS[state.model]; const rows=state._rows||[];
+    if(m && rows.length>1){ const i=rows.findIndex(x=>String(x[m.pk])===String(formRec[m.pk]));
+      const j=e.key==='ArrowLeft'?i-1:i+1;
+      if(i>=0 && j>=0 && j<rows.length){ e.preventDefault(); gotoRecord(state.model, rows[j][m.pk]); } }
+    return;
+  }
   const w=$('cmdwrap'); if(!w||!w.classList.contains('on')) return;
   if(e.key==='Escape') closeCmd();
   else if(e.key==='ArrowDown'){ e.preventDefault(); cmdSel=Math.min(cmdItems.length-1,cmdSel+1); renderCmd(); }
@@ -5660,6 +6437,7 @@ async function renderProdPlan(){
     window._prodSupOh=oh;
   }catch(e){ window._prodSupOh={}; }
   await prodPackSync();
+  try{ window._prodNeedRows=await prodNeedRows(); }catch(e){ window._prodNeedRows=[]; }
   drawProdPlan();
 }
 // Load the most-recent SAVED DRAFT plan for the production date, so the plan/cart persist across browsers.
@@ -5724,6 +6502,117 @@ async function prodLoadTargets(){
     else { rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed' && String(b.production_date||'')>=String(planDate)); }
     (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ prodProducedMap[b.product_sku]=(prodProducedMap[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
+}
+/* ============ WHAT THIS RUN NEEDS, ONE CALCULATION ==========================
+   The daily sheet and the masterlist disagreed because they answer different
+   questions and neither said which: the sheet totals the PROCESSED grams the
+   kitchen weighs out of the bin, the MRP totals the RAW as-purchased kilos you
+   have to buy (processed ÷ yield). Both are right. Kept apart, they look like
+   an error; the owner's instruction — follow the sheet — is also correct,
+   because the kitchen weighs processed.
+
+   So compute both, once, and show them side by side with the stock that exists
+   for each. Everything downstream — the plan card, the printed prep list, the
+   confirm-actuals screen — reads this, so they cannot drift apart again.
+
+   `window._prodNeed` holds per-ingredient overrides in PROCESSED grams: the
+   kitchen may deliberately use more or less of something to complete a pack. */
+async function prodNeedRows(){
+  const bm=await prodBOMMap();
+  const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+  const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
+  const {ctx}=_outIngCtx(ings);
+  const oh=window._prodSupOh||{};
+  const ov=window._prodNeed||{};
+  const agg={};
+  prodPlanLines.filter(l=>(+l.good_packs||0)>0).forEach(l=>{
+    const packs=+l.good_packs||0;
+    (bm[l.product_sku]||[]).forEach(line=>{
+      const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{sku:line.ingredient_sku, procG:0, forProducts:[]};
+      a.procG+=line.processed_g*packs;
+      if(a.forProducts.indexOf(l.name||l.product_sku)<0) a.forProducts.push(l.name||l.product_sku);
+    });
+  });
+  // output ingredients being made to stock need their raw too
+  prodOutLines.filter(l=>(+l.needed_kg||0)>0).forEach(l=>{
+    const a=agg[l.ingredient_sku]=agg[l.ingredient_sku]||{sku:l.ingredient_sku, procG:0, forProducts:[]};
+    a.procG+=(+l.needed_kg||0)*1000;
+    if(a.forProducts.indexOf('(to stock)')<0) a.forProducts.push('(to stock)');
+  });
+  return Object.keys(agg).map(sku=>{
+    const it=im[sku]||{}; const cl=_countIngClass(it,ctx)||{};
+    const cat=_ksCat(cl.g1||it.category||'');
+    const y=((+it.yield_pct||100)/100)||1;
+    const base=agg[sku].procG;
+    const over=(ov[sku]!=null&&ov[sku]!=='')?(+ov[sku]||0):null;
+    const need=over!=null?over:base;
+    const parent=_procParent(it,bySku,byName);
+    return {
+      sku, name:_outName(it,cl)||it.name||sku,
+      cat:cat.k, catLabel:cat.l, color:cat.c,
+      bones:/bone/i.test(String(cl.g1||it.category||''))||/bone/i.test(String(it.name||'')),
+      recipeG:base,                       // what the recipes add up to
+      needG:need,                         // what we will actually pull (override wins)
+      overridden:over!=null,
+      rawG:need/y,                        // the same need, as-purchased
+      yieldPct:Math.round(y*1000)/10,
+      ohProcG:+oh[sku]||0,                // processed already in the bin
+      rawSku:parent?parent.sku:'',
+      rawName:parent?parent.name:'',
+      ohRawG:parent?(+oh[parent.sku]||0):0,
+      forProducts:agg[sku].forProducts
+    };
+  }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat) || b.needG-a.needG);
+}
+/* The prep list, on screen, in the printed sheet's own colours and order. */
+function prodNeedBody(){
+  const rows=window._prodNeedRows||[];
+  if(!rows.length) return '<tr><td colspan="8" class="empty">Enter good packs on a product above, and everything the run needs appears here.</td></tr>';
+  let h=''; let lastCat='';
+  rows.forEach((r,i)=>{
+    if(r.cat!==lastCat){ lastCat=r.cat;
+      const c=KSHEET_CATS.find(z=>z.k===r.cat)||{l:r.cat,c:'#5C5C5C'};
+      h+=`<tr class="grp"><td colspan="8" style="background:${c.c};color:#fff;font-weight:800;letter-spacing:.02em">${esc(c.l)}</td></tr>`;
+    }
+    const shortProc=r.ohProcG>0 && r.ohProcG<r.needG;
+    const shortRaw =r.rawSku && r.ohRawG < (r.needG-Math.min(r.ohProcG,r.needG))/((r.yieldPct/100)||1);
+    h+=`<tr style="box-shadow:inset 4px 0 0 ${r.color}">
+      <td><b>${esc(r.name)}</b>${r.bones?' <span class="tagf" style="background:#f7dcd6;color:#8a2b1c">BONE</span>':''}
+        <div class="mini" style="color:var(--muted)">${esc(r.forProducts.join(' · '))}</div></td>
+      <td class="num mini" style="color:var(--muted)">${_kgs(r.recipeG)}</td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:88px;text-align:right${r.overridden?';border-color:var(--berry);font-weight:700':''}"
+          value="${r.overridden?(Math.round(r.needG)/1000):''}" placeholder="${_kgs(r.recipeG)}"
+          oninput="prodNeedSet('${esc(r.sku)}',this.value)"
+          title="What the kitchen will actually pull. Leave blank to follow the recipe; type a figure to use more or less of this ingredient to complete the pack."></td>
+      <td class="num"><b>${_kgs(r.needG)}</b></td>
+      <td class="num mini" style="color:${r.ohProcG>0?(shortProc?'var(--earth,#b5762a)':'#1e6b2e'):'var(--muted)'}">${r.ohProcG>0?_kgs(r.ohProcG):'—'}</td>
+      <td class="num mini" style="color:var(--muted)">${_kgs(r.rawG)}<div class="mini" style="opacity:.7">@${r.yieldPct}%</div></td>
+      <td class="num mini" style="color:${r.ohRawG>0?(shortRaw?'var(--danger)':'#7a6432'):'var(--muted)'}">${r.rawSku?_kgs(r.ohRawG):'<span title="no raw parent set">—</span>'}</td>
+      <td class="mini" style="color:var(--muted)">${esc(r.rawName||'')}</td></tr>`;
+  });
+  return h;
+}
+function prodNeedFoot(){
+  const rows=window._prodNeedRows||[];
+  const n=rows.length, ov=rows.filter(r=>r.overridden).length;
+  const proc=rows.reduce((s,r)=>s+r.needG,0), raw=rows.reduce((s,r)=>s+r.rawG,0);
+  const shortRaw=rows.filter(r=>r.rawSku && r.ohRawG < (r.needG-Math.min(r.ohProcG,r.needG))/((r.yieldPct/100)||1)).length;
+  return `${n} ingredient(s) · <b>${_kgs(proc)}</b> processed to weigh out · <b>${_kgs(raw)}</b> as-purchased raw`
+    +(ov?` · <b style="color:var(--berry)">${ov} overridden</b>`:'')
+    +(shortRaw?` · <b style="color:var(--danger)">${shortRaw} short of raw</b>`:'');
+}
+const _kgs=g=>(Math.round((+g||0)/10)/100).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:3})+' kg';
+function prodNeedSet(sku,v){
+  window._prodNeed=window._prodNeed||{};
+  if(v===''||v==null) delete window._prodNeed[sku];
+  else window._prodNeed[sku]=Math.max(0,(+v||0))*1000;   // typed in kg, held in grams
+  return prodNeedRefresh();
+}
+function prodNeedReset(){ window._prodNeed={}; return prodNeedRefresh(); }
+async function prodNeedRefresh(){
+  try{ window._prodNeedRows=await prodNeedRows(); }catch(e){ window._prodNeedRows=[]; }
+  const el=$('needBody'); if(el) el.innerHTML=prodNeedBody();
+  const f=$('needFoot'); if(f) f.innerHTML=prodNeedFoot();
 }
 function _prodRemain(sku,thisGood){ const t=+prodTargetMap[sku]||0, p=+prodProducedMap[sku]||0; return Math.max(0, t-p-(+thisGood||0)); }
 function drawProdPlan(){
@@ -5793,6 +6682,17 @@ function drawProdPlan(){
     </tbody></table></div>
     <div style="margin-top:8px"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button></div>
     <div class="hint" style="margin-top:8px">This list is for prep you <b>still have to do</b>. Processed stock you have <b>already made</b> needs no line here — when you confirm the run, every recipe draws the processed bin first and only makes the shortfall from raw. So 25 kg of a processed ingredient sitting in the chiller against a 21 kg recipe means <b>nothing to prep and nothing to type</b>; the green chip beside each item is there so you can see that at a glance.</div></div>`;
+  /* The prep list, on the plan itself — the same numbers the kitchen sheet
+     prints, in the same colours and the same order (item 5), with the needed
+     quantity editable (item 2) and the two stock columns beside it (item 3). */
+  h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Ingredients needed — the prep list</span>
+    <span style="color:var(--muted);font-size:12px">Grouped and coloured like the printed sheet. <b>Needed</b> is what the kitchen weighs out of the processed bin; <b>As-purchased raw</b> is the same quantity before yield. Type over <b>Use instead</b> to pull more or less of an ingredient.</span></div>
+    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr>
+      <th>Ingredient</th><th class="num">Recipe says</th><th class="num">Use instead</th><th class="num">Needed</th>
+      <th class="num">Processed on hand</th><th class="num">As-purchased raw</th><th class="num">Raw on hand</th><th>From raw</th>
+    </tr></thead><tbody id="needBody">${prodNeedBody()}</tbody></table></div>
+    <div class="pager"><span id="needFoot">${prodNeedFoot()}</span>
+      <button class="btn sec sm" onclick="prodNeedReset()" title="Clear every override and go back to what the recipes say">↺ Back to the recipe</button></div></div>`;
   h+=prodPackHtml();
   $('content').innerHTML=h;
 }
@@ -5803,6 +6703,7 @@ function prodPackTouch(){
   prodPackSync().then(()=>{
     if(JSON.stringify(prodPackStk.map(r=>[r.sku,r.qty]))!==before) drawProdPlan();
   }).catch(()=>{});
+  prodNeedRefresh();                       // the prep list follows the pack count
 }
 
 /* ---- Packaging & labels used on this run --------------------------------------
@@ -6298,6 +7199,19 @@ const KSHEET_CSS=`  :root{
     display:flex;justify-content:space-between;font-weight:800;font-size:15px;
   }
 
+  /* ---- Ingredient Yield Record: boxes to write in, sized for a pen ---- */
+  .yield-record{page-break-before:always;}
+  .yield-record .yr-box{
+    display:inline-block;min-width:74px;height:22px;
+    border-bottom:1.4px solid #9a9a93;border-radius:2px;
+  }
+  .yield-record table.yr td{padding-top:9px;padding-bottom:9px;}
+  .yield-record table.yr th{font-size:11px;letter-spacing:.02em;}
+  .yr-legend{
+    margin-top:14px;padding-top:12px;border-top:2px dashed var(--line);
+    display:flex;flex-wrap:wrap;gap:22px;font-size:12px;color:var(--sub);
+  }
+
   .print-bar{
     position:sticky;bottom:0;background:linear-gradient(0deg,var(--bg) 70%,transparent);
     padding-top:20px;display:flex;justify-content:center;gap:12px;
@@ -6552,6 +7466,7 @@ function _ksPrepNotes(fmt, ings){
   return [...new Set(n)];
 }
 async function prodKitchenSheet(){
+  try{ window._prodNeedRows=await prodNeedRows(); }catch(e){}
   const lines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
   const outs=prodOutLines.filter(l=>(+l.needed_kg||0)>0);
   if(!lines.length && !outs.length){ toast('Add products with packs, or an output ingredient, first',true); return; }
@@ -6715,18 +7630,57 @@ async function prodKitchenSheet(){
       </div></div>
     </div></div>`:'';
 
-  // ---- combined shopping / prep list, grouped by category ----
+  /* ---- combined shopping / prep list -------------------------------------
+     Four columns, not one. "Combined total" alone was the number that made the
+     sheet look like it disagreed with the masterlist: it is PROCESSED weight,
+     what you weigh out of the bin, while the masterlist quotes the raw you buy.
+     Both are printed now, each beside the stock that actually exists for it, so
+     the shopper and the prep team read the same page and neither has to convert
+     anything in their head. */
+  const _needBySku={}; (window._prodNeedRows||[]).forEach(r=>_needBySku[r.sku]=r);
   const combinedHtml=KSHEET_ORDER.map(k=>{
     const entries=[...combined.entries()].filter(([,v])=>v.cat===k).sort((a,b)=>b[1].grams-a[1].grams);
     if(!entries.length) return '';
     const c=KSHEET_CATS.find(z=>z.k===k);
     return `<div class="cat-group">
       <div class="cat-group-header" style="background:${c.c}">${esc2(c.l)}</div>
-      <table class="ingred"><thead><tr><th>Ingredient</th><th class="num">Combined Total</th></tr></thead>
-      <tbody>${entries.map(([name,v])=>`<tr><td><span class="ingred-name">${esc2(name)}${v.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span></td><td class="num">${_ksKg(v.grams)}</td></tr>`).join('')}</tbody></table>
+      <table class="ingred"><thead><tr><th>Ingredient</th><th class="num">Kailangan (processed)</th><th class="num">Processed stock</th><th class="num">Bilhin (raw)</th><th class="num">Raw stock</th></tr></thead>
+      <tbody>${entries.map(([name,v])=>{ const n=_needBySku[v.sku]||{};
+        const need=(n.needG!=null)?n.needG:v.grams;
+        const rawG=(n.rawG!=null)?n.rawG:null;
+        const shortRaw=n.rawSku && n.ohRawG < (need-Math.min(n.ohProcG||0,need))/(((n.yieldPct||100)/100)||1);
+        return `<tr><td><span class="ingred-name">${esc2(name)}${v.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span>${n.overridden?'<div class="ingred-note">binago mula sa recipe: '+_ksKg(n.recipeG)+'</div>':''}</td>
+        <td class="num"><b>${_ksKg(need)}</b></td>
+        <td class="num" style="color:${(n.ohProcG||0)>0?'#1D9E75':'#9a9a93'}">${(n.ohProcG||0)>0?_ksKg(n.ohProcG):'—'}</td>
+        <td class="num">${rawG!=null?_ksKg(rawG):'—'}</td>
+        <td class="num" style="color:${shortRaw?'#b23b2e':((n.ohRawG||0)>0?'#7a6432':'#9a9a93')}">${n.rawSku?_ksKg(n.ohRawG):'—'}${shortRaw?' ⚠':''}</td></tr>`; }).join('')}</tbody></table>
     </div>`;
   }).join('');
-  const grand=[...combined.values()].reduce((s,v)=>s+v.grams,0);
+  const grand=[...combined.values()].reduce((s,v)=>{ const n=_needBySku[v.sku]; return s+((n&&n.needG!=null)?n.needG:v.grams); },0);
+  const grandRaw=[...combined.values()].reduce((s,v)=>{ const n=_needBySku[v.sku]; return s+((n&&n.rawG!=null)?n.rawG:v.grams); },0);
+
+  /* ---- Ingredient Yield Record -------------------------------------------
+     The bench half of the confirm screen. Same ingredients, same order, same
+     category colours, same columns in the same sequence — so encoding it after
+     the run is reading straight down the page, not hunting for figures.
+     Two weighings for the freezer draw, because drip loss you estimate is a
+     number nobody ever improves; drip loss you weigh is one you can argue with. */
+  const _yrHead=`<tr><th>Ingredient</th><th class="num">Kailangan</th><th class="num">Frozen out</th><th class="num">Thawed</th>
+      <th class="num">Raw used</th><th class="num">Processed made</th><th class="num">Final output</th><th class="num">Excess</th></tr>`;
+  const _blank=`<td class="num"><span class="yr-box"></span></td>`;
+  const yieldRecordHtml=KSHEET_ORDER.map(k=>{
+    const entries=[...combined.entries()].filter(([,v])=>v.cat===k).sort((a,b)=>b[1].grams-a[1].grams);
+    if(!entries.length) return '';
+    const c=KSHEET_CATS.find(z=>z.k===k);
+    return `<div class="cat-group">
+      <div class="cat-group-header" style="background:${c.c}">${esc2(c.l)}</div>
+      <table class="ingred yr"><thead>${_yrHead}</thead><tbody>${entries.map(([name,v])=>{
+        const n=_needBySku[v.sku]||{}; const need=(n.needG!=null)?n.needG:v.grams;
+        return `<tr><td><span class="ingred-name">${esc2(name)}${v.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span>
+          ${n.ohProcG?('<div class="ingred-note">nasa freezer: '+_ksKg(n.ohProcG)+(n.yieldPct?(' · yield '+n.yieldPct+'%'):'')+'</div>'):''}</td>
+          <td class="num"><b>${_ksKg(need)}</b></td>${_blank}${_blank}${_blank}${_blank}${_blank}${_blank}</tr>`; }).join('')}
+      </tbody></table></div>`;
+  }).join('');
 
   const subs=window._prodSub||{};
   const subNote=Object.keys(subs).length?`<div class="card" style="margin-bottom:18px">
@@ -6745,7 +7699,22 @@ async function prodKitchenSheet(){
       <h2>Combined Shopping / Prep List</h2>
       <p class="hint">Lahat ng sangkap sa araw na ito, pinagsama at nakagrupo ayon sa kategorya.</p>
       <div id="combinedList">${combinedHtml}
-        <div class="totals-line"><span>Grand total — all products</span><span>${_ksKg(grand)}</span></div>
+        <div class="totals-line"><span>Grand total — processed to weigh out</span><span>${_ksKg(grand)}</span></div>
+        <div class="totals-line"><span>Grand total — as-purchased raw (÷ yield)</span><span>${_ksKg(grandRaw)}</span></div>
+      </div>
+    </div>
+    <div class="card combined-section yield-record">
+      <h2>Talaan ng Yield ng Sangkap · Ingredient Yield Record</h2>
+      <p class="hint">Isulat ang <b>aktwal</b> na timbang habang ginagawa. <b>Frozen out</b> = timbang paglabas sa freezer, bago matunaw.
+        <b>Thawed</b> = timbangin ulit pagkatapos matunaw — ito ang napupunta sa mix; ang pagkakaiba ay tubig na nawala.
+        <b>Raw used → Processed made</b> = hilaw na ginamit at kung magkano ang nagawa. <b>Final output</b> = thawed + processed made.
+        <b>Excess</b> = final output ng higit sa kailangan, babalik sa stock.</p>
+      <div id="yieldRecord">${yieldRecordHtml}
+        <div class="yr-legend">
+          <span><b>Drip loss</b> = Frozen out − Thawed</span>
+          <span><b>Yield</b> = Processed made ÷ Raw used</span>
+          <span><b>Excess</b> = Final output − Kailangan</span>
+        </div>
         <div class="card" style="margin-top:20px">
           <h2 style="margin-bottom:14px;">Pangkalahatang Sign-Off (Araw ng Produksyon)</h2>
           <div class="mix-content">
@@ -6973,18 +7942,45 @@ async function openProdActuals(){
   // (A) processed output needed by finished-product BOMs (aggregate grams)
   const agg={};
   prodPlanLines.forEach(l=>{ const packs=+l.good_packs||0; if(packs<=0)return; (bm[l.product_sku]||[]).forEach(line=>{ const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{neededG:0,costG:line.unit_cost_g}; a.neededG+=line.processed_g*packs; }); });
+  // an override on the prep list is what the kitchen will really pull
+  const _ov=window._prodNeed||{};
+  Object.keys(_ov).forEach(sku=>{ if(agg[sku]) agg[sku].neededG=+_ov[sku]||0; });
   const oh=await _ingOhBulacanG();
   const _yld=(it)=>((+it.yield_pct||100)/100)||1;
   const mk=(sku,neededG,type)=>{ const it=im[sku]||{}; const p=_procParent(it,bySku,byName); const y=_yld(it);
     const ohG=type==='A'?Math.max(0,oh[sku]||0):0;               // standalone outputs make to stock, no processed-first draw
-    const procUsedKg=Math.round(Math.min(neededG,ohG)/10)/100;   // use existing processed first
-    const shortG=Math.max(0,neededG-ohG); const rawG=shortG/y;
+    /* THE TWO WEIGHINGS. The team weighs what comes OUT of the freezer, thaws
+       it, and weighs it again. Drip is the difference between the two — a
+       measured number, not an estimate. Because drip is real, they must pull
+       MORE than the recipe needs: to land `needed` in the bowl at a t% standard
+       they take needed ÷ (1−t), capped at what the bin actually holds. */
+    const _t=Math.min(0.9,Math.max(0,(+it.thaw_loss_pct||0)/100));
+    const frozenG=type==='A'?Math.min(ohG, neededG/(1-_t)) : 0;
+    const thawedG=Math.round(frozenG*(1-_t)*100)/100;
+    const frozenOutKg=Math.round(frozenG/10)/100;
+    const procUsedKg=Math.round(thawedG/10)/100;                 // what actually reaches the mix
+    const shortG=Math.max(0,neededG-thawedG); const rawG=shortG/y;
     return {sku, name:it.name||sku, type, parent:(p&&p.sku)||'', parentCostG:(+(p||{}).moving_avg_cost_kg||+(p||{}).list_price_kg||0)/1000,
       outCostG:(type==='A'?(agg[sku]&&agg[sku].costG):((+it.price_kg_processed||+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000))||0,
       yield:y, neededKg:Math.round(neededG/10)/100, ohKg:Math.round(ohG/10)/100,
+      thawPct:(+it.thaw_loss_pct||0),
+      /* Thawing costs weight. 10 kg pulled frozen from the bin does not put
+         10 kg in the bowl — drip loss is real, and until now it vanished into
+         the yield figure, which is a DIFFERENT loss (trimming raw down to
+         processed) measured at a different step. Conflating them makes both
+         numbers lies. Two weighings, so the drip is measured, not guessed. */
+      frozenOutKg, thawTouched:false,
+      thawLossKg:Math.round((frozenOutKg-procUsedKg)*1000)/1000,
       procUsedKg, actualRawKg:Math.round(rawG/10)/100, actualMadeKg:Math.round(shortG/10)/100 }; };
   const A=Object.keys(agg).map(sku=>mk(sku,agg[sku].neededG,'A'));
   const B=prodOutLines.filter(l=>(+l.needed_kg||0)>0).map(l=>mk(l.ingredient_sku,(+l.needed_kg||0)*1000,'B'));
+  /* Same order as the prep list, which is the same order as the printed sheet —
+     bones, muscle, organ, liver, veg, seeds. The team reads the sheet, then reads
+     this screen; making them disagree is how a line gets missed. */
+  try{ if(!window._prodNeedRows||!window._prodNeedRows.length) window._prodNeedRows=await prodNeedRows(); }catch(e){}
+  const _ord={}; (window._prodNeedRows||[]).forEach((r,i)=>{ _ord[r.sku]=i; });
+  const _bySheet=(u,v)=>((_ord[u.sku]!=null?_ord[u.sku]:9e9)-(_ord[v.sku]!=null?_ord[v.sku]:9e9));
+  A.sort(_bySheet); B.sort(_bySheet);
   window._prodAct=A.concat(B);
   drawProdActuals();
 }
@@ -7001,12 +7997,25 @@ async function openProdActuals(){
 function _paCalc(x){
   const needed=+x.neededKg||0, proc=(x.type==='A')?(+x.procUsedKg||0):0;
   const raw=+x.actualRawKg||0, made=+x.actualMadeKg||0;
+  /* Thaw loss is weight that leaves the FREEZER but never reaches the bowl. So
+     the bin is drawn down by proc + thaw, while only `proc` counts towards the
+     recipe. Keeping the two apart is the whole point: yield measures trimming
+     raw into processed, thaw measures drip off already-processed stock, and a
+     single number cannot honestly carry both. */
+  /* Drip is DERIVED — frozen weighed out, minus thawed weighed back in. Nobody
+     types it, so nobody can fudge it, and it cannot silently disagree with the
+     two weights either side of it. */
+  const frozen=(x.type==='A')?Math.max(0,+x.frozenOutKg||0):0;
+  const thaw=(x.type==='A')?Math.max(0,Math.round((frozen-proc)*1000)/1000):0;
+  const drawn=Math.round((proc+thaw)*1000)/1000;
   const shortfall=Math.round(Math.max(0,needed-proc)*1000)/1000;
   const stdYield=Math.round((x.yield||1)*1000)/10;
   const yieldPct=raw>0?Math.round((made/raw)*1000)/10:0;
-  const total=Math.round((proc+made)*1000)/1000;
+  const thawPct=drawn>0?Math.round((thaw/drawn)*1000)/10:0;
+  const thawYield=drawn>0?Math.round((proc/drawn)*1000)/10:0;   // how much of the frozen weight survived
+  const total=Math.round((proc+made)*1000)/1000;                // FINAL OUTPUT — everything available to the mix
   const excess=Math.round((total-needed)*1000)/1000;
-  return {needed,proc,raw,made,shortfall,stdYield,yieldPct,total,excess};
+  return {needed,proc,raw,made,shortfall,stdYield,yieldPct,total,excess,thaw,drawn,frozen,thawPct,thawYield};
 }
 const _pa2=v=>(Math.round(v*1000)/1000);
 // Plain-language recap under each row. This is the part that stops the "wait, is
@@ -7015,10 +8024,12 @@ function _paRecap(x){
   const c=_paCalc(x);
   const bits=[];
   if(x.type==='A') bits.push(`need <b>${_pa2(c.needed)}</b> kg → <b>${_pa2(c.proc)}</b> from processed stock (have ${x.ohKg}) → <b>${_pa2(c.shortfall)}</b> still to make`);
+  if(c.thaw>0) bits.push(`froze out <b>${_pa2(c.frozen)}</b> kg → thawed to <b>${_pa2(c.proc)}</b> kg = <b style="color:var(--earth,#b5762a)">${_pa2(c.thaw)}</b> kg drip (<b>${c.thawYield}%</b> survived, ${c.thawPct}% lost)`);
+  else if(c.thaw<-0.0005) bits.push(`<b style="color:var(--danger)">thawed weight is higher than the frozen weight — check the two figures</b>`);
   else bits.push(`make <b>${_pa2(c.needed)}</b> kg to stock`);
   if(c.raw>0) bits.push(`pulled <b>${_pa2(c.raw)}</b> kg raw → made <b>${_pa2(c.made)}</b> kg = <b>${c.yieldPct}%</b> actual yield <span style="color:var(--muted)">(standard ${c.stdYield}%)</span>`);
   else bits.push(`<span style="color:var(--muted)">standard yield ${c.stdYield}% — raw needed ${_pa2(c.shortfall/(x.yield||1))} kg</span>`);
-  if(x.type==='A') bits.push(`total available <b>${_pa2(c.total)}</b> kg vs <b>${_pa2(c.needed)}</b> needed → ${c.excess>0.0005?`<b style="color:#4e7a3e">${_pa2(c.excess)} kg excess back to processed stock</b>`:(c.excess<-0.0005?`<b style="color:var(--danger)">${_pa2(-c.excess)} kg SHORT</b>`:'exactly covered')}`);
+  if(x.type==='A') bits.push(`final output <b>${_pa2(c.total)}</b> kg vs <b>${_pa2(c.needed)}</b> needed → ${c.excess>0.0005?`<b style="color:#4e7a3e">${_pa2(c.excess)} kg excess back to processed stock</b>`:(c.excess<-0.0005?`<b style="color:var(--danger)">${_pa2(-c.excess)} kg SHORT</b>`:'exactly covered')}`);
   else if(Math.abs(c.excess)>0.0005) bits.push(c.excess>0?`<b style="color:#4e7a3e">${_pa2(c.excess)} kg more than planned</b>`:`<b style="color:var(--danger)">${_pa2(-c.excess)} kg under plan</b>`);
   return bits.join(' · ');
 }
@@ -7027,14 +8038,24 @@ function _paRecap(x){
 // with value 5 and eat the dot.
 function _paNum(i,field,w,title){
   const x=(window._prodAct||[])[i]||{};
-  return `<input type="number" step="any" inputmode="decimal" value="${x[field]}" title="${esc(title||'')}"
+  return `<input id="pa_${field}_${i}" type="number" step="any" inputmode="decimal" value="${x[field]}" title="${esc(title||'')}"
     oninput="_paEdit(${i},'${field}',this.value)"
     style="width:${w}px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px">`;
 }
 function _paEdit(i,field,v){
   const x=(window._prodAct||[])[i]; if(!x) return;
   x[field]=(v===''||v==null)?0:(parseFloat(v)||0);
-  if(field==='procUsedKg') _paSync(i,true);        // re-default raw + made from the new shortfall
+  /* Typing the frozen weight moves the thawed weight with it at the standard
+     drip — until the team types a thawed weight of their own, at which point
+     their scale wins and we stop guessing on their behalf. */
+  if(field==='procUsedKg') x.thawTouched=true;
+  if(field==='frozenOutKg' && !x.thawTouched){
+    const t=Math.min(0.9,Math.max(0,(+x.thawPct||0)/100));
+    x.procUsedKg=Math.round((+x.frozenOutKg||0)*(1-t)*1000)/1000;
+    const el=$('pa_procUsedKg_'+i); if(el && document.activeElement!==el) el.value=x.procUsedKg;
+  }
+  x.thawLossKg=Math.round(Math.max(0,(+x.frozenOutKg||0)-(+x.procUsedKg||0))*1000)/1000;
+  if(field==='procUsedKg'||field==='frozenOutKg') _paSync(i,true);   // re-default raw + made from the new shortfall
   _paRefresh();
 }
 // Repaint only the computed cells — never the inputs, so the caret stays put.
@@ -7043,6 +8064,9 @@ function _paRefresh(){
     const c=_paCalc(x);
     const y=$('payl'+i); if(y) y.innerHTML=c.yieldPct?`<b style="color:${c.yieldPct<70?'var(--danger)':'#4e7a3e'}">${c.yieldPct}%</b>`:'—';
     const e=$('paex'+i); if(e){ e.textContent=c.excess?((c.excess>0?'+':'')+_pa2(c.excess)):'0'; e.style.color=c.excess<-0.0005?'var(--danger)':(c.excess>0.0005?'#4e7a3e':'var(--muted)'); }
+    const fo=$('pafo'+i); if(fo) fo.innerHTML='<b>'+_pa2(c.total)+'</b>';
+    const th=$('path'+i); if(th){ th.innerHTML=c.thaw?(_pa2(c.thaw)+' <span style="color:var(--muted)">('+c.thawPct+'%)</span>'):'—';
+      th.style.color=c.thaw<-0.0005?'var(--danger)':'var(--earth,#b5762a)'; }
     const s=$('pash'+i); if(s) s.textContent=_pa2(c.shortfall);
     const r=$('parc'+i); if(r) r.innerHTML=_paRecap(x);
     const rw=$('parw'+i); if(rw && document.activeElement!==rw) rw.value=x.actualRawKg;
@@ -7059,29 +8083,37 @@ function _paSync(i){ const x=(window._prodAct||[])[i]; if(!x)return; const short
 function _paRow(x,i){
   const c=_paCalc(x);
   const procCell = x.type==='A'
-    ? `<td class="num">${_paNum(i,'procUsedKg',76,'drawn from existing processed stock — on hand '+x.ohKg+' kg')}</td>
+    ? `<td class="num">${_paNum(i,'frozenOutKg',76,'weigh what comes OUT of the freezer, before thawing — on hand '+x.ohKg+' kg')}</td>
+       <td class="num">${_paNum(i,'procUsedKg',76,'weigh it AGAIN after thawing — this is what reaches the mix')}</td>
+       <td class="num mini" id="path${i}" style="color:${c.thaw<-0.0005?'var(--danger)':'var(--earth,#b5762a)'}">${c.thaw?(_pa2(c.thaw)+' <span style="color:var(--muted)">('+c.thawPct+'%)</span>'):'—'}</td>
        <td class="num mini" id="pash${i}" style="color:var(--muted)">${_pa2(c.shortfall)}</td>`
-    : `<td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">${_pa2(c.needed)}</td>`;
-  return `<tr><td><b>${esc(x.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(x.sku)}</code></div>${x.parent?`<div class="mini" style="color:var(--muted)">from ${esc(ingName(x.parent))}</div>`:'<span class="mini" style="color:var(--danger)">no raw parent</span>'}</td>
+    : `<td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">${_pa2(c.needed)}</td>`;
+  const _c=(window._prodNeedRows||[]).find(r=>r.sku===x.sku);
+  const _col=_c?_c.color:'#5C5C5C';
+  return `<tr style="box-shadow:inset 4px 0 0 ${_col}"><td><span class="cat-dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${_col};margin-right:6px"></span><b>${esc(x.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(x.sku)}</code></div>${x.parent?`<div class="mini" style="color:var(--muted)">from ${esc(ingName(x.parent))}</div>`:'<span class="mini" style="color:var(--danger)">no raw parent</span>'}</td>
     <td class="num"><b>${_pa2(c.needed)}</b>${x.type==='A'?`<div class="mini" style="color:var(--muted)">stock ${x.ohKg}</div>`:''}</td>
     ${procCell}
     <td class="num"><input type="number" step="any" inputmode="decimal" id="parw${i}" value="${x.actualRawKg}" oninput="_paEdit(${i},'actualRawKg',this.value)" style="width:76px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
     <td class="num"><input type="number" step="any" inputmode="decimal" id="pamd${i}" value="${x.actualMadeKg}" oninput="_paEdit(${i},'actualMadeKg',this.value)" style="width:78px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
     <td class="num" id="payl${i}">${c.yieldPct?`<b style="color:${c.yieldPct<70?'var(--danger)':'#4e7a3e'}">${c.yieldPct}%</b>`:'—'}</td>
+    <td class="num" id="pafo${i}"><b>${_pa2(c.total)}</b></td>
     <td class="num mini" id="paex${i}" style="color:${c.excess<-0.0005?'var(--danger)':(c.excess>0.0005?'#4e7a3e':'var(--muted)')}">${c.excess?((c.excess>0?'+':'')+_pa2(c.excess)):'0'}</td></tr>
-  <tr class="parecap"><td colspan="8" id="parc${i}">${_paRecap(x)}</td></tr>`;
+  <tr class="parecap"><td colspan="11" id="parc${i}">${_paRecap(x)}</td></tr>`;
 }
 function drawProdActuals(){
   const a=window._prodAct||[]; const A=a.filter(x=>x.type==='A'), B=a.filter(x=>x.type==='B');
   const idx=(x)=>a.indexOf(x);
-  const head=`<thead><tr><th>Ingredient</th><th class="num">Needed</th><th class="num">From processed stock</th><th class="num">Still to make</th><th class="num">Raw pulled</th><th class="num">Output made</th><th class="num">Actual yield</th><th class="num">Excess → stock</th></tr></thead>`;
+  const head=`<thead><tr><th>Ingredient</th><th class="num">Needed</th><th class="num">Frozen out</th><th class="num">Thawed</th><th class="num">Drip loss</th><th class="num">Still to make</th><th class="num">Raw used</th><th class="num">Processed made</th><th class="num">Actual yield</th><th class="num">Final output</th><th class="num">Excess → stock</th></tr></thead>`;
   const short=a.filter(x=>_paCalc(x).excess<-0.0005);
   $('modal').innerHTML=`<div><h3>Confirm production — record what actually happened</h3>
     <div style="margin:6px 0 10px;padding:9px 11px;background:#f6f8f4;border-radius:8px;font-size:12.5px;line-height:1.5">
-      Read each row left to right: <b>Needed</b> → what we take <b>from processed stock</b> → what is <b>still to make</b> →
-      the <b>raw pulled</b> and the <b>output made</b> from it. Pull more raw than the shortfall if the team is processing a
-      whole tray — the extra output is not lost, it lands in <b>Excess → stock</b> and is available for the next run.
-      <b>Actual yield = output made ÷ raw pulled</b>, recorded per run so you can compare it with the standard yield on the ingredient.
+      Read each row left to right, and enter the <b>actual weights off the scale</b>.
+      <b>Frozen out</b> = what came out of the freezer. <b>Thawed</b> = the same batch weighed again after thawing — the difference is
+      <b>drip loss</b>, calculated, not typed. What is left is <b>still to make</b>: enter the <b>raw used</b> and the
+      <b>processed made</b> from it. Pull more raw than the shortfall if the team is processing a whole tray — the extra is not lost,
+      it lands in <b>Excess → stock</b> for the next run.<br>
+      Three different losses, kept apart on purpose: <b>drip</b> = frozen out − thawed · <b>actual yield</b> = processed made ÷ raw used,
+      against the standard on the ingredient · <b>final output</b> = thawed + processed made, which is what the run actually put in the bowl.
     </div>
     <div id="paWarn" style="display:${short.length?'block':'none'};margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px"><b>${short.length} ingredient(s) come up short</b> — processed stock plus what you made is less than the run needs. Post anyway and stock goes negative, or raise the output made.</div>
     ${A.length?`<div class="mini" style="margin:6px 0 2px;font-weight:700">For products (mix ingredients)</div>
@@ -7111,6 +8143,26 @@ async function prodActualsApply(){
     const DEFAULT_FG_SHELF=4; const _shelfBy={}; try{ (await db.list('products',{})).forEach(p=>_shelfBy[p.sku]=+p.shelf_life_days||0); }catch(e){}
     const totProc={}; recs.forEach(r=>{ const packs=+r.good_packs||0; (bm[r.product_sku]||[]).forEach(line=>{ totProc[line.ingredient_sku]=(totProc[line.ingredient_sku]||0)+line.processed_g*packs; }); });
     const procRef='Production '+prodRunRef;
+    /* 1a) THAW LOSS. Weight that left the freezer and never reached the mix.
+       It has to come off stock — the kilos are gone — but it must not be
+       counted as issued to a batch, because nothing was made from it. Its own
+       movement type, and its own variance line, so it can be measured and
+       argued with instead of quietly inflating everybody's yield. */
+    let _thawKg=0, _thawVal=0;
+    for(const x of acts){
+      const t=Math.round((+x.thawLossKg||0)*1000*100)/100;   // grams
+      if(!(t>0)) continue;
+      _thawKg+=t/1000; _thawVal+=(t/1000)*((+x.outCostG||0)*1000);
+      try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:x.sku,location_code:planProduceLoc(),
+        qty:-t, unit_cost:(+x.outCostG||0), movement_type:'thaw_loss', note:'Thaw loss · '+prodRunRef}); }catch(e){}
+      try{ await db.create('variance_log',{check_type:'3.6 · Thaw loss',source_ref:prodRunRef,
+        expected:Math.round((+x.procUsedKg||0)*1000)/1000, actual:Math.round(((+x.procUsedKg||0)+(t/1000))*1000)/1000,
+        gap_qty:-(Math.round((t/1000)*1000)/1000), gap_value:Math.round((t/1000)*((+x.outCostG||0)*1000)*100)/100,
+        location:planProduceLoc(), responsible_user:CURRENT_USER, status:'open',
+        note:(x.name||x.sku)+' — '+(Math.round(t/10)/100)+' kg lost thawing (drip), not part of the mix'}); }catch(e){}
+    }
+    if(_thawKg>0) sysLog('production_batches',prodRunRef,'💧 Thaw loss '+(Math.round(_thawKg*1000)/1000)+' kg ('+fmt(_thawVal)+') recorded separately from yield');
+
     // 1) processing per output (aggregate): consume raw (actual), produce processed (actual made)
     for(const x of acts){ const rawG=Math.round((+x.actualRawKg||0)*1000*100)/100; const madeG=Math.round((+x.actualMadeKg||0)*1000*100)/100;
       if(x.parent && rawG>0){ try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:x.parent,location_code:'bulacan',qty:-rawG,unit_cost:x.parentCostG,movement_type:'processing_out',note:procRef}); }catch(e){} }
@@ -7134,14 +8186,25 @@ async function prodActualsApply(){
         const madeKg=Math.round((+x.actualMadeKg||0)*1000)/1000;
         const rawKg =Math.round((+x.actualRawKg ||0)*1000)/1000;
         const procKg=Math.round((+x.procUsedKg  ||0)*1000)/1000;
-        // nothing was prepped for this one — it came entirely out of processed stock
-        if(!(madeKg>0 || rawKg>0)) continue;
+        const _c=_paCalc(x);
+        /* Written even when nothing was PROCESSED, because a run that only
+           thawed still has a drip rate worth measuring — that was the hole:
+           the ingredients drawn straight from the bin left no record at all. */
+        if(!(madeKg>0 || rawKg>0 || (+x.frozenOutKg||0)>0)) continue;
         _pi++;
         const rec={ batch_ref:prodRunRef+'/P'+_p2(_pi), run_ref:prodRunRef, product_sku:x.sku,
           kind:'output', location_code:planProduceLoc(), production_date:prodPlanDate,
           status:'confirmed', operator:CURRENT_USER,
           planned_packs:0, good_packs:0, reject_packs:0, waste_g:0, output_lot:'',
           output_kg:madeKg, raw_used_kg:rawKg, from_stock_kg:procKg,
+          needed_kg:Math.round(_c.needed*1000)/1000,
+          frozen_out_kg:Math.round(_c.frozen*1000)/1000,
+          thawed_kg:procKg,
+          thaw_loss_kg:Math.round(_c.thaw*1000)/1000,
+          thaw_yield_pct:(_c.drawn>0?_c.thawYield:null),
+          final_output_kg:Math.round(_c.total*1000)/1000,
+          excess_kg:Math.round(_c.excess*1000)/1000,
+          std_yield_pct:_c.stdYield,
           yield_pct:(rawKg>0?Math.round((madeKg/rawKg)*1000)/10:null) };
         try{ await db.create('production_batches',rec); outRecs.push(rec); }
         catch(e){ _outFail.push(rec.batch_ref); console.warn('output batch failed',rec.batch_ref,String(e&&e.message||e)); }
@@ -8393,7 +9456,7 @@ async function rptExpiring(){
 async function rptPayables(){
   if(typeof moneyHidden==='function' && moneyHidden()) return '<div class="repcard"><div class="hint">Cost is hidden for your role.</div></div>';
   let po=[],pol=[],pay=[]; try{po=await db.list('purchase_orders',{});}catch(e){} try{pol=await db.list('po_lines',{});}catch(e){} try{pay=await db.list('po_payments',{});}catch(e){}
-  const payByPo={}; pay.forEach(p=>payByPo[p.po_ref]=(payByPo[p.po_ref]||0)+(+p.amount||0));
+  const payByPo={}; pay.filter(payToSupplier).forEach(p=>payByPo[p.po_ref]=(payByPo[p.po_ref]||0)+(+p.amount||0));
   const lineByPo={}; pol.forEach(l=>{ (lineByPo[l.po_ref]=lineByPo[l.po_ref]||[]).push(l); });
   const P=n=>'₱'+(Math.round(n*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
   const rows=po.filter(p=>PO_LIVE.includes(p.status)).map(p=>{ const bl=poBillable(p,lineByPo[p.po_ref]||[]); const pd=payByPo[p.po_ref]||0; const bal=Math.max(0,bl-pd); const st=pd<=0.005?'unpaid':(bal>0.5?'partial':'paid'); return {p,bl,pd,bal,st}; }).sort((a,b)=>b.bal-a.bal);
@@ -8498,6 +9561,10 @@ let AUTOS = JSON.parse(localStorage.getItem('wr_autos')||'null') || {
   shopify:{on:false,url:'',label:'Shopify — Orders sync',hint:'Orders flow in through your existing Apps Script sheet.'},
   telegram:{on:false,url:'',label:'Telegram / Email — PO & report alerts',hint:'n8n sends on confirmed PO + daily/weekly digests.'},
   mrp_schedule:{on:false,url:'',label:'MRP — scheduled draft POs',hint:'n8n runs the Supabase MRP function on a schedule.'},
+  /* Not a webhook — a preference the app stamps on every notification payload
+     so the n8n flow knows which channels are allowed. Backups: email only. */
+  channels:{on:true,url:'',label:'Notification channels',hint:'Which channels each kind of notification may use. The app writes this onto every webhook payload as "channels"; your n8n flow must branch on it. Backups are email-only by default — no Telegram.',
+    map:{ backup:{email:true,telegram:false}, digest:{email:true,telegram:true}, default:{email:true,telegram:true} }},
   keepwarm:{on:false,url:'',label:'Supabase keep-warm ping',hint:'Writes a heartbeat timestamp (a real DB write) every few hours so the free project never pauses. Set up the keepWarm() time trigger in the Apps Script.'}
 };
 function saveAutos(){ localStorage.setItem('wr_autos',JSON.stringify(AUTOS));
@@ -9389,6 +10456,46 @@ async function renderSelfTest(){
   T('Audit log write (localStorage)', async()=>{ try{ localStorage.setItem('wr_selftest','1'); const ok=localStorage.getItem('wr_selftest')==='1'; localStorage.removeItem('wr_selftest'); return [ok,'read/write OK']; }catch(e){ return [false,e.message]; } });
   T('Access control (Finance ⇏ Studio)', async()=>{ return [roleCan('Finance','studio')===false, 'gated correctly']; });
   T('All modules registered', async()=>{ const need=['ingredients','products','purchase_orders','production_batches','transfers','count_sessions','variance_log','mrp','reporting','users','automations']; const miss=need.filter(k=>!MODELS[k]); return [miss.length===0, miss.length?('missing '+miss.join(',')):need.length+' modules']; });
+  /* ---- Data integrity. These four all fire on the same underlying accident:
+     a document is deleted or its lines are rewritten, and the rows that hung off
+     it are left pointing at nothing — or worse, get posted a second time. They
+     are cheap to check and expensive to miss, so they run every time. ---- */
+  T('Every payment belongs to a live order', async()=>{
+    const po=new Set((await db.list('purchase_orders',{})).map(o=>o.po_ref));
+    const pay=await db.list('po_payments',{});
+    const orph=pay.filter(p=>!po.has(p.po_ref));
+    const v=orph.reduce((s,p)=>s+(+p.amount||0),0);
+    return [orph.length===0, orph.length?(orph.length+' payment(s) · '+fmt(v)+' against orders that no longer exist: '+[...new Set(orph.map(p=>p.po_ref))].join(', ')):pay.length+' payments OK'];
+  });
+  T('No order paid twice for the same thing', async()=>{
+    const pay=await db.list('po_payments',{}); const seen={}, dup=[];
+    pay.forEach(p=>{ const k=p.po_ref+'|'+(+p.amount||0)+'|'+(p.paid_at||''); if(seen[k]) dup.push(p.po_ref+' '+fmt(p.amount)+' on '+p.paid_at); else seen[k]=1; });
+    return [dup.length===0, dup.length?('same order, same amount, same day — '+dup.join('; ')):'no repeats'];
+  });
+  T('Every stock receipt belongs to a live order', async()=>{
+    const po=new Set((await db.list('purchase_orders',{})).map(o=>o.po_ref));
+    const mv=(await db.list('inventory_movements',{})).filter(m=>m.movement_type==='receipt');
+    const orph=mv.filter(m=>{ const n=String(m.note||''); if(n.indexOf('PO ')!==0) return false; return !po.has(n.slice(3).replace(/ R\d+$/,'')); });
+    return [orph.length===0, orph.length?(orph.length+' receipt movement(s) from a deleted order — stock is on the books with no order behind it'):mv.length+' receipts OK'];
+  });
+  T('Nothing received more than it was ordered', async()=>{
+    const po=(await db.list('purchase_orders',{})).filter(o=>o.status!=='cancelled');
+    const bad=[];
+    for(const o of po){
+      let ls=[]; try{ ls=await db.children(MODELS.purchase_orders.o2m, o.po_ref); }catch(e){ continue; }
+      if(!ls.length) continue;
+      const led=await poReceivedFromLedger(o.po_ref);
+      ls.forEach(l=>{ const oq=poOrderQty(l), got=+led[l.ingredient_sku]||0;
+        if(oq>0 && got>oq*1.5+0.0001) bad.push(o.po_ref+' · '+ingName(l.ingredient_sku)+' ordered '+oq+', ledger has '+Math.round(got*100)/100); });
+    }
+    return [bad.length===0, bad.length?(bad.length+' line(s) look double-posted — '+bad.slice(0,3).join('; ')+(bad.length>3?' …':'')):'every line within its order'];
+  });
+  T('Orders with lines still attached', async()=>{
+    const po=(await db.list('purchase_orders',{})).filter(o=>!['cancelled','open','draft'].includes(o.status||''));
+    const empty=[];
+    for(const o of po){ try{ const ls=await db.children(MODELS.purchase_orders.o2m,o.po_ref); if(!ls.length) empty.push(o.po_ref); }catch(e){} }
+    return [empty.length===0, empty.length?(empty.length+' issued/received order(s) have no lines: '+empty.join(', ')):po.length+' orders OK'];
+  });
   if(isLive()){ T('Supabase live connection', async()=>{ try{ await sb('ingredients?select=sku&limit=1'); return [true,'connected']; }catch(e){ return [false,e.message.slice(0,70)]; } }); }
   const results=[];
   for(const t of tests){ try{ const [pass,detail]=await t.fn(); results.push({name:t.name,pass,detail}); }catch(e){ results.push({name:t.name,pass:false,detail:(e.message||'error')}); } }
@@ -9415,6 +10522,32 @@ const KB = {
        'A cancelled custom order stops owing packs straight away, so it leaves Demand/MRP on the next run.',
        'Cancelled purchase orders are hidden from the PO list by default; the eye button shows them again.',
        'Nothing here is automatic. Cancel only happens when somebody presses the button, and the activity log records who did it.']},
+  wdt:{d:'Everything the week owes, in one place — from the locked demand plot, the demand table and every locked custom order.',
+    h:['Pick the week; the locked plot for that date is used if there is one',
+       'Read the product list top-down — it is sorted by what is closest to running out',
+       '🖨 Product target / Custom orders / Raw ingredients — three printouts for three different people'],
+    l:['PRIORITY IS BY COVER, NOT SIZE. A product with nothing on hand against an outstanding order leads the list whatever the quantity, because that is the one that stops a delivery. A large order already sitting in the freezer is not urgent.',
+       'Still to make = target − what has been confirmed produced since the week started, so the list shrinks as the kitchen works.',
+       'Custom orders get their own section: a named customer with a date cannot be swapped for another product.',
+       'The raw list covers only what is STILL to make, and prints both bases — processed (what the kitchen weighs) and as-purchased raw (what you buy).']},
+  yields:{d:'The three losses a run has, kept as three numbers instead of one.',
+    h:['Pick a date range; every confirmed prep batch in it is read',
+       'Click any ingredient row to open its individual runs',
+       '🖨 Print or ⬇ CSV for the weekly review'],
+    l:['DRIP is frozen processed stock that never reached the mix. It is MEASURED, not estimated: the team weighs what comes out of the freezer and weighs it again after thawing, and the difference is the drip. A drip figure somebody typed from memory is a number nobody ever improves.',
+       'TRIMMING YIELD is processed made ÷ raw used — the classic yield — shown against the standard on the ingredient master. The bar makes the gap a picture: the fill is actual, the tick is standard.',
+       'RECIPE COVERAGE is final output ÷ what the run needed. Under 100% means the run did not cover its own plan, whatever the other two rates say.',
+       'They are separate on purpose. Rolled into one figure they tell you something went wrong and nothing about where — drip points at how long stock sat out, trimming at the butcher, coverage at the plan.',
+       'Set each ingredient\'s standard drip % on its master record once you have a few weeks of real figures. Until then leave it blank: an honest blank beats an invented 5%.']},
+  payables:{d:'What each week owes, how much has gone out, and what is still committed against goods that have not arrived.',
+    h:['Pick how many weeks to show; click any week to open its orders',
+       'Read Remaining as the bill, Pending delivery as exposure — they are not the same thing',
+       '🖨 Print or \u2b07 CSV for the payment run'],
+    l:['Weeks run MONDAY TO SUNDAY off the ORDER date, because that is when the commitment was made — not when it was paid or delivered.',
+       'NET AMOUNT is goods less discount plus any delivery fee owed to the supplier. Once anything has been received the received value is billed rather than the ordered value, so a short delivery does not overstate the bill.',
+       'PENDING DELIVERY is ordered value that has not arrived. It is money committed, not money owed, so it is kept out of Remaining on purpose — mixing the two is how a payment run pays for meat that is still at the supplier.',
+       'A delivery fee marked payable to a FLEET SERVICE is a separate payable. It never reduces the supplier balance, so a courier payment can no longer make a supplier look settled.',
+       'Cancelled orders are excluded everywhere here, as they are in every other report.']},
   home:{d:'Your landing page — KPI tiles and quick links into every module.',h:['Glance at counts (ingredients, products, suppliers, open POs)','Click a card to jump into that module','Use the search box or ⌘K to find anything'],l:['KPIs are live counts from the database','Nothing is entered here — it summarizes other modules']},
   ingredients:{d:'Master list of everything you buy or make into product: raw meats, organs, veg, fruit, seeds, supplies, plus live animals and internal intermediates.',h:['Open a row to edit price, category, storage, par, lead time','Set the processing method + yield so costing is accurate','Mark live-animal / intermediate items with their flags'],l:['₱/kg usable = raw price ÷ processing yield — the true cost in a pack','moving_avg_cost auto-updates from goods receipts (perpetual costing)','Intermediates (e.g. Rabbit Ground Meat) derive cost from their source × dress-out yield']},
   products:{d:'Sellable finished goods, grouped into families with size variants, each with its own SKU, price and recipe (BOM).',h:['Open a product to edit price, pack size, feeding style','Edit the Recipe (BOM) lines — usable grams per pack','Add variants as separate products under the same family'],l:['BOM grams are USABLE grams in the pack','Raw needed for production = usable ÷ ingredient yield','Cost/pack is computed from actual ingredients issued at production']},
