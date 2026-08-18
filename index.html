@@ -514,7 +514,7 @@
    buy it, make it, count it. Master Data is reference material you set up once,
    so it sits with Administration at the bottom rather than at the top. */
 const MODULES = [
-  {id:'analytics', label:'Analytics', items:['stock_balance','payables','yields','reporting','margin','momentum']},
+  {id:'analytics', label:'Analytics', items:['stock_balance','yields','reporting','margin','momentum']},
   {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc','ffprofiles']},
   {id:'plan',   label:'Planning',    items:['mrp','wdt']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_reorder']},
@@ -685,7 +685,7 @@ const MODELS = {
 
   ffprofiles:{ label:'Calculator Profiles', icon:'🐾', special:'ffprofiles' },
 
-  purchase_orders:{ label:'Purchase Orders', icon:'🧾', name:'po_ref', pk:'po_ref',
+  purchase_orders:{ label:'Purchase Orders & Payables', icon:'🧾', name:'po_ref', pk:'po_ref',
     status:{f:'status',stages:['open','rfq','quoted','confirmed','partial','received','cancelled']}, cancelable:true,
     searchOn:['po_ref','supplier_name','status','created_by'],
     fields:[
@@ -778,7 +778,7 @@ const MODELS = {
   mrp:{ label:'Demand / MRP', icon:'📉', special:'mrp' },
   wdt:{ label:'Weekly Demand Target', icon:'🎯', special:'wdt' },
   yields:{ label:'Yield & Loss', icon:'💧', special:'yields' },
-  payables:{ label:'Weekly Payables', icon:'💳', special:'payables' },
+  payables:{ label:'Purchase Orders & Payables', icon:'💳', special:'payables' },   // alias — folded into Purchasing
   reporting:{ label:'Reports', icon:'📊', special:'reporting' },
   users:{ label:'Users & Access', icon:'👤', special:'users' },
   studio:{ label:'Studio (beta)', icon:'🛠️', special:'studio' },
@@ -1017,7 +1017,7 @@ function route(){
     if(m.special==='mrp') return renderMRP();
     if(m.special==='wdt') return renderWDT();
     if(m.special==='yields') return renderYields();
-    if(m.special==='payables') return renderPayables();
+    if(m.special==='payables') return renderPurchasing();   // one screen, kept as a hash alias
     if(m.special==='customorders') return renderCustomOrders();
     if(m.special==='ffcalc') return renderFFCalc();
     if(m.special==='ffprofiles') return renderFFProfiles();
@@ -1045,6 +1045,10 @@ function route(){
   syncHash();
   if(state.view==='bulk' && window._bulkModel===state.model) return renderBulkEdit();
   if(state.view==='kanban') return renderKanban();
+  /* Purchase Orders opens on the combined purchasing screen — order, receipt and
+     payment on one row — instead of a bare grid. The record form underneath is
+     untouched, and state._poPlain drops back to the plain list. */
+  if(state.view==='list' && state.model==='purchase_orders' && !state._poPlain) return renderPurchasing();
   if(state.view==='list') return renderList();
   if(state.view==='form') return renderForm();
   if(state.view==='report') return renderReport();
@@ -3187,6 +3191,218 @@ function wpBody(){
   });
   return h;
 }
+/* ============ Purchasing — one module, three jobs ==========================
+   A purchase order is not three records. It is one, and three people need a
+   different face of it: the purchaser wants to know what is on order, the
+   receiver what has not arrived, and whoever pays wants what is owed. Splitting
+   those across two screens meant nobody saw the whole order — and the money and
+   the goods drifted apart, which is exactly how a courier fee ended up settling
+   a supplier's bill.
+
+   So: one list, every cell a way into the order, filtered by clickable chips
+   instead of by hunting.                                                      */
+let _puFilter='all', _puWeeks=true, _puOpenWk={};
+function puSet(f){ _puFilter=(f===_puFilter&&f!=='all')?'all':f; renderPurchasing(); }
+function puToggleWk(w){ _puOpenWk[w]=!_puOpenWk[w]; const el=$('puBody'); if(el) el.innerHTML=puBody(); }
+function puMode(){ _puWeeks=!_puWeeks; _puOpenWk={}; renderPurchasing(); }
+function puOpen(ref){ gotoRecord('purchase_orders', ref); }
+const PU_CHIPS=[
+  {k:'all',        l:'All orders',       t:'o', m:()=>true},
+  {k:'to_order',   l:'To send',          t:'o', m:r=>['open','draft','rfq','quoted'].includes(r.status)},
+  {k:'ordered',    l:'Ordered',          t:'o', m:r=>r.status==='confirmed'},
+  {k:'partial',    l:'Part received',    t:'o', m:r=>r.status==='partial'},
+  {k:'received',   l:'Fully received',   t:'o', m:r=>r.status==='received'},
+  /* Only an order that has actually been PLACED can be "still to arrive".
+     An RFQ has nothing outstanding — it has nothing agreed. */
+  {k:'to_arrive',  l:'Still to arrive',  t:'d', m:r=>r.pendVal>0.5&&['confirmed','partial'].includes(r.status)},
+  {k:'unpaid',     l:'Unpaid',           t:'p', m:r=>r.payStat==='unpaid'&&r.net>0.5},
+  {k:'partpaid',   l:'Part-paid',        t:'p', m:r=>r.payStat==='part-paid'},
+  {k:'settled',    l:'Settled',          t:'p', m:r=>r.payStat==='settled'&&r.net>0.5},
+  {k:'fleet',      l:'Courier owed',     t:'p', m:r=>(r.fleetDue-r.fleetPaid)>0.5},
+];
+function puRows(){ const c=PU_CHIPS.find(x=>x.k===_puFilter)||PU_CHIPS[0]; return (_wpRows||[]).filter(c.m); }
+function _puChipHtml(){
+  const T={o:'Order',d:'Delivery',p:'Payment'};
+  let last='';
+  return PU_CHIPS.map(c=>{
+    const rs=(_wpRows||[]).filter(c.m);
+    const amt=c.t==='p' ? (c.k==='fleet'?rs.reduce((s,r)=>s+(r.fleetDue-r.fleetPaid),0):rs.reduce((s,r)=>s+r.bal,0))
+            : c.t==='d' ? rs.reduce((s,r)=>s+r.pendVal,0)
+            : rs.reduce((s,r)=>s+r.net,0);
+    const on=_puFilter===c.k;
+    const col=c.t==='p'?(c.k==='settled'?'#4e7a3e':'var(--danger)'):(c.t==='d'?'var(--earth,#b5762a)':'var(--ink,#222)');
+    const sep=(c.t!==last)?`<span style="width:1px;height:26px;background:var(--line);margin:0 4px"></span>`:'';
+    last=c.t;
+    return sep+`<button onclick="puSet('${c.k}')" title="${T[c.t]} · click to filter"
+      style="border:1px solid ${on?'var(--brand,#4e7a3e)':'var(--line)'};background:${on?'#eef3ea':'#fff'};
+      border-radius:20px;padding:4px 11px;cursor:pointer;font:inherit;font-size:12px;white-space:nowrap;
+      display:inline-flex;align-items:center;gap:6px">
+      <b style="font-weight:${on?800:600}">${esc(c.l)}</b>
+      <span style="background:${on?'var(--brand,#4e7a3e)':'#eceae2'};color:${on?'#fff':'#555'};border-radius:10px;padding:0 6px;font-size:11px">${rs.length}</span>
+      ${rs.length?`<span style="color:${col};font-size:11.5px">${wpPeso(amt)}</span>`:''}</button>`;
+  }).join('');
+}
+function _puStatus(r){
+  const m={open:['#eee','#555'],draft:['#eee','#555'],rfq:['#e8eef7','#2a4d7a'],quoted:['#e8eef7','#2a4d7a'],
+    confirmed:['#e7f0e9','#2d5c22'],partial:['#fff3d6','#7a5a10'],received:['#e2f0e4','#2d5c22'],cancelled:['#f2f2f2','#888']}[r.status]||['#eee','#555'];
+  return `<span style="background:${m[0]};color:${m[1]};border-radius:20px;padding:1px 8px;font-size:11px;font-weight:700;white-space:nowrap">${esc(r.statusL||r.status)}</span>`;
+}
+/* Paid / still owed / not yet delivered, as one bar per week. Three numbers in a
+   table row are three numbers; the same three as one bar is a shape you can read
+   at a glance from across the office. */
+function _puSplit(paid,bal,pend){
+  const tot=Math.max(0.01,paid+Math.max(0,bal)+pend), W=86, sc=v=>Math.max(0,v)/tot*W;
+  const a=sc(paid), b=sc(Math.max(0,bal)), c=sc(pend);
+  return `<svg width="${W}" height="13" viewBox="0 0 ${W} 13" style="vertical-align:middle"
+    role="img" aria-label="paid ${Math.round(paid)}, owed ${Math.round(bal)}, not yet delivered ${Math.round(pend)}">
+    <rect x="0" y="3" width="${W}" height="7" rx="3.5" fill="#e4e2da"/>
+    <rect x="0" y="3" width="${a.toFixed(1)}" height="7" fill="#4e7a3e"/>
+    <rect x="${a.toFixed(1)}" y="3" width="${b.toFixed(1)}" height="7" fill="#c9482f"/>
+    <rect x="${(a+b).toFixed(1)}" y="3" width="${c.toFixed(1)}" height="7" fill="#d9c48a"/></svg>`;
+}
+function _puBar(r){
+  const pct=r.gross>0?Math.max(0,Math.min(1,(r.gross-r.pendVal)/r.gross)):1;
+  const col=pct>=0.999?'#4e7a3e':(pct>0?'var(--earth,#b5762a)':'#c9482f');
+  return `<span title="${Math.round(pct*100)}% of the order value has arrived" style="display:inline-block;width:52px;height:6px;border-radius:3px;background:#eceae2;vertical-align:middle">
+    <span style="display:block;width:${(pct*52).toFixed(1)}px;height:6px;border-radius:3px;background:${col}"></span></span>`;
+}
+function puOrderRow(r,pad){
+  const owe=r.bal>0.5, fleetOwe=(r.fleetDue-r.fleetPaid)>0.5;
+  return `<tr style="cursor:pointer" onclick="puOpen('${esc(r.ref)}')" title="Open ${esc(r.ref)}">
+    <td style="${pad?'padding-left:20px;':''}"><code style="font-size:11.5px">${esc(r.ref)}</code>
+      <div class="mini" style="color:var(--muted)">${esc(r.supplier)} · ${esc(r.date)}</div></td>
+    <td>${_puStatus(r)}</td>
+    <td class="num">${wpPeso(r.net)}${r.disc>0.005?`<div class="mini" style="color:var(--muted)">less ${wpPeso(r.disc)}</div>`:''}</td>
+    <td class="num" style="color:${r.paid>0.005?'#4e7a3e':'var(--muted)'}">${r.paid>0.005?wpPeso(r.paid):'—'}</td>
+    <td class="num" style="color:${owe?'var(--danger)':'var(--muted)'}"><b>${owe?wpPeso(r.bal):'—'}</b>
+      <div class="mini">${_wpChip(r.payStat)}</div></td>
+    <td class="num">${r.fee>0.005?wpPeso(r.fee):'—'}${fleetOwe?`<div class="mini" style="color:var(--earth,#b5762a)">${esc(r.feeTo)}</div>`:''}</td>
+    <td class="num">${_puBar(r)}${r.pendVal>0.5?`<div class="mini" style="color:var(--earth,#b5762a)">${wpPeso(r.pendVal)} · ${r.pendKg} kg</div>`
+      :'<div class="mini" style="color:var(--muted)">all in</div>'}</td>
+    <td class="mini" style="color:var(--muted)">${esc(r.last||'—')}${r.method?`<div>${esc(r.method)}</div>`:''}</td></tr>`;
+}
+/* The orders in the order they are ON SCREEN. The record form's ‹ › walk this,
+   so moving between orders follows the list the user is actually looking at
+   rather than the table's natural order. */
+function puOrdered(){
+  const rows=puRows();
+  if(!_puWeeks) return rows.slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||b.bal-a.bal);
+  const keep=new Set(rows.map(r=>r.ref)); const out=[];
+  (_wpWeeks||[]).forEach(w=>{ if(_puOpenWk[w.week]===false) return;
+    w.rows.filter(r=>keep.has(r.ref)).forEach(r=>out.push(r)); });
+  return out.length?out:rows;
+}
+function puSyncNav(){
+  // only while this screen is the one on show — a slow load must never overwrite
+  // the row set a different view has since put there
+  if(state.model!=='purchase_orders' || state._poPlain) return;   // the alias has no record form to walk
+  state._rows=puOrdered().map(r=>({po_ref:r.ref}));
+}
+function puBody(){
+  const rows=puRows();
+  puSyncNav();
+  if(!rows.length) return '<tr><td colspan="8" class="empty">Nothing matches that filter.</td></tr>';
+  if(!_puWeeks) return rows.slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||b.bal-a.bal).map(r=>puOrderRow(r,false)).join('');
+  const keep=new Set(rows.map(r=>r.ref));
+  let h='';
+  (_wpWeeks||[]).forEach(w=>{
+    const rs=w.rows.filter(r=>keep.has(r.ref)); if(!rs.length) return;
+    const t=(f)=>Math.round(rs.reduce((s,r)=>s+(+r[f]||0),0)*100)/100;
+    const open=_puOpenWk[w.week]!==false;      // weeks start open — the point is to see the orders
+    h+=`<tr class="grp" style="cursor:pointer" onclick="puToggleWk('${esc(w.week)}')">
+      <td style="background:#eef1ea;font-weight:800">${open?'▾':'▸'} ${esc(w.label)}
+        <span class="mini" style="font-weight:400;color:var(--muted)">${rs.length} order(s) · ${[...new Set(rs.map(r=>r.supplier))].length} supplier(s)</span></td>
+      <td style="background:#eef1ea"></td>
+      <td class="num" style="background:#eef1ea;font-weight:700">${wpPeso(t('net'))}</td>
+      <td class="num" style="background:#eef1ea;font-weight:700;color:#4e7a3e">${wpPeso(t('paid'))}</td>
+      <td class="num" style="background:#eef1ea;font-weight:700;color:${t('bal')>0.5?'var(--danger)':'var(--muted)'}">${wpPeso(t('bal'))}</td>
+      <td class="num" style="background:#eef1ea">${t('fee')>0.005?wpPeso(t('fee')):''}</td>
+      <td class="num" style="background:#eef1ea;color:var(--earth,#b5762a)">${t('pendVal')>0.5?wpPeso(t('pendVal')):''}</td>
+      <td style="background:#eef1ea">${_puSplit(t('paid'),t('bal'),t('pendVal'))}</td></tr>`;
+    if(open) rs.forEach(r=>{ h+=puOrderRow(r,true); });
+  });
+  return h||'<tr><td colspan="8" class="empty">Nothing matches that filter.</td></tr>';
+}
+async function renderPurchasing(){
+  $('crumb').innerHTML='<b>Purchase Orders</b>';
+  $('cp').innerHTML=`<div class="title">Purchase Orders <span onclick="openKB('purchasing')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <button class="btn" onclick="state.model='purchase_orders';state.view='form';openForm('')">＋ New order</button>
+    <button class="btn sec sm" onclick="puMode()">${_puWeeks?'☰ Flat list':'🗓 By week'}</button>
+    <label class="mini">Show <select onchange="_wpN=+this.value;renderPurchasing()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+      ${[4,8,13,26,52].map(n=>`<option value="${n}" ${_wpN===n?'selected':''}>${n} weeks</option>`).join('')}</select></label>
+    <button class="btn sec sm" onclick="wpPrint()">🖨 Print</button>
+    <button class="btn sec sm" onclick="wpCsv()">⬇ CSV</button>
+    <div class="sp"></div><span style="color:var(--muted)">order → receive → pay, in one place</span>`;
+  $('content').innerHTML='<div class="repcard"><div class="empty">Adding it up…</div></div>';
+  const _tok=(window.__puTok=(window.__puTok||0)+1);
+  try{ await wpLoad(); }catch(e){ $('content').innerHTML='<div class="repcard"><div class="empty">'+esc(e.message||'could not load')+'</div></div>'; return; }
+  // the user may have moved on while this was loading — do not repaint over them
+  if(_tok!==window.__puTok || !['purchase_orders','payables'].includes(state.model) || state._poPlain) return;
+  _wpWeeks=(_wpWeeks||[]).slice(0,_wpN);
+  const keep=new Set(_wpWeeks.flatMap(w=>w.rows.map(r=>r.ref)));
+  _wpRows=(_wpRows||[]).filter(r=>keep.has(r.ref));
+  const T=_wpRows.reduce((a,r)=>({net:a.net+r.net,paid:a.paid+r.paid,bal:a.bal+r.bal,
+    pend:a.pend+(['confirmed','partial'].includes(r.status)?r.pendVal:0),
+    fleet:a.fleet+Math.max(0,r.fleetDue-r.fleetPaid)}),{net:0,paid:0,bal:0,pend:0,fleet:0});
+  const owing=_wpRows.filter(r=>r.bal>0.5);
+  const bySup={}; owing.forEach(r=>{ bySup[r.supplier]=(bySup[r.supplier]||0)+r.bal; });
+  const supList=Object.entries(bySup).sort((a,b)=>b[1]-a[1]);
+  const maxSup=Math.max(1,...supList.map(s=>s[1]));
+  const arriving=_wpRows.filter(r=>r.pendVal>0.5&&['confirmed','partial'].includes(r.status)).sort((a,b)=>b.pendVal-a.pendVal);
+  const kpi=(l,v,s,c)=>`<div style="flex:1;min-width:132px;padding:8px 11px;border:1px solid var(--line);border-radius:8px;background:#fff">
+    <div class="mini" style="color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-size:10px">${l}</div>
+    <div style="font-size:19px;font-weight:800;line-height:1.25${c?';color:'+c:''}">${v}</div>
+    <div class="mini" style="color:var(--muted)">${s}</div></div>`;
+  $('content').innerHTML=`
+  <div class="repcard" style="padding:12px 14px">
+    <div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:10px">
+      ${kpi('Net payable',wpPeso(T.net),_wpRows.length+' order(s)')}
+      ${kpi('Paid',wpPeso(T.paid),(T.net>0?Math.round(T.paid/T.net*100):0)+'% of the net','#4e7a3e')}
+      ${kpi('Still owed',wpPeso(T.bal),owing.length+' with a balance',T.bal>0.5?'var(--danger)':'#4e7a3e')}
+      ${kpi('Not yet delivered',wpPeso(T.pend),arriving.length+' order(s) to arrive','var(--earth,#b5762a)')}
+      ${kpi('Courier owed',wpPeso(T.fleet),T.fleet>0.5?'separate from the supplier':'nothing outstanding')}
+    </div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">${_puChipHtml()}</div>
+  </div>
+
+  <div style="display:flex;gap:12px;align-items:flex-start;margin-top:12px">
+    <div style="flex:0 0 25%;min-width:220px;display:flex;flex-direction:column;gap:12px">
+      <div class="repcard" style="padding:11px 12px">
+        <div class="mini" style="font-weight:800;margin-bottom:7px">Who is owed</div>
+        ${supList.length?supList.slice(0,7).map(([sp,v])=>`
+          <div style="margin-bottom:7px;cursor:pointer" onclick="puSet('unpaid')" title="filter to unpaid orders">
+            <div style="display:flex;justify-content:space-between;font-size:12px"><span>${esc(sp)}</span><b>${wpPeso(v)}</b></div>
+            <svg width="100%" height="6" viewBox="0 0 100 6" preserveAspectRatio="none" style="display:block;margin-top:2px">
+              <rect x="0" y="0" width="100" height="6" rx="3" fill="#f0efe9"/>
+              <rect x="0" y="0" width="${(v/maxSup*100).toFixed(1)}" height="6" rx="3" fill="#c9482f"/></svg>
+          </div>`).join('')+(supList.length>7?`<div class="mini" style="color:var(--muted)">+ ${supList.length-7} more</div>`:'')
+          :'<div class="mini" style="color:var(--muted)">Nothing outstanding ✅</div>'}
+      </div>
+      <div class="repcard" style="padding:11px 12px">
+        <div class="mini" style="font-weight:800;margin-bottom:7px">Still to arrive</div>
+        ${arriving.length?arriving.slice(0,7).map(r=>`
+          <div style="margin-bottom:7px;cursor:pointer;font-size:12px" onclick="puOpen('${esc(r.ref)}')" title="Open ${esc(r.ref)}">
+            <div style="display:flex;justify-content:space-between"><code style="font-size:11px">${esc(r.ref)}</code><b style="color:var(--earth,#b5762a)">${wpPeso(r.pendVal)}</b></div>
+            <div class="mini" style="color:var(--muted)">${esc(r.supplier)} · ${r.pendKg} kg</div>
+          </div>`).join('')+(arriving.length>7?`<div class="mini" style="color:var(--muted)">+ ${arriving.length-7} more</div>`:'')
+          :'<div class="mini" style="color:var(--muted)">Everything ordered has arrived ✅</div>'}
+      </div>
+    </div>
+
+    <div class="repcard" style="flex:1;min-width:0">
+      <div class="repbar"><span>${esc((PU_CHIPS.find(c=>c.k===_puFilter)||PU_CHIPS[0]).l)} — ${puRows().length} order(s)</span>
+        <span class="mini" style="color:var(--muted)"><span style="color:#4e7a3e">■</span> paid
+          <span style="color:#c9482f">■</span> owed <span style="color:#d9c48a">■</span> not yet delivered · every row opens the order</span></div>
+      <div style="overflow-x:auto" class="stickyhead"><table style="min-width:860px"><thead><tr>
+        <th>Order</th><th>Status</th><th class="num">Net payable</th><th class="num">Paid</th>
+        <th class="num">Remaining</th><th class="num">Delivery fee</th><th class="num">Delivered</th><th>Last payment</th>
+      </tr></thead><tbody id="puBody">${puBody()}</tbody></table></div>
+      <div class="pager"><span class="mini" style="color:var(--muted)">Cancelled orders excluded everywhere.
+        <b>Not yet delivered</b> is money committed, not a bill — it stays out of Remaining.</span></div>
+    </div>
+  </div>`;
+}
+
 async function renderPayables(){
   $('crumb').innerHTML='<b>Weekly Payables</b>';
   $('cp').innerHTML=`<div class="title">Weekly Payables <span onclick="openKB('payables')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
@@ -7340,6 +7556,8 @@ const KSHEET_CSS=`  :root{
     display:inline-block;min-width:74px;height:22px;
     border-bottom:1.4px solid #9a9a93;border-radius:2px;
   }
+  .yield-record .yr-box.pre{color:#9a9a93;font-size:11px;text-align:right;padding-right:2px;}
+  .yield-record table.yr th .sub{display:block;font-weight:400;opacity:.72;font-size:9px;letter-spacing:0;}
   .yield-record table.yr td{padding-top:9px;padding-bottom:9px;}
   .yield-record table.yr th{font-size:11px;letter-spacing:.02em;}
   .yr-legend{
@@ -7799,8 +8017,10 @@ async function prodKitchenSheet(){
      the run is reading straight down the page, not hunting for figures.
      Two weighings for the freezer draw, because drip loss you estimate is a
      number nobody ever improves; drip loss you weigh is one you can argue with. */
-  const _yrHead=`<tr><th>Ingredient</th><th class="num">Kailangan</th><th class="num">Frozen out</th><th class="num">Thawed</th>
-      <th class="num">Raw used</th><th class="num">Processed made</th><th class="num">Final output</th><th class="num">Excess</th></tr>`;
+  const _yrHead=`<tr><th>Ingredient</th><th class="num">Needed qty</th>
+      <th class="num">Frozen processed<span class="sub">used</span></th><th class="num">Thawed processed<span class="sub">used</span></th>
+      <th class="num">Raw<span class="sub">used</span></th><th class="num">Processed<span class="sub">created</span></th>
+      <th class="num">Used in<span class="sub">product</span></th><th class="num">Excess<span class="sub">to stock</span></th></tr>`;
   const _blank=`<td class="num"><span class="yr-box"></span></td>`;
   const yieldRecordHtml=KSHEET_ORDER.map(k=>{
     const entries=[...combined.entries()].filter(([,v])=>v.cat===k).sort((a,b)=>b[1].grams-a[1].grams);
@@ -7812,7 +8032,8 @@ async function prodKitchenSheet(){
         const n=_needBySku[v.sku]||{}; const need=(n.needG!=null)?n.needG:v.grams;
         return `<tr><td><span class="ingred-name">${esc2(name)}${v.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span>
           ${n.ohProcG?('<div class="ingred-note">nasa freezer: '+_ksKg(n.ohProcG)+(n.yieldPct?(' · yield '+n.yieldPct+'%'):'')+'</div>'):''}</td>
-          <td class="num"><b>${_ksKg(need)}</b></td>${_blank}${_blank}${_blank}${_blank}${_blank}${_blank}</tr>`; }).join('')}
+          <td class="num"><b>${_ksKg(need)}</b></td>${_blank}${_blank}${_blank}${_blank}
+          <td class="num"><span class="yr-box pre">${_ksKg(need)}</span></td>${_blank}</tr>`; }).join('')}
       </tbody></table></div>`;
   }).join('');
 
@@ -7838,15 +8059,16 @@ async function prodKitchenSheet(){
     </div>
     <div class="card combined-section yield-record">
       <h2>Talaan ng Yield ng Sangkap · Ingredient Yield Record</h2>
-      <p class="hint">Isulat ang <b>aktwal</b> na timbang habang ginagawa. <b>Frozen out</b> = timbang paglabas sa freezer, bago matunaw.
-        <b>Thawed</b> = timbangin ulit pagkatapos matunaw — ito ang napupunta sa mix; ang pagkakaiba ay tubig na nawala.
-        <b>Raw used → Processed made</b> = hilaw na ginamit at kung magkano ang nagawa. <b>Final output</b> = thawed + processed made.
-        <b>Excess</b> = final output ng higit sa kailangan, babalik sa stock.</p>
+      <p class="hint">Isulat ang <b>aktwal</b> na timbang habang ginagawa. Apat na hakbang:<br>
+        <b>1 · Frozen processed used → Thawed processed used</b> — timbangin paglabas sa freezer, tunawin, timbangin ulit. Ang pagkakaiba ay tubig na nawala.<br>
+        <b>2 · Raw used → Processed created</b> — hilaw na ginamit, at kung magkano ang nagawa mula rito.<br>
+        <b>3 · Used in product</b> — nakasulat na ang kailangan; palitan lang kung mas marami o mas kaunti ang ginamit.<br>
+        <b>4 · Excess to stock</b> — ang natira (thawed + created, bawas ang ginamit), babalik sa processed stock.</p>
       <div id="yieldRecord">${yieldRecordHtml}
         <div class="yr-legend">
-          <span><b>Drip loss</b> = Frozen out − Thawed</span>
-          <span><b>Yield</b> = Processed made ÷ Raw used</span>
-          <span><b>Excess</b> = Final output − Kailangan</span>
+          <span><b>Drip loss</b> = Frozen processed used − Thawed processed used</span>
+          <span><b>Yield</b> = Processed created ÷ Raw used</span>
+          <span><b>Excess to stock</b> = (Thawed + Created) − Used in product</span>
         </div>
         <div class="card" style="margin-top:20px">
           <h2 style="margin-bottom:14px;">Pangkalahatang Sign-Off (Araw ng Produksyon)</h2>
@@ -8104,6 +8326,11 @@ async function openProdActuals(){
          numbers lies. Two weighings, so the drip is measured, not guessed. */
       frozenOutKg, thawTouched:false,
       thawLossKg:Math.round((frozenOutKg-procUsedKg)*1000)/1000,
+      /* What actually goes INTO the product. It starts at what the recipe needs,
+         because that is the plan — but the kitchen decides on the day, and a mix
+         that takes a little more or less should be recorded as it happened
+         rather than forced back to the plan. Whatever is left is excess. */
+      usedKg:Math.round(neededG/10)/100, excessKg:0, excessAnchor:false,
       procUsedKg, actualRawKg:Math.round(rawG/10)/100, actualMadeKg:Math.round(shortG/10)/100 }; };
   const A=Object.keys(agg).map(sku=>mk(sku,agg[sku].neededG,'A'));
   const B=prodOutLines.filter(l=>(+l.needed_kg||0)>0).map(l=>mk(l.ingredient_sku,(+l.needed_kg||0)*1000,'B'));
@@ -8146,9 +8373,19 @@ function _paCalc(x){
   const yieldPct=raw>0?Math.round((made/raw)*1000)/10:0;
   const thawPct=drawn>0?Math.round((thaw/drawn)*1000)/10:0;
   const thawYield=drawn>0?Math.round((proc/drawn)*1000)/10:0;   // how much of the frozen weight survived
-  const total=Math.round((proc+made)*1000)/1000;                // FINAL OUTPUT — everything available to the mix
-  const excess=Math.round((total-needed)*1000)/1000;
-  return {needed,proc,raw,made,shortfall,stdYield,yieldPct,total,excess,thaw,drawn,frozen,thawPct,thawYield};
+  const total=Math.round((proc+made)*1000)/1000;                // everything this run made available
+  /* USED and EXCESS are two ends of one number: whatever the run made available
+     either goes into the product or goes back to stock. Both are typeable, so
+     one of them has to be the anchor and the other has to follow — otherwise a
+     new weight silently contradicts a figure someone already wrote down.
+     By default USED is the anchor, starting at what the recipe asked for.
+     Type an EXCESS and it takes over: from then on, raising Processed created
+     raises what goes into the product rather than growing the leftovers. */
+  let used, excess;
+  if(x.excessAnchor){ excess=Math.round((+x.excessKg||0)*1000)/1000; used=Math.round((total-excess)*1000)/1000; }
+  else { used=(x.usedKg==null||x.usedKg==='')?needed:Math.max(0,+x.usedKg||0);
+         excess=Math.round((total-used)*1000)/1000; }
+  return {needed,proc,raw,made,used,shortfall,stdYield,yieldPct,total,excess,thaw,drawn,frozen,thawPct,thawYield};
 }
 const _pa2=v=>(Math.round(v*1000)/1000);
 // Plain-language recap under each row. This is the part that stops the "wait, is
@@ -8156,14 +8393,13 @@ const _pa2=v=>(Math.round(v*1000)/1000);
 function _paRecap(x){
   const c=_paCalc(x);
   const bits=[];
-  if(x.type==='A') bits.push(`need <b>${_pa2(c.needed)}</b> kg → <b>${_pa2(c.proc)}</b> from processed stock (have ${x.ohKg}) → <b>${_pa2(c.shortfall)}</b> still to make`);
-  if(c.thaw>0) bits.push(`froze out <b>${_pa2(c.frozen)}</b> kg → thawed to <b>${_pa2(c.proc)}</b> kg = <b style="color:var(--earth,#b5762a)">${_pa2(c.thaw)}</b> kg drip (<b>${c.thawYield}%</b> survived, ${c.thawPct}% lost)`);
+  if(c.thaw>0) bits.push(`froze out <b>${_pa2(c.frozen)}</b> → thawed to <b>${_pa2(c.proc)}</b> kg = <b style="color:var(--earth,#b5762a)">${_pa2(c.thaw)}</b> kg drip (${c.thawPct}% lost)`);
   else if(c.thaw<-0.0005) bits.push(`<b style="color:var(--danger)">thawed weight is higher than the frozen weight — check the two figures</b>`);
-  else bits.push(`make <b>${_pa2(c.needed)}</b> kg to stock`);
-  if(c.raw>0) bits.push(`pulled <b>${_pa2(c.raw)}</b> kg raw → made <b>${_pa2(c.made)}</b> kg = <b>${c.yieldPct}%</b> actual yield <span style="color:var(--muted)">(standard ${c.stdYield}%)</span>`);
-  else bits.push(`<span style="color:var(--muted)">standard yield ${c.stdYield}% — raw needed ${_pa2(c.shortfall/(x.yield||1))} kg</span>`);
-  if(x.type==='A') bits.push(`final output <b>${_pa2(c.total)}</b> kg vs <b>${_pa2(c.needed)}</b> needed → ${c.excess>0.0005?`<b style="color:#4e7a3e">${_pa2(c.excess)} kg excess back to processed stock</b>`:(c.excess<-0.0005?`<b style="color:var(--danger)">${_pa2(-c.excess)} kg SHORT</b>`:'exactly covered')}`);
-  else if(Math.abs(c.excess)>0.0005) bits.push(c.excess>0?`<b style="color:#4e7a3e">${_pa2(c.excess)} kg more than planned</b>`:`<b style="color:var(--danger)">${_pa2(-c.excess)} kg under plan</b>`);
+  if(c.raw>0) bits.push(`raw <b>${_pa2(c.raw)}</b> → created <b>${_pa2(c.made)}</b> kg = <b>${c.yieldPct}%</b> yield <span style="color:var(--muted)">(standard ${c.stdYield}%)</span>`);
+  else if(c.shortfall>0.0005) bits.push(`<span style="color:var(--muted)">still to make ${_pa2(c.shortfall)} kg — at ${c.stdYield}% that is ${_pa2(c.shortfall/(x.yield||1))} kg raw</span>`);
+  bits.push(`available <b>${_pa2(c.total)}</b> kg → used <b>${_pa2(c.used)}</b> in the product${Math.abs(c.used-c.needed)>0.0005?` <span style="color:var(--berry)">(recipe said ${_pa2(c.needed)})</span>`:''}`);
+  bits.push(c.excess>0.0005?`<b style="color:#4e7a3e">${_pa2(c.excess)} kg excess to stock</b>`
+    :(c.excess<-0.0005?`<b style="color:var(--danger)">${_pa2(-c.excess)} kg SHORT — used more than the run made available</b>`:'nothing left over'));
   return bits.join(' · ');
 }
 // Numeric input that survives a decimal point: oninput only touches the model and
@@ -8189,18 +8425,21 @@ function _paEdit(i,field,v){
   }
   x.thawLossKg=Math.round(Math.max(0,(+x.frozenOutKg||0)-(+x.procUsedKg||0))*1000)/1000;
   if(field==='procUsedKg'||field==='frozenOutKg') _paSync(i,true);   // re-default raw + made from the new shortfall
+  if(field==='usedKg')   x.excessAnchor=false;   // they are steering by what goes in the product
+  if(field==='excessKg') x.excessAnchor=true;    // …or by what they are keeping back
+  /* Keep the follower's stored value in step with the anchor, so the cell that
+     is not being typed in always shows the number it will actually post. */
+  { const c=_paCalc(x);
+    if(x.excessAnchor) x.usedKg=c.used; else x.excessKg=c.excess; }
   _paRefresh();
 }
 // Repaint only the computed cells — never the inputs, so the caret stays put.
 function _paRefresh(){
   (window._prodAct||[]).forEach((x,i)=>{
     const c=_paCalc(x);
-    const y=$('payl'+i); if(y) y.innerHTML=c.yieldPct?`<b style="color:${c.yieldPct<70?'var(--danger)':'#4e7a3e'}">${c.yieldPct}%</b>`:'—';
-    const e=$('paex'+i); if(e){ e.textContent=c.excess?((c.excess>0?'+':'')+_pa2(c.excess)):'0'; e.style.color=c.excess<-0.0005?'var(--danger)':(c.excess>0.0005?'#4e7a3e':'var(--muted)'); }
-    const fo=$('pafo'+i); if(fo) fo.innerHTML='<b>'+_pa2(c.total)+'</b>';
-    const th=$('path'+i); if(th){ th.innerHTML=c.thaw?(_pa2(c.thaw)+' <span style="color:var(--muted)">('+c.thawPct+'%)</span>'):'—';
-      th.style.color=c.thaw<-0.0005?'var(--danger)':'var(--earth,#b5762a)'; }
-    const s=$('pash'+i); if(s) s.textContent=_pa2(c.shortfall);
+    const uz=$('pa_usedKg_'+i);   if(uz && document.activeElement!==uz) uz.value=c.used;
+    const ex=$('pa_excessKg_'+i); if(ex && document.activeElement!==ex) ex.value=c.excess;
+
     const r=$('parc'+i); if(r) r.innerHTML=_paRecap(x);
     const rw=$('parw'+i); if(rw && document.activeElement!==rw) rw.value=x.actualRawKg;
     const md=$('pamd'+i); if(md && document.activeElement!==md) md.value=x.actualMadeKg;
@@ -8208,53 +8447,54 @@ function _paRefresh(){
   const w=$('paWarn');
   if(w){ const n=(window._prodAct||[]).filter(x=>_paCalc(x).excess<-0.0005).length;
     w.style.display=n?'block':'none';
-    if(n) w.innerHTML=`<b>${n} ingredient(s) come up short</b> — processed stock plus what you made is less than the run needs. Post anyway and stock goes negative, or raise the output made.`; }
+    if(n) w.innerHTML=`<b>${n} ingredient(s) come up short</b> — more was used in the product than the run made available, so stock will go negative. Raise <b>Processed created</b>, or lower <b>Used in product</b>.`; }
 }
 // Recompute raw + output defaults from the edited Processed-used (keeps processed-first sound).
 function _paSync(i){ const x=(window._prodAct||[])[i]; if(!x)return; const short=Math.max(0,(+x.neededKg||0)-(+x.procUsedKg||0));
   x.actualMadeKg=Math.round(short*1000)/1000; x.actualRawKg=Math.round((short/(x.yield||1))*1000)/1000; }
-function paSplitToggle(sku){ window._paSplitOpen=window._paSplitOpen||{};
-  window._paSplitOpen[sku]=!window._paSplitOpen[sku]; drawProdActuals(); }
 function _paRow(x,i){
   const c=_paCalc(x);
   const procCell = x.type==='A'
-    ? `<td class="num">${_paNum(i,'frozenOutKg',76,'weigh what comes OUT of the freezer, before thawing — on hand '+x.ohKg+' kg')}</td>
-       <td class="num">${_paNum(i,'procUsedKg',76,'weigh it AGAIN after thawing — this is what reaches the mix')}</td>
-       <td class="num mini" id="path${i}" style="color:${c.thaw<-0.0005?'var(--danger)':'var(--earth,#b5762a)'}">${c.thaw?(_pa2(c.thaw)+' <span style="color:var(--muted)">('+c.thawPct+'%)</span>'):'—'}</td>
-       <td class="num mini" id="pash${i}" style="color:var(--muted)">${_pa2(c.shortfall)}</td>`
-    : `<td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">${_pa2(c.needed)}</td>`;
+    ? `<td class="num">${_paNum(i,'frozenOutKg',78,'weigh what comes OUT of the freezer, before thawing — on hand '+x.ohKg+' kg')}</td>
+       <td class="num">${_paNum(i,'procUsedKg',78,'weigh the SAME batch again after thawing — the difference is drip loss')}</td>`
+    : `<td class="num mini" style="color:var(--muted)">—</td><td class="num mini" style="color:var(--muted)">—</td>`;
   const _c=(window._prodNeedRows||[]).find(r=>r.sku===x.sku);
   const _col=_c?_c.color:'#5C5C5C';
   /* Which product each kilo is for. The aggregate says how much to weigh out;
      this says where it goes, which is what gets asked when a mix runs short. */
-  const _sp=(_c&&_c.split)||[];
-  const _spOpen=(window._paSplitOpen||{})[x.sku];
-  const _spLine=_sp.length?`<div class="mini"><span class="btn link" style="font-size:11.5px" onclick="paSplitToggle('${esc(x.sku)}')">${_spOpen?'▾':'▸'} for ${_sp.length} product${_sp.length===1?'':'s'}</span></div>
-    ${_spOpen?`<div class="mini" style="color:var(--muted);margin-top:3px;line-height:1.7">${_sp.map(s=>`→ ${esc(s.name)}${s.packs?' ('+s.packs+' packs)':''} <b>${_pa2(s.useG/1000)}</b> kg`).join('<br>')}</div>`:''}`:'';
-  return `<tr style="box-shadow:inset 4px 0 0 ${_col}"><td><span class="cat-dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${_col};margin-right:6px"></span><b>${esc(x.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(x.sku)}</code></div>${x.parent?`<div class="mini" style="color:var(--muted)">from ${esc(ingName(x.parent))}</div>`:'<span class="mini" style="color:var(--danger)">no raw parent</span>'}${_spLine}</td>
-    <td class="num"><b>${_pa2(c.needed)}</b>${x.type==='A'?`<div class="mini" style="color:var(--muted)">stock ${x.ohKg}</div>`:''}</td>
+  return `<tr style="box-shadow:inset 4px 0 0 ${_col}"><td><span class="cat-dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${_col};margin-right:6px"></span><b>${esc(x.name)}</b></td>
+    <td class="num"><b>${_pa2(c.needed)}</b>${x.type==='A'?`<div class="mini" style="color:var(--muted)">in stock ${x.ohKg}</div>`:''}</td>
     ${procCell}
-    <td class="num"><input type="number" step="any" inputmode="decimal" id="parw${i}" value="${x.actualRawKg}" oninput="_paEdit(${i},'actualRawKg',this.value)" style="width:76px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+    <td class="num"><input type="number" step="any" inputmode="decimal" id="parw${i}" value="${x.actualRawKg}" oninput="_paEdit(${i},'actualRawKg',this.value)" style="width:78px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
     <td class="num"><input type="number" step="any" inputmode="decimal" id="pamd${i}" value="${x.actualMadeKg}" oninput="_paEdit(${i},'actualMadeKg',this.value)" style="width:78px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
-    <td class="num" id="payl${i}">${c.yieldPct?`<b style="color:${c.yieldPct<70?'var(--danger)':'#4e7a3e'}">${c.yieldPct}%</b>`:'—'}</td>
-    <td class="num" id="pafo${i}"><b>${_pa2(c.total)}</b></td>
-    <td class="num mini" id="paex${i}" style="color:${c.excess<-0.0005?'var(--danger)':(c.excess>0.0005?'#4e7a3e':'var(--muted)')}">${c.excess?((c.excess>0?'+':'')+_pa2(c.excess)):'0'}</td></tr>
-  <tr class="parecap"><td colspan="11" id="parc${i}">${_paRecap(x)}</td></tr>`;
+    <td class="num">${_paNum(i,'usedKg',78,'what actually went into the product. Starts at the recipe figure — change it if the kitchen allocated more or less.')}
+      ${x.excessAnchor?'<div class="mini" style="color:var(--muted)">= available − excess</div>'
+        :(Math.abs(c.used-c.needed)>0.0005?`<div class="mini" style="color:var(--berry)">recipe ${_pa2(c.needed)}</div>`:'')}</td>
+    <td class="num">${_paNum(i,'excessKg',78,'what is kept back and put into processed stock. Type here instead and the product takes whatever is left, so more Processed created goes into the mix rather than into the leftovers.')}
+      ${x.excessAnchor?'':'<div class="mini" style="color:var(--muted)">= available − used</div>'}
+      ${c.excess<-0.0005?'<div class="mini" style="color:var(--danger)">short</div>':''}</td></tr>
+  <tr class="parecap"><td colspan="8" id="parc${i}">${_paRecap(x)}</td></tr>`;
 }
 function drawProdActuals(){
   const a=window._prodAct||[]; const A=a.filter(x=>x.type==='A'), B=a.filter(x=>x.type==='B');
   const idx=(x)=>a.indexOf(x);
-  const head=`<thead><tr><th>Ingredient</th><th class="num">Needed</th><th class="num">Frozen out</th><th class="num">Thawed</th><th class="num">Drip loss</th><th class="num">Still to make</th><th class="num">Raw used</th><th class="num">Processed made</th><th class="num">Actual yield</th><th class="num">Final output</th><th class="num">Excess → stock</th></tr></thead>`;
+  const head=`<thead><tr><th>Ingredient</th><th class="num">Needed qty</th>
+    <th class="num">Frozen processed<br><span style="font-weight:400;opacity:.8">used</span></th>
+    <th class="num">Thawed processed<br><span style="font-weight:400;opacity:.8">used</span></th>
+    <th class="num">Raw<br><span style="font-weight:400;opacity:.8">used</span></th>
+    <th class="num">Processed<br><span style="font-weight:400;opacity:.8">created</span></th>
+    <th class="num">Used in<br><span style="font-weight:400;opacity:.8">product</span></th>
+    <th class="num">Excess<br><span style="font-weight:400;opacity:.8">to stock</span></th></tr></thead>`;
   const short=a.filter(x=>_paCalc(x).excess<-0.0005);
   $('modal').innerHTML=`<div><h3>Confirm production — record what actually happened</h3>
     <div style="margin:6px 0 10px;padding:9px 11px;background:#f6f8f4;border-radius:8px;font-size:12.5px;line-height:1.5">
-      Read each row left to right, and enter the <b>actual weights off the scale</b>.
-      <b>Frozen out</b> = what came out of the freezer. <b>Thawed</b> = the same batch weighed again after thawing — the difference is
-      <b>drip loss</b>, calculated, not typed. What is left is <b>still to make</b>: enter the <b>raw used</b> and the
-      <b>processed made</b> from it. Pull more raw than the shortfall if the team is processing a whole tray — the extra is not lost,
-      it lands in <b>Excess → stock</b> for the next run.<br>
-      Three different losses, kept apart on purpose: <b>drip</b> = frozen out − thawed · <b>actual yield</b> = processed made ÷ raw used,
-      against the standard on the ingredient · <b>final output</b> = thawed + processed made, which is what the run actually put in the bowl.
+      Four steps, left to right, all <b>actual weights off the scale</b>:<br>
+      <b>1 · Frozen processed used → Thawed processed used</b> — weigh what leaves the freezer, thaw it, weigh it again. The difference is drip loss, calculated for you.<br>
+      <b>2 · Raw used → Processed created</b> — what was pulled and trimmed, and what came off it. That ratio is the run's real yield.<br>
+      <b>3 · Used in product</b> — starts at the needed qty because that is the plan, but change it if the kitchen allocated more or less on the day.<br>
+      <b>4 · Excess to stock</b> — what is kept back and put into processed stock for the next run.<br>
+      <span style="color:var(--muted)">Steps 3 and 4 are two ends of one number, so type into whichever you actually counted — the other follows.
+      Type an <b>excess</b> and any extra <b>processed created</b> goes into the product instead of growing the leftovers.</span>
     </div>
     <div id="paWarn" style="display:${short.length?'block':'none'};margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px"><b>${short.length} ingredient(s) come up short</b> — processed stock plus what you made is less than the run needs. Post anyway and stock goes negative, or raise the output made.</div>
     ${A.length?`<div class="mini" style="margin:6px 0 2px;font-weight:700">For products (mix ingredients)</div>
@@ -8374,6 +8614,7 @@ async function prodActualsApply(){
           planned_packs:0, good_packs:0, reject_packs:0, waste_g:0, output_lot:'',
           output_kg:madeKg, raw_used_kg:rawKg, from_stock_kg:procKg,
           needed_kg:Math.round(_c.needed*1000)/1000,
+          used_in_product_kg:Math.round(_c.used*1000)/1000,
           frozen_out_kg:Math.round(_c.frozen*1000)/1000,
           thawed_kg:procKg,
           thaw_loss_kg:Math.round(_c.thaw*1000)/1000,
@@ -8395,8 +8636,12 @@ async function prodActualsApply(){
       const _bb=addDaysISO(prodPlanDate||todayISO(), _shelfBy[r.product_sku]||DEFAULT_FG_SHELF);   // best-before = production date + shelf life
       try{ await db.update('production_batches','batch_ref',r.batch_ref,{cost_per_pack:cpp,best_before:_bb}); }catch(e){}
       try{ await db.create('inventory_movements',{kind:'product',ref_sku:r.product_sku,location_code:'bulacan',qty:packs,unit_cost:cpp,movement_type:'batch_output',note:'Production '+r.batch_ref,expiry_date:_bb}); posted++; }catch(e){ failed++; }
-      for(const line of (bm[r.product_sku]||[])){ const procG=Math.round(line.processed_g*packs*100)/100; if(!(procG>0)) continue;
+      for(const line of (bm[r.product_sku]||[])){ let procG=Math.round(line.processed_g*packs*100)/100; if(!(procG>0)) continue;
         const x=actBy[line.ingredient_sku]||{}; const tot=totProc[line.ingredient_sku]||procG; const share=tot>0?(line.processed_g*packs)/tot:1;
+        /* "Used in product" is the kitchen's figure and it wins over the recipe.
+           Scale each batch's draw by the same ratio so the ledger records what
+           was actually issued rather than what the BOM assumed. */
+        { const _c=_paCalc(x); if(_c.needed>0.0005 && Math.abs(_c.used-_c.needed)>0.0005) procG=Math.round(procG*(_c.used/_c.needed)*100)/100; }
         const actRawB=Math.round((+x.actualRawKg||0)*1000*share*100)/100; const madeB=Math.round((+x.actualMadeKg||0)*1000*share*100)/100;
         try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:line.ingredient_sku,location_code:'bulacan',qty:-procG,unit_cost:line.unit_cost_g,movement_type:'issue_to_batch',note:'Production '+r.batch_ref}); drawn++; }catch(e){ failed++; }
         try{ await db.create('batch_issues',{batch_ref:r.batch_ref,ingredient_sku:line.ingredient_sku,expected_raw_g:Math.round(line.raw_g*packs*100)/100,actual_raw_g:actRawB,expected_processed_g:procG,actual_processed_g:(madeB||procG),uom:'kg'}); }catch(e){}
@@ -10744,6 +10989,16 @@ const KB = {
        'PENDING DELIVERY is ordered value that has not arrived. It is money committed, not money owed, so it is kept out of Remaining on purpose — mixing the two is how a payment run pays for meat that is still at the supplier.',
        'A delivery fee marked payable to a FLEET SERVICE is a separate payable. It never reduces the supplier balance, so a courier payment can no longer make a supplier look settled.',
        'Cancelled orders are excluded everywhere here, as they are in every other report.']},
+  purchasing:{d:'Every purchase order, and the money against it, on one row.',
+    h:['Click any chip to filter — order status, still-to-arrive, or payment state',
+       'Click any row to open the order and receive against it or record a payment',
+       '☰ Flat list drops the week grouping; 🖨 and \u2b07 export the payment run'],
+    l:['ONE ORDER, THREE JOBS. A purchase order is not three records. The purchaser needs what is on order, the receiver what has not arrived, and whoever pays needs what is owed. Splitting those across two screens meant nobody saw the whole order, and the money and the goods drifted apart.',
+       'NET PAYABLE is goods less discount plus any delivery fee owed to the supplier. Once anything has been received the RECEIVED value is billed rather than the ordered value, so a short delivery cannot overstate the bill.',
+       'NOT YET DELIVERED is money committed against goods that have not arrived. It is exposure, not a bill, and it is deliberately kept out of Remaining — mixing the two is how a payment run pays for meat still sitting at the supplier.',
+       'A delivery fee marked payable to a FLEET SERVICE is its own payable. It never reduces the supplier balance, so a courier payment cannot make a supplier look settled.',
+       'Weeks run Monday to Sunday off the ORDER date, because that is when the commitment was made — not when it was paid or delivered.',
+       'Cancelled orders are excluded from every figure here, as they are in every other report.']},
   home:{d:'Your landing page — KPI tiles and quick links into every module.',h:['Glance at counts (ingredients, products, suppliers, open POs)','Click a card to jump into that module','Use the search box or ⌘K to find anything'],l:['KPIs are live counts from the database','Nothing is entered here — it summarizes other modules']},
   ingredients:{d:'Master list of everything you buy or make into product: raw meats, organs, veg, fruit, seeds, supplies, plus live animals and internal intermediates.',h:['Open a row to edit price, category, storage, par, lead time','Set the processing method + yield so costing is accurate','Mark live-animal / intermediate items with their flags'],l:['₱/kg usable = raw price ÷ processing yield — the true cost in a pack','moving_avg_cost auto-updates from goods receipts (perpetual costing)','Intermediates (e.g. Rabbit Ground Meat) derive cost from their source × dress-out yield']},
   products:{d:'Sellable finished goods, grouped into families with size variants, each with its own SKU, price and recipe (BOM).',h:['Open a product to edit price, pack size, feeding style','Edit the Recipe (BOM) lines — usable grams per pack','Add variants as separate products under the same family'],l:['BOM grams are USABLE grams in the pack','Raw needed for production = usable ÷ ingredient yield','Cost/pack is computed from actual ingredients issued at production']},
