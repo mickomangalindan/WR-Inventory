@@ -538,6 +538,9 @@ function statusLabel(model,v){ const s=String(v==null?'':v); return ((STATUS_LAB
 /* Statuses a PO can still owe money or goods against. 'partial' joins the pair
    everywhere the old code asked for confirmed-or-received — payables, the
    payment button, the dashboard, the MRP's on-order column. */
+/* The one migration file. When a script is folded into another, change it HERE
+   and every message that names it follows. */
+const WR_SQL_FILE='sql/wr_20260817_ALL.sql';
 const PO_LIVE=['confirmed','partial','received'];
 /* Hidden from the PO list unless you ask for them: a cancelled order is dead, a
    fully received one is history. Both stay one click away. */
@@ -8684,10 +8687,14 @@ async function prodActualsApply(){
     try{ await coSyncStatuses(); }catch(e){}   // packs made → Partially Fulfilled / Completed
     if(_outFail.length){
       // the stock moved either way; what is missing is the RECORD of the prep
-      sysLog('production_batches',prodRunRef,'⚠ '+_outFail.length+' prep batch record(s) could not be written — run sql/wr_20260818_prep_batches.sql');
-      alert('⚠ The stock movements posted correctly, but '+_outFail.length+' PREP BATCH record(s) could not be saved to the Production list.\n\n'
-        +'This almost always means the database is missing the columns a prep batch needs (kind, output_kg, raw_used_kg, yield_pct).\n\n'
-        +'Fix: run sql/wr_20260818_prep_batches.sql in Supabase → SQL editor, then confirm the run again — section 4 of that script also rebuilds any prep already posted, straight from the ledger.');
+      /* Name the ONE script that exists. Pointing at a file that was folded into
+         another is worse than saying nothing — it sends someone hunting. */
+      sysLog('production_batches',prodRunRef,'⚠ '+_outFail.length+' prep batch record(s) could not be written — run '+WR_SQL_FILE);
+      alert('⚠ The stock posted correctly. What did NOT save is '+_outFail.length+' PREP BATCH record(s) — the row in the Production list that says what the team prepped.\n\n'
+        +'Nothing is lost: the movements are in the ledger, and the script below rebuilds these rows from it.\n\n'
+        +'The database is missing the columns a prep batch needs (kind, output_kg, raw_used_kg, yield_pct, and the yield fields).\n\n'
+        +'FIX — in Supabase → SQL editor, run:\n    '+WR_SQL_FILE+'\n\n'
+        +'Run the whole file top to bottom; it is safe to re-run. PART 1 adds the columns, PART 5 rebuilds every prep batch already posted, straight from the ledger — you do not have to re-enter this run.');
     }
     toast('Confirmed · '+posted+' product(s)'+(nOut?', '+nOut+' output ingredient(s)':'')+', '+drawn+' issue(s), yield captured'
       +((_lblDone||_supDone)?(' · '+_lblDone+' label + '+_supDone+' supply line(s) deducted'):'')+(failed?(' · ⚠ '+failed+' failed'):''), failed>0);
