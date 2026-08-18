@@ -777,9 +777,14 @@ const MODELS = {
       {n:'transfer_date',l:'Date',t:'date'},{n:'created_by',l:'Created by',t:'text',ro:true}],
     list:['transfer_ref','from_code','to_code','status','transfer_date'],
     groups:[['transfer_ref','from_code','to_code'],['transfer_date','created_by']],
-    o2mLoader:{label:'⬇ Load Bulacan finished stock', fn:'loadBulacanStock'},
-    o2m:{field:'lines',model:'transfer_lines',fk:'transfer_ref',label:'Products',
-      cols:[{n:'product_sku',l:'Product',t:'rel',rel:'products'},{n:'sent_packs',l:'Sent',t:'number'},{n:'received_packs',l:'Received',t:'number',ro:true}]} },
+    o2mLoaders:[{label:'🥩 Ingredients', fn:"trPick('ingredient')"},{label:'📦 Products', fn:"trPick('product')"},
+                {label:'🧴 Supplies', fn:"trPick('supply')"},{label:'🏷 Stickers', fn:"trPick('sticker')"},
+                {label:'⬇ All finished stock', fn:'loadBulacanStock'}],
+    o2m:{field:'lines',model:'transfer_lines',fk:'transfer_ref',label:'What is moving',
+      cols:[{n:'kind',l:'Type',t:'select',o:['product','ingredient']},
+            {n:'product_sku',l:'Item',t:'rel',relAny:['products','ingredients'],
+             rel:(ln)=>((ln&&ln.kind==='ingredient')?'ingredients':'products')},
+            {n:'sent_packs',l:'Sent',t:'number'},{n:'received_packs',l:'Received',t:'number',ro:true}]} },
 
   count_sessions:{ label:'Weekly Inventory', icon:'🧮', name:'count_ref', pk:'count_ref', customForm:'count',
     searchOn:['count_ref','location_code','status','counted_by'],
@@ -1396,7 +1401,11 @@ async function openForm(idEnc){
   }
   // preload rel options
   for(const f of m.fields) if(f.t==='rel') await relOptions(f.rel);
-  if(m.o2m) for(const c of m.o2m.cols) if(c.t==='rel') await relOptions(c.rel);
+  /* A relation column may now depend on the ROW — a transfer line can point at
+     a product or an ingredient depending on what is moving — so preload every
+     master such a column could ask for. */
+  if(m.o2m) for(const c of m.o2m.cols) if(c.t==='rel'){
+    for(const rn of (Array.isArray(c.relAny)?c.relAny:[c.rel])) if(typeof rn==='string') await relOptions(rn); }
   // product map (box size + name + group) for transfer lines: box/loose entry, name, and grouped print
   if(m.o2m && m.o2m.cols.some(c=>c.n==='product_sku')){ window._prodLineMap={};
     try{ (await db.list('products',{})).forEach(p=>window._prodLineMap[p.sku]={name:p.name,variant:p.variant,box:(+p.box_size||1),group_1:p.group_1,group_2:p.group_2,family:p.family,sort_order:p.sort_order}); }catch(e){} }
@@ -1461,7 +1470,8 @@ async function renderForm(){
     } else {
       notebook=`<div class="notebook"><div class="nbtabs"><button class="on">${o.label}</button></div><div class="lines">
       <table class="autow"><thead><tr>${o.cols.map((c,ci)=>`<th data-ci="${ci}" class="${c.t==='number'?'num':''}">${c.l}<span class="colgrip" onmousedown="colDragStart(event,this)" title="drag to resize"></span></th>`).join('')}<th style="width:28px"></th></tr></thead><tbody id="lineBody"></tbody></table>
-      ${m.o2mLoader?`<button class="btn sm sec" style="margin-right:8px" onclick="${m.o2mLoader.fn}()">${m.o2mLoader.label}</button>`:''}<span class="addrow" onclick="addLine()">＋ Add a line</span></div></div>`;
+      ${m.o2mLoader?`<button class="btn sm sec" style="margin-right:8px" onclick="${m.o2mLoader.fn}()">${m.o2mLoader.label}</button>`:''}
+      ${(m.o2mLoaders||[]).map(b=>`<button class="btn sm sec" style="margin-right:6px" onclick="${b.fn.indexOf('(')>0?b.fn:b.fn+'()'}">${b.label}</button>`).join('')}<span class="addrow" onclick="addLine()">＋ Add a line</span></div></div>`;
     }
   }
   const titleField = m.fields.find(f=>f.n===m.name)||m.fields[0];
@@ -1532,7 +1542,7 @@ async function renderForm(){
      batch_issues        what was PLANNED against what was ACTUALLY used
      inventory_movements what the ledger really took out of stock
    Both are shown, because a difference between them is worth seeing.        */
-let _pbRows=[], _pbRef='', _pbDirty=false;
+let _pbRows=[], _pbRef='', _pbDirty=false, _pbIngs=[];
 /* The record you open after a run shows the SAME eight columns as the confirm
    screen, in the same order, driven by the same arithmetic (_paCalc). Anything
    less and the figure someone typed on the day has a different name the next
@@ -1547,6 +1557,7 @@ async function pbLoad(){
   try{ iss=(await db.list('batch_issues',{})).filter(x=>String(x.batch_ref)===String(_pbRef)); }catch(e){}
   try{ mv=(await db.list('inventory_movements',{})).filter(x=>String(x.note||'')==='Production '+_pbRef); }catch(e){}
   try{ ings=await listIngredients(); }catch(e){}
+  _pbIngs=(ings||[]).filter(i=>!isSupplyItem(i)).sort((a,b)=>String(a.name||a.sku).localeCompare(String(b.name||b.sku)));
   try{ bom=(await db.list('bom_lines',{})).filter(b=>b.product_sku===formRec.product_sku); }catch(e){}
   const im={}; ings.forEach(i=>im[i.sku]=i);
   const ctx=(_outIngCtx(ings)||{}).ctx;
@@ -1554,15 +1565,25 @@ async function pbLoad(){
   const rows={};
   const put=(sku)=>rows[sku]=rows[sku]||{sku,planG:0,ledG:0,rec:null};
   bom.forEach(b=>{ put(b.ingredient_sku).planG+=(+b.usable_g||0)*packs; });
-  mv.filter(x=>x.kind==='ingredient').forEach(x=>{ put(x.ref_sku).ledG+=Math.abs(+x.qty||0); });
+  /* NET, not absolute. A correction posts a reversing movement against the
+     same note — taking the absolute value counted the mistake and its undo as
+     two separate issues, so a batch that had been corrected once reopened
+     showing twice the ingredient it ever used. */
+  mv.filter(x=>x.kind==='ingredient').forEach(x=>{ put(x.ref_sku).ledG += -(+x.qty||0); });
+  Object.values(rows).forEach(r=>{ if(r.ledG<0.5) r.ledG=Math.max(0,r.ledG); });
   iss.forEach(x=>{ const r=put(x.ingredient_sku); r.rec=x;
     if(!r.planG && x.expected_processed_g!=null) r.planG=+x.expected_processed_g||0; });
   _pbRows=Object.values(rows).map(r=>{
     const it=im[r.sku]||{}; const cl=(ctx?_countIngClass(it,ctx):null)||{}; const cat=_ksCat(cl.g1||it.category||'');
     const x=r.rec||{};
     /* The ledger is the truth for what LEFT stock, which is what went into the
-       product. Everything else defaults to that until somebody records more. */
-    const used = r.ledG || (+x.actual_processed_g||0) || r.planG;
+       product. On a DRAFT the recipe figure is a useful starting point; on a
+       CONFIRMED run it is not — an ingredient with nothing in the ledger and
+       no issue line was not used, and defaulting it back to the recipe would
+       re-issue it the next time anyone pressed Save. That is exactly how a
+       swapped-out ingredient would creep back onto the run. */
+    const _confirmed = String(formRec.status||'')==='confirmed';
+    const used = r.ledG || (+x.actual_processed_g||0) || (_confirmed ? 0 : r.planG);
     const G=(v,d)=>(v==null?d:(+v||0));
     const thawed = G(x.thawed_g, used);
     const created= G(x.created_g, 0);
@@ -1589,32 +1610,94 @@ function pbEdit(i,field,v){
   if(x.excessAnchor) x.usedKg=c.used; else x.excessKg=c.excess;
   _pbDirty=true; pbDraw();
 }
+/* ---- Correcting WHICH ingredient was used, not just how much -------------
+   A quantity edit answers "we used more". It cannot answer "we used the wrong
+   thing" — which is what happened when raw broccoli went into a run that
+   called for precooked. Swapping is not a rename: the ledger already took the
+   wrong ingredient out of stock, so the fix is to put it back and take the
+   right one instead. Modelling it as remove + add makes that automatic, and
+   leaves both movements on the record. */
+function _pbRowFor(sku, usedKg, planG){
+  const it=(_pbIngs||[]).find(i=>i.sku===sku)||{sku,name:sku};
+  const cat=_ksCat(it.category||'');
+  return { sku, name:it.name||sku, cat:cat.k, catLabel:cat.l, color:cat.c,
+    type:'A', yield:((+it.yield_pct||100)/100)||1,
+    outCostG:(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000,
+    planG:+planG||0, ledG:0, neededKg:Math.round((+planG||0)/10)/100,
+    frozenOutKg:0, procUsedKg:Math.round((+usedKg||0)*1000)/1000, actualRawKg:0, actualMadeKg:0,
+    usedKg:Math.round((+usedKg||0)*1000)/1000, excessKg:0, excessAnchor:false, _added:true };
+}
+function pbSwap(i,sku){
+  if(!sku) return;
+  const x=_pbRows[i]; if(!x || x.sku===sku) { pbDraw(); return; }
+  const used=_paCalc(x).used;
+  x._removed=true; x._swappedFor=sku;
+  const n=_pbRowFor(sku, used, x.planG);
+  n._swappedFrom=x.sku; n._swappedFromName=x.name;
+  _pbRows.splice(i+1,0,n);
+  _pbDirty=true; pbDraw();
+}
+function pbAddIng(sku){
+  if(!sku) return;
+  if(_pbRows.some(r=>r.sku===sku && !r._removed)){ toast('That ingredient is already on the run',true); return; }
+  _pbRows.push(_pbRowFor(sku,0,0)); _pbDirty=true; pbDraw();
+}
+function pbRemove(i){
+  const x=_pbRows[i]; if(!x) return;
+  if(x._added && !x.ledG){ _pbRows.splice(i,1); }      // never posted; just drop it
+  else { x._removed=!x._removed; delete x._swappedFor; }
+  _pbDirty=true; pbDraw();
+}
+function _pbPick(id,cur,fn){
+  const groups={};
+  (_pbIngs||[]).forEach(it=>{ const c=_ksCat(it.category||''); (groups[c.l]=groups[c.l]||[]).push(it); });
+  return `<select id="${id}" onchange="${fn}" style="max-width:230px;padding:4px;border:1px solid var(--line);border-radius:5px;font-size:12px">
+    <option value="">— choose an ingredient —</option>
+    ${Object.keys(groups).sort().map(g=>`<optgroup label="${esc(g)}">`
+      +groups[g].map(it=>`<option value="${esc(it.sku)}" ${it.sku===cur?'selected':''}>${esc(it.name||it.sku)}</option>`).join('')
+      +`</optgroup>`).join('')}</select>`;
+}
 function pbReset(){ pbLoad().then(pbDraw); }
 async function pbSave(){
   if(!_pbRef) return;
   const packs=+formRec.good_packs||0;
-  const changed=_pbRows.filter(x=>Math.abs(_paCalc(x).used*1000-x.ledG)>0.5);
-  const lines=changed.map(x=>`• ${x.name}: ledger has ${_pbKg(x.ledG)}, you are saying ${_pbKg(_paCalc(x).used*1000)}`);
-  const total=_pbRows.reduce((s,x)=>s+_paCalc(x).used*x.outCostG*1000,0);
+  const tgt=x=>x._removed?0:_paCalc(x).used*1000;      // a removed row is worth zero, not "unchanged"
+  const changed=_pbRows.filter(x=>Math.abs(tgt(x)-x.ledG)>0.5);
+  const lines=changed.map(x=>x._removed
+    ? `• ${x.name}: taken off the run — ${_pbKg(x.ledG)} goes back into stock`+(x._swappedFor?` (swapped for ${(_pbIngs.find(i=>i.sku===x._swappedFor)||{}).name||x._swappedFor})`:'')
+    : (x._swappedFrom ? `• ${x.name}: used instead of ${x._swappedFromName} — ${_pbKg(tgt(x))} comes out of stock`
+                      : `• ${x.name}: ledger has ${_pbKg(x.ledG)}, you are saying ${_pbKg(tgt(x))}`));
+  const total=_pbRows.filter(x=>!x._removed).reduce((s,x)=>s+_paCalc(x).used*x.outCostG*1000,0);
   if(!confirm('Save what this batch used?\n\n'
     +(lines.length?('This changes what came out of stock:\n'+lines.join('\n')+'\n\nAn adjusting movement is posted for each — the original stays, so the trail is intact.\n\n')
                   :'No stock movement changes — only the weights are being recorded.\n\n')
     +'Cost per pack becomes '+fmt(packs>0?total/packs:0)+'.')) return;
-  let posted=0, wrote=0;
+  let posted=0, wrote=0, dropped=0;
   for(const x of _pbRows){
     const c=_paCalc(x);
-    const delta=Math.round((c.used*1000-x.ledG)*100)/100;   // + = more left stock, − = some came back
+    const delta=Math.round((tgt(x)-x.ledG)*100)/100;   // + = more left stock, − = some came back
     if(Math.abs(delta)>0.5){
       try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:x.sku,location_code:formRec.location_code||planProduceLoc(),
         qty:-delta, unit_cost:x.outCostG, movement_type:'issue_to_batch', note:'Production '+_pbRef}); posted++; }catch(e){ toast(e.message,true); }
     }
+    let ex=[]; try{ ex=(await db.list('batch_issues',{})).filter(y=>String(y.batch_ref)===String(_pbRef)&&String(y.ingredient_sku)===String(x.sku)); }catch(e){}
+    if(x._removed){
+      /* The reversing movement above is the audit trail; the issue line is not.
+         Leaving a zero row behind would put a ghost ingredient on every future
+         print of this batch. */
+      try{ if(ex.length && ex[0].id!=null){ await db.del('batch_issues','id',ex[0].id); dropped++; } }catch(e){ console.warn('batch_issues drop',e); }
+      continue;
+    }
+    /* Nothing in the ledger, nothing recorded before, nothing used now — there
+       is no fact to write, and a zero row would put a ghost ingredient on
+       every future print of this batch. */
+    if(!ex.length && !x.ledG && Math.abs(c.used)<0.0005){ continue; }
     const G=v=>Math.round((+v||0)*1000*100)/100;
     const rec={batch_ref:_pbRef, ingredient_sku:x.sku, expected_processed_g:Math.round(x.planG*100)/100,
       frozen_g:G(c.frozen), thawed_g:G(c.proc), created_g:G(c.made),
       actual_raw_g:G(c.raw), actual_processed_g:G(c.used), excess_g:G(c.excess),
       drawn_g:G(c.frozen), uom:'kg'};
     try{
-      let ex=[]; try{ ex=(await db.list('batch_issues',{})).filter(y=>String(y.batch_ref)===String(_pbRef)&&String(y.ingredient_sku)===String(x.sku)); }catch(e){}
       if(ex.length && ex[0].id!=null) await db.update('batch_issues','id',ex[0].id,rec);
       else await db.create('batch_issues',rec);
       wrote++;
@@ -1622,9 +1705,12 @@ async function pbSave(){
   }
   const cpp=Math.round((packs>0?total/packs:0)*100)/100;
   try{ await formUpdate('production_batches','batch_ref',_pbRef,{cost_per_pack:cpp}); }catch(e){}
+  const swaps=_pbRows.filter(x=>x._swappedFrom).map(x=>x._swappedFromName+' → '+x.name);
   sysLog('production_batches',_pbRef,'✏️ Ingredients used edited by '+CURRENT_USER+' — '+wrote+' line(s)'
+    +(dropped?(', '+dropped+' removed'):'')
+    +(swaps.length?(', swapped: '+swaps.join('; ')):'')
     +(posted?(', '+posted+' stock adjustment(s) posted'):', no stock change')+' · ₱'+cpp+'/pack');
-  toast('Saved · '+wrote+' ingredient line(s)'+(posted?(' · '+posted+' stock adjustment(s)'):''));
+  toast('Saved · '+wrote+' ingredient line(s)'+(dropped?(' · '+dropped+' removed'):'')+(posted?(' · '+posted+' stock adjustment(s)'):''));
   await pbLoad(); pbDraw(); renderForm();
 }
 function pbDraw(){
@@ -1643,29 +1729,39 @@ function pbDraw(){
   let body='',last='';
   _pbRows.forEach((x,i)=>{
     const c=_paCalc(x);
-    T.plan+=c.needed; T.frozen+=c.frozen; T.thawed+=c.proc; T.raw+=c.raw; T.made+=c.made;
-    T.used+=c.used; T.exc+=c.excess; T.php+=c.used*x.outCostG*1000;
+    if(!x._removed){
+      T.plan+=c.needed; T.frozen+=c.frozen; T.thawed+=c.proc; T.raw+=c.raw; T.made+=c.made;
+      T.used+=c.used; T.exc+=c.excess; T.php+=c.used*x.outCostG*1000; }
     if(x.cat!==last){ last=x.cat;
       body+=`<tr class="grp"><td colspan="9" style="background:${x.color};color:#fff;font-weight:700;padding:4px 9px">${esc(x.catLabel)}</td></tr>`; }
     const gap=c.needed>0?c.used-c.needed:0;
-    body+=`<tr style="box-shadow:inset 4px 0 0 ${x.color}">
-      <td><b>${esc(x.name)}</b></td>
+    body+=`<tr style="box-shadow:inset 4px 0 0 ${x.color}${x._removed?';opacity:.5':''}">
+      <td><b style="${x._removed?'text-decoration:line-through':''}">${esc(x.name)}</b>
+        <span class="mini" style="white-space:nowrap">
+          <span class="btn link" style="font-size:11px" onclick="pbSwapOpen(${i})" title="the kitchen used a different ingredient">⇄</span>
+          <span class="btn link" style="font-size:11px;color:var(--danger)" onclick="pbRemove(${i})" title="${x._removed?'put it back on the run':'take it off the run and return it to stock'}">${x._removed?'↺':'✕'}</span></span>
+        ${x._swappedFrom?`<div class="mini" style="color:var(--berry)">used instead of ${esc(x._swappedFromName)}</div>`:''}
+        ${x._removed?`<div class="mini" style="color:var(--danger)">coming off the run — ${_pbKg(x.ledG)} goes back to stock</div>`:''}
+        ${(x._added&&!x._swappedFrom)?'<div class="mini" style="color:var(--berry)">not in the recipe — added</div>':''}
+        ${window._pbSwapOn===i?`<div style="margin-top:4px">${_pbPick('pbSwap'+i,x.sku,'pbSwap('+i+',this.value)')}</div>`:''}</td>
       <td class="num mini" style="color:var(--muted)">${c.needed?_pa2(c.needed)+' kg':'—'}</td>
-      <td class="num">${num(i,'frozenOutKg',x.frozenOutKg,'weight out of the freezer, before thawing')}</td>
-      <td class="num">${num(i,'procUsedKg',x.procUsedKg,'the same batch weighed again after thawing')}</td>
-      <td class="num">${num(i,'actualRawKg',x.actualRawKg,'raw pulled and trimmed for this ingredient')}</td>
-      <td class="num">${num(i,'actualMadeKg',x.actualMadeKg,'processed output that came off that raw')}</td>
-      <td class="num">${num(i,'usedKg',x.usedKg,'what went into the product — the only figure that moves stock'+(c.needed?' · recipe '+_pa2(c.needed)+' kg':''))}
+      <td class="num">${x._removed?'—':num(i,'frozenOutKg',x.frozenOutKg,'weight out of the freezer, before thawing')}</td>
+      <td class="num">${x._removed?'—':num(i,'procUsedKg',x.procUsedKg,'the same batch weighed again after thawing')}</td>
+      <td class="num">${x._removed?'—':num(i,'actualRawKg',x.actualRawKg,'raw pulled and trimmed for this ingredient')}</td>
+      <td class="num">${x._removed?'—':num(i,'actualMadeKg',x.actualMadeKg,'processed output that came off that raw')}</td>
+      <td class="num">${x._removed?'0':num(i,'usedKg',x.usedKg,'what went into the product — the only figure that moves stock'+(c.needed?' · recipe '+_pa2(c.needed)+' kg':''))}
         ${(c.needed&&Math.abs(gap)>=0.001)?`<div class="mini" style="color:${gap>0?'var(--earth,#b5762a)':'#4e7a3e'}">${(gap>0?'+':'')+_pa2(gap)} vs recipe</div>`:''}</td>
-      <td class="num">${num(i,'excessKg',x.excessKg,'kept back and returned to processed stock')}
+      <td class="num">${x._removed?'—':num(i,'excessKg',x.excessKg,'kept back and returned to processed stock')}
         ${c.excess<-0.0005?'<div class="mini" style="color:var(--danger)">short</div>':''}</td>
-      <td class="num">${fmt(c.used*x.outCostG*1000)}</td></tr>
-    <tr class="parecap"><td colspan="9">${_paRecap(x)}</td></tr>`;
+      <td class="num">${x._removed?'—':fmt(c.used*x.outCostG*1000)}</td></tr>
+    ${x._removed?'':`<tr class="parecap"><td colspan="9">${_paRecap(x)}</td></tr>`}`;
   });
   el.innerHTML=`<div class="repcard" style="margin:0 0 12px">
-    <div class="repbar"><span>Ingredients used — ${_pbRows.length} item(s)</span>
+    <div class="repbar"><span>Ingredients used — ${_pbRows.filter(x=>!x._removed).length} item(s)</span>
       <span class="mini" style="color:var(--muted)">${packs?packs+' packs · ':''}same columns as the confirm screen — editable</span>
-      <span style="flex:1"></span>${bar}
+      <span style="flex:1"></span>
+      ${_pbPick('pbAddSel','','pbAddIng(this.value);this.value=\'\'')}
+      ${bar}
       ${_pbDirty?`<button class="btn sm" onclick="pbSave()">💾 Save ingredients</button>
                   <button class="btn sec sm" onclick="pbReset()">↺ Undo</button>`:''}</div>
     <div class="hint" style="margin:0 0 8px">${PA_HELP}</div>
@@ -1681,6 +1777,7 @@ function pbDraw(){
           <td class="num"><b>${fmt(T.php/packs)}</b>${formRec.cost_per_pack!=null?`<div class="mini" style="color:${Math.abs((+formRec.cost_per_pack||0)-T.php/packs)<0.01?'var(--muted)':'var(--earth,#b5762a)'}">saved on the batch: ${fmt(formRec.cost_per_pack)}</div>`:'<div class="mini" style="color:var(--danger)">nothing saved on the batch yet</div>'}</td></tr>`:''}
       </tfoot></table></div></div>`;
 }
+async function pbSwapOpen(i){ window._pbSwapOn=(window._pbSwapOn===i)?null:i; pbDraw(); }
 async function pbIngredients(){ const el=$('pbIng'); if(!el) return; await pbLoad(); pbDraw(); }
 /* The day's production sheet, from the record instead of the planning screen —
    every batch in the run, with what each one used, in the same eight columns. */
@@ -1739,6 +1836,7 @@ async function pbRunSheet(){
     tr.grp td{color:#fff !important;font-weight:800;padding:4px 6px}
     tr.tot td{font-weight:700;border-top:2px solid #4e7a3e;background:#f2f5ef !important}
     .note{margin-top:10px;font-size:9.5px;color:#666;line-height:1.6}
+    th .psub{display:block;font-weight:400;opacity:.8;font-size:9px}
     thead{display:table-header-group} tr{break-inside:avoid}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Production record</h1>
     <div class="sub">${esc(run)} · ${esc(formRec.production_date||'')} · ${esc(formRec.operator||'')} · printed ${esc(todayISO())}</div>
@@ -1748,15 +1846,14 @@ async function pbRunSheet(){
       <thead><tr><th>Ingredient</th><th>Batch</th><th class="n">Raw used</th><th class="n">Created</th><th class="n">Yield</th></tr></thead><tbody>${prep}</tbody></table>`:''}
     <h2>Ingredients used</h2>
     <table><colgroup><col style="width:22%"><col style="width:9%"><col style="width:11%"><col style="width:11%"><col style="width:9%"><col style="width:10%"><col style="width:10%"><col style="width:9%"><col style="width:9%"></colgroup>
-      <thead><tr><th>Ingredient</th><th class="n">Needed qty</th><th class="n">Frozen processed used</th><th class="n">Thawed processed used</th>
-        <th class="n">Raw used</th><th class="n">Processed created</th><th class="n">Used in product</th><th class="n">Excess to stock</th><th class="n">Value</th></tr></thead>
+      <thead>${paPrintHead({cls:'n',sub:'psub'})}</thead>
       <tbody>${body||'<tr><td colspan="9">Nothing recorded.</td></tr>'}
       <tr class="tot"><td>Total</td><td class="n">${kg(T.need)}</td><td class="n">${kg(T.f)}</td><td class="n">${kg(T.t)}</td>
         <td class="n">${kg(T.raw)}</td><td class="n">${kg(T.made)}</td><td class="n">${kg(T.u)}</td><td class="n">${kg(T.e)}</td><td class="n">${P(T.p)}</td></tr>
       </tbody></table>
-    <div class="note"><b>Frozen processed used → Thawed processed used</b>: the two weighings; the difference is drip loss.
-      <b>Raw used → Processed created</b>: what was trimmed and what came off it. <b>Used in product</b> is the only figure that moves stock.
-      <b>Excess to stock</b> = (thawed + created) − used, returned to the freezer. <b>Value</b> = used × the ingredient's carrying cost at printing.</div>
+    <div class="note">${PA_STEPS}<br>
+      <b>Used in Product</b> is the only figure that moves stock. <b>Excess to Stock</b> = (Thawed + Created) − Used in Product.
+      <b>Value</b> = used × the ingredient's carrying cost at printing.</div>
     <div style="margin-top:18px;font-size:11px">Checked by ____________________________   Date ______________</div>
     </body></html>`);
   w.document.close(); w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},250);
@@ -1774,14 +1871,14 @@ function renderLines(){
     const ro=(typeof c.ro==='function'?c.ro(ln,formRec):c.ro)?'disabled':'';
     if(ro&&(c.n==='received_packs'||c.n==='received_kg')&&(v===''||v==null)) v=0; // captured at receiving
     // Product picker: show the SKU under the name so both are visible on the line.
-    if(c.t==='rel'){const opts=relCache[c.rel]||[];
+    if(c.t==='rel'){const _rel=(typeof c.rel==='function')?c.rel(ln,formRec):c.rel; const opts=relCache[_rel]||[];
       /* The code goes UNDER the box, once — it used to be inside the option text as
          well ("Meatballs Rabbit (RASPGCMB0045)" above "RASPGCMB0045"). And only for
          PRODUCTS: a product code (RASPGCGD0500) carries pack size and variant that
          the name does not, while RAW-BEEF-LIVER next to "Beef liver" says nothing. */
-      const skuHint=(v&&c.rel==='products')?`<div class="mini"><code>${esc(v)}</code></div>`:'';
-      return `<td><select onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}><option value="">—</option>${relOptsHTML(opts,v,true)}</select>${skuHint}</td>`;}
-    if(c.t==='select')return `<td><select onchange="lSet(${i},'${c.n}',this.value)" ${ro}>${(c.o||[]).map(op=>`<option ${v===op?'selected':''}>${op}</option>`).join('')}</select></td>`;
+      const skuHint=(v&&_rel==='products')?`<div class="mini"><code>${esc(v)}</code></div>`:'';
+      return `<td><select data-col="${esc(c.n)}" onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}><option value="">—</option>${relOptsHTML(opts,v,true)}</select>${skuHint}</td>`;}
+    if(c.t==='select')return `<td><select data-col="${esc(c.n)}" onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}>${(c.o||[]).map(op=>`<option ${v===op?'selected':''}>${op}</option>`).join('')}</select></td>`;
     // Transfer "Sent" packs: case-packed finished goods entered as boxes + loose packs (like receiving & count).
     if(c.n==='sent_packs' && !ro){ const box=(PM[ln.product_sku]||{}).box||1;
       if(box>1){ const tot=(v===''||v==null)?null:+v; const bx=(ln._sbx!=null&&ln._sbx!=='')?ln._sbx:(tot!=null?Math.floor(tot/box):''); const lo=(ln._slo!=null&&ln._slo!=='')?ln._slo:(tot!=null?(tot-Math.floor(tot/box)*box):'');
@@ -3675,10 +3772,10 @@ function puBody(){
    it worked. Two questions it has to answer without anyone opening Supabase:
    did every sale land, and does what Shopify is about to be told match what is
    actually at Pasig.                                                        */
-let _shDays=14, _shRows=[], _shStock=[], _shErr=[], _shHeld=[], _shFrom=null;
+let _shDays=14, _shRows=[], _shStock=[], _shErr=[], _shHeld=[], _shSkip=[], _shFrom=null;
 async function shLoad(){
   const from=new Date(Date.now()-_shDays*864e5).toISOString().slice(0,10);
-  _shRows=[]; _shStock=[]; _shErr=[]; _shHeld=[]; _shFrom=null;
+  _shRows=[]; _shStock=[]; _shErr=[]; _shHeld=[]; _shSkip=[]; _shFrom=null;
   /* The sync start date is the one setting that decides whether the first pull
      helps or halves the stock: every order before it is already inside the
      Pasig opening count. Read it so the screen can say it out loud rather than
@@ -3697,11 +3794,16 @@ async function shLoad(){
     else if(!DEMO.shopify_events) _shRows=null;
     else _shRows=DEMO.shopify_events.filter(r=>String(r.occurred_at||'').slice(0,10)>=from);
   }catch(e){ _shRows=null; }
-  /* Held and broken are not the same thing and must never share a number.
-     HELD is the design working — an order the opening count already covers.
-     A real problem is a SKU the ERP cannot find, and that one needs a person. */
-  _shHeld=(_shRows||[]).filter(r=>!r.posted && /^held/i.test(String(r.post_error||'')));
-  _shErr =(_shRows||[]).filter(r=>!r.posted && r.post_error && !/^held/i.test(String(r.post_error)));
+  /* THREE outcomes that are not the same thing and must never share a number.
+       HELD        the opening count already covers it — the guard working.
+       NOT STOCKED ice, packaging, a made-to-order mix. A real sale that must
+                   not move a food balance. Acknowledged on purpose.
+       NEEDS A DECISION  a code nobody has ruled on yet. This is the only one
+                   that is a fault, and it is the only one worth an alarm. */
+  const _p=r=>String(r.post_error||'');
+  _shHeld=(_shRows||[]).filter(r=>!r.posted && /^held/i.test(_p(r)));
+  _shSkip=(_shRows||[]).filter(r=>!r.posted && /^not stocked/i.test(_p(r)));
+  _shErr =(_shRows||[]).filter(r=>!r.posted && _p(r) && !/^held|^not stocked/i.test(_p(r)));
   try{
     if(isLive()) _shStock=await sb('wr_shopify_stock?select=*&order=available_pasig.desc');
     else {
@@ -3747,7 +3849,8 @@ async function renderShopify(){
       ${kpi('Came back', sum(back)+' packs', back.length+' refund/return line(s)', back.length?'var(--earth,#b5762a)':'')}
       ${kpi('Sales value', fmt(val), 'at the Shopify price')}
       ${kpi('Held', _shHeld.length, _shHeld.length?'already in the opening count':'none', '')}
-      ${kpi('Did not post', _shErr.length, _shErr.length?'needs a look':'all clean', _shErr.length?'var(--danger)':'#4e7a3e')}
+      ${kpi('Not stocked', _shSkip.length, _shSkip.length?'ice, packaging, made to order':'none', '')}
+      ${kpi('Needs a decision', _shErr.length, _shErr.length?'a code nobody has ruled on':'all ruled on', _shErr.length?'var(--danger)':'#4e7a3e')}
       ${kpi('Last event', last, stale?'nothing for over 36 h':'sync looks alive', stale?'var(--danger)':'')}
     </div>
     <div class="hint" style="margin:10px 0 0">
@@ -3758,18 +3861,38 @@ async function renderShopify(){
       <b>restocked</b>; money refunded without the food coming back is not inventory.</div>
   </div>`;
   if(_shErr.length){
+    /* Grouped by code, not listed by event: forty lines of one unknown SKU is
+       one decision, and showing it forty times hides the other three. */
+    const g={}; _shErr.forEach(r=>{ const k=r.variant_sku||'(blank)';
+      (g[k]=g[k]||{sku:k,n:0,qty:0,what:r.note||'',ex:r.order_name||r.shop_order_id,why:r.post_error}); g[k].n++; g[k].qty+=(+r.qty||0); });
+    const gs=Object.values(g).sort((a,b)=>b.n-a.n);
     h+=`<div class="repcard" style="margin-top:12px;border-left:4px solid var(--danger)">
-      <div class="repbar"><span>⚠ ${_shErr.length} event(s) did not post</span>
-        <span class="mini" style="color:var(--muted)">almost always a SKU that is not in Products</span></div>
-      <div style="overflow-x:auto"><table><thead><tr><th>When</th><th>Type</th><th>Order</th><th>SKU</th><th class="num">Qty</th><th>Why</th></tr></thead><tbody>
-      ${_shErr.slice(0,25).map(r=>`<tr><td class="mini">${esc(String(r.occurred_at||'').slice(0,16).replace('T',' '))}</td>
-        <td>${esc(r.event_type)}</td><td class="mini">${esc(r.order_name||r.shop_order_id)}</td>
-        <td><code>${esc(r.variant_sku)}</code></td><td class="num">${r.qty}</td>
-        <td class="mini" style="color:var(--danger)">${esc(r.post_error)}</td></tr>`).join('')}
+      <div class="repbar"><span>⚠ ${gs.length} Shopify code(s) nobody has ruled on</span>
+        <span class="mini" style="color:var(--muted)">${_shErr.length} event(s) waiting — nothing is lost</span></div>
+      <div style="overflow-x:auto"><table><thead><tr><th>Shopify code</th><th>What it is</th><th class="num">Events</th><th class="num">Packs</th><th>An order</th></tr></thead><tbody>
+      ${gs.slice(0,30).map(x=>`<tr><td><code>${esc(x.sku)}</code></td><td class="mini">${esc(x.what)}</td>
+        <td class="num">${x.n}</td><td class="num">${x.qty}</td><td class="mini">${esc(x.ex)}</td></tr>`).join('')}
       </tbody></table></div>
-      <div class="hint" style="margin-top:8px">Add the missing product, or map its code:
-        <code>insert into public.shopify_sku_map(shop_sku, product_sku) values ('SHOPIFY-CODE','ERP-CODE');</code>
-        then <code>select * from public.wr_shopify_repost();</code> — nothing is lost while it waits.</div></div>`;
+      <div class="hint" style="margin-top:8px">Each code is one of three things. If it is a product you sell from stock, add it to Products (or map an old code:
+        <code>insert into public.shopify_sku_map(shop_sku, product_sku) values ('SHOPIFY-CODE','ERP-CODE');</code>).
+        If it is ice, packaging, or a made-to-order custom mix, it is a real sale that must not move a food balance — acknowledge it:
+        <code>select * from public.wr_shopify_ack_unmatched();</code>. Either way, run
+        <code>select * from public.wr_shopify_repost();</code> and the waiting events settle.</div></div>`;
+  }
+  if(_shSkip.length){
+    const g={}; _shSkip.forEach(r=>{ const k=r.variant_sku||'(blank)';
+      (g[k]=g[k]||{sku:k,n:0,qty:0,why:String(r.post_error||'').replace(/^not stocked — /i,'')}); g[k].n++; g[k].qty+=(+r.qty||0); });
+    const gs=Object.values(g).sort((a,b)=>b.qty-a.qty);
+    h+=`<div class="repcard" style="margin-top:12px">
+      <div class="repbar"><span>${gs.length} code(s) sold but deliberately not stocked</span>
+        <span class="mini" style="color:var(--muted)">${_shSkip.length} event(s) — recorded, never deducted</span></div>
+      <div style="overflow-x:auto"><table><thead><tr><th>Shopify code</th><th>Why</th><th class="num">Events</th><th class="num">Qty</th></tr></thead><tbody>
+      ${gs.slice(0,20).map(x=>`<tr><td><code>${esc(x.sku)}</code></td><td class="mini">${esc(x.why)}</td>
+        <td class="num">${x.n}</td><td class="num">${x.qty}</td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="hint" style="margin-top:8px">A custom mix is built from a recipe on the day and never sits on a shelf — every custom product in this
+        database has zero stock movements against it. Deducting one would drive Pasig negative for a pack that never existed. Custom Orders accounts for them.
+        Ice and styrofoam are packaging. Changed your mind about one? Delete its row from <code>shopify_sku_map</code> and re-post.</div></div>`;
   }
   if(_shHeld.length){
     h+=`<div class="repcard" style="margin-top:12px;border-left:4px solid var(--earth,#b5762a)">
@@ -4958,10 +5081,18 @@ async function postTransfer(t){ try{
     if(_mv.length){ const _pn={}; (await db.list('products',{})).forEach(p=>_pn[p.sku]=p.name);
       if(!confirm('⚠ Best-before warning — these products have finished stock past best-before:\n\n'+_mv.map(s=>'• '+(_pn[s]||s)+' (best before '+_bad[s]+')').join('\n')+'\n\nMake sure you are not shipping expired packs. Proceed with the transfer?')) return; } }catch(e){}
   const from=t.from_code||'bulacan', to=t.to_code||'pasig'; let n=0,flags=0;
-  for(const l of lines){ const sent=Math.max(0,+l.sent_packs||0), recv=Math.max(0,+l.received_packs||0); if(sent<=0&&recv<=0) continue; const uc=cm[l.product_sku]||0;
-    if(sent>0) await db.create('inventory_movements',{kind:'product',ref_sku:l.product_sku,location_code:from,qty:-sent,unit_cost:uc,movement_type:'transfer_out',note:'Transfer '+t.transfer_ref});
-    if(recv>0) await db.create('inventory_movements',{kind:'product',ref_sku:l.product_sku,location_code:to,qty:recv,unit_cost:uc,movement_type:'transfer_in',note:'Transfer '+t.transfer_ref});
-    const gap=sent-recv; if(Math.abs(gap)>0.0001){ flags++; try{ await db.create('variance_log',{check_type:'4 · Transfer',source_ref:t.transfer_ref,expected:sent,actual:recv,gap_qty:-gap,gap_value:Math.round((cm[l.product_sku]||0)*gap*100)/100,location:'in-transit',responsible_user:CURRENT_USER,status:'open',note:l.product_sku+' sent '+sent+' vs received '+recv}); }catch(e){} }
+  /* A transfer is not only finished packs. Meat, packaging and labels move
+     between the two sites too, and when the app could only carry products the
+     team moved them anyway — off the books. The line now says which ledger it
+     belongs to, and ingredients are carried in GRAMS like everywhere else. */
+  let icm={}; try{ (await listIngredients()).forEach(i=>{ icm[i.sku]=(+i.moving_avg_cost_kg||+i.list_price_kg||0)/1000; }); }catch(e){}
+  for(const l of lines){ const sent=Math.max(0,+l.sent_packs||0), recv=Math.max(0,+l.received_packs||0); if(sent<=0&&recv<=0) continue;
+    const kind=(l.kind==='ingredient')?'ingredient':'product';
+    const mult=(kind==='ingredient')?1000:1;                      // ingredient lines are typed in kg
+    const uc=(kind==='ingredient')?(icm[l.product_sku]||0):(cm[l.product_sku]||0);
+    if(sent>0) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:from,qty:-sent*mult,unit_cost:uc,movement_type:'transfer_out',note:'Transfer '+t.transfer_ref});
+    if(recv>0) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:to,qty:recv*mult,unit_cost:uc,movement_type:'transfer_in',note:'Transfer '+t.transfer_ref});
+    const gap=sent-recv; if(Math.abs(gap)>0.0001){ flags++; try{ await db.create('variance_log',{check_type:'4 · Transfer',source_ref:t.transfer_ref,expected:sent,actual:recv,gap_qty:-gap,gap_value:Math.round(uc*mult*gap*100)/100,location:'in-transit',responsible_user:CURRENT_USER,status:'open',note:l.product_sku+' sent '+sent+' vs received '+recv}); }catch(e){} }
     n++; }
   sysLog('transfers',t.transfer_ref,'🚚 Received — '+n+' line(s) posted; '+flags+' shortfall(s) flagged by '+CURRENT_USER); toast('Transfer posted · '+flags+' shortfall(s)');
  }catch(e){ toast('Transfer posting failed: '+e.message,true); } }
@@ -5486,7 +5617,7 @@ async function _transferReceiveApply(){
     if(box>1){ const bx=+(($('tr_bx'+i)||{}).value)||0, lo=+(($('tr_lo'+i)||{}).value)||0; rr=bx*box+lo; }
     else rr=+(($('tr_r'+i)||{}).value)||0;
     if(rr<(+l.sent_packs||0)-0.0001) short++;
-    return {transfer_ref:formRec.transfer_ref, product_sku:l.product_sku, sent_packs:l.sent_packs, received_packs:rr}; });
+    return {transfer_ref:formRec.transfer_ref, kind:l.kind||'product', product_sku:l.product_sku, sent_packs:l.sent_packs, received_packs:rr}; });
   try{
     await db.replaceChildren(MODELS.transfers.o2m, formRec.transfer_ref, updated);
     formChildren=updated; formRec.status='received';
@@ -7187,28 +7318,42 @@ async function loadFFAliases(){ if(FFCALC_ALIASES) return FFCALC_ALIASES; FFCALC
 async function saveFFAliases(){ try{ localStorage.setItem('wr_ffcalc_aliases',JSON.stringify(FFCALC_ALIASES||{})); }catch(e){}
   if(isLive()&&SUPA&&SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'ffcalc_aliases',value:FFCALC_ALIASES||{}})}); }catch(e){} } }
 async function ffLearnAlias(name, sku){ if(!name||!sku) return; await loadFFAliases(); const k=String(name).trim().toLowerCase(); if(k && FFCALC_ALIASES[k]!==sku){ FFCALC_ALIASES[k]=sku; await saveFFAliases(); } }
-// Receive an order from the embedded calculator → map names to SKUs → open a pre-filled Custom Order.
+/* Receive an order from the embedded calculator → map names to SKUs → open a
+   pre-filled Custom Order.
+
+   TWO THINGS USED TO BREAK HERE. First, this function carried its own copy of
+   the name→SKU matcher, and it was the weaker one: it could not see past a
+   bracket, so "Broccoli (Precooked)" found nothing while the identical import
+   path elsewhere matched it fine. There is now one resolver, _ffMapItems, and
+   both callers use it. Second, a multi-dog batch has no single pack — it is
+   several recipes at several pack sizes cooked together — so it arrives as
+   payload.dogs and becomes one order with a line per dog. */
 async function ffCreateOrderFromCalc(o){
-  if(!o||!o.items||!o.items.length){ toast('The calculator sent no ingredients',true); return; }
-  let ings=[]; try{ ings=await listIngredients(); }catch(e){}
-  await loadFFAliases(); const valid=new Set(ings.map(i=>i.sku));
-  const norm=s=>String(s||'').trim().toLowerCase();
-  const idx={}; ings.forEach(it=>{ [it.name, it.raw_input, it.approved_alt].forEach(nm=>{ const k=norm(nm); if(k && !idx[k]) idx[k]=it.sku; }); });
-  const recipe=[]; const unmatched=[];
-  o.items.forEach(x=>{ const q=norm(x.name); let sku='';
-    if(FFCALC_ALIASES[q] && valid.has(FFCALC_ALIASES[q])) sku=FFCALC_ALIASES[q];   // learned alias first
-    if(!sku) sku=idx[q]||'';
-    if(!sku){ const hit=ings.find(it=>{ const a=norm(it.name),bb=norm(it.raw_input); return a&&(a===q||a.includes(q)||q.includes(a)) || (bb&&(bb===q||bb.includes(q))); }); if(hit) sku=hit.sku; }
-    if(!sku) unmatched.push(x.name);
-    recipe.push({ingredient_sku:sku, grams:+x.grams||0, src_name:x.name}); });
+  const multi = !!(o && o.multi && Array.isArray(o.dogs) && o.dogs.length);
+  if(!o || (!multi && (!o.items || !o.items.length))){ toast('The calculator sent no ingredients',true); return; }
+
+  const groups = multi ? o.dogs : [{dog:o.dog, packSize:o.packSize, packs:o.packs, price:o.price, items:o.items}];
+  const lines=[]; const unmatched=[]; let nIng=0;
+  for(const g of groups){
+    const m=await _ffMapItems(g.items||[]);
+    m.unmatched.forEach(u=>{ if(unmatched.indexOf(u)<0) unmatched.push(u); });
+    nIng+=m.recipe.length;
+    const desc=[o.customer||'Custom', g.dog, o.feedingType].filter(Boolean).join(' · ');
+    lines.push({line_type:'custom', product_sku:'', description:desc||'Custom meal',
+      recipe:m.recipe, pack_size_g:+g.packSize||0, packs:+g.packs||1, unit_price:+g.price||0});
+  }
   try{ (await db.list('products',{})).forEach(p=>_coProd[p.sku]=p); }catch(e){}
   try{ _coIng=(await listIngredients()).filter(i=>!isSupplyItem(i)); }catch(e){}
-  const desc=[o.customer||'Custom', o.dog, o.feedingType].filter(Boolean).join(' · ');
-  coRec={order_ref:'', customer_name:o.customer||'', contact:o.dog||'', order_date:todayISO(), needed_date:todayISO(), status:'draft', discount:0, delivery_fee:0, created_by:CURRENT_USER, notes:'From Fresh Food Calculator'};
-  coLines=[{line_type:'custom', product_sku:'', description:desc||'Custom meal', recipe, pack_size_g:+o.packSize||0, packs:+o.packs||1, unit_price:+o.price||0}];
+  coRec={order_ref:'', customer_name:o.customer||'', contact:multi?(o.dogs.map(d=>d.dog).filter(Boolean).join(', ')):(o.dog||''),
+    order_date:todayISO(), needed_date:todayISO(), status:'draft', discount:0, delivery_fee:0, created_by:CURRENT_USER,
+    notes:multi?('From Fresh Food Calculator — multi-pet batch, '+lines.length+' dog(s), '
+                 +lines.reduce((s,l)=>s+(+l.packs||0),0)+' packs')
+               :'From Fresh Food Calculator'};
+  coLines=lines;
   _coView='form'; state.model='custom_orders'; state.view='special'; renderSide(); drawCOForm();
   if(unmatched.length){ toast(unmatched.length+' ingredient(s) need mapping: '+unmatched.slice(0,6).join(', '),true); coEditRecipe(0); }
-  else toast('Calculator order imported ('+recipe.length+' ingredient(s)) — review & Lock');
+  else toast((multi?('Multi-pet batch imported — '+lines.length+' dog(s), '):'Calculator order imported (')
+    +nIng+' ingredient line(s)'+(multi?'':')')+' — review & Lock');
 }
 // one-time listener for calculator → ERP messages
 if(!window.__wrFFListen){ window.__wrFFListen=1; window.addEventListener('message',function(ev){ const d=ev&&ev.data; if(!d||d.source!=='wr-ffcalc'||d.type!=='create-order') return; try{ ffCreateOrderFromCalc(d.payload); }catch(e){ toast('Could not import calculator order: '+(e&&e.message||e),true); } }); }
@@ -7356,7 +7501,10 @@ async function prodNeedRows(){
     const base=agg[sku].procG;
     const over=(ov[sku]!=null&&ov[sku]!=='')?(+ov[sku]||0):null;
     const need=over!=null?over:base;
-    const parent=_procParent(it,bySku,byName);
+    const step=_procParent(it,bySku,byName);        // what a prep run deducts
+    const R=_procRoot(it,bySku,byName);
+    const parent=R.root||step;                      // what purchasing actually buys
+    const chainY=R.root?R.yield:y;
     return {
       sku, name:_outName(it,cl)||it.name||sku,
       cat:cat.k, catLabel:cat.l, color:cat.c,
@@ -7364,12 +7512,19 @@ async function prodNeedRows(){
       recipeG:base,                       // what the recipes add up to
       needG:need,                         // what we will actually pull (override wins)
       overridden:over!=null,
-      rawG:need/y,                        // the same need, as-purchased
-      yieldPct:Math.round(y*1000)/10,
+      rawG:need/(chainY||1),              // the same need, as-purchased at the ROOT
+      yieldPct:Math.round(chainY*1000)/10,
+      stepPct:Math.round(y*1000)/10,      // this one hop, on its own
       ohProcG:+oh[sku]||0,                // processed already in the bin
       rawSku:parent?parent.sku:'',
       rawName:parent?parent.name:'',
       ohRawG:parent?(+oh[parent.sku]||0):0,
+      /* the road from the raw material to this ingredient, e.g.
+         Live rabbit → Rabbit whole dressed → Rabbit deboned meat */
+      viaSku:(step&&parent&&step.sku!==parent.sku)?step.sku:'',
+      viaName:(step&&parent&&step.sku!==parent.sku)?step.name:'',
+      viaPct:(step&&parent&&step.sku!==parent.sku)?Math.round(y*1000)/10:0,
+      ohViaG:(step&&parent&&step.sku!==parent.sku)?(+oh[step.sku]||0):0,
       forProducts:agg[sku].forProducts,
       /* the per-product split, scaled if the needed qty was overridden — so an
          edit up or down still says where the extra (or the shortfall) lands */
@@ -7403,13 +7558,14 @@ function prodNeedBody(){
       <td class="num mini" style="color:var(--muted)">${_kgs(r.recipeG)}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:104px;text-align:right;font-weight:700${r.overridden?';border-color:var(--berry);background:#fdf7f9':''}"
           value="${Math.round(r.needG)/1000}"
-          oninput="prodNeedSet('${esc(r.sku)}',this.value)"
+          oninput="prodNeedType('${esc(r.sku)}',this.value)" onchange="prodNeedSet('${esc(r.sku)}',this.value)"
           title="What the kitchen will actually pull. Starts at the recipe figure${r.overridden?' — you have changed it; ↺ Back to the recipe restores it':''}. Type over it to use more or less of this ingredient."/>
         ${r.overridden?`<div class="mini" style="color:var(--berry)">changed from ${_kgs(r.recipeG)}</div>`:''}</td>
       <td class="num mini" style="color:${r.ohProcG>0?(shortProc?'var(--earth,#b5762a)':'#1e6b2e'):'var(--muted)'}">${r.ohProcG>0?_kgs(r.ohProcG):'—'}</td>
       <td class="num mini" style="color:${r.ohRawG>0?(shortRaw?'var(--danger)':'#7a6432'):'var(--muted)'}">${r.rawSku?_kgs(r.ohRawG):'<span title="no raw parent set">—</span>'}
         ${r.rawSku?`<div class="mini" style="opacity:.7">${_kgs(r.rawG)} raw @${r.yieldPct}%</div>`:''}</td>
-      <td class="mini" style="color:var(--muted)">${esc(r.rawName||'')}</td></tr>`;
+      <td class="mini" style="color:var(--muted)">${esc(r.rawName||'')}
+        ${r.viaName?`<div class="mini" style="opacity:.75" title="dressed first, then broken down — the two losses are measured separately">via ${esc(r.viaName)} @${r.viaPct}%${r.ohViaG>0?' · '+_kgs(r.ohViaG)+' on hand':''}</div>`:''}</td></tr>`;
     if(open[r.sku]) (r.split||[]).forEach(s=>{
       h+=`<tr style="background:#fafaf7;font-size:12px">
         <td style="padding-left:26px;color:var(--muted)">→ ${esc(s.name)}${s.packs?` <span class="mini">${s.packs} packs</span>`:''}</td>
@@ -7431,18 +7587,39 @@ function prodNeedFoot(){
     +(shortRaw?` · <b style="color:var(--danger)">${shortRaw} short of raw</b>`:'');
 }
 const _kgs=g=>(Math.round((+g||0)/10)/100).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:3})+' kg';
-function prodNeedSet(sku,v){
+/* TYPING MUST NOT REBUILD THE TABLE UNDER THE CARET.
+   This used to redraw the whole list on every keystroke and then hunt for the
+   input again to put the caret back. It survived the first character and lost
+   the field on the second, so "12.5" arrived as "1" and the rest of the digits
+   went into whichever row had landed in that position — which is why a decimal
+   looked impossible to type. Store on input, redraw on leave: exactly the shape
+   the packs field beside it has always used. */
+function prodNeedType(sku,v){
   window._prodNeed=window._prodNeed||{};
+  const row=(window._prodNeedRows||[]).find(r=>r.sku===sku);
   if(v===''||v==null) delete window._prodNeed[sku];
   else {
-    const g=Math.max(0,(+v||0))*1000;                    // typed in kg, held in grams
-    /* The cell now shows the recipe figure by default, so "typed" is not the
-       same as "changed" — a value that matches the recipe is not an override,
-       and must not be flagged as one. */
-    const row=(window._prodNeedRows||[]).find(r=>r.sku===sku);
+    const g=Math.max(0,(parseFloat(v)||0))*1000;         // typed in kg, held in grams
+    /* The cell shows the recipe figure by default, so "typed" is not the same
+       as "changed" — a value that matches the recipe is not an override, and
+       must not be flagged as one. */
     if(row && Math.abs(g-row.recipeG)<0.5) delete window._prodNeed[sku];
     else window._prodNeed[sku]=g;
   }
+  /* Keep the running totals honest while they type, without touching a single
+     cell they might be standing in. */
+  if(row){
+    const ov=window._prodNeed[sku];
+    row.needG=(ov!=null)?ov:row.recipeG;
+    row.overridden=(ov!=null);
+    row.rawG=row.needG/((row.yieldPct/100)||1);
+    const base=row.recipeG||0;
+    (row.split||[]).forEach(s=>{ s.useG=base>0?(s.g*(row.needG/base)):s.g; });
+  }
+  const f=$('needFoot'); if(f) f.innerHTML=prodNeedFoot();
+}
+function prodNeedSet(sku,v){
+  prodNeedType(sku,v);
   return prodNeedRefresh();
 }
 function prodNeedReset(){ window._prodNeed={}; return prodNeedRefresh(); }
@@ -8073,9 +8250,17 @@ const KSHEET_CSS=`  :root{
   .yield-record table.yr th.num,
   .yield-record table.yr td.num{text-align:right;width:10.5%;font-variant-numeric:tabular-nums;}
   .yield-record{page-break-before:always;}
+  /* A ruled line under a number is not a box. The team asked for cells they
+     can see, so the write-in columns get a real grid — the border is on the
+     CELL, and the box inside it fills it, so a pen has an obvious target. */
+  .yield-record table.yr th.num,
+  .yield-record table.yr td.num{border:1px solid #b9b7ae;}
+  .yield-record table.yr td:first-child{border-left:1px solid #b9b7ae;border-bottom:1px solid #b9b7ae;}
+  .yield-record table.yr th:first-child{border:1px solid #b9b7ae;}
+  .yield-record table.yr{border-collapse:collapse;}
   .yield-record .yr-box{
-    display:inline-block;min-width:74px;height:22px;
-    border-bottom:1.4px solid #9a9a93;border-radius:2px;
+    display:block;width:100%;height:26px;border-radius:2px;
+    background:repeating-linear-gradient(0deg,transparent,transparent 25px,#e6e4dc 25px,#e6e4dc 26px);
   }
   .yield-record .yr-box.pre{color:#9a9a93;font-size:11px;text-align:right;padding-right:2px;}
   .yield-record table.yr th .sub{display:block;font-weight:400;opacity:.72;font-size:9px;letter-spacing:0;}
@@ -8538,10 +8723,7 @@ async function prodKitchenSheet(){
      the run is reading straight down the page, not hunting for figures.
      Two weighings for the freezer draw, because drip loss you estimate is a
      number nobody ever improves; drip loss you weigh is one you can argue with. */
-  const _yrHead=`<tr><th>Ingredient</th><th class="num">Needed qty</th>
-      <th class="num">Frozen processed<span class="sub">used</span></th><th class="num">Thawed processed<span class="sub">used</span></th>
-      <th class="num">Raw<span class="sub">used</span></th><th class="num">Processed<span class="sub">created</span></th>
-      <th class="num">Used in<span class="sub">product</span></th><th class="num">Excess<span class="sub">to stock</span></th></tr>`;
+  const _yrHead=paPrintHead({value:false});
   const _blank=`<td class="num"><span class="yr-box"></span></td>`;
   const yieldRecordHtml=KSHEET_ORDER.map(k=>{
     const entries=[...combined.entries()].filter(([,v])=>v.cat===k).sort((a,b)=>b[1].grams-a[1].grams);
@@ -8581,15 +8763,15 @@ async function prodKitchenSheet(){
     <div class="card combined-section yield-record">
       <h2>Talaan ng Yield ng Sangkap · Ingredient Yield Record</h2>
       <p class="hint">Isulat ang <b>aktwal</b> na timbang habang ginagawa. Apat na hakbang:<br>
-        <b>1 · Frozen processed used → Thawed processed used</b> — timbangin paglabas sa freezer, tunawin, timbangin ulit. Ang pagkakaiba ay tubig na nawala.<br>
-        <b>2 · Raw used → Processed created</b> — hilaw na ginamit, at kung magkano ang nagawa mula rito.<br>
-        <b>3 · Used in product</b> — nakasulat na ang kailangan; palitan lang kung mas marami o mas kaunti ang ginamit.<br>
-        <b>4 · Excess to stock</b> — ang natira (thawed + created, bawas ang ginamit), babalik sa processed stock.</p>
+        <b>1 · Pulled Out (Processed) → Thawed Processed</b> — timbangin paglabas sa freezer, tunawin, timbangin ulit. Ang pagkakaiba ay tubig na nawala.<br>
+        <b>2 · + Raw Pulled Out → Processed Created</b> — hilaw na hinugot at ginamit, at kung magkano ang nagawa mula rito.<br>
+        <b>3 · = Used in Product</b> — nakasulat na ang kailangan; palitan lang kung mas marami o mas kaunti ang ginamit.<br>
+        <b>4 · * Excess to Stock</b> — ang natira, babalik sa processed stock.</p>
       <div id="yieldRecord">${yieldRecordHtml}
         <div class="yr-legend">
-          <span><b>Drip loss</b> = Frozen processed used − Thawed processed used</span>
-          <span><b>Yield</b> = Processed created ÷ Raw used</span>
-          <span><b>Excess to stock</b> = (Thawed + Created) − Used in product</span>
+          <span><b>Drip loss</b> = Pulled Out (Processed) − Thawed Processed</span>
+          <span><b>Yield</b> = Processed Created ÷ Raw Pulled Out</span>
+          <span><b>Excess to Stock</b> = (Thawed + Created) − Used in Product</span>
         </div>
         <div class="card" style="margin-top:20px">
           <h2 style="margin-bottom:14px;">Pangkalahatang Sign-Off (Araw ng Produksyon)</h2>
@@ -8932,25 +9114,42 @@ function _paRecap(x){
    same figure had three names and nobody could carry a habit from one to the
    next. One list now, one order, everywhere.                                  */
 const PA_COLS=[
-  {k:'needed',  a:'Needed',    b:'qty',      f:null},
-  {k:'frozen',  a:'Frozen processed', b:'used',    f:'frozenOutKg'},
-  {k:'thawed',  a:'Thawed processed', b:'used',    f:'procUsedKg'},
-  {k:'raw',     a:'Raw',       b:'used',     f:'actualRawKg'},
-  {k:'created', a:'Processed', b:'created',  f:'actualMadeKg'},
-  {k:'used',    a:'Used in',   b:'product',  f:'usedKg'},
-  {k:'excess',  a:'Excess',    b:'to stock', f:'excessKg'},
-  {k:'value',   a:'Value',     b:'',         f:null},
+  {k:'needed',  op:'',  a:'Needed',    b:'Qty',          f:null},
+  {k:'frozen',  op:'',  a:'Pulled Out',b:'(Processed)',  f:'frozenOutKg'},
+  {k:'thawed',  op:'→', a:'Thawed',    b:'Processed',    f:'procUsedKg'},
+  {k:'raw',     op:'+', a:'Raw',       b:'Pulled Out',   f:'actualRawKg'},
+  {k:'created', op:'→', a:'Processed', b:'Created',      f:'actualMadeKg'},
+  {k:'used',    op:'=', a:'Used in',   b:'Product',      f:'usedKg'},
+  {k:'excess',  op:'*', a:'Excess',    b:'to Stock',     f:'excessKg'},
+  {k:'value',   op:'',  a:'Value',     b:'',             f:null},
 ];
+/* The operator belongs IN the heading. Read left to right the row is a
+   sentence: pulled out → thawed, plus raw pulled out → processed created,
+   = used in product, * whatever is left. Without the symbols the eight
+   columns look like eight unrelated boxes to fill, which is exactly how
+   they were being filled. */
+const PA_OP_TITLE={'→':'becomes','+':'and also','=':'goes into the product','*':'and the remainder is kept'};
+function _paOp(c,style){ return c.op
+  ? `<span title="${esc(PA_OP_TITLE[c.op]||'')}" style="${style||'opacity:.55;font-weight:400;margin-right:3px'}">${esc(c.op)}</span>` : ''; }
 function paHead(opts){ opts=opts||{};
   const cols=PA_COLS.filter(c=>opts.value!==false||c.k!=='value');
   return `<thead><tr><th>Ingredient</th>`+cols.map(c=>
-    `<th class="num">${esc(c.a)}${c.b?`<br><span style="font-weight:400;opacity:.8">${esc(c.b)}</span>`:''}</th>`).join('')+`</tr></thead>`;
+    `<th class="num">${_paOp(c)}${esc(c.a)}${c.b?`<br><span style="font-weight:400;opacity:.8">${esc(c.b)}</span>`:''}</th>`).join('')+`</tr></thead>`;
 }
+/* The same headings for a printed page, where the class names differ. */
+function paPrintHead(opts){ opts=opts||{};
+  const cls=(opts.cls||'num'), sub=(opts.sub||'sub');
+  const cols=PA_COLS.filter(c=>opts.value!==false||c.k!=='value');
+  return `<tr><th>Ingredient</th>`+cols.map(c=>
+    `<th class="${cls}">${_paOp(c,'opacity:.6;font-weight:400;margin-right:2px')}${esc(c.a)}`
+    +(c.b?`<span class="${sub}">${esc(c.b)}</span>`:'')+`</th>`).join('')+`</tr>`;
+}
+const PA_STEPS=`<b>1 · Pulled Out (Processed) → Thawed Processed</b> — weigh what leaves the freezer, thaw it, weigh it again. The difference is drip loss.<br>
+      <b>2 · Raw Pulled Out → Processed Created</b> — what was pulled and trimmed, and what came off it. That ratio is the run's real yield.<br>
+      <b>3 · = Used in Product</b> — starts at the needed qty because that is the plan; change it if the kitchen allocated more or less on the day.<br>
+      <b>4 · * Excess to Stock</b> — the remainder. Whatever the product did not take goes back into processed stock.`;
 const PA_HELP=`Four steps, left to right, all <b>actual weights off the scale</b>:<br>
-      <b>1 · Frozen processed used → Thawed processed used</b> — weigh what leaves the freezer, thaw it, weigh it again. The difference is drip loss, calculated for you.<br>
-      <b>2 · Raw used → Processed created</b> — what was pulled and trimmed, and what came off it. That ratio is the run's real yield.<br>
-      <b>3 · Used in product</b> — starts at the needed qty because that is the plan, but change it if the kitchen allocated more or less on the day.<br>
-      <b>4 · Excess to stock</b> — what is kept back and put into processed stock for the next run.<br>
+      ${PA_STEPS}<br>
       <span style="color:var(--muted)">Steps 3 and 4 are two ends of one number, so type into whichever you actually counted — the other follows.
       Type an <b>excess</b> and any extra <b>processed created</b> goes into the product instead of growing the leftovers.</span>`;
 function _paNum(i,field,w,title){
@@ -9324,6 +9523,38 @@ function _procParent(it,bySku,byName){ if(!it) return null;
   const bySrc=it.source_sku&&bySku[it.source_sku]?bySku[it.source_sku]:null;
   const ri=(it.raw_input||'').trim().toLowerCase(); const byRi=(ri&&byName[ri]&&byName[ri].sku!==it.sku)?byName[ri]:null;
   return bySrc||byRi||null; }
+/* ---- A processing chain can be longer than one hop ------------------------
+   A live rabbit is not butchered into cuts. It is DRESSED first, and only then
+   broken down — and the two lose weight for completely different reasons, at
+   completely different rates. Hanging every cut straight off the live weight
+   folded both losses into one number, so a bad dressing week and a bad
+   butchering week looked identical and neither could be fixed.
+
+   So the parent of a cut may itself be processed. This walks the chain to the
+   root raw material and multiplies the yields on the way, which is what
+   purchasing needs: the cut is bought as a live animal, however many steps
+   away that is. One hop still answers "what do I deduct when I make this",
+   which is the immediate parent and nothing else. */
+function _procChain(it,bySku,byName,max){
+  const out=[]; const seen=new Set(); let cur=it, guard=+max||6;
+  while(cur && guard-- > 0){
+    if(seen.has(cur.sku)) break;                 // a source loop must not hang the page
+    seen.add(cur.sku);
+    const p=_procParent(cur,bySku,byName);
+    if(!p || p.sku===cur.sku) break;
+    out.push({from:cur, to:p, yieldPct:((+cur.yield_pct||100)||100)});
+    if(!isProcessedItem(p)) { cur=p; break; }    // reached the raw material
+    cur=p;
+  }
+  return out;
+}
+/* The root raw material, and the compound yield from it down to this item. */
+function _procRoot(it,bySku,byName){
+  const ch=_procChain(it,bySku,byName);
+  if(!ch.length) return {root:null, chain:[], yield:((+((it||{}).yield_pct)||100)||100)/100};
+  let y=1; ch.forEach(h=>{ y*= (h.yieldPct/100)||1; });
+  return {root:ch[ch.length-1].to, chain:ch, yield:y||1};
+}
 function drawProcessing(){
   const outs=_procIngs.filter(isProcessedItem);
   const bySku={}, byName={}; _procIngs.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
@@ -11264,7 +11495,9 @@ function _stkTableHTML(rows){
       S.items.forEach(r=>{ n++; totO+=r.ordered; totR+=r.received; if(r.link) linked++;
         const sh=stickerSheets(r.ordered,r.per_sheet); const shTxt=r.per_sheet>0?(sh.sheets+' × '+r.per_sheet):'—';
         h+=`<tr><td>${n}</td><td><b>${esc(r.name)}</b>${r.variant&&r.variant!==r.name?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}</td><td>${esc(r.net)||'—'}</td><td><code>${esc(r.sku)}</code></td>`+
-          `<td>${r.link?`<a href="${esc(r.link)}" target="_blank" rel="noopener">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>`+
+          `<td>${(r.link&&safeUrl(r.link)!=='#')?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener">Open artwork ↗</a>`
+            :(r.link?`<span style="color:var(--danger)" title="this is a file NAME, not a link — run PART 11">— not a link</span>`
+                    :'<span style="color:var(--danger)">— pending</span>')}</td>`+
           `<td>${esc(r.dim)||'—'}</td>`+
           `<td class="num">${r.par||'—'}</td><td class="num mini" style="color:var(--muted)">${r.oh||'—'}</td>`+
           `<td class="num">${r.ordered||'—'}</td><td class="num mini">${shTxt}</td><td class="num">${r.received||'—'}</td></tr>`;
@@ -11284,14 +11517,138 @@ function _stkPrintLines(children, prods, ings){
     G.subs.forEach(S=>{
       body+=`<tr class="cat"><td colspan="8">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(r=>{ n++; totO+=r.ordered; totR+=r.received;
+        const _ok=r.link&&safeUrl(r.link)!=='#';
         body+=`<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.net)}</td><td>${esc(r.sku)}</td>`+
-          `<td>${r.link?`<a href="${esc(r.link)}">Open artwork ↗</a>`:'pending'}</td>`+
+          `<td>${_ok?`<a href="${esc(safeUrl(r.link))}">Open artwork ↗</a>`:'pending'}</td>`+
           `<td>${esc(r.dim)}</td><td style="text-align:right">${r.ordered||''}</td><td style="text-align:right">${r.received||''}</td></tr>`;
       });
     });
   });
   const foot=`<tr class="tot"><td colspan="6" style="text-align:right">Totals</td><td style="text-align:right">${totO}</td><td style="text-align:right">${totR}</td></tr>`;
   return `<h3>Sticker Order Lines</h3><table class="lines"><thead><tr><th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th><th style="text-align:right">Qty Ordered</th><th style="text-align:right">Qty Received</th></tr></thead><tbody>${body}${foot}</tbody></table>`;
+}
+
+/* ===== The printer's copy — the master sticker file, exactly =============
+   The team already has a format that works with the print shop: two supplier
+   tabs, numbered rows, variant / net weight / SKU / Drive link / dimension,
+   then two empty columns for Qty Ordered and Qty Received. Rather than invent
+   a house layout, this reproduces theirs — once as a print/PDF page, once as
+   a tab-separated block that pastes straight into Google Sheets with the
+   links live.                                                              */
+function _stkSupplierOf(r){ return String(r.supplier||'').trim() || '(supplier not assigned)'; }
+function _stkMasterGroups(rows){
+  const by={};
+  rows.forEach(r=>{ const s=_stkSupplierOf(r); (by[s]=by[s]||[]).push(r); });
+  return Object.keys(by).sort().map(sup=>({
+    supplier:sup,
+    groups:hierGroups(by[sup],{g1:'group_1',g2:'group_2'})
+  }));
+}
+function _stkRowsForPrint(){
+  const rows=(window._stkPrintRows||[]).slice();
+  return _stkMasterGroups(rows);
+}
+async function stkMasterRows(ref){
+  let lines=[]; try{ lines=(await db.list('po_lines',{})).filter(l=>l.po_ref===ref); }catch(e){}
+  const prods={}; try{ (await db.list('products',{})).forEach(p=>prods[p.sku]=p); }catch(e){}
+  const ings={};  try{ (await db.list('ingredients',{})).forEach(i=>ings[i.sku]=i); }catch(e){}
+  const rows=_stkRowsFrom(lines, prods, ings);
+  rows.forEach(r=>{ const p=prods[r.sku]||{};
+    r.supplier=(p.sticker_supplier||'').trim();
+    r.label=(p.sticker_art_label||'').trim(); });
+  return rows;
+}
+async function stkMasterPrint(){
+  const ref=window._stkPoRef; if(!ref){ toast('No sticker PO selected',true); return; }
+  const rows=await stkMasterRows(ref);
+  if(!rows.length){ toast('That order has no lines',true); return; }
+  window._stkPrintRows=rows;
+  let rec={}; try{ rec=(await db.list('purchase_orders',{})).find(p=>p.po_ref===ref)||{}; }catch(e){}
+  const blocks=_stkRowsForPrint().map(S=>{
+    let n=0, body='';
+    S.groups.forEach(G=>{
+      body+=`<tr class="g1"><td colspan="8">${esc(G.g1)}</td></tr>`;
+      G.subs.forEach(sub=>{
+        body+=`<tr class="g2"><td colspan="4">&nbsp;&nbsp;&nbsp;${esc(sub.g2)}</td><td colspan="4"></td></tr>`;
+        sub.items.forEach(r=>{ n++;
+          const linked=r.link&&safeUrl(r.link)!=='#';
+          body+=`<tr><td class="n">${n}</td><td>${esc(r.name)}${r.variant&&r.variant!==r.name?' — '+esc(r.variant):''}</td>
+            <td>${esc(r.net)||''}</td><td class="sku">${esc(r.sku)}</td>
+            <td>${linked?`<a href="${esc(safeUrl(r.link))}">${esc(r.label||'Open artwork')}</a>`
+                        :`<span class="pend">artwork pending</span>`}</td>
+            <td>${esc(r.dim)||''}</td><td class="fill">${r.ordered||''}</td><td class="fill"></td></tr>`;
+        });
+      });
+    });
+    return `<h2>${esc(S.supplier)}</h2>
+      <table><colgroup><col style="width:4%"><col style="width:26%"><col style="width:11%"><col style="width:15%">
+        <col style="width:20%"><col style="width:9%"><col style="width:7.5%"><col style="width:7.5%"></colgroup>
+      <thead><tr><th>#</th><th>Variant / Mix</th><th>Net Weight / Volume</th><th>Variant SKU</th>
+        <th>Google File Link</th><th>Dimension (Inches)</th><th>Qty Ordered</th><th>Qty Received</th></tr></thead>
+      <tbody>${body}</tbody></table>`;
+  }).join('');
+  const w=window.open('','_blank'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+    <title>WR Sticker Label Order — ${esc(ref)}</title>
+    <style>
+      @page{size:A4 landscape;margin:11mm}
+      body{font:11px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#1a1a1a}
+      h1{font-size:17px;margin:0 0 2px} h2{font-size:12px;margin:16px 0 5px;padding:5px 7px;background:#1a1a1a;color:#fff;border-radius:3px}
+      .sub{color:#666;font-size:10px;margin-bottom:6px}
+      table{width:100%;border-collapse:collapse;table-layout:fixed;margin-bottom:8px}
+      th{background:#f5f4f0;text-align:left;padding:5px 6px;font-size:9.5px;text-transform:uppercase;
+         letter-spacing:.05em;color:#555;border:1px solid #b9b7ae}
+      td{padding:4px 6px;border:1px solid #d8d6cd;overflow-wrap:anywhere;vertical-align:top}
+      td.n{text-align:right;color:#888} td.sku{font-family:ui-monospace,Menlo,monospace;font-size:10px}
+      /* the two columns the print shop writes in get a real box, like the file */
+      td.fill{background:#fcfcfa;border:1px solid #8f8d85;height:20px;text-align:right}
+      tr.g1 td{background:#e7ece3;font-weight:800;font-size:11px;border:1px solid #b9b7ae}
+      tr.g2 td{background:#f4f6f2;font-weight:700;font-size:10.5px}
+      .pend{color:#b23b2e;font-weight:700}
+      a{color:#185fa5} thead{display:table-header-group} tr{break-inside:avoid}
+      .foot{margin-top:14px;font-size:10px;color:#666}
+    </style></head><body>
+    <h1>WHOLESOME RABBIT — Sticker Label Order</h1>
+    <div class="sub">${esc(ref)} · ${esc(rec.order_date||todayISO())} · status ${esc(rec.status||'draft')} · printed ${esc(todayISO())}
+      &nbsp;·&nbsp; Quantities are in PIECES. Fill Qty Received on delivery.</div>
+    ${blocks}
+    <div class="foot">Ordered by ____________________  ·  Received by ____________________  ·  Date ______________</div>
+    </body></html>`);
+  w.document.close(); w.focus(); setTimeout(()=>{ try{ w.print(); }catch(e){} },300);
+}
+/* Tab-separated, because that is what pastes into Google Sheets with columns
+   intact — and the link column is a real =HYPERLINK() so the print shop can
+   click it from the shared sheet. */
+async function stkMasterSheet(){
+  const ref=window._stkPoRef; if(!ref){ toast('No sticker PO selected',true); return; }
+  const rows=await stkMasterRows(ref);
+  if(!rows.length){ toast('That order has no lines',true); return; }
+  window._stkPrintRows=rows;
+  const out=[['WHOLESOME RABBIT — Sticker Label Order', ref, todayISO()], []];
+  _stkRowsForPrint().forEach(S=>{
+    out.push([S.supplier]);
+    out.push(['#','Variant / Mix','Net Weight / Volume','Variant SKU','Google File Link','Dimension (Inches)','Qty Ordered','Qty Received']);
+    let n=0;
+    S.groups.forEach(G=>{
+      out.push(['  '+G.g1]);
+      G.subs.forEach(sub=>{
+        out.push(['     '+sub.g2]);
+        sub.items.forEach(r=>{ n++;
+          const linked=r.link&&safeUrl(r.link)!=='#';
+          out.push([n, r.name+(r.variant&&r.variant!==r.name?(' — '+r.variant):''), r.net||'', r.sku,
+            linked?('=HYPERLINK("'+safeUrl(r.link)+'","'+String(r.label||r.name).replace(/"/g,"'")+'")'):'artwork pending',
+            r.dim||'', r.ordered||'', '']);
+        });
+      });
+    });
+    out.push([]);
+  });
+  const tsv=out.map(r=>r.map(c=>String(c==null?'':c).replace(/\t/g,' ').replace(/\r?\n/g,' ')).join('\t')).join('\n');
+  dlBlob(tsv,'WR_Sticker_Order_'+String(ref).replace(/[^\w.-]+/g,'_')+'.tsv','text/tab-separated-values');
+  /* Put it on the clipboard too — for most people the fastest route into a
+     shared sheet is Ctrl+V, not a download and an import dialog. */
+  try{ await navigator.clipboard.writeText(tsv); toast('Downloaded — and copied, so you can paste straight into Google Sheets'); }
+  catch(e){ toast('Downloaded · File → Import in Google Sheets, or open it and copy'); }
 }
 
 /* ===== Sticker PO — lives in-app, laid out like the master sticker order file ===== */
@@ -11303,8 +11660,9 @@ async function renderStickerPO(){
   const sel=pos.map(p=>`<option value="${esc(p.po_ref)}" ${p.po_ref===ref?'selected':''}>${esc(p.po_ref)} · ${esc(p.status||'')}</option>`).join('');
   $('cp').innerHTML=`<div class="title">Sticker PO</div>
     ${pos.length>0?`<select onchange="window._stkPoRef=this.value; renderStickerPO()">${sel}</select><div class="sp"></div>`:''}
-    ${pos.length?`<button class="btn sec" onclick="window.print()">🖨 Print</button>`:''}
-    <div class="sp"></div><span style="color:var(--muted)">SKU · name · Drive artwork link · qty — grouped by family</span>`;
+    ${pos.length?`<button class="btn sec" onclick="stkMasterPrint()">🖨 Printer's copy (PDF)</button>
+      <button class="btn sec" onclick="stkMasterSheet()">📋 For Google Sheets</button>`:''}
+    <div class="sp"></div><span style="color:var(--muted)">the master sticker file's own layout — one block per supplier</span>`;
   if(!pos.length){ $('content').innerHTML='<div class="repcard"><div class="empty">No sticker PO yet. Load a sticker PO (its reference contains <code>[STICKERS]</code>) and it will appear here.</div></div>'; return; }
   const rec=pos.find(p=>p.po_ref===ref)||pos[0];
   let lines=[]; try{ lines=(await db.list('po_lines',{})).filter(l=>l.po_ref===ref); }catch(e){}
@@ -11398,10 +11756,120 @@ async function mrpSheetSync(){ const a=AUTOS.sheets_demand;
 }
 
 /* ============ Internal Transfer — load Bulacan finished stock ============ */
+/* ============ Transfer picker — four doors, one screen ====================
+   Transfers used to load "all finished stock at Bulacan" and nothing else, so
+   moving a sack of chia or a roll of labels to Pasig was either done off the
+   books or typed as a product that does not exist. The picker below is the
+   production plan's: search, group, sort, tick, type a quantity. Same habits,
+   four different masters.
+   Products and stickers move in WHOLE units. Ingredients and supplies move in
+   kg, because that is how they are counted everywhere else in this app.       */
+let _trPickKind='product', _trPickRows=[], _trQty={}, _trSearch='', _trGroup='cat', _trSort='name';
+const TR_KINDS={
+  ingredient:{l:'Ingredients', unit:'kg',    icon:'🥩', ledger:'ingredient'},
+  supply    :{l:'Supplies',    unit:'kg',    icon:'🧴', ledger:'ingredient'},
+  sticker   :{l:'Stickers',    unit:'pcs',   icon:'🏷', ledger:'ingredient'},
+  product   :{l:'Products',    unit:'packs', icon:'📦', ledger:'product'},
+};
+function _trIsSticker(i){ return /sticker|label/i.test(String(i.category||'')); }
+async function _trOnHand(kind, loc){
+  const oh={}, want=(TR_KINDS[kind]||{}).ledger||'product';
+  if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(b=>{
+      if(String(b.kind||'')===want && String(b.location_code||'')===loc) oh[b.ref_sku]=(oh[b.ref_sku]||0)+(+b.on_hand||0); }); }catch(e){} }
+  else (DEMO.inventory_movements||[]).forEach(m=>{
+      if(String(m.kind||'')===want && String(m.location_code||'')===loc) oh[m.ref_sku]=(oh[m.ref_sku]||0)+(+m.qty||0); });
+  return oh;
+}
+async function trPick(kind){
+  if(formIsNew){ toast('Save the transfer first',true); return; }
+  _trPickKind=kind; _trQty={}; _trSearch=''; _trGroup='cat'; _trSort='name';
+  const from=formRec.from_code||'bulacan';
+  const oh=await _trOnHand(kind, from);
+  let rows=[];
+  if(kind==='product'){
+    let ps=[]; try{ ps=await db.list('products',{}); }catch(e){}
+    rows=ps.map(p=>({sku:p.sku,name:p.name||p.sku,cat:p.family||p.group_1||'Products',oh:+oh[p.sku]||0,div:1}));
+  } else {
+    let ings=[]; try{ ings=await listIngredients(); }catch(e){}
+    rows=ings.filter(i=>{ const st=_trIsSticker(i), sup=isSupplyItem(i);
+        if(kind==='sticker') return st;
+        if(kind==='supply')  return sup && !st;
+        return !sup && !st; })
+      .map(i=>({sku:i.sku,name:i.name||i.sku,cat:i.category||'—',oh:+oh[i.sku]||0,
+                div:(kind==='sticker')?1:1000}));   // stickers are counted in pieces, food in grams
+  }
+  _trPickRows=rows;
+  drawTrPick();
+  $('overlay').classList.add('on');
+}
+function trPickSet(sku,v){ if(v===''||v==null) delete _trQty[sku]; else _trQty[sku]=Math.max(0,parseFloat(v)||0); _trPickFoot(); }
+function _trPickFoot(){ const el=$('trPickFoot'); if(!el) return;
+  const n=Object.keys(_trQty).filter(k=>_trQty[k]>0).length;
+  el.innerHTML=n?`<b>${n}</b> line(s) ready to add`:'Type a quantity against anything you are moving.'; }
+function trPickRows(){
+  const q=String(_trSearch||'').trim().toLowerCase();
+  let rows=_trPickRows.filter(r=>!q || (r.name+' '+r.sku+' '+r.cat).toLowerCase().includes(q));
+  const S={name:(a,b)=>String(a.name).localeCompare(String(b.name)),
+           stock:(a,b)=>b.oh-a.oh,
+           sku:(a,b)=>String(a.sku).localeCompare(String(b.sku))};
+  rows.sort(S[_trSort]||S.name);
+  return rows;
+}
+function drawTrPick(){
+  const K=TR_KINDS[_trPickKind]||TR_KINDS.product;
+  const rows=trPickRows();
+  const groups={};
+  rows.forEach(r=>{ const g=(_trGroup==='cat')?(r.cat||'—'):(_trGroup==='stock'?((r.oh>0)?'In stock':'Nothing on hand'):'All'); (groups[g]=groups[g]||[]).push(r); });
+  const body=Object.keys(groups).sort().map(g=>
+    `<tr class="grp"><td colspan="4" style="background:#f2f2ec;font-weight:800;padding:4px 8px">${esc(g)} <span class="mini" style="font-weight:400;color:var(--muted)">${groups[g].length}</span></td></tr>`
+    +groups[g].map(r=>`<tr><td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code></div></td>
+      <td class="num mini" style="color:${r.oh>0?'#1e6b2e':'var(--muted)'}">${r.oh?((Math.round((r.oh/r.div)*1000)/1000)+' '+K.unit):'—'}</td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" value="${_trQty[r.sku]!=null?_trQty[r.sku]:''}"
+        oninput="trPickSet('${esc(r.sku)}',this.value)" placeholder="0"
+        style="width:92px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+      <td class="mini" style="color:var(--muted)">${esc(K.unit)}</td></tr>`).join('')).join('');
+  $('modal').innerHTML=`<div><h3>${K.icon} Add ${esc(K.l.toLowerCase())} to this transfer</h3>
+    <p class="mini">Moving from <b>${esc(formRec.from_code||'bulacan')}</b> to <b>${esc(formRec.to_code||'pasig')}</b>.
+      Stock shown is what is at the FROM site right now. ${_trPickKind==='product'||_trPickKind==='sticker'?'Whole units.':'Type kilos — decimals are fine.'}</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+      <input id="trSearch" value="${esc(_trSearch)}" placeholder="Search name, code or category…" oninput="_trSearch=this.value;drawTrPick();_trFocusSearch()"
+        style="flex:1;min-width:200px;padding:6px 9px;border:1px solid var(--line);border-radius:6px">
+      <label class="mini">Group <select onchange="_trGroup=this.value;drawTrPick()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+        <option value="cat" ${_trGroup==='cat'?'selected':''}>Category</option>
+        <option value="stock" ${_trGroup==='stock'?'selected':''}>Has stock</option>
+        <option value="none" ${_trGroup==='none'?'selected':''}>No grouping</option></select></label>
+      <label class="mini">Sort <select onchange="_trSort=this.value;drawTrPick()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+        <option value="name" ${_trSort==='name'?'selected':''}>Name</option>
+        <option value="stock" ${_trSort==='stock'?'selected':''}>Most stock</option>
+        <option value="sku" ${_trSort==='sku'?'selected':''}>Code</option></select></label>
+    </div>
+    <div class="mscroll" style="max-height:380px;overflow:auto"><table class="stickyhead"><thead><tr>
+      <th>Item</th><th class="num">At ${esc(formRec.from_code||'bulacan')}</th><th class="num">Move</th><th></th></tr></thead>
+      <tbody>${body||'<tr><td colspan="4" class="empty">Nothing matches that search.</td></tr>'}</tbody></table></div>
+    <div class="mini" id="trPickFoot" style="margin-top:8px;color:var(--muted)"></div>
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" onclick="trPickApply()">＋ Add to transfer</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  _trPickFoot();
+}
+function _trFocusSearch(){ const el=$('trSearch'); if(el && document.activeElement!==el){ el.focus(); try{ el.setSelectionRange(el.value.length,el.value.length); }catch(e){} } }
+function trPickApply(){
+  const K=TR_KINDS[_trPickKind]||TR_KINDS.product;
+  const picked=Object.keys(_trQty).filter(k=>_trQty[k]>0);
+  if(!picked.length){ toast('Nothing typed yet',true); return; }
+  formChildren=formChildren||[];
+  let added=0, merged=0;
+  picked.forEach(sku=>{
+    const ex=formChildren.find(l=>String(l.product_sku)===String(sku) && (l.kind||'product')===K.ledger);
+    if(ex){ ex.sent_packs=(+ex.sent_packs||0)+_trQty[sku]; merged++; }
+    else { formChildren.push({kind:K.ledger, product_sku:sku, sent_packs:_trQty[sku], received_packs:0}); added++; }
+  });
+  renderLines(); closeModal();
+  toast(added+' line(s) added'+(merged?(' · '+merged+' merged into an existing line'):''));
+}
 async function loadBulacanStock(){
   const prods=await db.list('products',{});
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.location_code===planProduceLoc()&&s.kind==='product') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} }
-  const rows = prods.filter(p=> isLive()? (stock[p.sku]>0) : true ).map(p=>({product_sku:p.sku, sent_packs: isLive()?(stock[p.sku]||0):'', received_packs: 0 }));
+  const rows = prods.filter(p=> isLive()? (stock[p.sku]>0) : true ).map(p=>({kind:'product', product_sku:p.sku, sent_packs: isLive()?(stock[p.sku]||0):'', received_packs: 0 }));
   if(!rows.length){ toast('No finished stock at Bulacan yet',true); return; }
   formChildren=rows; renderLines(); toast('Loaded '+rows.length+' product(s) manufactured at Bulacan');
 }
@@ -11567,7 +12035,8 @@ const KB = {
   shopify:{d:'Whether the one-way Shopify feed is working — sales in, nothing pushed back.',
     h:['Sales, refunds and returns arrive here and become stock movements at Pasig',
        'Held means the order is older than the sync start and the opening count already has it',
-       'Anything that did not post is listed with the reason — usually a SKU that is not in Products',
+       'Not stocked means ice, packaging or a made-to-order mix — a real sale that must not move a food balance',
+       'Needs a decision is the only alarm: a Shopify code nobody has ruled on yet',
        'The right-hand panel is what a future push WOULD publish; nothing writes to Shopify today'],
     l:['ONE WAY ON PURPOSE. Phase 1 reads Shopify and writes stock. Phase 2 — publishing on-hand back as the sellable quantity — is a separate decision, so the Apps Script has no push function in it at all rather than a flag someone can flip.',
        'THE SYNC START DATE IS THE WHOLE BALL GAME. Every order shipped before the Pasig opening was counted is already inside that count. Posting it again would deduct the same packs twice and walk stock to nothing, so the database HOLDS anything older and says so. Held is the guard working, not a failure.',
@@ -11575,6 +12044,8 @@ const KB = {
        'The Apps Script never writes a stock movement. It writes a raw event; a database trigger turns each into exactly one movement. That way there is one place where a sale becomes stock, and it can be read.',
        'A REFUND ONLY RETURNS STOCK IF SHOPIFY SAYS IT WAS RESTOCKED. Money refunded without the food coming back is not inventory — adding it would invent food that is in a customer\'s bin.',
        'AN UNMATCHED SKU IS NEVER LOST. The event is kept and flagged. Add the product or map the code in shopify_sku_map, then run wr_shopify_repost() and it posts.',
+       'NOT EVERY SALE IS A STOCK MOVEMENT. Ice, styrofoam and custom mixes sell through Shopify but were never finished-goods stock — every custom product in this database has zero movements against it, because it is built from a recipe on the day. Deducting one would drive Pasig negative for a pack that never existed, so those codes are acknowledged rather than posted.',
+       'The three buckets exist so the alarm stays meaningful. If made-to-order mixes sat in the same red number as a genuine missing product, nobody would look at the red number.',
        'PASIG ONLY. Bulacan is production stock and is not sellable until transferred; publishing it would let a customer buy what is not at the selling site.',
        'A negative Pasig balance would be published as ZERO, never as a negative. A negative balance is a counting problem to fix, not a number to broadcast.']},
   home:{d:'Your landing page — KPI tiles and quick links into every module.',h:['Glance at counts (ingredients, products, suppliers, open POs)','Click a card to jump into that module','Use the search box or ⌘K to find anything'],l:['KPIs are live counts from the database','Nothing is entered here — it summarizes other modules']},
@@ -11583,7 +12054,14 @@ const KB = {
   suppliers:{d:'Your vendors with contacts, payment terms and how they sell (loose / case / head).',h:['Add or edit a vendor','Record payment term + delivery notes','Link vendors to ingredients via the ingredient record'],l:['Conservative costing uses the most-expensive supplier price','Backup suppliers are shown for sourcing decisions']},
   purchase_orders:{d:'Orders to vendors — request a quote, issue the PO, receive the goods.',h:['New → pick vendor → add ingredient lines → Save','Send RFQ → Enter quotation (vendor avail + price) → Issue PO','Receive order (posts to stock) — a delivery that does not close the order leaves it Partially received','Log notes & schedule activities in the chatter'],l:['Status flow: open → RFQ → quoted → ordered → partially received → fully received','Cancelled and fully received orders are hidden from the list by default — use “Showing every status” to see them','Send RFQ asks the vendor what they can supply; Enter quotation records their available qty + unit price','Issue PO sets the order qty from vendor availability (capped at what you requested) and sends the final PO','The billable amount = received qty × unit price − discount + delivery fee','Every status change is auto-logged with who + when']},
   production_batches:{d:'Records a production run: which product, ingredients issued, packs out, rejects and waste.',h:['New → pick product → enter ingredients issued + packs produced','Set the output lot & date','Save to post to finished stock'],l:['Check 2 (usage) = actual issued vs recipe expected','Check 3 (yield/mass-balance) = usable produced vs packed + waste','Cost/pack = ingredient cost + labour + packaging ÷ good packs']},
-  transfers:{d:'Move finished packs from Bulacan to Pasig. Sent vs received is Check 4.',h:['New → click "Load Bulacan finished stock" to pull available products','Enter sent and received packs','Save — any shortfall is flagged'],l:['sent − received = loss in transit → a Check 4 variance','Posts a transfer_out at Bulacan and transfer_in at Pasig']},
+  transfers:{d:'Move anything between Bulacan and Pasig — finished packs, ingredients, supplies or labels. Sent vs received is Check 4.',
+    h:['Four buttons: 🥩 Ingredients · 📦 Products · 🧴 Supplies · 🏷 Stickers — each opens the same search / group / sort picker',
+       'Stock shown in the picker is what is at the FROM site right now',
+       'Enter sent packs, then 📥 Receive transfer at the other end — any shortfall is flagged'],
+    l:['ONE TRANSFER CAN CARRY FOUR KINDS OF THING. It used to carry only finished products, so meat, packaging and labels moved between sites off the books and both stock figures drifted.',
+       'Products and stickers move in WHOLE units; ingredients and supplies move in KILOS, because that is how they are counted everywhere else. The line records which ledger it belongs to so the movement posts against the right one.',
+       'sent − received = loss in transit → a Check 4 variance',
+       'Posts a transfer_out at the FROM site and a transfer_in at the TO site — never a single figure moved by hand']},
   count_sessions:{d:'Weekly physical inventory with approval. Counted qty becomes the new book stock after approval.',h:['New → choose scope (All / Ingredients / Supplies / Stickers / Products)','Click "Load items" — book qty auto-fills (read-only)','Enter counted qty → Save draft → Approve & post'],l:['Book qty is computed from the ledger — you cannot edit it','On approval, counted−book posts as a count_adjust + a Check 3.5 shrinkage variance','Only approved counts change stock']},
   inventory_movements:{d:'The perpetual ledger — every stock in/out as one immutable row.',h:['Read-only — review receipts, issues, transfers, sales, adjustments','Filter/group to trace a specific item'],l:['On-hand & value are summed from here (never stored directly)','Signed qty: + in, − out; each row references the document that made it']},
   stock_balance:{d:'Live on-hand and value per item/location, computed from the ledger.',h:['Read-only — see current stock at Bulacan & Pasig','Group by location or item'],l:['A database VIEW: SUM(qty) and SUM(qty×unit_cost) from movements','Updates the instant any document posts']},

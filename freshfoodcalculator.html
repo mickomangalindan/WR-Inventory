@@ -10446,7 +10446,33 @@ function deleteCurrentEcProfile(){
       return _rk.apply(this,arguments);
     };
   }
+  /* A MULTI-DOG BATCH IS NOT ONE PACK.
+     The bridge below used to read renderKitchen, which only ever runs for the
+     single-dog screen — so pressing Send on a seven-dog batch either sent the
+     last single pack computed or nothing at all. A multi-dog batch is seven
+     different recipes at seven different pack sizes that happen to be cooked
+     together, and that is exactly how it has to arrive in the ERP: one order,
+     one line per dog. */
+  window.__wrGetMulti=function(){
+    if(typeof mdHasResults==='undefined' || !mdHasResults) return null;
+    if(typeof mdComputedRows==='undefined' || !mdComputedRows || !mdComputedRows.length) return null;
+    var dogs=(typeof mdDogs!=='undefined'?mdDogs:[]).filter(function(d){ return d && String(d.name||'').trim() && +d.weight>0; });
+    if(!dogs.length) return null;
+    var ref=(typeof mdComputedFood!=='undefined'?+mdComputedFood:0)||0;
+    var cust=((document.getElementById('md-cust-name')||{}).value||'').trim();
+    var ft=(typeof mdFeedingType!=='undefined')?mdFeedingType:'';
+    var out=dogs.map(function(d){
+      var scale=ref>0?(mdFoodPerPack(d)/ref):1;
+      var items=mdComputedRows.map(function(r){
+        return {name:String(r.item||'').trim(), grams:Math.round((+r.grams||0)*scale*10)/10, cat:r.cat};
+      }).filter(function(x){ return x.grams>0; });
+      return { dog:String(d.name||'').trim(), packSize:Math.round(mdPackSize(d)*10)/10, packs:+d.packs||0, items:items };
+    }).filter(function(x){ return x.packs>0 && x.items.length; });
+    if(!out.length) return null;
+    return { multi:true, customer:cust, feedingType:ft, dogs:out };
+  };
   window.__wrGetOrder=function(){
+    var m=window.__wrGetMulti(); if(m) return m;
     try{ if(typeof updateKitchen==='function') updateKitchen(); }catch(e){}
     if(!cap) return null;
     var g=function(id){ var el=document.getElementById(id); return el?(el.value!=null?el.value:el.textContent):''; };
@@ -10459,10 +10485,11 @@ function deleteCurrentEcProfile(){
   function flash(msg,ok){ var b=document.getElementById('__wrSendBtn'); if(!b)return; b.textContent=msg; b.style.background=ok?'#2f7d33':'#c0392b'; setTimeout(function(){ b.textContent='📤 Send order to ERP'; b.style.background='#4e7a3e'; },2200); }
   function send(){
     var o=window.__wrGetOrder();
-    if(!o||!o.items.length){ flash('⚠ Compute a pack first',false); return; }
+    var empty=!o || (o.multi ? !(o.dogs||[]).length : !((o.items||[]).length));
+    if(empty){ flash('⚠ Compute a pack first',false); return; }
     if(window.parent===window){ flash('⚠ Open inside the ERP',false); return; }
     parent.postMessage({source:'wr-ffcalc', type:'create-order', payload:o}, '*');
-    flash('✓ Sent — see ERP',true);
+    flash(o.multi?('✓ Sent '+o.dogs.length+' dogs — see ERP'):'✓ Sent — see ERP',true);
   }
   window.__wrSend=send;
   function addBtn(){
