@@ -3675,10 +3675,21 @@ function puBody(){
    it worked. Two questions it has to answer without anyone opening Supabase:
    did every sale land, and does what Shopify is about to be told match what is
    actually at Pasig.                                                        */
-let _shDays=14, _shRows=[], _shStock=[], _shErr=[];
+let _shDays=14, _shRows=[], _shStock=[], _shErr=[], _shHeld=[], _shFrom=null;
 async function shLoad(){
   const from=new Date(Date.now()-_shDays*864e5).toISOString().slice(0,10);
-  _shRows=[]; _shStock=[]; _shErr=[];
+  _shRows=[]; _shStock=[]; _shErr=[]; _shHeld=[]; _shFrom=null;
+  /* The sync start date is the one setting that decides whether the first pull
+     helps or halves the stock: every order before it is already inside the
+     Pasig opening count. Read it so the screen can say it out loud rather than
+     leaving it buried in a settings row nobody opens. */
+  try{
+    let s=null;
+    if(isLive()){ const r=await sb('app_settings?select=value&key=eq.shopify_sync'); s=r&&r[0]&&r[0].value; }
+    else s=(DEMO.app_settings||[]).filter(r=>r.key==='shopify_sync').map(r=>r.value)[0];
+    if(typeof s==='string'){ try{ s=JSON.parse(s); }catch(e){} }
+    if(s&&s.from) _shFrom=s.from;
+  }catch(e){}
   try{
     if(isLive()) _shRows=await sb('shopify_events?select=*&occurred_at=gte.'+from+'&order=occurred_at.desc&limit=2000');
     /* No table at all is a different thing from an empty table: one means the
@@ -3686,7 +3697,11 @@ async function shLoad(){
     else if(!DEMO.shopify_events) _shRows=null;
     else _shRows=DEMO.shopify_events.filter(r=>String(r.occurred_at||'').slice(0,10)>=from);
   }catch(e){ _shRows=null; }
-  _shErr=(_shRows||[]).filter(r=>r.post_error);
+  /* Held and broken are not the same thing and must never share a number.
+     HELD is the design working — an order the opening count already covers.
+     A real problem is a SKU the ERP cannot find, and that one needs a person. */
+  _shHeld=(_shRows||[]).filter(r=>!r.posted && /^held/i.test(String(r.post_error||'')));
+  _shErr =(_shRows||[]).filter(r=>!r.posted && r.post_error && !/^held/i.test(String(r.post_error)));
   try{
     if(isLive()) _shStock=await sb('wr_shopify_stock?select=*&order=available_pasig.desc');
     else {
@@ -3702,16 +3717,18 @@ async function renderShopify(){
       ${[7,14,30,90].map(n=>`<option value="${n}" ${_shDays===n?'selected':''}>${n} days</option>`).join('')}</select></label>
     <button class="btn sec sm" onclick="renderShopify()">↻ Refresh</button>
     <button class="btn sec sm" onclick="shCsv()">⬇ CSV</button>
-    <div class="sp"></div><span style="color:var(--muted)">sales in · Pasig stock out</span>`;
+    <div class="sp"></div><span style="color:var(--muted)">one way — sales in, nothing pushed back</span>`;
   $('content').innerHTML='<div class="repcard"><div class="empty">Reading the sync…</div></div>';
   await shLoad();
   if(_shRows===null){
     $('content').innerHTML=`<div class="repcard"><div class="repbar"><span>Not set up yet</span></div>
       <div class="hint" style="margin:10px 0">The <code>shopify_events</code> table is not there, so nothing has been synced.<br><br>
-      <b>1.</b> Run <b>${esc(WR_SQL_FILE)}</b> in Supabase — PART 10 creates the table, the trigger and the stock view.<br>
-      <b>2.</b> Open the Apps Script <code>wr-shopify-sync.gs</code>, fill in the Script Properties, and run <b>runSelfTest()</b>.<br>
-      <b>3.</b> With <code>DRY_RUN = true</code>, run <b>pullShopify()</b> and <b>pushShopify()</b> and read the log.<br>
-      <b>4.</b> Only then set <code>DRY_RUN = false</code> and <b>installTriggers()</b>.</div></div>`;
+      <b>1.</b> Run <b>${esc(WR_SQL_FILE)}</b> in Supabase — PART 10 creates the table, the trigger, the SKU map and the sync start date.<br>
+      <b>2.</b> Open the Apps Script <code>wr-shopify-pull.gs</code>, fill in the Script Properties, and run <b>runSelfTest()</b>.<br>
+      <b>3.</b> Run <b>checkSkus()</b> — it writes nothing and tells you which Shopify SKUs the ERP cannot match.<br>
+      <b>4.</b> With <code>DRY_RUN = true</code>, run <b>pullShopify()</b> and read the log.<br>
+      <b>5.</b> Only then set <code>DRY_RUN = false</code>, pull once by hand, come back here, and finally <b>installTriggers()</b>.<br><br>
+      Nothing in that script can write to Shopify. Pushing stock back is phase 2 and is a separate decision.</div></div>`;
     return;
   }
   const by=t=>_shRows.filter(r=>r.event_type===t);
@@ -3724,16 +3741,19 @@ async function renderShopify(){
     <div class="mini" style="color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-size:10px">${l}</div>
     <div style="font-size:19px;font-weight:800;line-height:1.25${c?';color:'+c:''}">${v}</div>
     <div class="mini" style="color:var(--muted)">${s}</div></div>`;
-  const negs=(_shStock||[]).length?[]:[];
   let h=`<div class="repcard" style="padding:12px 14px">
     <div style="display:flex;gap:9px;flex-wrap:wrap">
       ${kpi('Sold', sum(sales)+' packs', sales.length+' line(s) in '+_shDays+' days')}
       ${kpi('Came back', sum(back)+' packs', back.length+' refund/return line(s)', back.length?'var(--earth,#b5762a)':'')}
       ${kpi('Sales value', fmt(val), 'at the Shopify price')}
+      ${kpi('Held', _shHeld.length, _shHeld.length?'already in the opening count':'none', '')}
       ${kpi('Did not post', _shErr.length, _shErr.length?'needs a look':'all clean', _shErr.length?'var(--danger)':'#4e7a3e')}
       ${kpi('Last event', last, stale?'nothing for over 36 h':'sync looks alive', stale?'var(--danger)':'')}
     </div>
-    <div class="hint" style="margin:10px 0 0">Every event carries Shopify's own order and line id, and the database refuses a second copy of the same one —
+    <div class="hint" style="margin:10px 0 0">
+      <b>Counting from ${_shFrom?esc(String(_shFrom).slice(0,16).replace('T',' ')):'the Pasig opening count'}.</b>
+      Anything the shop sold before that is already inside the opening count, so it is held rather than deducted a second time.
+      Every event also carries Shopify's own order and line id, and the database refuses a second copy of the same one —
       so a retry or a replayed webhook cannot deduct the same sale twice. A refund only returns stock when Shopify says the goods were
       <b>restocked</b>; money refunded without the food coming back is not inventory.</div>
   </div>`;
@@ -3746,7 +3766,18 @@ async function renderShopify(){
         <td>${esc(r.event_type)}</td><td class="mini">${esc(r.order_name||r.shop_order_id)}</td>
         <td><code>${esc(r.variant_sku)}</code></td><td class="num">${r.qty}</td>
         <td class="mini" style="color:var(--danger)">${esc(r.post_error)}</td></tr>`).join('')}
-      </tbody></table></div></div>`;
+      </tbody></table></div>
+      <div class="hint" style="margin-top:8px">Add the missing product, or map its code:
+        <code>insert into public.shopify_sku_map(shop_sku, product_sku) values ('SHOPIFY-CODE','ERP-CODE');</code>
+        then <code>select * from public.wr_shopify_repost();</code> — nothing is lost while it waits.</div></div>`;
+  }
+  if(_shHeld.length){
+    h+=`<div class="repcard" style="margin-top:12px;border-left:4px solid var(--earth,#b5762a)">
+      <div class="repbar"><span>${_shHeld.length} event(s) held</span>
+        <span class="mini" style="color:var(--muted)">dated before the sync start — this is the guard working, not a fault</span></div>
+      <div class="hint">These orders shipped before the Pasig opening was counted, so the count already reflects them.
+        Posting them would deduct the same packs twice. If you decide otherwise, move the start date and run
+        <code>select * from public.wr_shopify_repost();</code>.</div></div>`;
   }
   const topStock=(_shStock||[]).filter(r=>+r.available_pasig>0).slice(0,12);
   h+=`<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
@@ -3754,32 +3785,35 @@ async function renderShopify(){
       <div class="repbar"><span>Recent events</span><span class="mini" style="color:var(--muted)">newest first</span></div>
       <div style="overflow-x:auto;max-height:460px" class="stickyhead"><table><thead><tr>
         <th>When</th><th>Type</th><th>Order</th><th>Item</th><th class="num">Qty</th></tr></thead><tbody>
-        ${_shRows.slice(0,60).map(r=>{ const back=r.event_type!=='sale';
-          return `<tr><td class="mini">${esc(String(r.occurred_at||'').slice(0,16).replace('T',' '))}</td>
+        ${_shRows.slice(0,60).map(r=>{ const back=r.event_type!=='sale', held=!r.posted&&/^held/i.test(String(r.post_error||''));
+          return `<tr${held?' style="opacity:.55"':''}><td class="mini">${esc(String(r.occurred_at||'').slice(0,16).replace('T',' '))}</td>
           <td><span style="background:${back?'#fff3d6':'#e2f0e4'};color:${back?'#7a5a10':'#2d5c22'};border-radius:20px;padding:1px 8px;font-size:11px;font-weight:700">${esc(r.event_type)}</span></td>
           <td class="mini">${esc(r.order_name||r.shop_order_id)}</td>
-          <td>${esc(r.note||r.variant_sku)}<div class="mini" style="color:var(--muted)"><code>${esc(r.variant_sku)}</code></div></td>
-          <td class="num">${back?'+':'−'}${r.qty}</td></tr>`; }).join('')
+          <td>${esc(r.note||r.variant_sku)}<div class="mini" style="color:var(--muted)"><code>${esc(r.variant_sku)}</code>${held?' · held':''}</div></td>
+          <td class="num">${held?'—':(back?'+':'−')+r.qty}</td></tr>`; }).join('')
           ||'<tr><td colspan="5" class="empty">No events in this window.</td></tr>'}
       </tbody></table></div>
     </div>
     <div class="repcard" style="flex:0 0 34%;min-width:280px">
-      <div class="repbar"><span>What Shopify will be told</span><span class="mini" style="color:var(--muted)">Pasig only</span></div>
+      <div class="repbar"><span>Pasig sellable</span><span class="mini" style="color:var(--muted)">not pushed yet</span></div>
       ${topStock.length?`<table><tbody>${topStock.map(r=>`<tr style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.variant_sku)).replace(/'/g,'&#39;')}')">
         <td>${esc(r.product_name||r.variant_sku)}<div class="mini" style="color:var(--muted)"><code>${esc(r.variant_sku)}</code></div></td>
         <td class="num"><b>${r.available_pasig}</b></td></tr>`).join('')}</tbody></table>
         ${(_shStock||[]).filter(r=>+r.available_pasig>0).length>12?`<div class="mini" style="color:var(--muted);margin-top:6px">+ ${(_shStock||[]).filter(r=>+r.available_pasig>0).length-12} more</div>`:''}`
         :'<div class="empty">Nothing sellable at Pasig.</div>'}
-      <div class="hint" style="margin-top:8px">Bulacan is production stock and is deliberately excluded — it is not sellable until it has been
+      <div class="hint" style="margin-top:8px"><b>Phase 2 is deliberately off.</b> This is what WOULD be published to Shopify as the sellable
+        quantity if the push were switched on — look at it, argue with it, and only then decide. Nothing writes to Shopify today.<br><br>
+        Bulacan is production stock and is deliberately excluded — it is not sellable until it has been
         transferred, and publishing it would let someone buy what is not at the selling site.</div>
     </div>
   </div>`;
   $('content').innerHTML=h;
 }
 function shCsv(){
-  const aoa=[['When','Type','Order','SKU','Item','Qty','Unit price','Customer','Posted','Error']]
+  const aoa=[['When','Type','Order','SKU','Item','Qty','Unit price','Customer','Posted','Held','Error']]
     .concat((_shRows||[]).map(r=>[r.occurred_at,r.event_type,r.order_name||r.shop_order_id,r.variant_sku,r.note||'',
-      r.qty,r.unit_price||'',r.customer||'',r.posted?'yes':'no',r.post_error||'']));
+      r.qty,r.unit_price||'',r.customer||'',r.posted?'yes':'no',
+      (!r.posted&&/^held/i.test(String(r.post_error||'')))?'yes':'',r.post_error||'']));
   const csv=aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':(c==null?'':c)).join(',')).join('\n');
   dlBlob(csv,'WR_shopify_'+todayISO()+'.csv','text/csv'); toast('Downloaded');
 }
@@ -11530,15 +11564,19 @@ const KB = {
        'A delivery fee marked payable to a FLEET SERVICE is its own payable. It never reduces the supplier balance, so a courier payment cannot make a supplier look settled.',
        'Weeks run Monday to Sunday off the ORDER date, because that is when the commitment was made — not when it was paid or delivered.',
        'Cancelled orders are excluded from every figure here, as they are in every other report.']},
-  shopify:{d:'Whether the Shopify sync is working, and what Shopify is about to be told.',
+  shopify:{d:'Whether the one-way Shopify feed is working — sales in, nothing pushed back.',
     h:['Sales, refunds and returns arrive here and become stock movements at Pasig',
+       'Held means the order is older than the sync start and the opening count already has it',
        'Anything that did not post is listed with the reason — usually a SKU that is not in Products',
-       'The right-hand panel is exactly what gets pushed back as the sellable quantity'],
-    l:['DOUBLE-COUNTING IS THE RISK, so it is made impossible rather than unlikely. Every event carries Shopify\'s own order id and line id, and the database has a unique key on the pair — a retry, a re-run or a replayed webhook is refused, not deducted again.',
+       'The right-hand panel is what a future push WOULD publish; nothing writes to Shopify today'],
+    l:['ONE WAY ON PURPOSE. Phase 1 reads Shopify and writes stock. Phase 2 — publishing on-hand back as the sellable quantity — is a separate decision, so the Apps Script has no push function in it at all rather than a flag someone can flip.',
+       'THE SYNC START DATE IS THE WHOLE BALL GAME. Every order shipped before the Pasig opening was counted is already inside that count. Posting it again would deduct the same packs twice and walk stock to nothing, so the database HOLDS anything older and says so. Held is the guard working, not a failure.',
+       'DOUBLE-COUNTING IS THE OTHER RISK, so it is made impossible rather than unlikely. Every event carries Shopify\'s own order id and line id, and the database has a unique key on the pair — a retry, a re-run or a replayed webhook is refused, not deducted again.',
        'The Apps Script never writes a stock movement. It writes a raw event; a database trigger turns each into exactly one movement. That way there is one place where a sale becomes stock, and it can be read.',
        'A REFUND ONLY RETURNS STOCK IF SHOPIFY SAYS IT WAS RESTOCKED. Money refunded without the food coming back is not inventory — adding it would invent food that is in a customer\'s bin.',
-       'PASIG ONLY is pushed back. Bulacan is production stock and is not sellable until transferred; publishing it would let a customer buy what is not at the selling site.',
-       'A negative Pasig balance is published as ZERO, never as a negative. A negative balance is a counting problem to fix, not a number to broadcast.']},
+       'AN UNMATCHED SKU IS NEVER LOST. The event is kept and flagged. Add the product or map the code in shopify_sku_map, then run wr_shopify_repost() and it posts.',
+       'PASIG ONLY. Bulacan is production stock and is not sellable until transferred; publishing it would let a customer buy what is not at the selling site.',
+       'A negative Pasig balance would be published as ZERO, never as a negative. A negative balance is a counting problem to fix, not a number to broadcast.']},
   home:{d:'Your landing page — KPI tiles and quick links into every module.',h:['Glance at counts (ingredients, products, suppliers, open POs)','Click a card to jump into that module','Use the search box or ⌘K to find anything'],l:['KPIs are live counts from the database','Nothing is entered here — it summarizes other modules']},
   ingredients:{d:'Master list of everything you buy or make into product: raw meats, organs, veg, fruit, seeds, supplies, plus live animals and internal intermediates.',h:['Open a row to edit price, category, storage, par, lead time','Set the processing method + yield so costing is accurate','Mark live-animal / intermediate items with their flags'],l:['₱/kg usable = raw price ÷ processing yield — the true cost in a pack','moving_avg_cost auto-updates from goods receipts (perpetual costing)','Intermediates (e.g. Rabbit Ground Meat) derive cost from their source × dress-out yield']},
   products:{d:'Sellable finished goods, grouped into families with size variants, each with its own SKU, price and recipe (BOM).',h:['Open a product to edit price, pack size, feeding style','Edit the Recipe (BOM) lines — usable grams per pack','Add variants as separate products under the same family'],l:['BOM grams are USABLE grams in the pack','Raw needed for production = usable ÷ ingredient yield','Cost/pack is computed from actual ingredients issued at production']},
