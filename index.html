@@ -1467,11 +1467,13 @@ async function renderForm(){
      inventory_movements what the ledger really took out of stock
    Both are shown, because a difference between them is worth seeing.        */
 let _pbRows=[], _pbRef='', _pbDirty=false;
-/* Load what this batch consumed. Three sources, each answering something else:
-     bom_lines           what the recipe ASKED for
-     batch_issues        what the kitchen said they DREW and USED
-     inventory_movements what the ledger actually took out of stock
-   The ledger is the arithmetic that matters; the other two explain it.        */
+/* The record you open after a run shows the SAME eight columns as the confirm
+   screen, in the same order, driven by the same arithmetic (_paCalc). Anything
+   less and the figure someone typed on the day has a different name the next
+   morning. Sources:
+     bom_lines           what the recipe asked for
+     batch_issues        what the kitchen recorded
+     inventory_movements what the ledger actually took out of stock             */
 async function pbLoad(){
   _pbRows=[]; _pbRef=formRec.batch_ref||''; _pbDirty=false;
   if(!_pbRef) return;
@@ -1484,64 +1486,69 @@ async function pbLoad(){
   const ctx=(_outIngCtx(ings)||{}).ctx;
   const packs=+formRec.good_packs||0;
   const rows={};
-  const put=(sku)=>rows[sku]=rows[sku]||{sku,planG:0,ledG:0,drawnG:null,usedG:null,excessG:null,rawG:0};
+  const put=(sku)=>rows[sku]=rows[sku]||{sku,planG:0,ledG:0,rec:null};
   bom.forEach(b=>{ put(b.ingredient_sku).planG+=(+b.usable_g||0)*packs; });
   mv.filter(x=>x.kind==='ingredient').forEach(x=>{ put(x.ref_sku).ledG+=Math.abs(+x.qty||0); });
-  iss.forEach(x=>{ const r=put(x.ingredient_sku);
-    r.rawG=+x.actual_raw_g||0;
-    if(x.drawn_g!=null)  r.drawnG=+x.drawn_g||0;
-    if(x.excess_g!=null) r.excessG=+x.excess_g||0;
-    if(x.actual_processed_g!=null) r.usedG=+x.actual_processed_g||0;
+  iss.forEach(x=>{ const r=put(x.ingredient_sku); r.rec=x;
     if(!r.planG && x.expected_processed_g!=null) r.planG=+x.expected_processed_g||0; });
   _pbRows=Object.values(rows).map(r=>{
     const it=im[r.sku]||{}; const cl=(ctx?_countIngClass(it,ctx):null)||{}; const cat=_ksCat(cl.g1||it.category||'');
+    const x=r.rec||{};
     /* The ledger is the truth for what LEFT stock, which is what went into the
-       product. Anything drawn beyond that came back, so drawn defaults to used
-       until somebody says otherwise. */
-    const used = r.ledG || (r.usedG!=null?r.usedG:r.planG);
-    const drawn = (r.drawnG!=null && r.drawnG>=used) ? r.drawnG : used;
+       product. Everything else defaults to that until somebody records more. */
+    const used = r.ledG || (+x.actual_processed_g||0) || r.planG;
+    const G=(v,d)=>(v==null?d:(+v||0));
+    const thawed = G(x.thawed_g, used);
+    const created= G(x.created_g, 0);
+    const frozen = Math.max(G(x.frozen_g!=null?x.frozen_g:x.drawn_g, thawed), 0);
     return { sku:r.sku, name:_outName(it,cl)||it.name||r.sku, cat:cat.k, catLabel:cat.l, color:cat.c,
-      costG:(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000,
-      planG:r.planG, ledG:r.ledG, drawnG:drawn, usedG:used,
-      excessG:Math.round((drawn-used)*100)/100, rawG:r.rawG, anchor:'used' };
-  }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat)||b.usedG-a.usedG);
+      type:'A', yield:((+it.yield_pct||100)/100)||1, outCostG:(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000,
+      planG:r.planG, ledG:r.ledG,
+      // the same field names the confirm screen uses, so _paCalc just works
+      neededKg:Math.round(r.planG/10)/100,
+      frozenOutKg:Math.round(frozen/10)/100, procUsedKg:Math.round(thawed/10)/100,
+      actualRawKg:Math.round(G(x.actual_raw_g,0)/10)/100, actualMadeKg:Math.round(created/10)/100,
+      usedKg:Math.round(used/10)/100, excessKg:Math.round(G(x.excess_g,0)/10)/100, excessAnchor:false };
+  }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat)||b.usedKg-a.usedKg);
 }
 const _pbKg=g=>(Math.round((+g||0)/10)/100).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:3})+' kg';
-/* Drawn, used and excess are one number split two ways: whatever came out of
-   stock either went into the product or went back. Type into whichever you
-   counted and the third follows, so the row can never quietly disagree. */
+/* Editing works exactly as it does on the confirm screen — same rules, same
+   anchoring — because it is the same code path. */
 function pbEdit(i,field,v){
-  const r=_pbRows[i]; if(!r) return;
-  const g=Math.max(0,(parseFloat(v)||0))*1000;
-  if(field==='drawn'){ r.drawnG=g; if(r.anchor==='excess') r.usedG=Math.max(0,g-r.excessG); else r.excessG=Math.max(0,g-r.usedG); }
-  if(field==='used'){ r.anchor='used'; r.usedG=g; if(g>r.drawnG) r.drawnG=g; r.excessG=Math.round((r.drawnG-g)*100)/100; }
-  if(field==='excess'){ r.anchor='excess'; r.excessG=g; r.usedG=Math.max(0,Math.round((r.drawnG-g)*100)/100); }
-  if(field==='raw'){ r.rawG=g; }
+  const x=_pbRows[i]; if(!x) return;
+  x[field]=(v===''||v==null)?0:(parseFloat(v)||0);
+  if(field==='usedKg')   x.excessAnchor=false;
+  if(field==='excessKg') x.excessAnchor=true;
+  const c=_paCalc(x);
+  if(x.excessAnchor) x.usedKg=c.used; else x.excessKg=c.excess;
   _pbDirty=true; pbDraw();
 }
 function pbReset(){ pbLoad().then(pbDraw); }
 async function pbSave(){
-  if(!_pbRef){ return; }
+  if(!_pbRef) return;
   const packs=+formRec.good_packs||0;
-  const changed=_pbRows.filter(r=>Math.abs(r.usedG-r.ledG)>0.5);
-  const lines=changed.map(r=>`• ${r.name}: ledger has ${_pbKg(r.ledG)}, you are saying ${_pbKg(r.usedG)}`);
-  const total=_pbRows.reduce((s,r)=>s+r.usedG*r.costG,0);
+  const changed=_pbRows.filter(x=>Math.abs(_paCalc(x).used*1000-x.ledG)>0.5);
+  const lines=changed.map(x=>`• ${x.name}: ledger has ${_pbKg(x.ledG)}, you are saying ${_pbKg(_paCalc(x).used*1000)}`);
+  const total=_pbRows.reduce((s,x)=>s+_paCalc(x).used*x.outCostG*1000,0);
   if(!confirm('Save what this batch used?\n\n'
     +(lines.length?('This changes what came out of stock:\n'+lines.join('\n')+'\n\nAn adjusting movement is posted for each — the original stays, so the trail is intact.\n\n')
-                  :'No stock movement changes — only the drawn / excess / raw figures are being recorded.\n\n')
+                  :'No stock movement changes — only the weights are being recorded.\n\n')
     +'Cost per pack becomes '+fmt(packs>0?total/packs:0)+'.')) return;
   let posted=0, wrote=0;
-  for(const r of _pbRows){
-    const delta=Math.round((r.usedG-r.ledG)*100)/100;      // + = more left stock, − = some came back
+  for(const x of _pbRows){
+    const c=_paCalc(x);
+    const delta=Math.round((c.used*1000-x.ledG)*100)/100;   // + = more left stock, − = some came back
     if(Math.abs(delta)>0.5){
-      try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:r.sku,location_code:formRec.location_code||planProduceLoc(),
-        qty:-delta, unit_cost:r.costG, movement_type:'issue_to_batch', note:'Production '+_pbRef}); posted++; }catch(e){ toast(e.message,true); }
+      try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:x.sku,location_code:formRec.location_code||planProduceLoc(),
+        qty:-delta, unit_cost:x.outCostG, movement_type:'issue_to_batch', note:'Production '+_pbRef}); posted++; }catch(e){ toast(e.message,true); }
     }
-    const rec={batch_ref:_pbRef, ingredient_sku:r.sku, expected_processed_g:Math.round(r.planG*100)/100,
-      actual_processed_g:Math.round(r.usedG*100)/100, actual_raw_g:Math.round(r.rawG*100)/100,
-      drawn_g:Math.round(r.drawnG*100)/100, excess_g:Math.round(r.excessG*100)/100, uom:'kg'};
+    const G=v=>Math.round((+v||0)*1000*100)/100;
+    const rec={batch_ref:_pbRef, ingredient_sku:x.sku, expected_processed_g:Math.round(x.planG*100)/100,
+      frozen_g:G(c.frozen), thawed_g:G(c.proc), created_g:G(c.made),
+      actual_raw_g:G(c.raw), actual_processed_g:G(c.used), excess_g:G(c.excess),
+      drawn_g:G(c.frozen), uom:'kg'};
     try{
-      let ex=[]; try{ ex=(await db.list('batch_issues',{})).filter(x=>String(x.batch_ref)===String(_pbRef)&&String(x.ingredient_sku)===String(r.sku)); }catch(e){}
+      let ex=[]; try{ ex=(await db.list('batch_issues',{})).filter(y=>String(y.batch_ref)===String(_pbRef)&&String(y.ingredient_sku)===String(x.sku)); }catch(e){}
       if(ex.length && ex[0].id!=null) await db.update('batch_issues','id',ex[0].id,rec);
       else await db.create('batch_issues',rec);
       wrote++;
@@ -1557,64 +1564,60 @@ async function pbSave(){
 function pbDraw(){
   const el=$('pbIng'); if(!el) return;
   const packs=+formRec.good_packs||0;
+  const bar=`<button class="btn sec sm" onclick="pbRunSheet()">🖨 Production sheet</button>`;
   if(!_pbRows.length){
-    el.innerHTML=`<div class="repcard" style="margin:0 0 12px"><div class="repbar"><span>Ingredients used</span>
-      <button class="btn sec sm" onclick="pbRunSheet()">🖨 Production sheet</button></div>
+    el.innerHTML=`<div class="repcard" style="margin:0 0 12px"><div class="repbar"><span>Ingredients used</span><span style="flex:1"></span>${bar}</div>
       <div class="empty">Nothing recorded against this batch yet.${formRec.status==='draft'?' It is still a draft — ingredients post when the run is confirmed.':' If the run was confirmed, the movements may have been skipped — run System Check.'}</div></div>`;
     return;
   }
-  const num=(i,f,val,ttl)=>`<input type="number" step="any" inputmode="decimal" value="${Math.round((+val||0)/10)/100}"
+  const num=(i,f,val,ttl)=>`<input type="number" step="any" inputmode="decimal" value="${Math.round((+val||0)*1000)/1000}"
     title="${esc(ttl)}" oninput="pbEdit(${i},'${f}',this.value)"
-    style="width:88px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px">`;
-  const T=_pbRows.reduce((a,r)=>({plan:a.plan+r.planG,drawn:a.drawn+r.drawnG,used:a.used+r.usedG,
-    exc:a.exc+r.excessG,raw:a.raw+r.rawG,php:a.php+r.usedG*r.costG}),{plan:0,drawn:0,used:0,exc:0,raw:0,php:0});
+    style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px">`;
+  const T={plan:0,frozen:0,thawed:0,raw:0,made:0,used:0,exc:0,php:0};
   let body='',last='';
-  _pbRows.forEach((r,i)=>{
-    if(r.cat!==last){ last=r.cat;
-      body+=`<tr class="grp"><td colspan="7" style="background:${r.color};color:#fff;font-weight:700;padding:4px 9px">${esc(r.catLabel)}</td></tr>`; }
-    const gap=r.planG>0?r.usedG-r.planG:0;
-    body+=`<tr style="box-shadow:inset 4px 0 0 ${r.color}">
-      <td><b>${esc(r.name)}</b></td>
-      <td class="num mini" style="color:var(--muted)">${r.planG?_pbKg(r.planG):'—'}</td>
-      <td class="num">${num(i,'drawn',r.drawnG,'total weight taken out of stock for this batch')}</td>
-      <td class="num">${num(i,'used',r.usedG,'what actually went into the product'+(r.planG?' · recipe '+_pbKg(r.planG):''))}
-        ${(r.planG&&Math.abs(gap)>=1)?`<div class="mini" style="color:${gap>0?'var(--earth,#b5762a)':'#4e7a3e'}">${(gap>0?'+':'')+_pbKg(gap)} vs recipe</div>`:''}</td>
-      <td class="num">${num(i,'excess',r.excessG,'taken out but not used — went back into stock')}</td>
-      <td class="num">${num(i,'raw',r.rawG,'raw processed to make this ingredient, if any')}</td>
-      <td class="num">${fmt(r.usedG*r.costG)}</td></tr>`;
+  _pbRows.forEach((x,i)=>{
+    const c=_paCalc(x);
+    T.plan+=c.needed; T.frozen+=c.frozen; T.thawed+=c.proc; T.raw+=c.raw; T.made+=c.made;
+    T.used+=c.used; T.exc+=c.excess; T.php+=c.used*x.outCostG*1000;
+    if(x.cat!==last){ last=x.cat;
+      body+=`<tr class="grp"><td colspan="9" style="background:${x.color};color:#fff;font-weight:700;padding:4px 9px">${esc(x.catLabel)}</td></tr>`; }
+    const gap=c.needed>0?c.used-c.needed:0;
+    body+=`<tr style="box-shadow:inset 4px 0 0 ${x.color}">
+      <td><b>${esc(x.name)}</b></td>
+      <td class="num mini" style="color:var(--muted)">${c.needed?_pa2(c.needed)+' kg':'—'}</td>
+      <td class="num">${num(i,'frozenOutKg',x.frozenOutKg,'weight out of the freezer, before thawing')}</td>
+      <td class="num">${num(i,'procUsedKg',x.procUsedKg,'the same batch weighed again after thawing')}</td>
+      <td class="num">${num(i,'actualRawKg',x.actualRawKg,'raw pulled and trimmed for this ingredient')}</td>
+      <td class="num">${num(i,'actualMadeKg',x.actualMadeKg,'processed output that came off that raw')}</td>
+      <td class="num">${num(i,'usedKg',x.usedKg,'what went into the product — the only figure that moves stock'+(c.needed?' · recipe '+_pa2(c.needed)+' kg':''))}
+        ${(c.needed&&Math.abs(gap)>=0.001)?`<div class="mini" style="color:${gap>0?'var(--earth,#b5762a)':'#4e7a3e'}">${(gap>0?'+':'')+_pa2(gap)} vs recipe</div>`:''}</td>
+      <td class="num">${num(i,'excessKg',x.excessKg,'kept back and returned to processed stock')}
+        ${c.excess<-0.0005?'<div class="mini" style="color:var(--danger)">short</div>':''}</td>
+      <td class="num">${fmt(c.used*x.outCostG*1000)}</td></tr>
+    <tr class="parecap"><td colspan="9">${_paRecap(x)}</td></tr>`;
   });
-  const dirty=_pbDirty;
   el.innerHTML=`<div class="repcard" style="margin:0 0 12px">
     <div class="repbar"><span>Ingredients used — ${_pbRows.length} item(s)</span>
-      <span class="mini" style="color:var(--muted)">${packs?packs+' packs · ':''}editable — <b>Used in product</b> is what leaves stock</span>
-      <span style="flex:1"></span>
-      <button class="btn sec sm" onclick="pbRunSheet()">🖨 Production sheet</button>
-      ${dirty?`<button class="btn sm" onclick="pbSave()">💾 Save ingredients</button>
-               <button class="btn sec sm" onclick="pbReset()">↺ Undo</button>`:''}</div>
-    <div class="hint" style="margin:0 0 8px">
-      <b>Drawn from stock</b> is everything taken out for this batch. It splits into <b>Used in product</b> and
-      <b>Excess back to stock</b> — type into whichever you counted and the other follows.
-      Only <b>Used in product</b> moves stock; saving posts an adjustment for the difference and leaves the original movement alone.</div>
-    <div style="overflow-x:auto"><table><thead><tr>
-      <th>Ingredient</th><th class="num">Recipe</th><th class="num">Drawn<div class="mini" style="font-weight:400;opacity:.75">from stock</div></th>
-      <th class="num">Used<div class="mini" style="font-weight:400;opacity:.75">in product</div></th>
-      <th class="num">Excess<div class="mini" style="font-weight:400;opacity:.75">back to stock</div></th>
-      <th class="num">Raw<div class="mini" style="font-weight:400;opacity:.75">processed</div></th>
-      <th class="num">Value</th></tr></thead>
+      <span class="mini" style="color:var(--muted)">${packs?packs+' packs · ':''}same columns as the confirm screen — editable</span>
+      <span style="flex:1"></span>${bar}
+      ${_pbDirty?`<button class="btn sm" onclick="pbSave()">💾 Save ingredients</button>
+                  <button class="btn sec sm" onclick="pbReset()">↺ Undo</button>`:''}</div>
+    <div class="hint" style="margin:0 0 8px">${PA_HELP}</div>
+    <div style="overflow-x:auto"><table class="pa">${paHead()}
       <tbody>${body}</tbody>
       <tfoot><tr style="font-weight:700;border-top:2px solid var(--line)">
-        <td>Total</td><td class="num mini" style="color:var(--muted)">${T.plan?_pbKg(T.plan):'—'}</td>
-        <td class="num">${_pbKg(T.drawn)}</td><td class="num">${_pbKg(T.used)}</td>
-        <td class="num">${T.exc>0.5?_pbKg(T.exc):'—'}</td>
-        <td class="num mini" style="color:var(--muted)">${T.raw?_pbKg(T.raw):'—'}</td>
+        <td>Total</td><td class="num mini" style="color:var(--muted)">${T.plan?_pa2(T.plan)+' kg':'—'}</td>
+        <td class="num">${_pa2(T.frozen)} kg</td><td class="num">${_pa2(T.thawed)} kg</td>
+        <td class="num">${T.raw?_pa2(T.raw)+' kg':'—'}</td><td class="num">${T.made?_pa2(T.made)+' kg':'—'}</td>
+        <td class="num">${_pa2(T.used)} kg</td><td class="num">${Math.abs(T.exc)>0.0005?_pa2(T.exc)+' kg':'—'}</td>
         <td class="num">${fmt(T.php)}</td></tr>
-        ${packs?`<tr><td colspan="6" class="mini" style="color:var(--muted)">Ingredient cost per pack — ${fmt(T.php)} ÷ ${packs} packs</td>
+        ${packs?`<tr><td colspan="8" class="mini" style="color:var(--muted)">Ingredient cost per pack — ${fmt(T.php)} ÷ ${packs} packs</td>
           <td class="num"><b>${fmt(T.php/packs)}</b>${formRec.cost_per_pack!=null?`<div class="mini" style="color:${Math.abs((+formRec.cost_per_pack||0)-T.php/packs)<0.01?'var(--muted)':'var(--earth,#b5762a)'}">saved on the batch: ${fmt(formRec.cost_per_pack)}</div>`:'<div class="mini" style="color:var(--danger)">nothing saved on the batch yet</div>'}</td></tr>`:''}
       </tfoot></table></div></div>`;
 }
 async function pbIngredients(){ const el=$('pbIng'); if(!el) return; await pbLoad(); pbDraw(); }
-/* The day's production sheet, from the record instead of from the planning
-   screen — every batch in the run, with what each one used. */
+/* The day's production sheet, from the record instead of the planning screen —
+   every batch in the run, with what each one used, in the same eight columns. */
 async function pbRunSheet(){
   const run=formRec.run_ref||formRec.batch_ref; if(!run){ toast('No run reference on this batch',true); return; }
   let bs=[], iss=[], mv=[], ings=[], prods=[];
@@ -1628,25 +1631,28 @@ async function pbRunSheet(){
   const im={}; ings.forEach(i=>im[i.sku]=i); const pm={}; prods.forEach(p=>pm[p.sku]=p);
   const ctx=(_outIngCtx(ings)||{}).ctx;
   const agg={};
-  mv.filter(x=>x.kind==='ingredient'&&x.movement_type==='issue_to_batch').forEach(x=>{
-    (agg[x.ref_sku]=agg[x.ref_sku]||{used:0,drawn:0,raw:0}).used+=Math.abs(+x.qty||0); });
-  iss.forEach(x=>{ const a=agg[x.ingredient_sku]=agg[x.ingredient_sku]||{used:0,drawn:0,raw:0};
-    a.drawn=Math.max(a.drawn,+x.drawn_g||0); a.raw+=+x.actual_raw_g||0;
-    if(!a.used) a.used=+x.actual_processed_g||0; });
+  const A=(sku)=>agg[sku]=agg[sku]||{need:0,frozen:0,thawed:0,raw:0,made:0,used:0,exc:0};
+  mv.filter(x=>x.kind==='ingredient'&&x.movement_type==='issue_to_batch').forEach(x=>{ A(x.ref_sku).used+=Math.abs(+x.qty||0); });
+  iss.forEach(x=>{ const a=A(x.ingredient_sku);
+    a.need+=+x.expected_processed_g||0; a.raw+=+x.actual_raw_g||0; a.made+=+x.created_g||0;
+    a.frozen+=+(x.frozen_g!=null?x.frozen_g:x.drawn_g)||0; a.thawed+=+x.thawed_g||0; a.exc+=+x.excess_g||0;
+    if(!a.used) a.used+=+x.actual_processed_g||0; });
   const rows=Object.keys(agg).map(sku=>{ const it=im[sku]||{}; const cl=(ctx?_countIngClass(it,ctx):null)||{};
     const cat=_ksCat(cl.g1||it.category||''); const a=agg[sku];
-    const cost=(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000;
-    return {name:_outName(it,cl)||it.name||sku, cat:cat.k, catLabel:cat.l, color:cat.c,
-      used:a.used, drawn:Math.max(a.drawn,a.used), excess:Math.max(0,Math.max(a.drawn,a.used)-a.used), raw:a.raw, php:a.used*cost}; })
+    return {name:_outName(it,cl)||it.name||sku, cat:cat.k, catLabel:cat.l, color:cat.c, ...a,
+      thawed:a.thawed||a.used, frozen:a.frozen||a.thawed||a.used,
+      php:a.used*((+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000)}; })
     .sort((x,y)=>KSHEET_ORDER.indexOf(x.cat)-KSHEET_ORDER.indexOf(y.cat)||y.used-x.used);
-  const kg=g=>(Math.round((+g||0)/10)/100).toFixed(3)+' kg';
+  const kg=g=>(+g)?((Math.round((+g||0)/10)/100).toFixed(3)+' kg'):'—';
   const P=n=>'₱'+(Math.round((+n||0)*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
   let body='',last='';
   rows.forEach(r=>{ if(r.cat!==last){ last=r.cat;
-      body+=`<tr class="grp"><td colspan="6" style="background:${r.color} !important">${esc(r.catLabel)}</td></tr>`; }
-    body+=`<tr><td>${esc(r.name)}</td><td class="n">${kg(r.drawn)}</td><td class="n"><b>${kg(r.used)}</b></td>
-      <td class="n">${r.excess>0.5?kg(r.excess):'—'}</td><td class="n">${r.raw?kg(r.raw):'—'}</td><td class="n">${P(r.php)}</td></tr>`; });
-  const T=rows.reduce((a,r)=>({d:a.d+r.drawn,u:a.u+r.used,e:a.e+r.excess,r:a.r+r.raw,p:a.p+r.php}),{d:0,u:0,e:0,r:0,p:0});
+      body+=`<tr class="grp"><td colspan="9" style="background:${r.color} !important">${esc(r.catLabel)}</td></tr>`; }
+    body+=`<tr><td>${esc(r.name)}</td><td class="n">${kg(r.need)}</td><td class="n">${kg(r.frozen)}</td><td class="n">${kg(r.thawed)}</td>
+      <td class="n">${kg(r.raw)}</td><td class="n">${kg(r.made)}</td><td class="n"><b>${kg(r.used)}</b></td>
+      <td class="n">${kg(r.exc)}</td><td class="n">${P(r.php)}</td></tr>`; });
+  const T=rows.reduce((a,r)=>({need:a.need+r.need,f:a.f+r.frozen,t:a.t+r.thawed,raw:a.raw+r.raw,
+    made:a.made+r.made,u:a.u+r.used,e:a.e+r.exc,p:a.p+r.php}),{need:0,f:0,t:0,raw:0,made:0,u:0,e:0,p:0});
   const made=bs.filter(b=>(b.kind||'product')!=='output').map(b=>`<tr><td>${esc((pm[b.product_sku]||{}).name||b.product_sku)}</td>
       <td>${esc(b.batch_ref)}</td><td class="n">${b.good_packs||0}</td><td class="n">${b.cost_per_pack!=null?P(b.cost_per_pack):'—'}</td>
       <td>${esc(statusLabel('production_batches',b.status)||b.status||'')}</td></tr>`).join('');
@@ -1655,18 +1661,18 @@ async function pbRunSheet(){
       <td class="n">${b.output_kg!=null?(+b.output_kg).toFixed(3):'—'}</td><td class="n">${b.yield_pct!=null?b.yield_pct+'%':'—'}</td></tr>`).join('');
   const w=window.open('','_pbs','width=1000,height=980'); if(!w){ toast('Allow pop-ups to print',true); return; }
   w.document.write(`<html><head><meta charset="utf-8"><title>Production ${esc(run)}</title><style>
-    @page{size:A4;margin:14mm} *{box-sizing:border-box}
+    @page{size:A4 landscape;margin:12mm} *{box-sizing:border-box}
     html,body{-webkit-print-color-adjust:exact;print-color-adjust:exact;color-adjust:exact}
-    body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:12px}
-    h1{color:#4e7a3e;margin:0 0 2px;font-size:20px} .sub{color:#666;margin:0 0 14px;font-size:11.5px}
-    h2{font-size:13px;margin:16px 0 4px;color:#4e7a3e}
-    table{width:100%;border-collapse:collapse;margin-bottom:10px;table-layout:fixed}
-    th{background:#4e7a3e !important;color:#fff !important;text-align:left;padding:5px 7px;font-size:10.5px}
-    td{padding:4px 7px;border-bottom:1px solid #eee;overflow-wrap:anywhere}
+    body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:11.5px}
+    h1{color:#4e7a3e;margin:0 0 2px;font-size:19px} .sub{color:#666;margin:0 0 12px;font-size:11px}
+    h2{font-size:12.5px;margin:14px 0 4px;color:#4e7a3e}
+    table{width:100%;border-collapse:collapse;margin-bottom:8px;table-layout:fixed}
+    th{background:#4e7a3e !important;color:#fff !important;text-align:left;padding:5px 6px;font-size:10px}
+    td{padding:4px 6px;border-bottom:1px solid #eee;overflow-wrap:anywhere}
     td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-    tr.grp td{color:#fff !important;font-weight:800;padding:4px 7px}
+    tr.grp td{color:#fff !important;font-weight:800;padding:4px 6px}
     tr.tot td{font-weight:700;border-top:2px solid #4e7a3e;background:#f2f5ef !important}
-    .note{margin-top:12px;font-size:10px;color:#666;line-height:1.6}
+    .note{margin-top:10px;font-size:9.5px;color:#666;line-height:1.6}
     thead{display:table-header-group} tr{break-inside:avoid}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Production record</h1>
     <div class="sub">${esc(run)} · ${esc(formRec.production_date||'')} · ${esc(formRec.operator||'')} · printed ${esc(todayISO())}</div>
@@ -1675,15 +1681,17 @@ async function pbRunSheet(){
     ${prep?`<h2>Prep — raw turned into processed</h2><table><colgroup><col style="width:38%"><col style="width:24%"><col style="width:13%"><col style="width:13%"><col style="width:12%"></colgroup>
       <thead><tr><th>Ingredient</th><th>Batch</th><th class="n">Raw used</th><th class="n">Created</th><th class="n">Yield</th></tr></thead><tbody>${prep}</tbody></table>`:''}
     <h2>Ingredients used</h2>
-    <table><colgroup><col style="width:34%"><col style="width:13%"><col style="width:13%"><col style="width:13%"><col style="width:13%"><col style="width:14%"></colgroup>
-      <thead><tr><th>Ingredient</th><th class="n">Drawn from stock</th><th class="n">Used in product</th><th class="n">Excess to stock</th><th class="n">Raw processed</th><th class="n">Value</th></tr></thead>
-      <tbody>${body||'<tr><td colspan="6">Nothing recorded.</td></tr>'}
-      <tr class="tot"><td>Total</td><td class="n">${kg(T.d)}</td><td class="n">${kg(T.u)}</td><td class="n">${T.e>0.5?kg(T.e):'—'}</td><td class="n">${T.r?kg(T.r):'—'}</td><td class="n">${P(T.p)}</td></tr>
+    <table><colgroup><col style="width:22%"><col style="width:9%"><col style="width:11%"><col style="width:11%"><col style="width:9%"><col style="width:10%"><col style="width:10%"><col style="width:9%"><col style="width:9%"></colgroup>
+      <thead><tr><th>Ingredient</th><th class="n">Needed qty</th><th class="n">Frozen processed used</th><th class="n">Thawed processed used</th>
+        <th class="n">Raw used</th><th class="n">Processed created</th><th class="n">Used in product</th><th class="n">Excess to stock</th><th class="n">Value</th></tr></thead>
+      <tbody>${body||'<tr><td colspan="9">Nothing recorded.</td></tr>'}
+      <tr class="tot"><td>Total</td><td class="n">${kg(T.need)}</td><td class="n">${kg(T.f)}</td><td class="n">${kg(T.t)}</td>
+        <td class="n">${kg(T.raw)}</td><td class="n">${kg(T.made)}</td><td class="n">${kg(T.u)}</td><td class="n">${kg(T.e)}</td><td class="n">${P(T.p)}</td></tr>
       </tbody></table>
-    <div class="note"><b>Drawn from stock</b> = everything taken out for the run. <b>Used in product</b> = what went into the mix, and the only figure that moves stock.
-      <b>Excess to stock</b> = drawn − used, returned to the freezer.<br>
-      <b>Value</b> is Used × the ingredient's carrying cost at the time of printing.</div>
-    <div style="margin-top:22px;font-size:11px">Checked by ____________________________   Date ______________</div>
+    <div class="note"><b>Frozen processed used → Thawed processed used</b>: the two weighings; the difference is drip loss.
+      <b>Raw used → Processed created</b>: what was trimmed and what came off it. <b>Used in product</b> is the only figure that moves stock.
+      <b>Excess to stock</b> = (thawed + created) − used, returned to the freezer. <b>Value</b> = used × the ingredient's carrying cost at printing.</div>
+    <div style="margin-top:18px;font-size:11px">Checked by ____________________________   Date ______________</div>
     </body></html>`);
   w.document.close(); w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},250);
 }
@@ -8659,6 +8667,33 @@ function _paRecap(x){
 // Numeric input that survives a decimal point: oninput only touches the model and
 // the derived cells; the full redraw waits for blur. Typing "5." used to redraw
 // with value 5 and eat the dot.
+/* ============ The run's columns, defined ONCE =================================
+   Three places show what a run used: the confirm screen, the record you open
+   afterwards, and the printed sheet. When each carried its own headings, the
+   same figure had three names and nobody could carry a habit from one to the
+   next. One list now, one order, everywhere.                                  */
+const PA_COLS=[
+  {k:'needed',  a:'Needed',    b:'qty',      f:null},
+  {k:'frozen',  a:'Frozen processed', b:'used',    f:'frozenOutKg'},
+  {k:'thawed',  a:'Thawed processed', b:'used',    f:'procUsedKg'},
+  {k:'raw',     a:'Raw',       b:'used',     f:'actualRawKg'},
+  {k:'created', a:'Processed', b:'created',  f:'actualMadeKg'},
+  {k:'used',    a:'Used in',   b:'product',  f:'usedKg'},
+  {k:'excess',  a:'Excess',    b:'to stock', f:'excessKg'},
+  {k:'value',   a:'Value',     b:'',         f:null},
+];
+function paHead(opts){ opts=opts||{};
+  const cols=PA_COLS.filter(c=>opts.value!==false||c.k!=='value');
+  return `<thead><tr><th>Ingredient</th>`+cols.map(c=>
+    `<th class="num">${esc(c.a)}${c.b?`<br><span style="font-weight:400;opacity:.8">${esc(c.b)}</span>`:''}</th>`).join('')+`</tr></thead>`;
+}
+const PA_HELP=`Four steps, left to right, all <b>actual weights off the scale</b>:<br>
+      <b>1 · Frozen processed used → Thawed processed used</b> — weigh what leaves the freezer, thaw it, weigh it again. The difference is drip loss, calculated for you.<br>
+      <b>2 · Raw used → Processed created</b> — what was pulled and trimmed, and what came off it. That ratio is the run's real yield.<br>
+      <b>3 · Used in product</b> — starts at the needed qty because that is the plan, but change it if the kitchen allocated more or less on the day.<br>
+      <b>4 · Excess to stock</b> — what is kept back and put into processed stock for the next run.<br>
+      <span style="color:var(--muted)">Steps 3 and 4 are two ends of one number, so type into whichever you actually counted — the other follows.
+      Type an <b>excess</b> and any extra <b>processed created</b> goes into the product instead of growing the leftovers.</span>`;
 function _paNum(i,field,w,title){
   const x=(window._prodAct||[])[i]||{};
   return `<input id="pa_${field}_${i}" type="number" step="any" inputmode="decimal" value="${x[field]}" title="${esc(title||'')}"
@@ -8732,25 +8767,13 @@ function _paRow(x,i){
 function drawProdActuals(){
   const a=window._prodAct||[]; const A=a.filter(x=>x.type==='A'), B=a.filter(x=>x.type==='B');
   const idx=(x)=>a.indexOf(x);
-  const head=`<thead><tr><th>Ingredient</th><th class="num">Needed qty</th>
-    <th class="num">Frozen processed<br><span style="font-weight:400;opacity:.8">used</span></th>
-    <th class="num">Thawed processed<br><span style="font-weight:400;opacity:.8">used</span></th>
-    <th class="num">Raw<br><span style="font-weight:400;opacity:.8">used</span></th>
-    <th class="num">Processed<br><span style="font-weight:400;opacity:.8">created</span></th>
-    <th class="num">Used in<br><span style="font-weight:400;opacity:.8">product</span></th>
-    <th class="num">Excess<br><span style="font-weight:400;opacity:.8">to stock</span></th></tr></thead>`;
+  const head=paHead();
   const short=a.filter(x=>_paCalc(x).excess<-0.0005);
   $('modal').innerHTML=`<div><h3>Confirm production — record what actually happened</h3>
     <div style="margin:6px 0 10px;padding:9px 11px;background:#f6f8f4;border-radius:8px;font-size:12.5px;line-height:1.5">
-      Four steps, left to right, all <b>actual weights off the scale</b>:<br>
-      <b>1 · Frozen processed used → Thawed processed used</b> — weigh what leaves the freezer, thaw it, weigh it again. The difference is drip loss, calculated for you.<br>
-      <b>2 · Raw used → Processed created</b> — what was pulled and trimmed, and what came off it. That ratio is the run's real yield.<br>
-      <b>3 · Used in product</b> — starts at the needed qty because that is the plan, but change it if the kitchen allocated more or less on the day.<br>
-      <b>4 · Excess to stock</b> — what is kept back and put into processed stock for the next run.<br>
-      <span style="color:var(--muted)">Steps 3 and 4 are two ends of one number, so type into whichever you actually counted — the other follows.
-      Type an <b>excess</b> and any extra <b>processed created</b> goes into the product instead of growing the leftovers.</span>
+      ${PA_HELP}
     </div>
-    <div id="paWarn" style="display:${short.length?'block':'none'};margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px"><b>${short.length} ingredient(s) come up short</b> — processed stock plus what you made is less than the run needs. Post anyway and stock goes negative, or raise the output made.</div>
+    <div id="paWarn" style="display:${short.length?'block':'none'};margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px"><b>${short.length} ingredient(s) come up short</b> — more is going into the product than the run made available, so stock will go negative. Raise <b>Processed created</b>, or lower <b>Used in product</b>.</div>
     ${A.length?`<div class="mini" style="margin:6px 0 2px;font-weight:700">For products (mix ingredients)</div>
     <div class="mscroll" style="overflow-x:auto"><table class="pa">${head}<tbody>${A.map(x=>_paRow(x,idx(x))).join('')}</tbody></table></div>`:''}
     ${B.length?`<div class="mini" style="margin:12px 0 2px;font-weight:700">Output ingredients (make to stock)</div>
