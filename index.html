@@ -514,7 +514,7 @@
    buy it, make it, count it. Master Data is reference material you set up once,
    so it sits with Administration at the bottom rather than at the top. */
 const MODULES = [
-  {id:'analytics', label:'Analytics', items:['stock_balance','yields','reporting','margin','momentum']},
+  {id:'analytics', label:'Analytics', items:['stock_balance','shopify','yields','reporting','margin','momentum']},
   {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc','ffprofiles']},
   {id:'plan',   label:'Planning',    items:['mrp','wdt']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_reorder']},
@@ -564,6 +564,28 @@ function isCancelled(rec){ return String((rec||{}).status||'').toLowerCase()==='
    So: the variant is shown ONLY when it says something the name does not.
    Fix the master (see wr_20260818_variants.sql) and this formats itself. */
 function _isSizeOnly(v){ return /^\s*\d+(\.\d+)?\s*(g|kg|ml|l|pc|pcs|pack|packs)?\s*$/i.test(String(v||'')); }
+/* ---- Naming a production batch ------------------------------------------
+   A batch's SKU is a PRODUCT on a product batch and an INGREDIENT on a prep
+   batch, so neither master alone can name every row. Worse, a product's
+   STICKER is stored in the ingredient master under the PRODUCT'S OWN SKU —
+   one sticker per product, deliberately — so a single flat lookup let the
+   sticker overwrite the product and the Production list filled up with rows
+   called "… — Sticker". Kind decides which master answers, and a sticker or
+   any other supply is never allowed to name a batch.                        */
+async function _pbNameMap(){
+  const prod={}, ing={};
+  try{ (await db.list('products',{})).forEach(p=>{ prod[p.sku]=p.name||p.sku; }); }catch(e){}
+  try{ (await listIngredients()).forEach(i=>{
+        if(i.is_supply || /sticker|supply/i.test(String(i.category||''))) return;   // never names a batch
+        ing[i.sku]=i.name||i.sku; }); }catch(e){}
+  return {prod,ing};
+}
+function _pbName(M,sku,kind){
+  if(!sku) return '';
+  M=M||{prod:{},ing:{}};
+  return (kind==='output') ? (M.ing[sku]||M.prod[sku]||sku)
+                           : (M.prod[sku]||M.ing[sku]||sku);
+}
 function prodLabel(p, opts){
   opts=opts||{};
   if(!p) return '';
@@ -781,6 +803,7 @@ const MODELS = {
   mrp:{ label:'Demand / MRP', icon:'📉', special:'mrp' },
   wdt:{ label:'Weekly Demand Target', icon:'🎯', special:'wdt' },
   yields:{ label:'Yield & Loss', icon:'💧', special:'yields' },
+  shopify:{ label:'Shopify Sync', icon:'🛒', special:'shopify' },
   payables:{ label:'Purchase Orders & Payables', icon:'💳', special:'payables' },   // alias — folded into Purchasing
   reporting:{ label:'Reports', icon:'📊', special:'reporting' },
   users:{ label:'Users & Access', icon:'👤', special:'users' },
@@ -980,7 +1003,7 @@ function setCrumb(extra){
   const link = (state.view==='form'&&!formIsNew) ? ` <span onclick="copyRecordLink()" title="Copy link to this record" style="cursor:pointer;color:var(--muted)">🔗</span>` : '';
   $('crumb').innerHTML = back+`<b>${m.label}</b>`+(extra?` / ${esc(extra)}`:'')+link;
 }
-const DEFAULT_GROUP={ products:'group_1', ingredients:'ingredient_group', supplies:'category', suppliers:'sells_type' };   // products = 3-level hierarchy; ingredients grouped by raw source (Ingredient Master order)
+const DEFAULT_GROUP={ products:'group_1', ingredients:'ingredient_group', supplies:'category', suppliers:'sells_type', production_batches:'run_ref' };   // products = 3-level hierarchy; ingredients grouped by raw source (Ingredient Master order)
 // Tag each supplier row with the ingredient category it mainly supplies (for Group By).
 async function _tagSupplierTypes(supRows){
   let ings=[]; try{ ings=await db.list('ingredients',{}); }catch(e){}
@@ -1020,6 +1043,7 @@ function route(){
     if(m.special==='mrp') return renderMRP();
     if(m.special==='wdt') return renderWDT();
     if(m.special==='yields') return renderYields();
+    if(m.special==='shopify') return renderShopify();
     if(m.special==='payables') return renderPurchasing();   // one screen, kept as a hash alias
     if(m.special==='customorders') return renderCustomOrders();
     if(m.special==='ffcalc') return renderFFCalc();
@@ -1101,19 +1125,63 @@ function controlPanel(){
     ${state.view!=='report'?gb:''}
     ${m.archivable?`<button class="btn sec sm" onclick="state.showArchived=!state.showArchived;route()">${state.showArchived?'Hide archived':'Show archived'}</button>`:''}
     ${(state.model==='purchase_orders'&&state.view==='list')?`<button class="btn sec sm ${state._poWS!==false?'on':''}" onclick="state._poWS=${state._poWS!==false?'false':'true'};route()">${state._poWS!==false?'✕ Ungroup':'⑃ Week → Status'}</button>`:''}
+    ${(state.model==='production_batches'&&state.view==='list')?_pbChips():''}
     ${(state.model==='purchase_orders'&&state.view==='list')?`<button class="btn sec sm ${state._poAll?'on':''}" onclick="state._poAll=${state._poAll?'false':'true'};route()" title="Cancelled and fully received orders are hidden by default — they are finished business.">${state._poAll?'👁 Showing every status':'👁 Live orders only'}</button>`:''}
     <div class="vswitch">${vbtn('list','≣','List')}${m.status?vbtn('kanban','▥','Kanban'):''}${canForm?vbtn('form','▤','Form'):''}${vbtn('report','▦','Report')}</div>`;
+}
+/* One-click answers to the three questions people actually open Production for:
+   what is still a draft, what did we make, and was it product or prep. They set
+   the same facet filters the drawer does, so the two never disagree. */
+function _pbChips(){
+  const f=state.filters||{};
+  const on=(k,v)=>((f[k]||[]).indexOf(v)>=0);
+  const c=(k,v,label,title)=>`<button class="btn sec sm ${on(k,v)?'on':''}" title="${esc(title||'')}"
+    onclick="pbChip('${k}','${esc(v).replace(/'/g,"&#39;")}')">${esc(label)}</button>`;
+  return c('status','draft','Drafts','Planned but not yet confirmed')
+       + c('status','confirmed','Confirmed','Posted to stock')
+       + c('_kind','Product (packs)','Products','Packs of a finished product')
+       + c('_kind','Prep (raw → processed)','Prep','Raw turned into a processed ingredient')
+       + (Object.keys(f).some(k=>(f[k]||[]).length)?`<button class="btn sec sm" onclick="state.filters={};route()">✕ Clear</button>`:'');
+}
+function pbChip(k,v){
+  state.filters=state.filters||{};
+  const a=state.filters[k]=state.filters[k]||[];
+  const i=a.indexOf(v); if(i>=0) a.splice(i,1); else a.push(v);
+  if(!a.length) delete state.filters[k];
+  route();
 }
 let searchTimer;
 function onSearch(v){ state.search=v; clearTimeout(searchTimer); searchTimer=setTimeout(()=>route(),250); }
 /* ---- Advanced search & filters (products / ingredients) ---- */
 const FILTERS={
   products:[ {k:'group_1',l:'Group'},{k:'group_2',l:'Subgroup'},{k:'feeding_style',l:'Feeding style'},{k:'variant',l:'Variant'} ],
-  ingredients:[ {k:'_type',l:'Type'},{k:'ingredient_group',l:'Group'},{k:'category',l:'Category'},{k:'supplier',l:'Supplier'} ]
+  ingredients:[ {k:'_type',l:'Type'},{k:'ingredient_group',l:'Group'},{k:'category',l:'Category'},{k:'supplier',l:'Supplier'} ],
+  production_batches:[ {k:'_kind',l:'Kind'},{k:'status',l:'Status'},{k:'run_ref',l:'Run'},{k:'_week',l:'Week'},{k:'operator',l:'Operator'} ]
 };
 function ingType(r){ if(isSupplyItem(r)) return /sticker|label/i.test(String(r.category||'')+' '+String(r.name||''))?'Sticker':'Supply'; return r.is_intermediate?'Processed':'Raw'; }
-function _rowFacet(model,r,k){ if(k==='_type') return ingType(r); return r[k]; }
-function _searchText(model,r){ const parts= model==='products'? [r.name,r.sku,r.group_1,r.group_2,r.feeding_style,r.variant,r.barcode] : [r.name,r.sku,r.category,r.ingredient_group,r.raw_input,r.supplier,r.supplier1,r.supplier2]; return parts.filter(Boolean).join(' ').toLowerCase(); }
+function _rowFacet(model,r,k){
+  if(k==='_type') return ingType(r);
+  if(k==='_kind') return (r.kind==='output')?'Prep (raw → processed)':'Product (packs)';
+  if(k==='_week') return _wkLabel(r.production_date);
+  return r[k];
+}
+// "Aug 17 – Aug 23" from any date in that Mon–Sun week — one label per week, sortable by the Monday
+function _wkLabel(d){ if(!d) return '(no date)';
+  const t=new Date(String(d)+'T00:00:00'); if(isNaN(t.getTime())) return '(no date)';
+  t.setDate(t.getDate()-((t.getDay()+6)%7));
+  const b=new Date(t.getTime()+6*864e5);
+  const f=x=>x.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+  return f(t)+' – '+f(b);
+}
+function _searchText(model,r){
+  /* Production is searched on the RESOLVED item name, not the SKU column — a
+     batch's name lives in another table, so a server-side column search could
+     never find "Meatballs Ostrich". */
+  const parts = model==='products'  ? [r.name,r.sku,r.group_1,r.group_2,r.feeding_style,r.variant,r.barcode]
+              : model==='production_batches' ? [r._item,r.batch_ref,r.run_ref,r.product_sku,r.status,r.kind,r.operator,r.output_lot,r.production_date]
+              : [r.name,r.sku,r.category,r.ingredient_group,r.raw_input,r.supplier,r.supplier1,r.supplier2];
+  return parts.filter(Boolean).join(' ').toLowerCase();
+}
 function applyAdvFilter(model,rows){
   const terms=(state.search||'').toLowerCase().split(/\s+/).filter(Boolean);
   const f=state.filters||{};
@@ -1162,8 +1230,11 @@ async function renderList(){
   $('content').innerHTML='<div class="empty">Loading…</div>';
   let rows;
   try{
-    if(state.model==='ingredients'||state.model==='products'){
-      rows=await listForModel(state.model);   // fetch all — advanced multi-keyword search + facet filters run client-side
+    if(state.model==='ingredients'||state.model==='products'||state.model==='production_batches'){
+      rows=await listForModel(state.model);   // fetch all — multi-keyword search + facet filters run client-side
+      if(state.model==='production_batches'){                  // resolve the name BEFORE searching it
+        try{ const M=await _pbNameMap(); rows.forEach(r=>{ if(!r.kind) r.kind='product'; r._item=_pbName(M,r.product_sku,r.kind); }); }catch(e){}
+      }
       rows=applyAdvFilter(state.model, rows);
     } else { rows=await db.list(state.model,{search:state.search}); }
   }
@@ -1188,12 +1259,10 @@ async function renderList(){
   const cols=m.list.map(n=>m.fields.find(f=>f.n===n)).filter(f=>f && fieldMode(state.model,f.n)!=='hide');
   /* Production: a batch's SKU is a product on a product batch and an INGREDIENT
      on an output batch, so neither master alone can name every row. */
-  if(state.model==='production_batches'){
-    try{ const nm={};
-      (await db.list('products',{})).forEach(p=>nm[p.sku]=p.name||p.sku);
-      (await listIngredients()).forEach(i=>nm[i.sku]=i.name||i.sku);
-      rows.forEach(r=>{ r._item=nm[r.product_sku]||r.product_sku; if(!r.kind) r.kind='product'; });
-    }catch(e){ rows.forEach(r=>{ r._item=r.product_sku; }); }
+  if(state.model==='production_batches' && rows.some(r=>r._item==null)){
+    try{ const M=await _pbNameMap();
+      rows.forEach(r=>{ if(!r.kind) r.kind='product'; if(r._item==null) r._item=_pbName(M,r.product_sku,r.kind); });
+    }catch(e){ rows.forEach(r=>{ if(r._item==null) r._item=r.product_sku; }); }
   }
   // Purchase Orders: append Total kg + Est. value columns, summed from each PO's lines.
   if(state.model==='purchase_orders'){
@@ -1322,11 +1391,8 @@ async function openForm(idEnc){
   formChildren = m.o2m && idEnc ? await db.children(m.o2m, decodeURIComponent(idEnc)) : [];
   // a production batch names either a product or a processed ingredient
   if(state.model==='production_batches' && formRec.product_sku){
-    try{ const nm={};
-      (await db.list('products',{})).forEach(p=>nm[p.sku]=p.name||p.sku);
-      (await listIngredients()).forEach(i=>nm[i.sku]=i.name||i.sku);
-      formRec._item=nm[formRec.product_sku]||formRec.product_sku;
-    }catch(e){ formRec._item=formRec.product_sku; }
+    try{ const M=await _pbNameMap(); formRec._item=_pbName(M,formRec.product_sku,formRec.kind); }
+    catch(e){ formRec._item=formRec.product_sku; }
   }
   // preload rel options
   for(const f of m.fields) if(f.t==='rel') await relOptions(f.rel);
@@ -1910,6 +1976,10 @@ function repSet(k,v){ repCfg[k]=v; renderReport(); }
    grouped like the count sheet (raw + its processed form together, products by family, supplies apart).
    Ending equals the ledger SUM(qty), so this both explains and cross-checks on-hand. */
 let LS_LOC='all', LS_ACT=false;
+/* Blank on purpose. "Live" is the default because the question this screen
+   answers is what is in the freezer NOW; a date range is something you reach
+   for to explain a variance, not something to be dropped into. */
+let LS_FROM='', LS_TO='';
 async function renderLiveStock(){
   $('cp').innerHTML=`<div class="title">Live Stock <span onclick="openKB('stock_balance')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderLiveStock()">↻ Recompute</button>
@@ -1918,8 +1988,24 @@ async function renderLiveStock(){
       <option value="bulacan"${LS_LOC==='bulacan'?' selected':''}>Bulacan</option>
       <option value="pasig"${LS_LOC==='pasig'?' selected':''}>Pasig</option></select></span>
     <label class="mini" style="margin-left:8px"><input type="checkbox" ${LS_ACT?'checked':''} onchange="LS_ACT=this.checked;renderLiveStock()"> Needs action only</label>
-    <div class="sp"></div><span style="color:var(--muted)">begin + in − used + produced ± moves = ending</span>`;
-  let mov=[],ings=[],prods=[]; try{mov=await db.list('inventory_movements',{per:100000});}catch(e){} try{ings=await listIngredients();}catch(e){} try{prods=await db.list('products',{});}catch(e){}
+    <span class="mini" style="margin-left:10px">From <input type="date" value="${esc(LS_FROM)}" onchange="LS_FROM=this.value;renderLiveStock()"
+      title="Everything before this date is folded into the opening column, so the ending figure stays correct. Blank = from the beginning."></span>
+    <span class="mini">to <input type="date" value="${esc(LS_TO)}" onchange="LS_TO=this.value;renderLiveStock()"
+      title="Stop the clock here. Blank = now — which is what live means."></span>
+    ${(LS_FROM||LS_TO)?`<button class="btn sec sm" onclick="LS_FROM='';LS_TO='';renderLiveStock()">↺ Live</button>`
+      :`<span class="tagf" style="background:#e2f0e4;color:#2d5c22">LIVE · as at now</span>`}
+    <div class="sp"></div><span style="color:var(--muted)">begin + in + produced − used − sold ± moves = ending</span>`;
+  let mov=[],ings=[],prods=[]; try{mov=await db.list('inventory_movements',{per:100000});}catch(e){}
+  /* A date window, not a filter on the ROW — an inventory balance is a running
+     total, so hiding early movements would not narrow the view, it would give
+     a wrong number. FROM only affects which movements are called "opening";
+     everything before it is folded into the opening column, so the ending
+     figure is always right whatever window is chosen. TO simply stops the
+     clock. Both blank = everything up to now, which is what "live" means and
+     is the right default: the question this screen answers is "what is in the
+     freezer right now", and any other default answers a question nobody asked. */
+  if(LS_TO)   mov=mov.filter(v=>String(v.created_at||'').slice(0,10)<=LS_TO);
+  const _lsFrom=LS_FROM||''; try{ings=await listIngredients();}catch(e){} try{prods=await db.list('products',{});}catch(e){}
   const im={}; ings.forEach(i=>im[i.sku]=i); const pm={}; prods.forEach(p=>pm[p.sku]=p);
   const _bs={},_bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
   const matOf=(i)=>{ if(!i||!i.is_intermediate) return (i&&i.name)||''; const p=_procParent(i,_bs,_bn); return (p&&p.name)||i.name; };
@@ -1927,18 +2013,22 @@ async function renderLiveStock(){
   const acc={};
   mov.forEach(v=>{ const loc=v.location_code||'bulacan'; if(LS_LOC!=='all' && loc!==LS_LOC) return;
     const sku=v.ref_sku; if(!sku) return; const key=sku+'|'+(LS_LOC==='all'?'*':loc);
-    const a=acc[key]||(acc[key]={sku,begin:0,recv:0,prod:0,cons:0,tf:0,adj:0,val:0});
-    const q=+v.qty||0, t=v.movement_type||'';
+    const a=acc[key]||(acc[key]={sku,begin:0,recv:0,prod:0,cons:0,tf:0,sold:0,back:0,adj:0,val:0});
+    const q=+v.qty||0; let t=v.movement_type||'';
+    // anything before the window opened IS the opening balance for this view
+    if(_lsFrom && String(v.created_at||'').slice(0,10)<_lsFrom) t='opening';
     if(t==='opening') a.begin+=q;
     else if(t==='receipt') a.recv+=q;
     else if(t==='batch_output'||t==='processing_in') a.prod+=q;
     else if(t==='issue_to_batch'||t==='processing_out') a.cons+=q;
     else if(t==='transfer_in'||t==='transfer_out') a.tf+=q;
-    else a.adj+=q;   // count_adjust and anything else nets here
+    else if(t==='sale') a.sold+=q;                  // Shopify, negative
+    else if(t==='refund'||t==='return') a.back+=q;  // Shopify, positive — it came back
+    else a.adj+=q;   // count_adjust, thaw_loss and anything else nets here
     a.val += q*(+v.unit_cost||0);
   });
 
-  let rows=Object.values(acc).map(a=>{ const end=a.begin+a.recv+a.prod+a.cons+a.tf+a.adj;
+  let rows=Object.values(acc).map(a=>{ const end=a.begin+a.recv+a.prod+a.cons+a.tf+a.sold+a.back+a.adj;
     const isProd=!!pm[a.sku]; const it=isProd?pm[a.sku]:(im[a.sku]||{}); const isSup=!isProd&&isSupplyItem(it);
     const div=(isProd||isSup)?1:1000; const unit=isProd?'packs':(isSup?(it.uom||'units'):'kg');
     // 3-level grouping (Group › Subgroup › Item), matching the count sheet & master data.
@@ -1949,8 +2039,9 @@ async function renderLiveStock(){
     const name=(it.name||a.sku)+((!isProd&&!isSup&&it.is_intermediate)?' — processed':'');
     const par=isProd?(+it.par_packs||0):(+it.reorder_g||+it.par_g||0);
     const below=par>0 && end<par, neg=end< -0.0001;
-    return {sku:a.sku, name, g1, g2, grank, unit, div, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf, adj:a.adj, end, value:a.val, par, below, neg, sort_order:it.sort_order};
-  }).filter(r=> r.begin||r.recv||r.prod||r.cons||r.tf||r.adj);
+    return {sku:a.sku, name, g1, g2, grank, unit, div, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf,
+            sold:a.sold, back:a.back, adj:a.adj, end, value:a.val, par, below, neg, sort_order:it.sort_order};
+  }).filter(r=> r.begin||r.recv||r.prod||r.cons||r.tf||r.sold||r.back||r.adj);
   if(LS_ACT) rows=rows.filter(r=>r.below||r.neg);
 
   const nBelow=rows.filter(r=>r.below).length, nNeg=rows.filter(r=>r.neg).length;
@@ -1970,15 +2061,15 @@ async function renderLiveStock(){
   const _gmin=arr=>Math.min(...arr.map(_lr));
   const byG1={}; rows.forEach(r=>{ (byG1[r.g1]=byG1[r.g1]||[]).push(r); });
   h+=`<div class="repcard"><div style="overflow-x:auto"><table><thead><tr>
-    <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
-  if(!rows.length) h+=`<tr><td colspan="${mh?10:11}" class="empty">${LS_ACT?'Nothing needs action ✅':'No stock movements yet.'}</td></tr>`;
+    <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num" title="Sold on Shopify, less anything refunded or returned">−Sold</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
+  if(!rows.length) h+=`<tr><td colspan="${mh?11:12}" class="empty">${LS_ACT?'Nothing needs action ✅':'No stock movements yet.'}</td></tr>`;
   Object.keys(byG1).sort((a,b)=>_gmin(byG1[a])-_gmin(byG1[b])||cmpGroupKeys(a,b)).forEach(g1=>{
     const g1list=byG1[g1]; const gval=g1list.reduce((s,r)=>s+r.value,0);
-    h+=`<tr style="background:#e7f0e9"><td colspan="${mh?9:9}"><b>${esc(g1)}</b> <span class="mini">· ${g1list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
+    h+=`<tr style="background:#e7f0e9"><td colspan="${mh?10:10}"><b>${esc(g1)}</b> <span class="mini">· ${g1list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
     const byG2={}; g1list.forEach(r=>{ (byG2[r.g2]=byG2[r.g2]||[]).push(r); });
     Object.keys(byG2).sort((a,b)=>_gmin(byG2[a])-_gmin(byG2[b])||cmpGroupKeys(a,b)).forEach(g2=>{
     const list=byG2[g2].slice().sort((a,b)=>_lr(a)-_lr(b)||cmpItems(a,b));
-    h+=`<tr style="background:#f6f8f4"><td colspan="${mh?10:11}" style="padding-left:24px">▸ <b>${esc(g2)}</b> <span class="mini">(${list.length})</span></td></tr>`;
+    h+=`<tr style="background:#f6f8f4"><td colspan="${mh?11:12}" style="padding-left:24px">▸ <b>${esc(g2)}</b> <span class="mini">(${list.length})</span></td></tr>`;
     list.forEach(r=>{ const endCol=r.neg?'var(--danger)':(r.below?'var(--earth,#b5762a)':'var(--ink)');
       const flag=r.neg?'<span style="color:var(--danger);font-weight:700">🔴 negative</span>':(r.below?'<span style="color:var(--earth,#b5762a);font-weight:700">⚠ reorder</span>':'<span class="mini" style="color:var(--ok)">ok</span>');
       const cl=r.below||r.neg?' style="cursor:pointer"':' style="cursor:pointer"';
@@ -1986,7 +2077,9 @@ async function renderLiveStock(){
       h+=`<tr${cl} onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open item">
         <td>${esc(r.name)}</td><td class="mini">${esc(r.unit)}</td>
         <td class="num">${qf(r.begin,r.div)}</td><td class="num">${r.recv?qf(r.recv,r.div):'—'}</td><td class="num">${r.prod?qf(r.prod,r.div):'—'}</td>
-        <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td><td class="num">${r.tf?qf(r.tf,r.div):'—'}</td><td class="num">${r.adj?qf(r.adj,r.div):'—'}</td>
+        <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td>
+        <td class="num"${(r.sold||r.back)?' title="sold '+qf(r.sold,r.div)+(r.back?' · back '+qf(r.back,r.div):'')+'"':''}>${(r.sold||r.back)?qf(r.sold+r.back,r.div):'—'}</td>
+        <td class="num">${r.tf?qf(r.tf,r.div):'—'}</td><td class="num">${r.adj?qf(r.adj,r.div):'—'}</td>
         <td class="num" style="color:${endCol}"><b>${qf(r.end,r.div)}</b></td>${mh?'':`<td class="num">${fmt(r.value)}</td>`}<td>${flag}</td></tr>`; });
     });
   });
@@ -3030,6 +3123,10 @@ let _wdtDate='', _wdtRows=[], _wdtCo=[], _wdtRaw=[], _wdtSrc={};
    fact — and then "how much had we made by Friday" is a different question from
    "how much have we made now". _wdtAsOf answers the first. */
 let _wdtPlotRef='', _wdtAsOf='', _wdtPlots=[];
+/* The window the whole screen reads over — demand AND production. Without it,
+   "made" was anything from the plot date onwards for ever, so last month's run
+   still counted against this week. Blank = the plot's own week. */
+let _wdtFrom='', _wdtTo='';
 function wdtWeekOf(d){ return d||MRPDATE||todayISO(); }
 async function wdtLoad(){
   // every saved plot, newest first — this is the list the picker offers
@@ -3077,13 +3174,21 @@ async function wdtLoad(){
   const co=await coOpenDemand().catch(()=>({}));
   Object.keys(co).forEach(sku=>{ if(!dem[sku]){ dem[sku]=co[sku].packs; src[sku]=(src[sku]||[]).concat(['custom order']); } });
   // produced so far this week comes off the target
+  /* One window, both sides. FROM defaults to the plot's week, TO to the as-of
+     date (or open). Anything made inside it counts — including products nobody
+     planned, which used to vanish from the week entirely. */
+  const from=_wdtFrom||date, to=_wdtTo||asOf||'';
   const made={}; try{ let rows;
-    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,production_date,kind&status=eq.confirmed&production_date=gte.'+encodeURIComponent(date));
-    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed'&&String(b.production_date||'')>=String(date));
+    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,production_date,kind&status=eq.confirmed&production_date=gte.'+encodeURIComponent(from));
+    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed'&&String(b.production_date||'')>=String(from));
     (rows||[]).filter(b=>b.kind!=='output')
-      .filter(b=>!asOf || String(b.production_date||'')<=asOf)   // as-of: nothing after the date counts
+      .filter(b=>!to || String(b.production_date||'')<=to)
       .forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
+  /* Made without a target. The week owes nothing for these, but the team did
+     the work and the packs are real — leaving them off made the sheet read as
+     if the day had not happened. */
+  Object.keys(made).forEach(sku=>{ if(!(dem[sku]>0) && made[sku]>0){ dem[sku]=0; src[sku]=(src[sku]||[]).concat(['made, not planned']); } });
   _wdtRows=Object.keys(dem).map(sku=>{
     const p=pBy[sku]||{sku,name:sku};
     const target=+dem[sku]||0, oh=+stock[sku]||0, done=+made[sku]||0;
@@ -3094,8 +3199,9 @@ async function wdtLoad(){
     return {sku, name:prodLabel(p,{noSku:true}), label:prodLabel(p),
             g1:p.group_1||'Products', g2:p.group_2||p.family||'Other',
             target, done, remaining, oh, cover,
+            unplanned:!(+dem[sku]>0) && done>0,
             isCustom:/^CUST-/.test(sku), src:(src[sku]||[]).join(', ')};
-  }).sort((a,b)=> a.cover-b.cover || b.remaining-a.remaining);
+  }).sort((a,b)=> (a.unplanned?1:0)-(b.unplanned?1:0) || a.cover-b.cover || b.remaining-a.remaining);
   _wdtCo=[];
   const coAll=co; Object.keys(coAll).forEach(sku=>{ (coAll[sku].orders||[]).forEach(o=>{
     _wdtCo.push({sku, product:(pBy[sku]&&prodLabel(pBy[sku],{noSku:true}))||sku, ref:o.ref, customer:o.customer||'—',
@@ -3123,7 +3229,7 @@ async function wdtLoad(){
               rawSku:p?p.sku:'', rawName:p?p.name:'', ohRawG:p?(+ohI[p.sku]||0):0, yieldPct:Math.round(y*1000)/10};
     }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat)||b.procG-a.procG);
   }catch(e){}
-  _wdtSrc={plot:plot?(plot.data&&plot.data.ref||plot.ref||''):'', date, asOf, histor};
+  _wdtSrc={plot:plot?(plot.data&&plot.data.ref||plot.ref||''):'', date, asOf, histor, from, to};
 }
 function _wdtCover(r){
   if(!r.remaining) return '<span class="badge b-received">done</span>';
@@ -3564,6 +3670,120 @@ function puBody(){
   });
   return h||'<tr><td colspan="8" class="empty">Nothing matches that filter.</td></tr>';
 }
+/* ============ Shopify sync — what came in, what goes out ==================
+   The Apps Script does the talking; this screen is where you find out whether
+   it worked. Two questions it has to answer without anyone opening Supabase:
+   did every sale land, and does what Shopify is about to be told match what is
+   actually at Pasig.                                                        */
+let _shDays=14, _shRows=[], _shStock=[], _shErr=[];
+async function shLoad(){
+  const from=new Date(Date.now()-_shDays*864e5).toISOString().slice(0,10);
+  _shRows=[]; _shStock=[]; _shErr=[];
+  try{
+    if(isLive()) _shRows=await sb('shopify_events?select=*&occurred_at=gte.'+from+'&order=occurred_at.desc&limit=2000');
+    /* No table at all is a different thing from an empty table: one means the
+       migration has not been run, the other means a quiet week. Say which. */
+    else if(!DEMO.shopify_events) _shRows=null;
+    else _shRows=DEMO.shopify_events.filter(r=>String(r.occurred_at||'').slice(0,10)>=from);
+  }catch(e){ _shRows=null; }
+  _shErr=(_shRows||[]).filter(r=>r.post_error);
+  try{
+    if(isLive()) _shStock=await sb('wr_shopify_stock?select=*&order=available_pasig.desc');
+    else {
+      const oh={}; (DEMO.inventory_movements||[]).forEach(m=>{ if(m.kind==='product'&&m.location_code==='pasig') oh[m.ref_sku]=(oh[m.ref_sku]||0)+(+m.qty||0); });
+      _shStock=(DEMO.products||[]).map(p=>({variant_sku:p.sku,product_name:p.name,available_pasig:Math.max(0,Math.floor(oh[p.sku]||0))}));
+    }
+  }catch(e){ _shStock=null; }
+}
+async function renderShopify(){
+  $('crumb').innerHTML='<b>Shopify sync</b>';
+  $('cp').innerHTML=`<div class="title">Shopify sync <span onclick="openKB('shopify')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <label class="mini">Last <select onchange="_shDays=+this.value;renderShopify()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+      ${[7,14,30,90].map(n=>`<option value="${n}" ${_shDays===n?'selected':''}>${n} days</option>`).join('')}</select></label>
+    <button class="btn sec sm" onclick="renderShopify()">↻ Refresh</button>
+    <button class="btn sec sm" onclick="shCsv()">⬇ CSV</button>
+    <div class="sp"></div><span style="color:var(--muted)">sales in · Pasig stock out</span>`;
+  $('content').innerHTML='<div class="repcard"><div class="empty">Reading the sync…</div></div>';
+  await shLoad();
+  if(_shRows===null){
+    $('content').innerHTML=`<div class="repcard"><div class="repbar"><span>Not set up yet</span></div>
+      <div class="hint" style="margin:10px 0">The <code>shopify_events</code> table is not there, so nothing has been synced.<br><br>
+      <b>1.</b> Run <b>${esc(WR_SQL_FILE)}</b> in Supabase — PART 10 creates the table, the trigger and the stock view.<br>
+      <b>2.</b> Open the Apps Script <code>wr-shopify-sync.gs</code>, fill in the Script Properties, and run <b>runSelfTest()</b>.<br>
+      <b>3.</b> With <code>DRY_RUN = true</code>, run <b>pullShopify()</b> and <b>pushShopify()</b> and read the log.<br>
+      <b>4.</b> Only then set <code>DRY_RUN = false</code> and <b>installTriggers()</b>.</div></div>`;
+    return;
+  }
+  const by=t=>_shRows.filter(r=>r.event_type===t);
+  const sum=rs=>rs.reduce((s,r)=>s+(+r.qty||0),0);
+  const sales=by('sale'), back=by('refund').concat(by('return'));
+  const val=sales.reduce((s,r)=>s+(+r.qty||0)*(+r.unit_price||0),0);
+  const last=_shRows.length?String(_shRows[0].occurred_at||'').slice(0,16).replace('T',' '):'—';
+  const stale=_shRows.length && (Date.now()-new Date(_shRows[0].occurred_at).getTime())>36*36e5;
+  const kpi=(l,v,s,c)=>`<div style="flex:1;min-width:140px;padding:8px 11px;border:1px solid var(--line);border-radius:8px;background:#fff">
+    <div class="mini" style="color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-size:10px">${l}</div>
+    <div style="font-size:19px;font-weight:800;line-height:1.25${c?';color:'+c:''}">${v}</div>
+    <div class="mini" style="color:var(--muted)">${s}</div></div>`;
+  const negs=(_shStock||[]).length?[]:[];
+  let h=`<div class="repcard" style="padding:12px 14px">
+    <div style="display:flex;gap:9px;flex-wrap:wrap">
+      ${kpi('Sold', sum(sales)+' packs', sales.length+' line(s) in '+_shDays+' days')}
+      ${kpi('Came back', sum(back)+' packs', back.length+' refund/return line(s)', back.length?'var(--earth,#b5762a)':'')}
+      ${kpi('Sales value', fmt(val), 'at the Shopify price')}
+      ${kpi('Did not post', _shErr.length, _shErr.length?'needs a look':'all clean', _shErr.length?'var(--danger)':'#4e7a3e')}
+      ${kpi('Last event', last, stale?'nothing for over 36 h':'sync looks alive', stale?'var(--danger)':'')}
+    </div>
+    <div class="hint" style="margin:10px 0 0">Every event carries Shopify's own order and line id, and the database refuses a second copy of the same one —
+      so a retry or a replayed webhook cannot deduct the same sale twice. A refund only returns stock when Shopify says the goods were
+      <b>restocked</b>; money refunded without the food coming back is not inventory.</div>
+  </div>`;
+  if(_shErr.length){
+    h+=`<div class="repcard" style="margin-top:12px;border-left:4px solid var(--danger)">
+      <div class="repbar"><span>⚠ ${_shErr.length} event(s) did not post</span>
+        <span class="mini" style="color:var(--muted)">almost always a SKU that is not in Products</span></div>
+      <div style="overflow-x:auto"><table><thead><tr><th>When</th><th>Type</th><th>Order</th><th>SKU</th><th class="num">Qty</th><th>Why</th></tr></thead><tbody>
+      ${_shErr.slice(0,25).map(r=>`<tr><td class="mini">${esc(String(r.occurred_at||'').slice(0,16).replace('T',' '))}</td>
+        <td>${esc(r.event_type)}</td><td class="mini">${esc(r.order_name||r.shop_order_id)}</td>
+        <td><code>${esc(r.variant_sku)}</code></td><td class="num">${r.qty}</td>
+        <td class="mini" style="color:var(--danger)">${esc(r.post_error)}</td></tr>`).join('')}
+      </tbody></table></div></div>`;
+  }
+  const topStock=(_shStock||[]).filter(r=>+r.available_pasig>0).slice(0,12);
+  h+=`<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
+    <div class="repcard" style="flex:1;min-width:340px">
+      <div class="repbar"><span>Recent events</span><span class="mini" style="color:var(--muted)">newest first</span></div>
+      <div style="overflow-x:auto;max-height:460px" class="stickyhead"><table><thead><tr>
+        <th>When</th><th>Type</th><th>Order</th><th>Item</th><th class="num">Qty</th></tr></thead><tbody>
+        ${_shRows.slice(0,60).map(r=>{ const back=r.event_type!=='sale';
+          return `<tr><td class="mini">${esc(String(r.occurred_at||'').slice(0,16).replace('T',' '))}</td>
+          <td><span style="background:${back?'#fff3d6':'#e2f0e4'};color:${back?'#7a5a10':'#2d5c22'};border-radius:20px;padding:1px 8px;font-size:11px;font-weight:700">${esc(r.event_type)}</span></td>
+          <td class="mini">${esc(r.order_name||r.shop_order_id)}</td>
+          <td>${esc(r.note||r.variant_sku)}<div class="mini" style="color:var(--muted)"><code>${esc(r.variant_sku)}</code></div></td>
+          <td class="num">${back?'+':'−'}${r.qty}</td></tr>`; }).join('')
+          ||'<tr><td colspan="5" class="empty">No events in this window.</td></tr>'}
+      </tbody></table></div>
+    </div>
+    <div class="repcard" style="flex:0 0 34%;min-width:280px">
+      <div class="repbar"><span>What Shopify will be told</span><span class="mini" style="color:var(--muted)">Pasig only</span></div>
+      ${topStock.length?`<table><tbody>${topStock.map(r=>`<tr style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.variant_sku)).replace(/'/g,'&#39;')}')">
+        <td>${esc(r.product_name||r.variant_sku)}<div class="mini" style="color:var(--muted)"><code>${esc(r.variant_sku)}</code></div></td>
+        <td class="num"><b>${r.available_pasig}</b></td></tr>`).join('')}</tbody></table>
+        ${(_shStock||[]).filter(r=>+r.available_pasig>0).length>12?`<div class="mini" style="color:var(--muted);margin-top:6px">+ ${(_shStock||[]).filter(r=>+r.available_pasig>0).length-12} more</div>`:''}`
+        :'<div class="empty">Nothing sellable at Pasig.</div>'}
+      <div class="hint" style="margin-top:8px">Bulacan is production stock and is deliberately excluded — it is not sellable until it has been
+        transferred, and publishing it would let someone buy what is not at the selling site.</div>
+    </div>
+  </div>`;
+  $('content').innerHTML=h;
+}
+function shCsv(){
+  const aoa=[['When','Type','Order','SKU','Item','Qty','Unit price','Customer','Posted','Error']]
+    .concat((_shRows||[]).map(r=>[r.occurred_at,r.event_type,r.order_name||r.shop_order_id,r.variant_sku,r.note||'',
+      r.qty,r.unit_price||'',r.customer||'',r.posted?'yes':'no',r.post_error||'']));
+  const csv=aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':(c==null?'':c)).join(',')).join('\n');
+  dlBlob(csv,'WR_shopify_'+todayISO()+'.csv','text/csv'); toast('Downloaded');
+}
+
 async function renderPurchasing(){
   $('crumb').innerHTML='<b>Purchase Orders</b>';
   $('cp').innerHTML=`<div class="title">Purchase Orders <span onclick="openKB('purchasing')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
@@ -3778,8 +3998,13 @@ async function renderWDT(){
       </select>
       <span class="mini" style="color:var(--muted)">week of</span>
       <input type="date" value="${esc(_wdtSrc.date)}" onchange="_wdtPlotRef='';_wdtDate=this.value;renderWDT()" title="Or pick the week directly — the plot saved for that date is used if there is one">
+      <span class="mini" style="color:var(--muted)">counting production</span>
+      <input type="date" value="${esc(_wdtSrc.from||'')}" onchange="_wdtFrom=this.value;renderWDT()" title="First day of production counted against this week. Blank = the plot's own date.">
+      <span class="mini" style="color:var(--muted)">to</span>
+      <input type="date" value="${esc(_wdtSrc.to||'')}" onchange="_wdtTo=this.value;renderWDT()" title="Last day counted. Blank = up to today.">
+      ${(_wdtFrom||_wdtTo)?`<button class="btn sec sm" onclick="_wdtFrom='';_wdtTo='';renderWDT()">↺ the plot's week</button>`:''}
       <span class="mini" style="color:var(--muted)">as of</span>
-      <input type="date" value="${esc(_wdtSrc.asOf||'')}" onchange="_wdtAsOf=this.value;renderWDT()" title="Leave blank for live. Set it to read the week as it stood on that day — packs made after it, and stock moved after it, are ignored.">
+      <input type="date" value="${esc(_wdtSrc.asOf||'')}" onchange="_wdtAsOf=this.value;renderWDT()" title="Leave blank for live. Set it to read the week as it stood on that day — stock moved after it is ignored.">
       ${_wdtSrc.histor?`<button class="btn sec sm" onclick="_wdtAsOf='';renderWDT()">↺ live</button>`:'<span class="mini" style="color:var(--muted)">live</span>'}
       ${_wdtSrc.plot?`<span class="mini">from plot <b>${esc(_wdtSrc.plot)}</b></span>`:'<span class="mini" style="color:var(--earth,#b5762a)">no saved plot for this week — showing the demand table and custom orders only</span>'}
       ${_wdtSrc.histor?`<span class="tagf" style="background:#fff3d6;color:#7a5a10">as at ${esc(_wdtSrc.asOf)} — not today</span>`:''}</div>
@@ -3790,9 +4015,9 @@ async function renderWDT(){
       <div class="stile"><div class="v">${cust}</div><div class="l">Custom SKUs</div></div></div>
     <div class="hint" style="margin:0 0 8px"><b>Priority is by cover, not by size.</b> A product with none in the freezer against an outstanding order leads the list, whatever the quantity — that is the one that stops a delivery. Sorted least-covered first.</div>
     <div style="overflow-x:auto" class="stickyhead"><table><thead><tr><th>#</th><th>Product</th><th class="num">Target</th><th class="num">Made</th><th class="num">Still to make</th><th class="num">On hand</th><th>Cover</th><th>Where it came from</th></tr></thead><tbody>
-    ${_wdtRows.map((r,i)=>`<tr${r.remaining>0&&r.oh<=0?' style="background:#fdf3f0"':''}>
+    ${_wdtRows.map((r,i)=>`<tr${r.unplanned?' style="background:#f6f8f4"':(r.remaining>0&&r.oh<=0?' style="background:#fdf3f0"':'')}>
       <td class="mini" style="color:var(--muted)">${i+1}</td>
-      <td><b>${esc(r.name)}</b>${r.isCustom?' <span class="tagf" style="background:#f3e8f7;color:#6b3f7a">CUSTOM</span>':''}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code> · ${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div></td>
+      <td><b>${esc(r.name)}</b>${r.isCustom?' <span class="tagf" style="background:#f3e8f7;color:#6b3f7a">CUSTOM</span>':''}${r.unplanned?' <span class="tagf" style="background:#eef1ea;color:#4e7a3e">MADE, NOT PLANNED</span>':''}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code> · ${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div></td>
       <td class="num"><b>${r.target}</b></td><td class="num mini" style="color:var(--muted)">${r.done||'—'}</td>
       <td class="num"><b style="color:${r.remaining?'var(--berry)':'#4e7a3e'}">${r.remaining}</b></td>
       <td class="num">${r.oh}</td><td>${_wdtCover(r)}</td>
@@ -11305,6 +11530,15 @@ const KB = {
        'A delivery fee marked payable to a FLEET SERVICE is its own payable. It never reduces the supplier balance, so a courier payment cannot make a supplier look settled.',
        'Weeks run Monday to Sunday off the ORDER date, because that is when the commitment was made — not when it was paid or delivered.',
        'Cancelled orders are excluded from every figure here, as they are in every other report.']},
+  shopify:{d:'Whether the Shopify sync is working, and what Shopify is about to be told.',
+    h:['Sales, refunds and returns arrive here and become stock movements at Pasig',
+       'Anything that did not post is listed with the reason — usually a SKU that is not in Products',
+       'The right-hand panel is exactly what gets pushed back as the sellable quantity'],
+    l:['DOUBLE-COUNTING IS THE RISK, so it is made impossible rather than unlikely. Every event carries Shopify\'s own order id and line id, and the database has a unique key on the pair — a retry, a re-run or a replayed webhook is refused, not deducted again.',
+       'The Apps Script never writes a stock movement. It writes a raw event; a database trigger turns each into exactly one movement. That way there is one place where a sale becomes stock, and it can be read.',
+       'A REFUND ONLY RETURNS STOCK IF SHOPIFY SAYS IT WAS RESTOCKED. Money refunded without the food coming back is not inventory — adding it would invent food that is in a customer\'s bin.',
+       'PASIG ONLY is pushed back. Bulacan is production stock and is not sellable until transferred; publishing it would let a customer buy what is not at the selling site.',
+       'A negative Pasig balance is published as ZERO, never as a negative. A negative balance is a counting problem to fix, not a number to broadcast.']},
   home:{d:'Your landing page — KPI tiles and quick links into every module.',h:['Glance at counts (ingredients, products, suppliers, open POs)','Click a card to jump into that module','Use the search box or ⌘K to find anything'],l:['KPIs are live counts from the database','Nothing is entered here — it summarizes other modules']},
   ingredients:{d:'Master list of everything you buy or make into product: raw meats, organs, veg, fruit, seeds, supplies, plus live animals and internal intermediates.',h:['Open a row to edit price, category, storage, par, lead time','Set the processing method + yield so costing is accurate','Mark live-animal / intermediate items with their flags'],l:['₱/kg usable = raw price ÷ processing yield — the true cost in a pack','moving_avg_cost auto-updates from goods receipts (perpetual costing)','Intermediates (e.g. Rabbit Ground Meat) derive cost from their source × dress-out yield']},
   products:{d:'Sellable finished goods, grouped into families with size variants, each with its own SKU, price and recipe (BOM).',h:['Open a product to edit price, pack size, feeding style','Edit the Recipe (BOM) lines — usable grams per pack','Add variants as separate products under the same family'],l:['BOM grams are USABLE grams in the pack','Raw needed for production = usable ÷ ingredient yield','Cost/pack is computed from actual ingredients issued at production']},
