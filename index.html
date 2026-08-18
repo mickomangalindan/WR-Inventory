@@ -1451,11 +1451,81 @@ async function renderForm(){
       <div class="sub">${esc(m.label)} ${formIsNew?'· new record':''}${stateBadge}</div></div>
     ${fieldsArea}
     ${(state.model==='purchase_orders'&&!formIsNew)?poPaymentsPanel(formRec,formChildren):''}
+    ${(state.model==='production_batches'&&!formIsNew)?'<div id="pbIng" style="padding:0 22px 4px"><div class="mini" style="color:var(--muted)">Reading what this batch used…</div></div>':''}
     ${!formIsNew?`<div style="padding:4px 22px 14px">${attachHtml()}</div>`:''}</div>`;
   const left=sheet+formbar;
   const _wide=m.o2m?' wide':'';   // line-item records use the full screen
   $('content').innerHTML=`<div class="formwrap${_wide}">${ !formIsNew ? `<div class="formcols"><div>${left}</div><div class="sidecol">${notesPanelHtml()}${chatterHtml()}</div></div>` : left }</div>`;
   if(m.o2m) renderLines();
+  if(state.model==='production_batches'&&!formIsNew) pbIngredients();
+}
+/* ---- What a production batch actually consumed -----------------------------
+   The record showed packs and a yield and nothing about the ingredients, so the
+   only way to answer "what went into this batch" was to read the movement
+   ledger by hand. Two sources, and they answer different questions:
+     batch_issues        what was PLANNED against what was ACTUALLY used
+     inventory_movements what the ledger really took out of stock
+   Both are shown, because a difference between them is worth seeing.        */
+async function pbIngredients(){
+  const el=$('pbIng'); if(!el) return;
+  const ref=formRec.batch_ref; if(!ref){ el.innerHTML=''; return; }
+  let iss=[], mv=[], ings=[], bom=[];
+  try{ iss=(await db.list('batch_issues',{})).filter(x=>String(x.batch_ref)===String(ref)); }catch(e){}
+  try{ mv=(await db.list('inventory_movements',{})).filter(x=>String(x.note||'')==='Production '+ref); }catch(e){}
+  try{ ings=await listIngredients(); }catch(e){}
+  try{ bom=(await db.list('bom_lines',{})).filter(b=>b.product_sku===formRec.product_sku); }catch(e){}
+  const im={}; ings.forEach(i=>im[i.sku]=i);
+  const ctxAll=_outIngCtx(ings); const ctx=ctxAll.ctx;
+  const packs=+formRec.good_packs||0;
+  const rows={};
+  const put=(sku,k,v)=>{ const r=rows[sku]=rows[sku]||{sku,planG:0,actG:0,ledG:0,rawG:0}; r[k]+=v; };
+  bom.forEach(b=>put(b.ingredient_sku,'planG',(+b.usable_g||0)*packs));
+  iss.forEach(x=>{ put(x.ingredient_sku,'actG',+x.actual_processed_g||0);
+    if(!bom.length) put(x.ingredient_sku,'planG',+x.expected_processed_g||0);
+    put(x.ingredient_sku,'rawG',+x.actual_raw_g||0); });
+  mv.filter(x=>x.kind==='ingredient').forEach(x=>put(x.ref_sku,'ledG',Math.abs(+x.qty||0)));
+  const list=Object.values(rows).map(r=>{
+    const it=im[r.sku]||{}; const cl=_countIngClass(it,ctx)||{}; const cat=_ksCat(cl.g1||it.category||'');
+    const cost=(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000;
+    const used=r.ledG||r.actG||r.planG;
+    return {...r, name:_outName(it,cl)||it.name||r.sku, cat:cat.k, catLabel:cat.l, color:cat.c,
+            used, php:used*cost};
+  }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat)||b.used-a.used);
+  if(!list.length){
+    el.innerHTML=`<div class="repcard" style="margin:0 0 12px"><div class="repbar"><span>Ingredients used</span></div>
+      <div class="empty">Nothing recorded against this batch yet.${formRec.status==='draft'?' It is still a draft — ingredients post when the run is confirmed.':' If the run was confirmed, the movements may have been skipped — run System Check.'}</div></div>`;
+    return;
+  }
+  const kg=g=>(Math.round((+g||0)/10)/100).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:3})+' kg';
+  const T=list.reduce((a,r)=>({plan:a.plan+r.planG,used:a.used+r.used,raw:a.raw+r.rawG,php:a.php+r.php}),{plan:0,used:0,raw:0,php:0});
+  let body='',last='';
+  list.forEach(r=>{
+    if(r.cat!==last){ last=r.cat;
+      body+=`<tr class="grp"><td colspan="6" style="background:${r.color};color:#fff;font-weight:700;padding:4px 9px">${esc(r.catLabel)}</td></tr>`; }
+    const gap=r.planG>0?r.used-r.planG:0;
+    body+=`<tr style="box-shadow:inset 4px 0 0 ${r.color}">
+      <td><b>${esc(r.name)}</b></td>
+      <td class="num mini" style="color:var(--muted)">${r.planG?kg(r.planG):'—'}</td>
+      <td class="num"><b>${kg(r.used)}</b></td>
+      <td class="num mini" style="color:${Math.abs(gap)<1?'var(--muted)':(gap>0?'var(--earth,#b5762a)':'#4e7a3e')}">${r.planG?((gap>0?'+':'')+kg(gap)):'—'}</td>
+      <td class="num mini" style="color:var(--muted)">${r.rawG?kg(r.rawG):'—'}</td>
+      <td class="num">${fmt(r.php)}</td></tr>`;
+  });
+  el.innerHTML=`<div class="repcard" style="margin:0 0 12px">
+    <div class="repbar"><span>Ingredients used — ${list.length} item(s)</span>
+      <span class="mini" style="color:var(--muted)">${packs?packs+' packs · ':''}what the ledger actually took out of stock</span></div>
+    <div style="overflow-x:auto"><table><thead><tr>
+      <th>Ingredient</th><th class="num">Recipe</th><th class="num">Used</th><th class="num">vs recipe</th>
+      <th class="num">Raw processed</th><th class="num">Value</th></tr></thead>
+      <tbody>${body}</tbody>
+      <tfoot><tr style="font-weight:700;border-top:2px solid var(--line)">
+        <td>Total</td><td class="num mini" style="color:var(--muted)">${T.plan?kg(T.plan):'—'}</td>
+        <td class="num">${kg(T.used)}</td><td class="num mini">${T.plan?((T.used-T.plan>0?'+':'')+kg(T.used-T.plan)):'—'}</td>
+        <td class="num mini" style="color:var(--muted)">${T.raw?kg(T.raw):'—'}</td>
+        <td class="num">${fmt(T.php)}</td></tr>
+        ${packs?`<tr><td colspan="5" class="mini" style="color:var(--muted)">Per pack</td>
+          <td class="num mini" style="color:var(--muted)">${fmt(T.php/packs)}${formRec.cost_per_pack?` <span title="recorded on the batch">(recorded ${fmt(formRec.cost_per_pack)})</span>`:''}</td></tr>`:''}
+      </tfoot></table></div></div>`;
 }
 function fSet(n,v){ formRec[n]=v; }
 function switchFormTab(i){ formTab=i; const m=MODELS[state.model];
@@ -4395,9 +4465,30 @@ async function prodCostMap(){
   const m={}; boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100; m[b.product_sku]=(m[b.product_sku]||0)+((+b.usable_g||0)/(y||1))/1000*(+it.moving_avg_cost_kg||+it.list_price_kg||0); }); return m; }
 /* ---- Idempotency: never post the same document to the ledger twice ---- */
 let _postLock=false;                                  // blocks overlapping double-clicks (single user)
-async function movementExists(note){                  // has this source already posted? (re-entry / 2-user guard)
-  if(isLive()){ try{ const r=await sb('inventory_movements?select=id&note=eq.'+encodeURIComponent(note)+'&limit=1'); return r.length>0; }catch(e){ return false; } }
-  return (DEMO.inventory_movements||[]).some(m=>m.note===note);
+/* Has this source already posted? (re-entry / 2-user guard)
+   The note ALONE is not enough. A run reference can be reused — reopen a plan and
+   /01 is minted again — and if the ledger already carries "Production …/01" for a
+   DIFFERENT product, matching on the note alone silently skips the new batch: the
+   packs never reach stock and the ingredients are never issued, with no error.
+   That is exactly what happened to PR-08152026 V01/01 and /02 on 17 Aug. So the
+   guard asks "this note AND this item", and a note held by another item is a
+   collision to shout about, not a reason to skip. */
+async function movementExists(note, sku){
+  if(isLive()){ try{
+      const q='inventory_movements?select=id,ref_sku&note=eq.'+encodeURIComponent(note)+'&limit=20';
+      const r=await sb(q);
+      return sku ? r.some(x=>String(x.ref_sku)===String(sku)) : r.length>0;
+    }catch(e){ return false; } }
+  return (DEMO.inventory_movements||[]).some(m=>m.note===note && (!sku||String(m.ref_sku)===String(sku)));
+}
+// the same note, but standing against a different item — a reference collision
+async function movementClash(note, sku){
+  if(!sku) return null;
+  let rows=[];
+  if(isLive()){ try{ rows=await sb('inventory_movements?select=ref_sku&note=eq.'+encodeURIComponent(note)+'&limit=20'); }catch(e){ return null; } }
+  else rows=(DEMO.inventory_movements||[]).filter(m=>m.note===note);
+  const other=rows.find(x=>String(x.ref_sku)!==String(sku));
+  return other?String(other.ref_sku):null;
 }
 /* ---- Column masking: use the role-gated *_secure views + definer RPCs when they exist ---- */
 let _secureViews;                                     // undefined = not yet probed
@@ -8634,7 +8725,16 @@ async function prodActualsApply(){
     // 2) per batch: finished output + mix draw-down + batch issues (actuals allocated by share)
     let posted=0,failed=0,drawn=0;
     for(const r of recs){ const packs=+r.good_packs||0; if(packs<=0) continue;
-      if(await movementExists('Production '+r.batch_ref)) continue;
+      if(await movementExists('Production '+r.batch_ref, r.product_sku)) continue;   // genuinely already posted
+      const _clash=await movementClash('Production '+r.batch_ref, r.product_sku);
+      if(_clash){
+        /* The reference belongs to something else. Post anyway — the packs are
+           real — but say so, because the ledger now has one note against two
+           items and somebody will have to read it later. */
+        sysLog('production_batches',prodRunRef,'⚠ Batch reference '+r.batch_ref+' was already used in the ledger by '+ingName(_clash)+
+          ' — this run\'s '+ingName(r.product_sku)+' posted under the same reference. Renumber the run if you can.');
+        toast('⚠ '+r.batch_ref+' was already used by another item — posted anyway, check the log',true);
+      }
       const cpp=Math.round((cm[r.product_sku]||0)*100)/100;
       const _bb=addDaysISO(prodPlanDate||todayISO(), _shelfBy[r.product_sku]||DEFAULT_FG_SHELF);   // best-before = production date + shelf life
       try{ await db.update('production_batches','batch_ref',r.batch_ref,{cost_per_pack:cpp,best_before:_bb}); }catch(e){}
@@ -10937,6 +11037,22 @@ async function renderSelfTest(){
         if(rec>oq+0.005) over.push(ingName(l.ingredient_sku)+' +'+(Math.round((rec-oq)*100)/100)+' kg on '+o.po_ref); });
     }
     return [true, over.length?(over.length+' line(s) came in over: '+over.slice(0,3).join('; ')+(over.length>3?' …':'')):'nothing over-delivered'];
+  });
+  /* Confirmed production actually reached stock. A batch row that says 71 packs
+     while the ledger has no batch_output for it is the reference-collision
+     failure: the row looks right, the freezer is short. */
+  T('Every confirmed batch reached stock', async()=>{
+    const bs=(await db.list('production_batches',{})).filter(b=>b.status==='confirmed'&&b.kind!=='output'&&(+b.good_packs||0)>0);
+    if(!bs.length) return [true,'no confirmed product batches yet'];
+    const mv=(await db.list('inventory_movements',{})).filter(m=>m.movement_type==='batch_output');
+    const bad=bs.filter(b=>!mv.some(m=>m.note==='Production '+b.batch_ref && String(m.ref_sku)===String(b.product_sku)));
+    return [bad.length===0, bad.length?(bad.length+' batch(es) never posted: '+bad.map(b=>b.batch_ref+' · '+b.good_packs+' packs of '+ingName(b.product_sku)).slice(0,3).join('; ')):bs.length+' batches OK'];
+  });
+  T('No batch reference used by two items', async()=>{
+    const mv=(await db.list('inventory_movements',{})).filter(m=>m.movement_type==='batch_output'&&String(m.note||'').indexOf('Production ')===0);
+    const by={}; mv.forEach(m=>{ (by[m.note]=by[m.note]||new Set()).add(String(m.ref_sku)); });
+    const clash=Object.keys(by).filter(k=>by[k].size>1);
+    return [clash.length===0, clash.length?(clash.length+' reference(s) held by two items: '+clash.slice(0,3).join('; ')):Object.keys(by).length+' references unique'];
   });
   T('Orders with lines still attached', async()=>{
     const po=(await db.list('purchase_orders',{})).filter(o=>!['cancelled','open','draft'].includes(o.status||''));
