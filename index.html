@@ -4449,6 +4449,39 @@ async function renderMRP(){
           ||'<tr><td colspan="8" class="empty">No custom orders exist yet.</td></tr>'}</tbody></table></div></div>`;
     }
   }
+  /* ---- Demand that exists but is on no plot -----------------------------
+     Two stores hold demand and only one of them is drawn here. The `demand`
+     table is where sheet imports, the Shopify pull and anything loaded by SQL
+     land; a saved PLOT is a separate document. Rows for a date you have not
+     plotted are invisible on this screen while still being real enough to mark
+     a custom order "Added in Demand" — which is exactly the contradiction that
+     makes people distrust the app. So: say what is sitting there, and offer to
+     open it. Nothing is merged behind anyone's back. */
+  let unplot=[];
+  try{
+    const plotted=new Set(((await mrpPlans())||[]).map(pl=>String(pl.plan_date||pl.date||'').slice(0,10)).filter(Boolean));
+    const byDate={};
+    let drows=[]; try{ drows=await db.list('demand',{}); }catch(e){}
+    (drows||[]).forEach(r=>{ const d=String(r.plan_date||'').slice(0,10);
+      if(!d || (+r.qty||0)<=0 || plotted.has(d) || d===MRPDATE) return;
+      const g=byDate[d]=byDate[d]||{date:d,skus:0,packs:0,eg:[]};
+      g.skus++; g.packs+=(+r.qty||0); if(g.eg.length<4) g.eg.push(r.sku);
+    });
+    unplot=Object.values(byDate).sort((a,b)=>a.date.localeCompare(b.date));
+  }catch(e){}
+  if(unplot.length){
+    dh+=`<div class="repcard" style="margin-top:14px;border-left:4px solid #e0b400">
+      <div class="repbar"><span>⚠ Demand exists on ${unplot.length} date(s) you have not plotted</span>
+        <span class="mini" style="color:var(--muted)">these rows are real — they just are not on this screen yet</span></div>
+      <div style="overflow-x:auto"><table><thead><tr><th>Plan date</th><th class="num">SKUs</th><th class="num">Packs</th><th>For example</th><th></th></tr></thead><tbody>
+      ${unplot.map(u=>`<tr><td><b>${esc(u.date)}</b></td><td class="num">${u.skus}</td><td class="num">${u.packs}</td>
+        <td class="mini" style="color:var(--muted)"><code>${u.eg.map(esc).join('</code> <code>')}</code>${u.skus>u.eg.length?' …':''}</td>
+        <td><button class="btn sm sec" onclick="mrpGoDate('${esc(u.date)}')">Open ${esc(u.date)}</button></td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="hint" style="margin-top:8px">A custom order goes to <b>Added in Demand</b> the moment a row lands in the demand table,
+        which is why one can say it is in demand while this screen shows nothing for that week. Open the date, then
+        <b>☁ Sync demand</b> to pull those rows in and save a plot.</div></div>`;
+  }
   // demand card
   dh+=`<div class="repcard"${(coSkus.length||1)?' style="margin-top:14px"':''}>
     <div class="repbar"><span>Plan (week of)</span><input type="date" value="${MRPDATE}" onchange="MRPDATE=this.value">
@@ -4789,6 +4822,8 @@ async function confirmSaveMRPPlan(hasExisting){
      toast('Demand plot sent to PDF / Drive / notify'); }
   renderMRP();
 }
+async function mrpGoDate(d){ MRPDATE=d; await renderMRP();
+  toast('Now on '+d+' — press ☁ Sync demand to pull those rows in'); }
 function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; mrpAdd={...(d.add||{})}; mrpRemarks={...(d.remarks||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
 // A saved demand plot is immutable — VIEW it read-only, then print or download.
 async function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p;
@@ -6332,7 +6367,12 @@ async function coPlanEvidence(){
     else rows=(DEMO.demand||[]);
     (rows||[]).forEach(r=>{ if(!((+r.qty||0)>0)) return;
       const d=String(r.plan_date||'').slice(0,10); const cur=inDemand[r.sku];
-      if(!cur || (d && (!cur.date || d>cur.date))) inDemand[r.sku]={date:d, qty:+r.qty||0};
+      /* WHERE the evidence lives matters, because the two stores are read by
+         different screens. A demand ROW makes the order say "Added in Demand";
+         a saved PLOT is what the Demand/MRP screen draws. An order can be
+         truthfully in demand while that screen looks empty — which reads as a
+         bug unless the badge says which one it found. */
+      if(!cur || (d && (!cur.date || d>cur.date))) inDemand[r.sku]={date:d, qty:+r.qty||0, src:'row'};
     });
   }catch(e){}
   /* THE SAVED DEMAND PLOT. This is where the first version went wrong: a plot
@@ -6361,8 +6401,10 @@ async function coPlanEvidence(){
 function coWhyText(ev, sku){
   const p=(ev.planned||{})[sku], d=(ev.inDemand||{})[sku];
   if(p) return 'on production plan '+(p.ref||'(draft)')+(p.date?' for '+p.date:'');
-  if(d) return (d.locked?'in locked demand ':'on the demand plot ')+(d.ref?d.ref+' ':'')
-              +(d.date?'('+d.date+')':'')+(d.qty?' · '+d.qty+' pack(s)':'');
+  if(d) return (d.src==='row' ? 'in the demand table ' : (d.locked?'in locked demand ':'on the demand plot '))
+              +(d.ref?d.ref+' ':'')
+              +(d.date?'for '+d.date+' ':'')+(d.qty?'· '+d.qty+' pack(s)':'')
+              +(d.src==='row' ? ' — no saved demand plot covers that date yet' : '');
   return '';
 }
 
