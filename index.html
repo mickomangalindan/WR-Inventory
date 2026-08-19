@@ -74,6 +74,8 @@
   table.sticky thead th{position:sticky;top:0;z-index:3}
   .stickyhead{max-height:70vh;overflow:auto}
   .stickyhead thead th{position:sticky;top:0;z-index:3}
+  /* The heading has to carry its own background or the rows scroll THROUGH it. */
+  .stickyhead thead th{background:var(--pale,#f2f2ec)}
   /* the header must be opaque or rows show through it while scrolling */
   thead th{background:#fbfbfc}
   .mscroll thead th{position:sticky;top:0;z-index:3;background:#fbfbfc}
@@ -779,7 +781,7 @@ const MODELS = {
     groups:[['transfer_ref','from_code','to_code'],['transfer_date','created_by']],
     o2mLoaders:[{label:'🥩 Ingredients', fn:"trPick('ingredient')"},{label:'📦 Products', fn:"trPick('product')"},
                 {label:'🧴 Supplies', fn:"trPick('supply')"},{label:'🏷 Stickers', fn:"trPick('sticker')"},
-                {label:'⬇ All finished stock', fn:'loadBulacanStock'}],
+                {label:'⬇ Finished stock…', fn:'openTransferLoad'}],
     o2m:{field:'lines',model:'transfer_lines',fk:'transfer_ref',label:'What is moving',
       cols:[{n:'kind',l:'Type',t:'select',o:['product','ingredient']},
             {n:'product_sku',l:'Item',t:'rel',relAny:['products','ingredients'],
@@ -2676,6 +2678,37 @@ function renderUserSel(){ const box=$('userBox'); if(!box)return;
     // demo mode: keep the role switcher so you can preview each role
     box.innerHTML=`<span style="opacity:.85">👤</span><select id="userSel" onchange="setUser(this.value)" style="background:rgba(255,255,255,.16);color:#fff;border:none;border-radius:5px;padding:5px 8px;font-size:12px">${USERS.map(u=>`<option ${u.name===CURRENT_USER?'selected':''}>${esc(u.name)}</option>`).join('')}</select><span style="opacity:.6">demo</span>`;
   }
+}
+/* ---- Long tables keep their headings ---------------------------------------
+   Sticky headers were being added one call site at a time, which meant the
+   long reports — Yield & Loss, Sales Momentum, the ledger — were exactly the
+   ones missing it, because they were written before the class existed. Rather
+   than hunt through forty renderers and miss the forty-first, this watches the
+   content area and promotes any table long enough to scroll off the top.
+   Short tables are left alone: a sticky heading on six rows is just a heading. */
+const _STICKY_MIN_ROWS=12;
+function applyStickyHeads(root){
+  const host=root||document.getElementById('content'); if(!host) return;
+  host.querySelectorAll('table').forEach(t=>{
+    if(!t.tHead || !t.tBodies.length) return;
+    if(t.tBodies[0].rows.length < _STICKY_MIN_ROWS) return;
+    if(t.closest('.stickyhead') || t.classList.contains('stickyhead')) return;
+    if(t.closest('#modal')) return;                       // modals scroll their own way
+    const w=t.parentElement;
+    // reuse the existing scroll wrapper when there is one, so layout does not shift
+    if(w && w!==host && w.children.length===1 && /auto|scroll/.test(getComputedStyle(w).overflowX)) w.classList.add('stickyhead');
+    else t.classList.add('stickyhead');
+  });
+}
+let _stickyTimer=null;
+function _watchSticky(){
+  const host=document.getElementById('content'); if(!host||window.__stickyOn) return;
+  window.__stickyOn=1;
+  try{
+    new MutationObserver(()=>{ clearTimeout(_stickyTimer); _stickyTimer=setTimeout(()=>applyStickyHeads(),60); })
+      .observe(host,{childList:true,subtree:true});
+  }catch(e){}
+  applyStickyHeads();
 }
 function evalF(expr,r){ try{ return Function('r','with(r){return ('+expr+')}')(r); }catch(e){ return ''; } }
 
@@ -6543,6 +6576,110 @@ function _coParse(s){ try{ return JSON.parse(s)||[]; }catch(e){ return []; } }
 function coBackToList(){ _coView='list'; renderCustomOrders(); }
 function _coProdOptions(sel){ const list=Object.values(_coProd).filter(p=>p.active!==false && !p.is_custom);
   return hierGroups(list,{g1:'group_1',g2:'group_2'}).map(G=>G.subs.map(S=>`<optgroup label="${esc(G.g1+' › '+(S.g2||''))}">`+S.items.map(p=>`<option value="${esc(p.sku)}" ${sel===p.sku?'selected':''}>${esc(p.name||p.sku)}</option>`).join('')+`</optgroup>`).join('')).join(''); }
+/* ============ Kitchen Batch, printed from the order =======================
+   The Fresh Food Calculator produces this sheet before an order exists; the
+   kitchen has been working from it for a year and reads it fluently. Once the
+   order is in the ERP the same sheet has to come back OUT — otherwise someone
+   re-opens the calculator, re-types the pets, and the two drift.
+
+   Same two tables, same order: one row per line (a pet, or a variant) with its
+   pack size and its grams per PMR category, then the combined ingredient total
+   for the whole batch. It is built from the ORDER's recipes, so what the
+   kitchen weighs is what the ERP will consume — no re-entry anywhere.        */
+async function coKitchenBatch(){
+  const lines=(coLines||[]).filter(l=>(l.recipe||[]).some(r=>r.ingredient_sku&&+r.grams>0));
+  if(!lines.length){ toast('No line on this order has a recipe yet',true); return; }
+  if(!_coIng||!_coIng.length){ try{ _coIng=(await listIngredients()).filter(i=>!isSupplyItem(i)); }catch(e){} }
+  const iname={}; (_coIng||[]).forEach(i=>iname[i.sku]=i.name||i.sku);
+
+  const CATS=CO_CATS.filter(c=>c.k!=='other').concat(CO_CATS.filter(c=>c.k==='other'));
+  const g1=v=>Math.round((+v||0)*10)/10;
+  const kg=v=>(Math.round((+v||0))/1000).toFixed(3)+'kg';
+
+  // per line, grams by category (per pack) and the line's own total
+  const rows=lines.map(l=>{
+    const by={}; CATS.forEach(c=>by[c.k]=0);
+    (l.recipe||[]).forEach(r=>{ if(!r.ingredient_sku||!(+r.grams>0)) return;
+      const it=(_coIng||[]).find(x=>x.sku===r.ingredient_sku);
+      by[it?_coCatOf(it):'other']=(by[it?_coCatOf(it):'other']||0)+(+r.grams||0); });
+    const packs=+l.packs||0, size=+l.pack_size_g||0;
+    return {name:(l.description||l.product_sku||'—'), size, packs, by,
+      total:(size>0?size:Object.values(by).reduce((a,b)=>a+b,0))*packs};
+  });
+  const used=CATS.filter(c=>rows.some(r=>(r.by[c.k]||0)>0));
+  const catTot={}; used.forEach(c=>catTot[c.k]=rows.reduce((s,r)=>s+(r.by[c.k]||0)*r.packs,0));
+
+  // combined, by ingredient, grouped by category
+  const comb={};
+  lines.forEach(l=>{ const packs=+l.packs||0;
+    (l.recipe||[]).forEach(r=>{ if(!r.ingredient_sku||!(+r.grams>0)) return;
+      const it=(_coIng||[]).find(x=>x.sku===r.ingredient_sku);
+      const k=it?_coCatOf(it):'other';
+      const key=r.ingredient_sku;
+      (comb[key]=comb[key]||{cat:k, name:iname[key]||r.src_name||key, g:0}).g+=(+r.grams||0)*packs; }); });
+  const grand=Object.values(comb).reduce((s,x)=>s+x.g,0);
+  const packsTot=rows.reduce((s,r)=>s+r.packs,0);
+
+  const w=window.open('','_blank'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  const H=v=>esc(String(v==null?'':v));
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+  <title>Kitchen Batch — ${H(coRec.customer_name||coRec.order_ref)}</title><style>
+    @page{size:A4 landscape;margin:11mm}
+    body{margin:0;font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}
+    .wrap{padding:4px 2px}
+    h1{font-size:17px;margin:0 0 2px;display:flex;align-items:center;gap:7px}
+    .grid{display:flex;gap:40px;align-items:flex-start;margin:10px 0 6px}
+    .lbl{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:#8a887f;font-weight:700}
+    .big{font-size:21px;font-weight:800;letter-spacing:-.01em}
+    .sub{color:#6b6a64;font-size:11px}
+    .date{margin-left:auto;color:#6b6a64;font-size:11px;align-self:flex-end}
+    hr{border:0;border-top:2px solid #1a1a1a;margin:8px 0 0}
+    table{width:100%;border-collapse:collapse;font-size:11.5px}
+    th{text-align:right;font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:#8a887f;
+       font-weight:700;padding:7px 8px;border-bottom:1px solid #e2e0d8}
+    th:first-child,td:first-child{text-align:left}
+    td{padding:6px 8px;border-bottom:.5px solid #efeee9;text-align:right;font-variant-numeric:tabular-nums}
+    tr.tot td{background:#1a1a1a;color:#fff;font-weight:800;border:0}
+    tr.tot td.acc{color:#4ec9b0}
+    .acc{color:#185fa5;font-weight:700}
+    .card{border:1.5px solid rgba(0,0,0,.12);border-radius:10px;padding:14px 16px;margin-top:18px}
+    .card h2{font-size:13px;margin:0 0 10px;display:flex;align-items:center;gap:7px}
+    tr.grp td{background:#f9f8f5;font-size:10px;color:#555;font-weight:700;text-align:left;border-top:1px solid rgba(0,0,0,.06)}
+    .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+    td.ing{padding-left:22px}
+    thead{display:table-header-group} tr{break-inside:avoid}
+  </style></head><body><div class="wrap">
+  <h1>🍳 Kitchen Batch Production</h1>
+  <div class="grid">
+    <div><div class="lbl">Customer name</div><div class="big">${H(coRec.customer_name||'—')}</div>
+      <div class="sub">${rows.length>1?'Multi-line batch':'Single batch'} · ${H(coRec.order_ref||'')}</div></div>
+    <div><div class="lbl">Needed</div><div class="big" style="font-size:17px">${H(coRec.needed_date||'—')}</div></div>
+    <div class="date">printed ${H(todayISO())}</div>
+  </div><hr>
+  <table><thead><tr><th>Line</th><th>Pack size</th><th>Packs</th>
+    ${used.map(c=>`<th style="color:${c.c}">${c.l.replace(/&amp;/g,'&')}</th>`).join('')}<th>Total kg</th></tr></thead><tbody>
+    ${rows.map(r=>`<tr><td>${H(r.name)}</td><td class="acc">${g1(r.size)}g</td><td>${r.packs}</td>
+      ${used.map(c=>`<td>${r.by[c.k]?g1(r.by[c.k])+'g':'—'}</td>`).join('')}
+      <td class="acc">${kg(r.total)}</td></tr>`).join('')}
+    <tr class="tot"><td>TOTAL KG</td><td>—</td><td>${packsTot} packs</td>
+      ${used.map(c=>`<td class="acc">${kg(catTot[c.k])}</td>`).join('')}
+      <td class="acc">${kg(grand)}</td></tr>
+  </tbody></table>
+
+  <div class="card"><h2>📦 Combined Total Batch — all lines</h2>
+    <table><thead><tr><th>Ingredient</th><th>Total g</th><th>Total kg</th></tr></thead><tbody>
+    ${CATS.filter(c=>Object.values(comb).some(x=>x.cat===c.k)).map(c=>
+      `<tr class="grp"><td colspan="3"><span class="dot" style="background:${c.c}"></span>${c.l.replace(/&amp;/g,'&')}</td></tr>`
+      +Object.values(comb).filter(x=>x.cat===c.k).sort((a,b)=>b.g-a.g)
+        .map(x=>`<tr><td class="ing">${H(x.name)}</td><td>${Math.round(x.g)}g</td><td class="acc">${kg(x.g)}</td></tr>`).join('')
+    ).join('')}
+    <tr class="tot"><td>GRAND TOTAL</td><td>${Math.round(grand)}g</td><td class="acc">${kg(grand)}</td></tr>
+    </tbody></table>
+  </div>
+  <div style="margin-top:16px;font-size:10.5px;color:#6b6a64">Weighed by ____________________ · Checked by ____________________ · Date ____________</div>
+  </div></body></html>`);
+  w.document.close(); w.focus(); setTimeout(()=>{ try{ w.print(); }catch(e){} },300);
+}
 function drawCOForm(){
   const locked = coIsLocked(coRec.status);
   $('crumb').innerHTML=`<b>Custom Orders</b> / ${esc(coRec.order_ref||'New quote')}`;
@@ -6550,6 +6687,7 @@ function drawCOForm(){
     ${!locked?`<button class="btn sec" onclick="coSave()">💾 Save quote</button><button class="wfbtn" onclick="coLock()">🔒 Lock order</button>`:''}
     ${coIsOpen(coRec.status)?`<button class="btn sec" onclick="coFulfil()">✓ Mark completed</button>`:''}
     ${!locked&&coRec.order_ref?`<button class="btn sec" onclick="coCancel()">✕ Cancel</button>`:''}
+    <button class="btn sec" onclick="coKitchenBatch()" title="the Fresh Food Calculator's Kitchen Batch sheet, from this order">🍳 Kitchen Batch</button>
     <button class="btn sec" onclick="coBackToList()">← Orders</button>
     <div class="sp"></div>${coStatBadge(coRec.status)} <span style="color:var(--muted)">${esc(coStatDef(coRec.status).d)}</span>`;
   const st=coRec.status||'quote';
@@ -6561,7 +6699,8 @@ function drawCOForm(){
     const recipeG=(l.recipe||[]).reduce((s,r)=>s+(+r.grams||0),0);
     const nameCell = isCustom
       ? `<input value="${esc(l.description||'')}" ${dis} placeholder="recipe name" oninput="coLines[${i}].description=this.value" style="width:150px">
-         <div class="mini">${recipeN} ingredient(s) · ${Math.round(recipeG)} g/pack ${locked?'':`<a onclick="coEditRecipe(${i})" style="cursor:pointer;color:#4e7a3e">🧪 edit recipe</a>`}${l.product_sku?` · <code>${esc(l.product_sku)}</code>`:''}</div>`
+         <div class="mini">${recipeN} ingredient(s) · ${Math.round(recipeG)} g/pack
+           <a onclick="coEditRecipe(${i})" style="cursor:pointer;color:#4e7a3e" title="${locked?'locked — open to read it':'open to change it'}">🧪 ${locked?'view recipe':'edit recipe'}</a>${l.product_sku?` · <code>${esc(l.product_sku)}</code>`:''}</div>`
       : `<select ${dis} onchange="coSetProduct(${i},this.value)" style="width:200px"><option value="">— pick product —</option>${_coProdOptions(l.product_sku)}</select>${l.product_sku?`<div class="mini"><code>${esc(l.product_sku)}</code></div>`:''}`;
     return `<tr><td>${isCustom?'🧪 custom':'📦 product'}</td><td>${nameCell}</td>
       <td><input type="number" step="any" inputmode="decimal" ${dis} value="${l.pack_size_g||''}" oninput="coLines[${i}].pack_size_g=+this.value||0" style="width:74px;text-align:right" ${isCustom?'':'title="from product"'}></td>
@@ -6602,7 +6741,13 @@ function coDelLine(i){ coLines.splice(i,1); drawCOForm(); }
 function coSetProduct(i,sku){ const l=coLines[i]; l.product_sku=sku; const p=_coProd[sku]; if(p){ l.description=p.name||sku; l.pack_size_g=+p.pack_g||l.pack_size_g||0; if(!(+l.unit_price>0)) l.unit_price=+p.sell_price||0; } drawCOForm(); }
 // ---- Recipe editor for a custom line (add/remove counter before saving) ----
 let _coEditIdx=-1, _coEditRows=[], _coEditBase=0;
+/* A LOCKED ORDER MUST STILL BE READABLE. Locking is what makes the demand and
+   the kitchen sheet stable, so it rightly stops edits — but it was also hiding
+   the link, and "why can't I open the recipe" is the only thing that can mean.
+   The recipe opens either way now; when locked the fields are read-only and it
+   says so, instead of pretending there is nothing to see. */
 function coEditRecipe(i){ _coEditIdx=i; const l=coLines[i]; _coEditRows=(l.recipe||[]).map(r=>({...r}));
+  window._coRecipeRO=coIsLocked(coRec&&coRec.status);
   // No blank starter row any more — each PMR section carries its own "＋ Add".
   _coEditBase=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; drawCoRecipe(); }
 /* Was grouped by `ingredient_group`, which is not a field on ingredients — so every
@@ -6702,8 +6847,12 @@ function drawCoRecipe(){
   // bucket every row by its ingredient's PMR category
   const byCat={}; CO_CATS.forEach(c=>byCat[c.k]=[]);
   _coEditRows.forEach((r,j)=>{ const k=_coRowCat(r); (byCat[k]=byCat[k]||[]).push({r,j}); });
+  const RO=!!window._coRecipeRO;
   const rowHtml=({r,j},cat)=>{ const unm=r.src_name&&!r.ingredient_sku;
     const srcHint=r.src_name?`<div class="mini" style="color:${unm?'var(--danger)':'var(--muted)'}">calculator: <b>${esc(r.src_name)}</b>${unm?' — pick a match':''}</div>`:'';
+    if(RO){ const it=(_coIng||[]).find(x=>x.sku===r.ingredient_sku)||{};
+      return `<tr><td>${esc(it.name||r.ingredient_sku||r.src_name||'—')}<div class="mini" style="color:var(--muted)"><code>${esc(r.ingredient_sku||'')}</code></div></td>
+        <td class="num"><b>${Math.round((+r.grams||0)*10)/10}</b> g</td><td style="width:24px"></td></tr>`; }
     return `<tr${unm?' style="background:#fdf3f0"':''}><td><select onchange="_coEditRows[${j}].ingredient_sku=this.value;drawCoRecipe()" style="width:100%;min-width:200px">${_coIngOptionsFor(cat,r.ingredient_sku)}</select>${srcHint}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" value="${r.grams||''}" oninput="_coEditRows[${j}].grams=+this.value||0;coRecipeTick()" style="width:84px;text-align:right"> g</td>
       <td style="width:24px"><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="_coEditRows.splice(${j},1);drawCoRecipe()">✕</span></td></tr>`; };
@@ -6724,18 +6873,25 @@ function drawCoRecipe(){
         <span class="mini"><b>${Math.round(g*10)/10} g</b>${packG>0?` · <span style="color:${col};font-weight:700">${pctNow.toFixed(1)}%</span>`:''}${c.pct?` <span style="color:var(--muted)">of ${tgt}% standard</span>`:''}</span>
       </div>
       ${rows.length?`<table style="margin:0"><tbody>${rows.map(x=>rowHtml(x,c.k)).join('')}</tbody></table>`:''}
-      <div style="padding:6px 10px">${avail
+      ${RO?'':`<div style="padding:6px 10px">${avail
         ? `<span class="addrow" onclick="_coAddTo('${c.k}')">＋ Add ${c.l.replace(/&amp;/g,'&').toLowerCase()}</span>`
-        : `<span class="mini" style="color:var(--earth,#b5762a)">No ingredient in the master is categorised as <b>${c.l}</b> — set the PMR category on the processed item in Master Data → Ingredients, or tick <b>show every ingredient</b> below.</span>`}</div>
+        : `<span class="mini" style="color:var(--earth,#b5762a)">No ingredient in the master is categorised as <b>${c.l}</b> — set the PMR category on the processed item in Master Data → Ingredients, or tick <b>show every ingredient</b> below.</span>`}</div>`}
     </div>`; }).join('');
-  $('modal').innerHTML=`<div><h3>🧪 Custom recipe — ${esc(coLines[_coEditIdx].description||'')||'(unnamed)'}</h3>
+  $('modal').innerHTML=`<div><h3>🧪 Custom recipe — ${esc(coLines[_coEditIdx].description||'')||'(unnamed)'}${RO?' <span class="tagf" style="background:#eee;color:#666">read-only</span>':''}</h3>
+    ${RO?`<p class="mini" style="background:#fbf6ea;border-left:3px solid var(--earth,#b5762a);padding:8px 11px;border-radius:0 6px 6px 0;margin:0 0 10px">
+      This order is <b>${esc(coStatLabel(coRec.status))}</b>, so the recipe is fixed. That is deliberate — the demand plan, the
+      kitchen sheet and the product's BOM were all built from these grams, and changing them here would leave those three
+      disagreeing with each other. To change what is actually made, correct it on the production run
+      (Production → the batch → Ingredients used), which posts the adjusting stock movements as well.</p>`:''}
     <p class="mini">Built the way the <b>Fresh Food Calculator</b> builds it — one section per PMR category, grams <b>per pack</b>. Each header shows what that section adds up to against the standard raw ratio, so an unbalanced mix is obvious before you save. <b>Each picker offers only that section's ingredients</b>, in their processed form — that is what production draws. This becomes the sellable SKU's BOM when the order is locked. Pack size: <b>${packG||'—'} g</b>.${nUnm?` <b style="color:var(--danger)">${nUnm} calculator ingredient(s) need a match</b> — pick the equivalent from your master list; the app <b>remembers it</b> for next time.`:''}</p>
     <div style="max-height:52vh;overflow:auto;padding-right:2px">${sections}</div>
-    <label class="mini" style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;color:var(--muted)">
+    ${RO?'':`<label class="mini" style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;color:var(--muted)">
       <input type="checkbox" ${window._coAllIng?'checked':''} onchange="window._coAllIng=this.checked;drawCoRecipe()" style="margin:0">
-      ⚙ show every ingredient in each picker <span style="opacity:.7">— only needed when something is filed under the wrong category</span></label>
+      ⚙ show every ingredient in each picker <span style="opacity:.7">— only needed when something is filed under the wrong category</span></label>`}
     <div id="coRecSum" style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px">${_coRecipeSummaryHtml()}</div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" id="coRecSaveBtn" onclick="coSaveRecipe()">💾 Save recipe (${now})</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+    <div style="display:flex;gap:8px;margin-top:14px">${RO
+      ? `<button class="btn sec" onclick="closeModal()">Close</button>`
+      : `<button class="btn" id="coRecSaveBtn" onclick="coSaveRecipe()">💾 Save recipe (${now})</button><button class="btn sec" onclick="closeModal()">Cancel</button>`}</div></div>`;
   modalWide(true); $('overlay').classList.add('on');
 }
 // summary HTML (recomputed live without re-rendering rows, so focus stays put)
@@ -7782,8 +7938,24 @@ function drawProdPlan(){
       return `<option value="${esc(i.sku)}">${pre}Processed: ${esc(i._nm)}${i._raw?'  ·  Raw: '+esc(i._raw):''}</option>`; }).join('')).join('')+`</optgroup>`).join('');
   const outRows=_outIngRows(_allIng, prodOutLines.map(l=>_bs[l.ingredient_sku]||{sku:l.ingredient_sku,name:l.name}));
   h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Output ingredients — raw to process</span>
-    <span style="color:var(--muted);font-size:12px">Enter the <b>raw you plan to pull</b>. The output is worked out from the standard yield — come back after the prep and correct either figure before you confirm. The chips show stock at <b>${esc(planProduceLoc())}</b>: <span class="ohchip proc">processed</span> beside the item, <span class="ohchip raw">raw</span> beside its parent.</span></div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Processed (make this)</th><th>From raw</th><th class="num">Raw to use (kg)</th><th class="num">Output qty (kg)</th><th class="num">Yield</th><th></th></tr></thead><tbody>
+    <span style="color:var(--muted);font-size:12px">Enter the <b>raw you plan to pull</b>; the output is worked out from the standard yield and stays editable after the prep.
+      If the run also uses processed stock already in the freezer — yesterday's unfinished work, for instance — put it in <b>Pulled Out</b> and weigh it again in <b>Thawed</b>.</span></div>
+    <div class="hint" style="margin:0 0 8px">
+      <b>Pulled Out (Processed) → Thawed Processed</b> &nbsp;<b>+</b>&nbsp; <b>Raw Pulled Out → Processed Created</b> &nbsp;<b>=</b>&nbsp; what lands in processed stock.<br>
+      <span style="color:var(--muted)">Only two things come off inventory here: the <b>raw</b> that was trimmed, and the <b>drip</b> lost thawing.
+      Pulled Out is not a deduction on its own — the stock never left the bin it is going back into. So
+      <b>net to processed stock = Processed Created − drip</b>.</span></div>
+    <div style="overflow-x:auto"><table style="min-width:1080px"><thead>
+      <tr><th rowspan="2">Processed (make this)</th><th rowspan="2">From raw</th>
+        <th class="num" colspan="2" style="border-bottom:1px solid var(--line)">Stock on hand · ${esc(planProduceLoc())}</th>
+        <th class="num" colspan="4" style="border-bottom:1px solid var(--line)">What the prep run does</th>
+        <th class="num" rowspan="2">= Net to<br><span style="font-weight:400;opacity:.8">processed stock</span></th>
+        <th class="num" rowspan="2">Yield</th><th rowspan="2"></th></tr>
+      <tr><th class="num">Processed</th><th class="num">Raw</th>
+        <th class="num">Pulled Out<br><span style="font-weight:400;opacity:.8">(Processed)</span></th>
+        <th class="num">→ Thawed<br><span style="font-weight:400;opacity:.8">Processed</span></th>
+        <th class="num">+ Raw<br><span style="font-weight:400;opacity:.8">Pulled Out</span></th>
+        <th class="num">→ Processed<br><span style="font-weight:400;opacity:.8">Created</span></th></tr></thead><tbody>
     ${prodOutLines.map((l,i)=>{ const r=outRows[i]||{};
       const y=((+r.yield_pct||100)/100)||1;
       /* RAW is the input. The kitchen knows what it is pulling out of the chiller;
@@ -7796,12 +7968,21 @@ function drawProdPlan(){
       const _oh=window._prodSupOh||{};
       const ohOut=_oh[l.ingredient_sku]||0, ohRaw=r._rawSku?(_oh[r._rawSku]||0):0;
       const overdrawn=parseFloat(raw)>0 && r._rawSku && parseFloat(raw)*1000>ohRaw+0.5;
-      return `<tr><td><span class="tagf tagf-proc">Processed</span> <b>${esc(r._nm||l.name)}</b>${_ohChip('proc',ohOut)}<div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''}</div></td>
-      <td class="mini">${r._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(r._raw)}${_ohChip('raw',ohRaw,{short:overdrawn})}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
-      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:96px;text-align:right${overdrawn?';border-color:var(--danger);color:var(--danger)':''}" value="${raw}" oninput="prodOutSetRaw(${i},this.value)" title="${overdrawn?'more than the '+(Math.round(ohRaw/10)/100)+' kg of raw on hand':'what you pull from the chiller'}"></td>
-      <td class="num"><input type="number" step="any" inputmode="decimal" id="pom${i}" style="width:100px;text-align:right" value="${made}" oninput="prodOutSetMade(${i},this.value)" title="what came off it — estimated from the standard yield until you correct it"></td>
+      const pull=(l.pulled_kg!=null&&l.pulled_kg!=='')?l.pulled_kg:'';
+      const thaw=(l.thawed_kg!=null&&l.thawed_kg!=='')?l.thawed_kg:'';
+      const _kgc=v=>(Math.round((+v||0)/10)/100);
+      const overPull=parseFloat(pull)>0 && parseFloat(pull)*1000>ohOut+0.5;
+      return `<tr><td><span class="tagf tagf-proc">Processed</span> <b>${esc(r._nm||l.name)}</b><div class="mini" style="color:var(--muted)">${esc(r._g1||'')}${r._g2?' › '+esc(r._g2):''}</div></td>
+      <td class="mini">${r._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(r._raw)}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
+      <td class="num mini" style="color:${ohOut>0?'#1e6b2e':'var(--muted)'}">${ohOut>0?_kgc(ohOut)+' kg':'—'}</td>
+      <td class="num mini" style="color:${overdrawn?'var(--danger)':(ohRaw>0?'#7a6432':'var(--muted)')}">${r._rawSku?_kgc(ohRaw)+' kg':'—'}${overdrawn?' ⚠':''}</td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:88px;text-align:right${overPull?';border-color:var(--danger);color:var(--danger)':''}" value="${pull}" oninput="prodOutSetPulled(${i},this.value)" title="${overPull?'more than the '+_kgc(ohOut)+' kg of processed on hand':'processed stock taken out of the freezer for this prep — leave blank if none'}"></td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" id="pot${i}" style="width:88px;text-align:right" value="${thaw}" oninput="prodOutSetThawed(${i},this.value)" title="the same stock weighed again after thawing — the difference is drip"></td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" style="width:92px;text-align:right${overdrawn?';border-color:var(--danger);color:var(--danger)':''}" value="${raw}" oninput="prodOutSetRaw(${i},this.value)" title="${overdrawn?'more than the '+_kgc(ohRaw)+' kg of raw on hand':'what you pull from the chiller'}"></td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" id="pom${i}" style="width:96px;text-align:right" value="${made}" oninput="prodOutSetMade(${i},this.value)" title="what came off that raw — estimated from the standard yield until you correct it"></td>
+      <td class="num" id="pon${i}">${_prodOutNetHtml(l)}</td>
       <td class="num" id="poy${i}">${a?`<b style="color:${a<70?'var(--danger)':'#4e7a3e'}">${a}%</b>`:`<span class="mini" style="color:var(--muted)">std ${Math.round(y*1000)/10}%</span>`}</td>
-      <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="6" class="empty">Optional — add a processed ingredient and enter the raw you will prep.</td></tr>'}
+      <td><span style="cursor:pointer;color:var(--danger)" title="Remove" onclick="prodDelOut(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="11" class="empty">Optional — add a processed ingredient and enter the raw you will prep.</td></tr>'}
     </tbody></table></div>
     <div style="margin-top:8px"><button class="btn sec sm" onclick="prodOutPick()">🔎 Browse &amp; add by category</button></div>
     <div class="hint" style="margin-top:8px">This list is for prep you <b>still have to do</b>. Processed stock you have <b>already made</b> needs no line here — when you confirm the run, every recipe draws the processed bin first and only makes the shortfall from raw. So 25 kg of a processed ingredient sitting in the chiller against a 21 kg recipe means <b>nothing to prep and nothing to type</b>; the green chip beside each item is there so you can see that at a glance.</div></div>`;
@@ -8003,7 +8184,7 @@ function prodPackSupApply(){
   closeModal(); drawProdPlan(); toast(n?('Added '+n+' supply line(s)'):'Nothing added');
 }
 function prodAddOut(sku){ if(!sku)return; if(prodOutLines.some(l=>l.ingredient_sku===sku)){ drawProdPlan(); return; }
-  const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{}; prodOutLines.push({ingredient_sku:sku,name:i.name||sku,raw_kg:'',needed_kg:0}); drawProdPlan(); }
+  const i=(window._prodAllIngredients||[]).find(x=>x.sku===sku)||{}; prodOutLines.push({ingredient_sku:sku,name:i.name||sku,raw_kg:'',needed_kg:0,pulled_kg:'',thawed_kg:''}); drawProdPlan(); }
 function prodDelOut(i){ prodOutLines.splice(i,1); drawProdPlan(); }
 // live yield beside the two boxes, without redrawing (a redraw eats the decimal point)
 /* Raw typed → output estimated at the standard yield, unless the user has already
@@ -8029,7 +8210,47 @@ function prodOutSetMade(i,v){
 function prodOutYield(i){ const l=prodOutLines[i]; const el=$('poy'+i); if(!l||!el) return;
   const raw=parseFloat(l.raw_kg), out=+l.needed_kg||0;
   const a=(raw>0)?Math.round((out/raw)*1000)/10:0;
-  el.innerHTML=a?`<b style="color:${a<70?'var(--danger)':'#4e7a3e'}">${a}%</b>`:'<span class="mini" style="color:var(--muted)">—</span>'; }
+  el.innerHTML=a?`<b style="color:${a<70?'var(--danger)':'#4e7a3e'}">${a}%</b>`:'<span class="mini" style="color:var(--muted)">—</span>';
+  const n=$('pon'+i); if(n) n.innerHTML=_prodOutNetHtml(l); }
+/* ---- The two weighings, on a prep line too --------------------------------
+   A prep run does not only turn raw into processed. It may also thaw stock the
+   team already made — yesterday's unfinished work parked as a processed output
+   — and that stock loses weight on the way. Until now a prep line could not
+   record it at all, so the drip disappeared into the yield figure, which
+   measures something completely different.
+
+   Pulling processed stock out is NOT a deduction: it goes back into the same
+   bin it came from. The only thing inventory actually loses is the DRIP.      */
+function prodOutSetPulled(i,v){
+  const l=prodOutLines[i]; if(!l) return;
+  l.pulled_kg=(v===''||v==null)?'':Math.max(0,parseFloat(v)||0);
+  if(!l._thawEdited){
+    const it=(window._prodAllIngredients||[]).find(x=>x.sku===l.ingredient_sku)||{};
+    const t=Math.min(0.9,Math.max(0,(+it.thaw_loss_pct||0)/100));
+    l.thawed_kg=(l.pulled_kg==='')?'':Math.round((+l.pulled_kg||0)*(1-t)*1000)/1000;
+    const el=$('pot'+i); if(el && document.activeElement!==el) el.value=(l.thawed_kg===''?'':l.thawed_kg);
+  }
+  prodOutYield(i);
+}
+function prodOutSetThawed(i,v){
+  const l=prodOutLines[i]; if(!l) return;
+  l.thawed_kg=(v===''||v==null)?'':Math.max(0,parseFloat(v)||0);
+  l._thawEdited=(v!==''&&v!=null);     // their scale wins from here on
+  prodOutYield(i);
+}
+function _prodOutDrip(l){
+  const p=parseFloat(l&&l.pulled_kg), t=parseFloat(l&&l.thawed_kg);
+  if(!(p>0)) return 0;
+  if(!(t>=0)) return 0;
+  return Math.max(0, Math.round((p-t)*1000)/1000);
+}
+function _prodOutNetHtml(l){
+  const made=+((l&&l.needed_kg)||0), drip=_prodOutDrip(l);
+  if(!(made>0) && !(drip>0)) return '<span class="mini" style="color:var(--muted)">—</span>';
+  const net=Math.round((made-drip)*1000)/1000;
+  return `<b style="color:${net>0?'#4e7a3e':'var(--danger)'}">${net} kg</b>`
+    +(drip>0?`<div class="mini" style="color:var(--earth,#b5762a)" title="weight lost thawing — it comes off stock, and it is not a yield problem">−${drip} kg drip</div>`:'');
+}
 
 /* ---- Kitchen cart: searchable/filterable picker for what to produce (#2/#7/#8) ---- */
 function prodKitchenCart(){
@@ -8104,8 +8325,21 @@ function drawOutPickBody(){
         body+=`<tr><td style="padding-left:26px"><span class="tagf tagf-proc">Processed</span> <b>${esc(i._nm)}</b>${_ohChip('proc',ohOut)}${i.is_intermediate?'':'<div class="mini" style="color:var(--earth,#b5762a)">⚠ <b>Intermediate</b> is not ticked on this ingredient — tick it in Master Data so it behaves as a processed output everywhere</div>'}</td>
           <td class="mini">${i._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(i._raw)}${_ohChip('raw',ohRaw,{short:overdrawn})}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
           <td class="num mini" style="color:var(--muted)">${i.yield_pct?esc(i.yield_pct)+'%':'—'}</td>
-          <td><input type="number" step="any" value="${v}" oninput="window._opQty['${esc(i.sku)}']=this.value===''?'':(+this.value||0);drawOutPickBody()" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px${overdrawn?';border-color:var(--danger);color:var(--danger)':''}" title="raw kg to pull"></td></tr>`; }); }); });
+          <td><input type="number" step="any" inputmode="decimal" value="${v}"
+            oninput="_opSet('${esc(i.sku)}',this.value)" onchange="_opSet('${esc(i.sku)}',this.value,true)"
+            style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px${overdrawn?';border-color:var(--danger);color:var(--danger)':''}"
+            title="raw kg to pull"></td></tr>`; }); }); });
   const el=$('opBody'); if(el) el.innerHTML=body||'<tr><td colspan="4" class="empty">No output ingredients match.</td></tr>';
+}
+/* REDRAWING ON EVERY KEYSTROKE IS WHY ONLY WHOLE NUMBERS WOULD GO IN.
+   The old handler rebuilt the whole picker body on `oninput`, which destroyed
+   the box the person was typing in: "2" landed, the table redrew, focus was
+   gone, and the "." and the "5" went nowhere. Store on input, redraw on leave
+   — the same shape the production plan's needed-qty box uses. */
+function _opSet(sku,v,redraw){
+  window._opQty=window._opQty||{};
+  window._opQty[sku]=(v===''||v==null)?'':Math.max(0,parseFloat(v)||0);
+  if(redraw) drawOutPickBody();
 }
 function prodOutApply(){ const q=window._opQty||{}; let n=0;
   Object.keys(q).forEach(sku=>{ const v=q[sku]; const rawKg=(v===''||v==null)?0:(+v||0);
@@ -9111,11 +9345,24 @@ async function openProdActuals(){
        MORE than the recipe needs: to land `needed` in the bowl at a t% standard
        they take needed ÷ (1−t), capped at what the bin actually holds. */
     const _t=Math.min(0.9,Math.max(0,(+it.thaw_loss_pct||0)/100));
-    const frozenG=type==='A'?Math.min(ohG, neededG/(1-_t)) : 0;
-    const thawedG=Math.round(frozenG*(1-_t)*100)/100;
+    /* A standalone prep line can now carry its own two weighings, typed on the
+       plan. Without this the confirm screen zeroed them and the drip on
+       yesterday's parked stock was silently lost. */
+    const _ol=(type==='B')?(prodOutLines.find(l=>l.ingredient_sku===sku)||{}):{};
+    const frozenG=(type==='A') ? Math.min(ohG, neededG/(1-_t))
+                               : Math.max(0,(parseFloat(_ol.pulled_kg)||0)*1000);
+    const thawedG=(type==='A') ? Math.round(frozenG*(1-_t)*100)/100
+                               : Math.round(Math.max(0,(_ol.thawed_kg===''||_ol.thawed_kg==null)?frozenG*(1-_t):(parseFloat(_ol.thawed_kg)||0)*1000)*100)/100;
     const frozenOutKg=Math.round(frozenG/10)/100;
     const procUsedKg=Math.round(thawedG/10)/100;                 // what actually reaches the mix
-    const shortG=Math.max(0,neededG-thawedG); const rawG=shortG/y;
+    /* For a BOM ingredient the confirm screen works out how much still has to be
+       made after the freezer draw. A standalone PREP line is not a shortfall
+       calculation — the plan already says what raw is being pulled and what it
+       is expected to make, and re-deriving it here threw both away. */
+    const shortG=(type==='A') ? Math.max(0,neededG-thawedG)
+                              : Math.max(0,(parseFloat(_ol.needed_kg)||0)*1000);
+    const rawG=(type==='A') ? shortG/y
+                            : Math.max(0,(parseFloat(_ol.raw_kg)||0)*1000);
     return {sku, name:it.name||sku, type, parent:(p&&p.sku)||'', parentCostG:(+(p||{}).moving_avg_cost_kg||+(p||{}).list_price_kg||0)/1000,
       outCostG:(type==='A'?(agg[sku]&&agg[sku].costG):((+it.price_kg_processed||+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000))||0,
       yield:y, neededKg:Math.round(neededG/10)/100, ohKg:Math.round(ohG/10)/100,
@@ -12093,12 +12340,75 @@ function trPickApply(){
   renderLines(); closeModal();
   toast(added+' line(s) added'+(merged?(' · '+merged+' merged into an existing line'):''));
 }
-async function loadBulacanStock(){
+/* ---- Loading finished stock onto a transfer -------------------------------
+   "Everything at Bulacan" is the right answer on the day the whole site is
+   emptied, and the wrong one on any day it is not — a run that is still being
+   finished, or packs held back for a customer collecting at the farm, get
+   swept onto the transfer and sent to Pasig on paper. So there are two ways
+   in now, and the wording says which is which:
+
+     ALL          — everything on hand at the producing site, whenever it was made
+     MADE BETWEEN — only the packs a confirmed run produced inside a date window,
+                    capped at what is actually on hand (you cannot send what has
+                    already gone)
+
+   The window is a PRODUCTION date, not a movement date, because that is the
+   question the floor actually asks: "what did we make this week." */
+async function loadBulacanStock(){ return openTransferLoad(); }
+function openTransferLoad(){
+  const to=todayISO(); const from=new Date(Date.now()-6*864e5).toISOString().slice(0,10);
+  $('modal').innerHTML=`<div><h3>⬇ Load finished stock from ${esc(planProduceLoc())}</h3>
+    <p class="mini">Two ways, and they answer different questions. Everything on hand is right when the site is being
+      emptied. A production window is right when you are sending <b>this week's run</b> and something else is deliberately
+      staying behind.</p>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">
+      <label style="display:flex;gap:9px;align-items:flex-start;padding:10px;border:1px solid var(--line);border-radius:8px;cursor:pointer">
+        <input type="radio" name="tlmode" value="all" checked style="margin-top:3px">
+        <span><b>Everything on hand</b><div class="mini" style="color:var(--muted)">All finished packs at ${esc(planProduceLoc())}, whenever they were made.</div></span></label>
+      <label style="display:flex;gap:9px;align-items:flex-start;padding:10px;border:1px solid var(--line);border-radius:8px;cursor:pointer">
+        <input type="radio" name="tlmode" value="win" style="margin-top:3px">
+        <span><b>Only what was produced between</b>
+          <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <input type="date" id="tlFrom" value="${from}" style="padding:5px;border:1px solid var(--line);border-radius:5px">
+            <span class="mini">and</span>
+            <input type="date" id="tlTo" value="${to}" style="padding:5px;border:1px solid var(--line);border-radius:5px"></div>
+          <div class="mini" style="color:var(--muted);margin-top:5px">Confirmed runs with a production date in that window. Never more than is on hand.</div></span></label>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="transferLoadApply()">⬇ Load</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+async function transferLoadApply(){
+  const mode=(document.querySelector('input[name=tlmode]:checked')||{}).value||'all';
+  const f=((document.getElementById('tlFrom')||{}).value)||'', t=((document.getElementById('tlTo')||{}).value)||'';
+  closeModal();
+  const loc=planProduceLoc();
   const prods=await db.list('products',{});
-  let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.location_code===planProduceLoc()&&s.kind==='product') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} }
-  const rows = prods.filter(p=> isLive()? (stock[p.sku]>0) : true ).map(p=>({kind:'product', product_sku:p.sku, sent_packs: isLive()?(stock[p.sku]||0):'', received_packs: 0 }));
-  if(!rows.length){ toast('No finished stock at Bulacan yet',true); return; }
-  formChildren=rows; renderLines(); toast('Loaded '+rows.length+' product(s) manufactured at Bulacan');
+  let stock={};
+  if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.location_code===loc&&s.kind==='product') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} }
+  else { (DEMO.inventory_movements||[]).forEach(m=>{ if(m.kind==='product'&&m.location_code===loc) stock[m.ref_sku]=(stock[m.ref_sku]||0)+(+m.qty||0); }); }
+
+  let rows;
+  if(mode==='win'){
+    if(!f||!t||f>t){ toast('Give me a start and an end, in that order',true); return; }
+    const made={};
+    try{ (await db.list('production_batches',{})).forEach(b=>{
+        if(String(b.status||'')!=='confirmed' || b.kind==='output') return;   // prep batches are kilos, not packs
+        const d=String(b.production_date||'').slice(0,10);
+        if(!d || d<f || d>t) return;
+        made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0);
+      }); }catch(e){}
+    rows=Object.keys(made).map(sku=>({sku, packs:Math.min(made[sku], Math.max(0, stock[sku]!=null?stock[sku]:made[sku]))}))
+      .filter(x=>x.packs>0)
+      .map(x=>({kind:'product', product_sku:x.sku, sent_packs:x.packs, received_packs:0}));
+    if(!rows.length){ toast('Nothing confirmed as produced between '+f+' and '+t,true); return; }
+    formChildren=rows; renderLines();
+    toast('Loaded '+rows.length+' product(s) produced '+f+' → '+t+' — capped at what is on hand');
+    return;
+  }
+  rows=prods.filter(p=> isLive()? (stock[p.sku]>0) : true ).map(p=>({kind:'product', product_sku:p.sku, sent_packs: isLive()?(stock[p.sku]||0):'', received_packs: 0 }));
+  if(!rows.length){ toast('No finished stock at '+loc+' yet',true); return; }
+  formChildren=rows; renderLines(); toast('Loaded '+rows.length+' product(s) on hand at '+loc);
 }
 
 /* ============ System Check (in-app unit tests) ============ */
@@ -12354,7 +12664,7 @@ DEMO.count_sessions=DEMO.count_sessions||[]; DEMO.count_lines=DEMO.count_lines||
 if(!DEMO.variance_log.length) DEMO.variance_log=[
   {id:1,check_type:'4 · Transfer',source_ref:'WR-TR-DEMO',expected:6,actual:5,gap_qty:-1,gap_value:130,location:'in-transit',responsible_user:'Warehouse',status:'open',note:''},
   {id:2,check_type:'1 · 3-way match',source_ref:'WR-PO-0012',expected:5,actual:4.2,gap_qty:-0.8,gap_value:224,location:'bulacan',responsible_user:'Purchasing',status:'open',note:''}];
-applyStudio(); updateMode(); renderUserSel(); renderSide();
+applyStudio(); updateMode(); renderUserSel(); renderSide(); _watchSticky();
 if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadAutos(); loadProfiles(); loadPlanCfg(); }
 window.addEventListener('hashchange', onHashRoute);
 if(needAuth()) showGate(); else bootRoute();
