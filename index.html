@@ -517,7 +517,7 @@ const MODULES = [
   {id:'analytics', label:'Analytics', items:['stock_balance','shopify','yields','reporting','margin','momentum']},
   {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc','ffprofiles']},
   {id:'plan',   label:'Planning',    items:['mrp','wdt']},
-  {id:'purch',  label:'Purchasing',  items:['purchase_orders','supplies_reorder','sticker_reorder']},
+  {id:'purch',  label:'Purchasing',  items:['purchase_orders','receiving','supplies_reorder','sticker_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','variance_log']},
   {id:'help',   label:'Help', items:['guides']},
@@ -819,6 +819,7 @@ const MODELS = {
   refs:{ label:'Internal References', icon:'🔢', special:'refs' },
   notif:{ label:'Notifications', icon:'🔔', special:'notif' },
   cleanser:{ label:'Data Cleanser', icon:'🧹', special:'cleanser' },
+  receiving:{ label:'Receiving', icon:'📥', special:'receiving' },
   supplies_reorder:{ label:'Supplies Reorder', icon:'🧻', special:'supplies_reorder' },
   sticker_reorder:{ label:'Sticker Reorder', icon:'🏷️', special:'sticker_reorder' },
   sticker_po:{ label:'Sticker PO', icon:'🏷️', special:'sticker_po' },
@@ -1066,6 +1067,7 @@ function route(){
     if(m.special==='guides') return renderGuides();
     if(m.special==='supplies_reorder') return renderSuppliesReorder();
     if(m.special==='sticker_reorder') return renderStickerReorder();
+    if(m.special==='receiving') return renderReceiving();
     if(m.special==='sticker_po') return renderStickerPO();
     if(m.special==='approvals') return renderApprovals();
     if(m.special==='margin') return renderMargin();
@@ -2640,11 +2642,28 @@ function saveUsers(){ localStorage.setItem('wr_users',JSON.stringify(USERS)); }
 function setUser(u){ CURRENT_USER=u; localStorage.setItem('wr_cur',u); toast('Acting as '+u); refreshMentionBell(); if(state.view==='form'&&!formIsNew) refreshNotesPanel(); }
 function curRole(){ if(SUPA&&SUPA.token&&SUPA.role) return SUPA.role; const u=USERS.find(x=>x.name===CURRENT_USER); return u?u.role:'Admin'; }
 const ADMIN_ONLY=['users','studio','connection','fieldacl','refs','notif','cleanser'];
-// Sensible menu defaults per role (Admin can override in Users & Access). Floor roles
-// don't plan or purchase; Pasig doesn't produce.
-const NAV_HIDE={ Warehouse:['mrp','purchase_orders','reporting'], Pasig:['mrp','prodplan','production_batches','purchase_orders','reporting'] };
+/* Sensible menu defaults per role (Admin can override in Users & Access).
+
+   TWO WAYS TO SAY IT, and the difference matters. A HIDE list is "everything
+   except these", which is right for a floor role whose job is broad. A SHOW
+   list is "only these", which is right for a job with a short, named remit —
+   and it is the safer of the two, because a module added next year is hidden
+   by default rather than quietly granted.
+
+   WAREHOUSE receives, moves and produces. It does not plan, buy, or see what
+   anything sells for, and it has no business in the automations screen — that
+   edits how the whole system behaves. Receiving now has its own module so the
+   goods can be booked in without opening a purchase order full of prices.
+
+   PURCHASING is payables, transfers and production. */
+const NAV_HIDE={ Warehouse:['mrp','purchase_orders','reporting','automations','margin','momentum','shopify'],
+                 Pasig:['mrp','prodplan','production_batches','purchase_orders','reporting','automations','margin'] };
+const NAV_SHOW={ Purchasing:['home','purchase_orders','receiving','transfers','prodplan','production_batches',
+                             'suppliers','ingredients','supplies','products','stock_balance',
+                             'sticker_reorder','supplies_reorder','variance_log','guides'] };
 function roleCan(role,mod){ if(role==='Admin')return true; if(ADMIN_ONLY.includes(mod))return false;
   if(ACCESS[role]&&ACCESS[role][mod]!==undefined) return ACCESS[role][mod]!==false;   // explicit override wins
+  if(NAV_SHOW[role]) return NAV_SHOW[role].includes(mod);                              // named remit — nothing else
   if(NAV_HIDE[role]&&NAV_HIDE[role].includes(mod)) return false;                       // default hide
   return true; }
 // True when the current role's field policy hides money — used to mask dashboard/report money.
@@ -3196,6 +3215,39 @@ function roundOrderKg(kg, minKg, packKg){
   if(packKg>0) out=Math.ceil((out-1e-9)/packKg)*packKg;                 // whole packs
   if(minKg>0 && out<minKg-1e-9) out=packKg>0?Math.ceil((minKg-1e-9)/packKg)*packKg:minKg;   // meet min, still whole packs
   return Math.round(out*1000)/1000;
+}
+/* ---- What the label printer will actually sell you ------------------------
+   Labels are not bought one at a time. Each size has a minimum quantity you
+   must buy in, and a price per piece at that size. The sticker screen used to
+   read those from a per-product field that had never been filled in, so every
+   label had a pack size of 0 and a price of 0 — which is why a typed quantity
+   went to the printer un-rounded and the order came out at zero pesos.
+   The size is on the artwork, so the size is where the rule belongs. */
+const STICKER_SIZES=[
+  {dim:'5 x 6.5', per:12, price:8.1},
+  {dim:'4 x 5',   per:20, price:5.5},
+  {dim:'3 x 3',   per:25, price:3.8},
+];
+function _stkDimKey(d){                    // "6.5 x 5" and "5 x 6.5" are the same label
+  const n=String(d||'').match(/[\d.]+/g);
+  if(!n||n.length<2) return '';
+  return n.slice(0,2).map(Number).sort((a,b)=>a-b).join('x');
+}
+/* Nearest by AREA, never by name: the master file holds 4 x 5.5 and 5.5 x 4.5
+   and 2.5 x 3, none of which are on the price list. Rounding a 4 x 5.5 up to
+   the 4 x 5 tier is honest — it is the closest thing the printer sells — and
+   the screen says which tier it used so nobody has to guess. */
+function stickerTier(dim){
+  const k=_stkDimKey(dim); if(!k) return null;
+  const [a,b]=k.split('x').map(Number); const area=a*b;
+  let best=null, gap=Infinity;
+  STICKER_SIZES.forEach(t=>{
+    const tk=_stkDimKey(t.dim); if(tk===k) { best=t; gap=-1; return; }
+    if(gap===-1) return;
+    const [x,y]=tk.split('x').map(Number); const g=Math.abs(x*y-area);
+    if(g<gap){ gap=g; best=t; }
+  });
+  return best?{...best, exact:gap===-1}:null;
 }
 // Stickers are bought per printed sheet/page — round pieces UP to full sheets.
 function stickerSheets(pieces, perSheet){ pieces=+pieces||0; perSheet=+perSheet||0;
@@ -3847,7 +3899,7 @@ async function renderShopify(){
     <div style="display:flex;gap:9px;flex-wrap:wrap">
       ${kpi('Sold', sum(sales)+' packs', sales.length+' line(s) in '+_shDays+' days')}
       ${kpi('Came back', sum(back)+' packs', back.length+' refund/return line(s)', back.length?'var(--earth,#b5762a)':'')}
-      ${kpi('Sales value', fmt(val), 'at the Shopify price')}
+      ${moneyHidden()?'':kpi('Sales value', fmt(val), 'at the Shopify price')}
       ${kpi('Held', _shHeld.length, _shHeld.length?'already in the opening count':'none', '')}
       ${kpi('Not stocked', _shSkip.length, _shSkip.length?'ice, packaging, made to order':'none', '')}
       ${kpi('Needs a decision', _shErr.length, _shErr.length?'a code nobody has ruled on':'all ruled on', _shErr.length?'var(--danger)':'#4e7a3e')}
@@ -3933,10 +3985,14 @@ async function renderShopify(){
   $('content').innerHTML=h;
 }
 function shCsv(){
-  const aoa=[['When','Type','Order','SKU','Item','Qty','Unit price','Customer','Posted','Held','Error']]
-    .concat((_shRows||[]).map(r=>[r.occurred_at,r.event_type,r.order_name||r.shop_order_id,r.variant_sku,r.note||'',
-      r.qty,r.unit_price||'',r.customer||'',r.posted?'yes':'no',
-      (!r.posted&&/^held/i.test(String(r.post_error||'')))?'yes':'',r.post_error||'']));
+  /* A role that is not allowed to see money on screen must not be able to
+     download it either — an export is the oldest way round a masked field. */
+  const _m=moneyHidden();
+  const aoa=[['When','Type','Order','SKU','Item','Qty'].concat(_m?[]:['Unit price']).concat(['Customer','Posted','Held','Error'])]
+    .concat((_shRows||[]).map(r=>[r.occurred_at,r.event_type,r.order_name||r.shop_order_id,r.variant_sku,r.note||'',r.qty]
+      .concat(_m?[]:[r.unit_price||''])
+      .concat([r.customer||'',r.posted?'yes':'no',
+        (!r.posted&&/^held/i.test(String(r.post_error||'')))?'yes':'',r.post_error||''])));
   const csv=aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':(c==null?'':c)).join(',')).join('\n');
   dlBlob(csv,'WR_shopify_'+todayISO()+'.csv','text/csv'); toast('Downloaded');
 }
@@ -11245,6 +11301,86 @@ async function generateSuppliesPO(){
    printers charge by the sheet, so ordering 61 of a 10-up label costs the same
    as ordering 70.                                                              */
 let _stkRoLoc='bulacan', _stkRoQty={}, _stkRoRows=[], _stkRoView='all';
+/* ============ Receiving — goods in, without the money =====================
+   The warehouse has to book a delivery in. Until now the only way to do that
+   was to open the purchase order, which is a commercial document: unit prices,
+   discounts, delivery fees, what is still owed. Handing that to whoever is at
+   the door means handing over the supplier's pricing, and it is the reason
+   "can the warehouse see the PO" kept being answered with a shrug.
+
+   This screen carries the SAME receiving action — it calls openPOReceive(),
+   there is no second posting path to drift — but shows only what a receiver
+   needs: who is delivering, what was ordered, what has arrived, what is left.
+   No column here has a peso sign in it, at any role.                        */
+let _rcvSearch='', _rcvShowDone=false;
+async function renderReceiving(){
+  $('crumb').innerHTML='<b>Receiving</b>';
+  $('cp').innerHTML=`<div class="title">Receiving <span onclick="openKB('receiving')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <input value="${esc(_rcvSearch)}" placeholder="Search supplier, reference or item…" oninput="_rcvSearch=this.value;drawReceiving()"
+      style="min-width:230px;padding:6px 9px;border:1px solid var(--line);border-radius:6px">
+    <label class="mini"><input type="checkbox" ${_rcvShowDone?'checked':''} onchange="_rcvShowDone=this.checked;drawReceiving()"> show completed</label>
+    <button class="btn sec sm" onclick="renderReceiving()">↻ Refresh</button>
+    <div class="sp"></div><span style="color:var(--muted)">what is on its way, and what has landed</span>`;
+  $('content').innerHTML='<div class="repcard"><div class="empty">Reading the orders…</div></div>';
+  let pos=[], lines=[];
+  try{ pos=(await db.list('purchase_orders',{})).filter(o=>o.status!=='cancelled' && !/\[STICKERS\]/i.test(o.po_ref||'')); }catch(e){}
+  try{ lines=await db.list('po_lines',{}); }catch(e){}
+  const byRef={}; lines.forEach(l=>{ (byRef[l.po_ref]=byRef[l.po_ref]||[]).push(l); });
+  window._rcvRows=pos.map(o=>{
+    const ls=byRef[o.po_ref]||[];
+    const ord=ls.reduce((s,l)=>s+poOrderQty(l),0);
+    const rec=ls.reduce((s,l)=>s+(+l.received_kg||0),0);
+    return {ref:o.po_ref, supplier:o.supplier_name||'(no supplier)', date:o.order_date||'', status:o.status||'',
+      n:ls.length, ord, rec, left:Math.max(0,ord-rec), items:ls.map(l=>({sku:l.ingredient_sku, name:ingName(l.ingredient_sku),
+        ord:poOrderQty(l), rec:+l.received_kg||0}))};
+  }).sort((a,b)=>String(b.date).localeCompare(String(a.date))||String(b.ref).localeCompare(String(a.ref)));
+  drawReceiving();
+}
+function drawReceiving(){
+  const q=String(_rcvSearch||'').trim().toLowerCase();
+  const rows=(window._rcvRows||[]).filter(r=>{
+    if(!_rcvShowDone && r.left<=0.0001) return false;
+    if(!q) return true;
+    return (r.ref+' '+r.supplier+' '+r.items.map(i=>i.name).join(' ')).toLowerCase().includes(q);
+  });
+  const kg=v=>(Math.round((+v||0)*1000)/1000).toLocaleString('en-PH',{maximumFractionDigits:3})+' kg';
+  const waiting=rows.filter(r=>r.left>0.0001).length;
+  let h=`<div class="repcard" style="padding:12px 14px">
+    <div style="display:flex;gap:9px;flex-wrap:wrap">
+      <div style="flex:1;min-width:150px;padding:8px 11px;border:1px solid var(--line);border-radius:8px;background:#fff">
+        <div class="mini" style="color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-size:10px">Waiting on a delivery</div>
+        <div style="font-size:19px;font-weight:800">${waiting} order(s)</div>
+        <div class="mini" style="color:var(--muted)">${kg(rows.reduce((s,r)=>s+r.left,0))} still to arrive</div></div>
+    </div>
+    <div class="hint" style="margin:10px 0 0">Open an order to post what actually arrived. Quantities only — pricing stays on the
+      purchase order, where the people who pay for it work. Posting here writes the same stock movement it always did.</div>
+  </div>
+  <div class="repcard" style="margin-top:12px">
+    <div class="repbar"><span>${rows.length} order(s)</span><span class="mini" style="color:var(--muted)">newest first</span></div>
+    <div style="overflow-x:auto"><table class="stickyhead"><thead><tr>
+      <th>Order</th><th>Supplier</th><th>Date</th><th class="num">Items</th>
+      <th class="num">Ordered</th><th class="num">Received</th><th class="num">Still to come</th><th>Status</th><th></th></tr></thead><tbody>`;
+  rows.forEach(r=>{
+    h+=`<tr style="cursor:pointer" onclick="rcvOpen('${esc(r.ref).replace(/'/g,'&#39;')}')">
+      <td><b>${esc(r.ref)}</b><div class="mini" style="color:var(--muted)">${esc(r.items.slice(0,3).map(i=>i.name).join(' · '))}${r.items.length>3?' …':''}</div></td>
+      <td>${esc(r.supplier)}</td><td class="mini">${esc(r.date)}</td><td class="num">${r.n}</td>
+      <td class="num mini" style="color:var(--muted)">${kg(r.ord)}</td>
+      <td class="num">${kg(r.rec)}</td>
+      <td class="num"><b style="color:${r.left>0.0001?'var(--berry)':'#4e7a3e'}">${r.left>0.0001?kg(r.left):'complete'}</b></td>
+      <td><span class="tagf">${esc(r.status)}</span></td>
+      <td><span class="btn link">📥 Receive</span></td></tr>`;
+  });
+  h+=`</tbody></table></div>${rows.length?'':'<div class="empty">Nothing waiting. Tick “show completed” to see orders already received.</div>'}</div>`;
+  $('content').innerHTML=h;
+}
+async function rcvOpen(ref){
+  /* Hand off to the purchase order's own receiving modal — one posting path,
+     so receiving can never mean two different things. */
+  state.model='purchase_orders'; state.view='form';
+  await openForm(encodeURIComponent(ref));
+  setTimeout(()=>{ try{ openPOReceive(); }catch(e){} }, 350);
+}
+
 async function renderStickerReorder(){
   $('cp').innerHTML=`<div class="title">Sticker Reorder <span onclick="openKB('sticker_reorder')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <select onchange="_stkRoLoc=this.value;_stkRoQty={};renderStickerReorder()">
@@ -11252,7 +11388,7 @@ async function renderStickerReorder(){
     <button class="btn sec" onclick="_stkRoFill('need')">↺ Reset to suggested</button>
     <button class="btn sec" onclick="_stkRoFill('zero')">✕ Clear all</button>
     <button class="wfbtn" onclick="generateStickerPO()">🧾 Generate Sticker PO</button>
-    <div class="sp"></div><span style="color:var(--muted)">production + PAR → labels to order → PO</span>`;
+    <div class="sp"></div><span style="color:var(--muted)">demand + custom orders + PAR → labels to order → PO</span>`;
 
   const prods=(await db.list('products',{})).filter(p=>p.active!==false);
   // packs planned this week: the locked demand plot, plus any locked custom order
@@ -11262,6 +11398,22 @@ async function renderStickerReorder(){
     if(cands[0]){ const d=cands[0].p.data||cands[0].p; planned={...(d.demand||{})}; window._stkRoPlanRef=(d&&d.ref)||''; window._stkRoPlanDate=cands[0].d; }
   }catch(e){}
   try{ const co=await coOpenDemandMap(); Object.keys(co).forEach(s=>{ planned[s]=Math.max(+planned[s]||0, co[s]); }); }catch(e){}
+  /* THE DEMAND TABLE IS THE THIRD SOURCE, and it was being ignored. A week can
+     be committed three ways — a saved plot, a locked custom order, and rows
+     written straight into demand (which is where a loaded multi-pet order and
+     every sheet import land). Reading only the first two meant a label that had
+     been promised to a customer never appeared on the reorder list at all.
+     Takes the LARGER of the three, never the sum: they describe the same week,
+     they do not stack. */
+  try{
+    const today=todayISO();
+    const horizon=new Date(Date.now()+21*864e5).toISOString().slice(0,10);
+    (await db.list('demand',{})).forEach(d=>{
+      const dt=String(d.plan_date||'').slice(0,10);
+      if(!dt || dt<today || dt>horizon) return;
+      planned[d.sku]=Math.max(+planned[d.sku]||0, +d.qty||0);
+    });
+  }catch(e){}
   // production labels are pulled at the site that makes them
   const madeHere=(_stkRoLoc===planProduceLoc());
 
@@ -11275,10 +11427,15 @@ async function renderStickerReorder(){
   try{ (await db.list('custom_order_lines',{})).forEach(l=>{ if(l.product_sku) custOrderOf[l.product_sku]=l.order_ref; }); }catch(e){}
   let sharedPacks=0; const personalRows=[];
   const _mk=(o)=>{
-    const perSheet=+o.perSheet||0;
+    /* The tier is the fallback, not the override: a per-product figure that has
+       actually been filled in still wins. */
+    const t=stickerTier(o.dim);
+    const perSheet=(+o.perSheet||0) || ((t&&t.per)||0);
+    const price=(+o.price||0) || ((t&&t.price)||0);
     const need=Math.max(o.forProd||0, o.forPar||0);
     const sheets=perSheet>0?Math.ceil(need/perSheet):0;
-    return {...o, need, sheets, order:(perSheet>0?sheets*perSheet:need)};   // printers charge by the sheet
+    return {...o, perSheet, price, tier:(t?t.dim:''), tierExact:!!(t&&t.exact),
+      need, sheets, order:(perSheet>0?sheets*perSheet:need)};   // printers charge by the pack
   };
   _stkRoRows=prods.filter(p=>{
     if(!(p.is_custom||/^CUST-/.test(p.sku))) return true;
@@ -11328,7 +11485,22 @@ async function renderStickerReorder(){
 function _stkRoFill(mode){ _stkRoQty={};
   if(mode==='need') _stkRoRows.forEach(r=>{ if(r.order>0) _stkRoQty[r.sku]=r.order; });
   drawStickerReorder(); }
-function _stkRoSet(sku,v){ const q=+v||0; if(q>0) _stkRoQty[sku]=q; else delete _stkRoQty[sku]; _stkRoTotals(); }
+function _stkRoSet(sku,v,snap){
+  const q=Math.max(0, parseFloat(v)||0);
+  if(q>0) _stkRoQty[sku]=q; else delete _stkRoQty[sku];
+  /* On leaving the box, round UP to the printer's minimum pack. Typing 30 of a
+     label sold in 20s and having the order silently go out as 30 is how you get
+     a delivery of 40 and an invoice nobody expected. */
+  if(snap && q>0){
+    const r=(_stkRoRows||[]).find(x=>x.sku===sku);
+    const per=r?(+r.perSheet||0):0;
+    if(per>0){ const up=Math.ceil((q-1e-9)/per)*per;
+      if(up!==q){ _stkRoQty[sku]=up; const el=document.getElementById('stkq_'+_stkRoId(sku)); if(el) el.value=up;
+        toast((r.name||sku)+' rounds up to '+up+' — sold by '+per); } }
+  }
+  _stkRoTotals();
+}
+const _stkRoId=sku=>String(sku).replace(/[^A-Za-z0-9]/g,'_');
 function _stkRoTotals(){
   const pcs=Object.values(_stkRoQty).reduce((s,v)=>s+(+v||0),0);
   const val=_stkRoRows.reduce((s,r)=>s+(+_stkRoQty[r.sku]||0)*(+r.price||0),0);
@@ -11379,7 +11551,7 @@ function drawStickerReorder(){
     <div style="overflow-x:auto" class="stickyhead"><table><thead><tr>
       <th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th>
       <th class="num">PAR</th><th class="num">On hand</th><th class="num">Packs</th><th class="num">PAR top-up</th>
-      <th class="num">Need</th><th class="num">Order</th><th class="num">Sheets</th><th class="num">₱/pc</th><th>Supplier</th>
+      <th class="num">Need</th><th class="num">Order</th><th class="num" title="the printer's minimum pack for this size">Packs</th><th class="num">₱/pc</th><th>Supplier</th>
     </tr></thead><tbody>`;
   const shown=rows.filter(r=>{
     if(_stkRoView==='order') return r.order>0||_stkRoQty[r.sku];
@@ -11392,7 +11564,10 @@ function drawStickerReorder(){
       h+=`<tr style="background:#eef3ea"><td colspan="15" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(r=>{
         n++; totNeed+=r.need; const q=+_stkRoQty[r.sku]||0; totOrder+=q; totVal+=q*(+r.price||0);
-        const sh=stickerSheets(q, r.perSheet); const shTxt=r.perSheet>0?(sh.sheets+' × '+r.perSheet):'—';
+        const sh=stickerSheets(q, r.perSheet);
+        const shTxt=r.perSheet>0
+          ? (sh.sheets+' × '+r.perSheet+(r.tier&&!r.tierExact?`<div class="mini" style="color:var(--muted)" title="${esc(r.dim)} is not on the price list — priced at the nearest size the printer sells">≈ ${esc(r.tier)}</div>`:''))
+          : '<span style="color:var(--danger)" title="no minimum pack known for this size">—</span>';
         const bare=String(r.sku).replace(/^PERSONAL:/,'');
         h+=`<tr><td>${n}</td>
           <td><b>${esc(r.name||bare)}</b>${r.variant&&String(r.variant)!==String(r.name)?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}${r.note?`<div class="mini" style="color:var(--berry)">${esc(r.note)}</div>`:''}</td>
@@ -11405,7 +11580,10 @@ function drawStickerReorder(){
           <td class="num mini" style="${r.forProd>0?'color:var(--berry);font-weight:600':'color:var(--muted)'}">${r.packs||'—'}</td>
           <td class="num mini" style="color:var(--muted)">${r.forPar||'—'}</td>
           <td class="num"><b>${r.need||'—'}</b></td>
-          <td class="num"><input type="number" step="1" inputmode="numeric" value="${_stkRoQty[r.sku]||''}" onchange="_stkRoSet('${esc(r.sku)}',this.value)" style="width:82px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+          <td class="num"><input id="stkq_${_stkRoId(r.sku)}" type="number" step="1" inputmode="numeric" value="${_stkRoQty[r.sku]||''}"
+            oninput="_stkRoSet('${esc(r.sku)}',this.value)" onchange="_stkRoSet('${esc(r.sku)}',this.value,true)"
+            title="${r.perSheet?('sold by '+r.perSheet+' at ₱'+r.price+' each'+(r.tier?(' · '+(r.tierExact?'':'nearest ')+r.tier+' tier'):'')):'no pack size known for this size'}"
+            style="width:82px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
           <td class="num mini">${shTxt}</td>
           <td class="num mini">${r.price?('₱'+(+r.price).toFixed(2)):'<span style="color:var(--danger)">—</span>'}</td>
           <td class="mini">${esc(r.supplier)||'<span style="color:var(--danger)">set one</span>'}</td></tr>`;
@@ -11429,12 +11607,19 @@ function drawStickerReorder(){
   _stkRoTotals();
 }
 async function generateStickerPO(){
-  const lines=_stkRoRows.filter(r=>(+_stkRoQty[r.sku]||0)>0).map(r=>({...r, qty:+_stkRoQty[r.sku]||0}));
+  const lines=_stkRoRows.filter(r=>(+_stkRoQty[r.sku]||0)>0).map(r=>{
+    const raw=+_stkRoQty[r.sku]||0, per=+r.perSheet||0;
+    return {...r, qty: per>0 ? Math.ceil((raw-1e-9)/per)*per : raw, typed:raw};
+  });
+  const bumped=lines.filter(l=>l.qty!==l.typed);
   if(!lines.length){ toast('Nothing to order — set a quantity first',true); return; }
   const val=lines.reduce((s,l)=>s+l.qty*(+l.price||0),0);
   const pcs=lines.reduce((s,l)=>s+l.qty,0);
   if(!confirm('Generate sticker PO(s)?\n\n'+lines.length+' label(s) · '+pcs.toLocaleString('en-PH')+' pieces · est. ₱'+
-      (Math.round(val*100)/100).toLocaleString('en-PH')+'\nGrouped by label supplier, for '+_stkRoLoc+'.')) return;
+      (Math.round(val*100)/100).toLocaleString('en-PH')+'\nGrouped by label supplier, for '+_stkRoLoc+'.'
+      +(bumped.length?('\n\nRounded up to the printer\'s minimum pack:\n'
+        +bumped.slice(0,8).map(l=>'• '+l.name+': '+l.typed+' → '+l.qty+' (sold by '+l.perSheet+')').join('\n')
+        +(bumped.length>8?('\n… and '+(bumped.length-8)+' more'):'')):''))) return;
   const bySup={}; lines.forEach(l=>{ const s=l.supplier||'(unassigned)'; (bySup[s]=bySup[s]||[]).push(l); });
   showBusy('Creating sticker PO(s)…'); const refs=[];
   try{
@@ -11887,7 +12072,10 @@ async function renderSelfTest(){
   T('Formula engine (price×1.12)', async()=>{ const v=evalF('list_price_kg*1.12',{list_price_kg:100}); return [Math.abs(v-112)<0.01, 'got '+ (Math.round(v*100)/100)]; });
   T('MRP computes requirement', async()=>{ const p=(await db.list('products',{}))[0]; const b=await db.list('bom_lines',{}); const need=b.filter(x=>x.product_sku===p.sku).reduce((s,x)=>s+(+x.usable_g||0)*10,0); return [need>0, 'need '+Math.round(need)+'g/10 packs']; });
   T('Weekly Inventory can load items', async()=>{ const n=(await db.list('ingredients',{})).length+(await db.list('products',{})).length; return [n>0, n+' countable items']; });
-  T('Transfer — Bulacan loader available', async()=>{ return [typeof loadBulacanStock==='function' && !!MODELS.transfers.o2mLoader, 'button wired']; });
+  T('Transfer — item pickers available', async()=>{
+    const n=(MODELS.transfers.o2mLoaders||[]).length;
+    return [typeof trPick==='function' && typeof loadBulacanStock==='function' && n>=4,
+      n+' picker(s) wired: '+(MODELS.transfers.o2mLoaders||[]).map(x=>x.label).join(' · ')]; });
   T('Report builder groups data', async()=>{ const r=await db.list('ingredients',{}); const g={}; r.forEach(x=>g[x.source]=1); return [Object.keys(g).length>0, Object.keys(g).length+' groups']; });
   T('Command palette search', async()=>{ await cmdSearch('beef'); return [cmdItems.length>0, cmdItems.length+' results']; });
   T('Variances center has records', async()=>{ const r=await db.list('variance_log',{}); return [r.length>=0, r.length+' logged']; });
@@ -11930,9 +12118,18 @@ async function renderSelfTest(){
       let ls=[]; try{ ls=await db.children(MODELS.purchase_orders.o2m, o.po_ref); }catch(e){ continue; }
       if(!ls.length) continue;
       const led=await poReceivedFromLedger(o.po_ref);
-      ls.forEach(l=>{ const rec=+l.received_kg||0, got=+led[l.ingredient_sku]||0;
+      /* THE LEDGER IS KEYED BY SKU; THE ORDER IS NOT. One order may list the
+         same ingredient on two lines — a second delivery, a price change, a
+         substitution. Comparing each line on its own against the SKU's whole
+         ledger total made both lines look wrong whenever they were both right:
+         25.356 + 38.25 = 63.606, and the ledger said 63.61. Add the lines up
+         first, then compare. */
+      const byS={}; ls.forEach(l=>{ byS[l.ingredient_sku]=(byS[l.ingredient_sku]||0)+(+l.received_kg||0); });
+      Object.keys(byS).forEach(sku=>{ const rec=byS[sku], got=+led[sku]||0;
+        const n=ls.filter(l=>l.ingredient_sku===sku).length;
         if(Math.abs(got-rec)>Math.max(0.01, rec*0.005))
-          bad.push(o.po_ref+' · '+ingName(l.ingredient_sku)+' — line says '+rec+', ledger has '+Math.round(got*100)/100); });
+          bad.push(o.po_ref+' · '+ingName(sku)+' — order says '+(Math.round(rec*1000)/1000)
+            +(n>1?(' across '+n+' lines'):'')+', ledger has '+Math.round(got*100)/100); });
     }
     return [bad.length===0, bad.length?(bad.length+' line(s) disagree with the ledger — '+bad.slice(0,3).join('; ')+(bad.length>3?' …':'')):'ledger agrees with every line'];
   });
@@ -12048,6 +12245,13 @@ const KB = {
        'The three buckets exist so the alarm stays meaningful. If made-to-order mixes sat in the same red number as a genuine missing product, nobody would look at the red number.',
        'PASIG ONLY. Bulacan is production stock and is not sellable until transferred; publishing it would let a customer buy what is not at the selling site.',
        'A negative Pasig balance would be published as ZERO, never as a negative. A negative balance is a counting problem to fix, not a number to broadcast.']},
+  receiving:{d:'Book in a delivery without opening the commercial side of the order.',
+    h:['Only orders still waiting on goods are listed; tick "show completed" for the rest',
+       'Ordered · Received · Still to come, in kilos — no prices anywhere on this screen',
+       'Open a row and post exactly what arrived; short deliveries leave the order partially received'],
+    l:['A PURCHASE ORDER IS A COMMERCIAL DOCUMENT. It carries unit prices, discounts, delivery fees and what is still owed. Handing that to whoever is at the door hands over the supplier\'s pricing, so receiving gets its own screen with the money left out.',
+       'THIS IS NOT A SECOND POSTING PATH. It opens the same receiving action the purchase order uses, so a delivery can never mean two different things depending on which screen booked it.',
+       'The ledger stays the authority for what has already arrived — a line whose received figure was wiped still shows the delivery.']},
   home:{d:'Your landing page — KPI tiles and quick links into every module.',h:['Glance at counts (ingredients, products, suppliers, open POs)','Click a card to jump into that module','Use the search box or ⌘K to find anything'],l:['KPIs are live counts from the database','Nothing is entered here — it summarizes other modules']},
   ingredients:{d:'Master list of everything you buy or make into product: raw meats, organs, veg, fruit, seeds, supplies, plus live animals and internal intermediates.',h:['Open a row to edit price, category, storage, par, lead time','Set the processing method + yield so costing is accurate','Mark live-animal / intermediate items with their flags'],l:['₱/kg usable = raw price ÷ processing yield — the true cost in a pack','moving_avg_cost auto-updates from goods receipts (perpetual costing)','Intermediates (e.g. Rabbit Ground Meat) derive cost from their source × dress-out yield']},
   products:{d:'Sellable finished goods, grouped into families with size variants, each with its own SKU, price and recipe (BOM).',h:['Open a product to edit price, pack size, feeding style','Edit the Recipe (BOM) lines — usable grams per pack','Add variants as separate products under the same family'],l:['BOM grams are USABLE grams in the pack','Raw needed for production = usable ÷ ingredient yield','Cost/pack is computed from actual ingredients issued at production']},
@@ -12071,7 +12275,13 @@ const KB = {
   supplies:{d:'Kitchen supplies — packaging, labels/stickers and consumables (vacuum bags, ecobags, thermal pouches). Split out from food ingredients.',h:['Add/edit a supply with its unit cost, PAR and reorder point','Keep "Kitchen supply" ticked so it stays out of the Ingredients list','Group by Type; reorder via Purchasing → Supplies Reorder'],l:['Shares the ingredients table (is_supply = true) so stock & receiving still work','Cost/unit feeds Gross Margin packaging and PO value estimates','Received & counted in whole units (not kg)']},
   margin:{d:'Live gross margin per product: BOM raw cost + variable process & packaging + fees → GP% and a suggested price at your target.',h:['Edit the global rate model (per-gram utilities, labor, packaging, fees, target GM) then 💾 Save','Set each product’s Cost profile tab: deboning / butcher / sous-vide / ecobag / thermal','Tap a row to open the product; ⬆ Write total cost pushes COGS to products'],l:['Raw = BOM grams × ingredient moving-average cost (falls back to processed/list price)','Process = (electricity+water+transport) per gram + labor (plain OR deboning) ± butcher ± sous-vide','Packaging = vacuum + sticker + ecobag + thermal, pulled from Kitchen Supplies costs','Fees = (transaction+marketing) % of price; Suggested = fixed cost ÷ (1 − target − fees%)','Rates persist in Supabase (app_settings.cost_model) — shared with the whole team']},
   momentum:{d:'Reads Shopify rolling sales (30/60/90/120 days) against live stock to show what to make now vs what’s overstocked.',h:['📊 Runway view: days of stock left per product, most urgent first','🎯 Quadrant view: momentum × stock for a two-axis read','Group by family or priority; 📥 Import/paste sales; tap a row to open the product'],l:['Momentum × = recent 30-day daily rate ÷ 120-day average (>1 = accelerating)','Days of cover = current stock ÷ recent daily rate','Stockout risk = low cover + steady/rising demand; overstock = high cover + slowing','Fed hourly from the “90-120 Day Demand” sheet into the sales_momentum table']},
-  sticker_reorder:{d:'Label demand per site — the larger of what production needs and what PAR needs — turned into a sticker PO.',h:['Pick the site, review Need (production vs PAR top-up)','Adjust Order where you want a different quantity — it rounds up to whole sheets','🧾 Generate Sticker PO — one draft per label supplier'],l:['One label per pack; production need = packs planned − labels on hand','Need is the LARGER of production and PAR top-up, never the sum','Quantities are in pieces; the PO reference carries [STICKERS] so it opens on the Sticker PO screen']},
+  sticker_reorder:{d:'Label demand per site — the larger of what the week owes and what PAR needs — turned into a sticker PO.',
+    h:['Pick the site, review Need (demand vs PAR top-up)','Adjust Order where you want a different quantity — it rounds up to the printer\'s minimum pack','🧾 Generate Sticker PO — one draft per label supplier'],
+    l:['THREE SOURCES FEED DEMAND, and it takes the LARGEST of them, never the sum: the latest saved demand plot, every locked custom order, and the demand table itself (where sheet imports and loaded multi-pet orders land). Reading only the plot meant a label promised to a customer never appeared here at all.',
+       'One label per pack; production need = packs planned − labels on hand',
+       'THE PRINTER SELLS BY THE PACK, and the pack depends on the label SIZE: 5 × 6.5 by 12 at ₱8.10, 4 × 5 by 20 at ₱5.50, 3 × 3 by 25 at ₱3.80. A quantity you type rounds UP to that pack when you leave the box, and the order confirms every line it rounded.',
+       'A size that is not on the price list (4 × 5.5, 2.5 × 3) is priced at the NEAREST tier by area and the row says so — an approximation you can see beats a zero you cannot.',
+       'Quantities are in pieces; the PO reference carries [STICKERS] so it opens on the Sticker PO screen']},
   supplies_reorder:{d:'Supplies below their PAR, with the quantity to reorder, ready to turn into a supplier PO.',h:['Review items below PAR (reorder = PAR − on hand)','🧾 Generate Supplies PO — one draft per supplier, ready to send','Set each supply’s PAR & reorder in Kitchen Supplies'],l:['Simple PAR rule — supplies have no recipe so they aren’t in MRP','Reorder qty is in the item’s own unit','Generated POs are confirmed and priced at the supply’s unit cost']},
   ffprofiles:{d:'A searchable list of the Fresh Food Calculator’s saved customers, shared across devices via Supabase.',h:['Search by customer, pet, or feeding type','Open the 🧮 Calculator to build a pack for one (Load saved profile there)','Profiles sync from the calculator’s ☁ Sync'],l:['Reads the ffcalc_profiles table (run wr_ffcalc_profiles.sql once)','Each calculator save pushes here; the calculator pulls on load','Read-only here — edit in the calculator']},
   ffcalc:{d:'The full Fresh Food Calculator, embedded in the app — size a custom pack per pet, then push it straight into a Custom Order.',h:['Fill in the pet profile & feeding type, compute the pack (Feeding / Kitchen)','Click 📤 Send order to ERP (top-right) to import the recipe','It lands as a Custom Order — map any unmatched ingredient, then 🔒 Lock'],l:['Runs isolated in a frame so it never clashes with the ERP','Sending posts the per-pack recipe (ingredient + grams), pack size, packs, customer & price','The ERP matches ingredient names to your master SKUs; unmatched ones are flagged for you to pick']},
