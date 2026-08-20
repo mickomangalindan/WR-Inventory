@@ -3285,21 +3285,33 @@ function recordPrintHtml(m, r, children){
       G.subs.forEach(S=>{
         if(S.g2 && !/^other$/i.test(String(S.g2))) body+=`<tr class="cat"><td colspan="${span}">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`;
         body+=S.items.map(r=>{ n++;
-          const label=esc(r.name)+(r.variant?' '+esc(r.variant):'')+' <span class="sku2">['+esc(r.sku)+']</span>';
-          if(isTr) return `<tr><td>${n}</td><td>${label}</td>`
+          /* The code goes on its own line. A custom-order name runs long enough to
+             shove the write-in boxes off the sheet, and stacking it also gives the
+             row the height somebody needs to write a figure into by hand. */
+          const label=esc(r.name)+(r.variant?' '+esc(r.variant):'')+'<span class="sku2">'+esc(r.sku)+'</span>';
+          if(isTr) return `<tr><td class="idx">${n}</td><td class="it">${label}</td>`
             +`<td style="text-align:right">${esc(r.sent_packs==null?'':r.sent_packs)}</td>`
             +_blank
             +((anyRecv&&(+r.received_packs||0)>0)?`<td style="text-align:right">${esc(r.received_packs)}</td>`:_blank)
             +_blank
             +numCols.map(c=>`<td style="text-align:right">${esc(r[c.n]==null?'':r[c.n])}</td>`).join('')+`</tr>`;
-          return `<tr><td>${n}</td><td>${label}</td><td>${esc(r.sku)}</td>`+numCols.map(c=>`<td style="text-align:right">${esc(r[c.n]==null?'':r[c.n])}</td>`).join('')+`</tr>`;
+          return `<tr><td class="idx">${n}</td><td class="it">${label}</td><td>${esc(r.sku)}</td>`+numCols.map(c=>`<td style="text-align:right">${esc(r[c.n]==null?'':r[c.n])}</td>`).join('')+`</tr>`;
         }).join('');
       });
     });
     const head=isTr
-      ? `<th>#</th><th>Item</th><th style="text-align:right">Sent</th><th style="text-align:right">Prepared</th><th style="text-align:right">Received</th><th>Remarks</th>`
+      ? `<th style="text-align:left">#</th><th style="text-align:left">Item</th><th style="text-align:right">Sent</th><th style="text-align:center">Prepared</th><th style="text-align:center">Received</th><th style="text-align:center">Remarks</th>`
         +numCols.map(c=>`<th style="text-align:right">${esc(c.l)}</th>`).join('')
-      : `<th>#</th><th>Item</th><th>SKU</th>`+numCols.map(c=>`<th style="text-align:right">${esc(c.l)}</th>`).join('');
+      : `<th style="text-align:left">#</th><th style="text-align:left">Item</th><th style="text-align:left">SKU</th>`+numCols.map(c=>`<th style="text-align:right">${esc(c.l)}</th>`).join('');
+    /* Fixed widths. Left to itself the browser gave the item column the middle of
+       the page and squeezed the four working columns into the right edge — the
+       exact opposite of what the sheet is for. Remarks gets the most room because
+       it is the only column anybody writes a sentence into. */
+    const _extra=numCols.length*7;
+    const cg=isTr
+      ? `<colgroup><col style="width:5%"><col style="width:${Math.max(30,42-_extra)}%"><col style="width:8%"><col style="width:11%"><col style="width:11%"><col style="width:${Math.max(14,23-_extra)}%">`
+        +numCols.map(()=>'<col style="width:7%">').join('')+`</colgroup>`
+      : '';
     const tot=numCols.map(c=>rows.reduce((s,r)=>s+(+r[c.n]||0),0));
     const foot=isTr
       ? `<tr class="tot"><td colspan="2" style="text-align:right">Total · ${n} item(s)</td>`
@@ -3307,7 +3319,7 @@ function recordPrintHtml(m, r, children){
         +_blank+((anyRecv)?`<td style="text-align:right">${num(Math.round(rows.reduce((s,r)=>s+(+r.received_packs||0),0)*100)/100)}</td>`:_blank)+_blank
         +tot.map(v=>`<td style="text-align:right">${num(Math.round(v*100)/100)}</td>`).join('')+`</tr>`
       : `<tr class="tot"><td colspan="3" style="text-align:right">Total · ${n} item(s)</td>`+tot.map(v=>`<td style="text-align:right">${num(Math.round(v*100)/100)}</td>`).join('')+`</tr>`;
-    lines=`<h3>${esc(m.o2m.label)}</h3><table class="lines"><thead><tr>${head}</tr></thead><tbody>${body}${foot}</tbody></table>`
+    lines=`<h3>${esc(m.o2m.label)}</h3><table class="lines${isTr?' tr':''}">${cg}<thead><tr>${head}</tr></thead><tbody>${body}${foot}</tbody></table>`
       +(isTr?`<div class="signoff"><div>Prepared by ______________________</div><div>Sent by ______________________</div><div>Received by ______________________</div><div>Date ____________</div></div>`:'');
   } else if(m.o2m && m.o2m.cols.some(c=>c.n==='ingredient_sku')){
     /* Ingredient-line documents (a purchase order). It used to print the bare SKU
@@ -3364,14 +3376,28 @@ function recordPrintHtml(m, r, children){
     table.lines{width:100%;border-collapse:collapse;font-size:12px}
     table.lines th{background:#4e7a3e;color:#fff;padding:6px 8px;font-weight:600}
     table.lines td{padding:5px 8px;border-bottom:1px solid #eee}
-    /* the columns somebody writes in get a real box, not a ruled line */
-    table.lines td.wr{border:1px solid #8f8d85;background:#fcfcfa;min-width:66px;height:22px}
+    /* the columns somebody writes in get a real box, not a ruled line.
+       border-collapse merges neighbouring borders, so a box drawn only on the
+       write-in cell loses the edge it shares with a plain cell — hence the
+       explicit outline, which is not collapsed away. */
+    table.lines td.wr{border:1px solid #6f6d66;background:#fff;height:30px;padding:2px}
     table.lines th{white-space:nowrap}
-    .sku2{color:#8a887f;font-weight:400;font-size:10.5px}
+    table.lines.tr{table-layout:fixed}
+    table.lines.tr td{padding:6px 8px;vertical-align:middle}
+    table.lines.tr td.idx{color:#8a887f;font-size:11px;text-align:left;padding-right:0}
+    table.lines.tr td.it{white-space:normal;word-break:break-word;line-height:1.35;padding-left:4px}
+    table.lines.tr td.wr{border:1px solid #6f6d66}
+    .sku2{display:block;color:#8a887f;font-weight:400;font-size:10px;letter-spacing:.2px}
     .signoff{display:flex;flex-wrap:wrap;gap:26px;margin-top:20px;font-size:11px;color:#555}
     table.lines tr.tot td{font-weight:700;border-top:2px solid #4e7a3e;background:#f6f8f4}
     table.lines tr.grp td{background:#dbe8de;font-weight:800;color:#234a31}
     table.lines tr.cat td{background:#f2f6ef;font-weight:600;color:#4e7a3e}
+    table.lines:not(.tr) .sku2{display:inline}
+    /* a row never splits across the fold, and a group heading never lands alone
+       at the bottom of a page with its items overleaf */
+    table.lines tr{page-break-inside:avoid}
+    table.lines tr.grp,table.lines tr.cat{page-break-after:avoid}
+    table.lines thead{display:table-header-group}
     table.lines a{color:#1155cc}
     .ft{margin-top:26px;color:#888;font-size:11px;border-top:1px solid #eee;padding-top:8px}
   </style></head><body>
@@ -4959,18 +4985,21 @@ async function renderMRP(){
       <div style="overflow-x:auto"><table><thead><tr><th>Plan date</th><th class="num">SKUs</th><th class="num">Packs</th><th>For example</th><th></th></tr></thead><tbody>
       ${unplot.map(u=>`<tr><td><b>${esc(u.date)}</b></td><td class="num">${u.skus}</td><td class="num">${u.packs}</td>
         <td class="mini" style="color:var(--muted)"><code>${u.eg.map(esc).join('</code> <code>')}</code>${u.skus>u.eg.length?' …':''}</td>
-        <td><button class="btn sm sec" onclick="mrpGoDate('${esc(u.date)}')">Open ${esc(u.date)}</button></td></tr>`).join('')}
+        <td style="white-space:nowrap"><button class="btn sm sec" onclick="mrpGoDate('${esc(u.date)}')">Open ${esc(u.date)}</button>
+          <button class="btn sm sec" title="Remove these rows from the demand table — the orders that wrote them are kept" onclick="mrpClearDemand('${esc(u.date)}')">🗑 Clear</button></td></tr>`).join('')}
       </tbody></table></div>
       <div class="hint" style="margin-top:8px">A custom order goes to <b>Added in Demand</b> the moment a row lands in the demand table,
         which is why one can say it is in demand while this screen shows nothing for that week. Open the date, then
-        <b>☁ Sync demand</b> to pull those rows in and save a plot.</div></div>`;
+        <b>☁ Sync demand</b> to pull those rows in and save a plot. Was it a trial? <b>🗑 Clear</b> takes the rows back out —
+        it never deletes the order that wrote them.</div></div>`;
   }
   // demand card
   dh+=`<div class="repcard"${(coSkus.length||1)?' style="margin-top:14px"':''}>
     <div class="repbar"><span>Plan (week of)</span><input type="date" value="${MRPDATE}" onchange="MRPDATE=this.value">
       <button class="btn sm sec" onclick="openMRPImport()">📥 Import (xlsx / csv)</button>
       <button class="btn sm sec" onclick="mrpImport()">⬆ Paste</button>
-      <button class="btn sm sec" onclick="mrpSheetSync()" title="Pulls the demand table for this plan date, plus every locked custom order regardless of its scheduled date">☁ Sync demand (sheets + custom orders)</button></div>`;
+      <button class="btn sm sec" onclick="mrpSheetSync()" title="Pulls the demand table for this plan date, plus every locked custom order regardless of its scheduled date">☁ Sync demand (sheets + custom orders)</button>
+      <button class="btn sm sec" onclick="mrpClearDemand(MRPDATE)" title="Remove the demand rows recorded against this date — by source, and without deleting the orders">🗑 Clear demand for this date</button></div>`;
   dh+=`<h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3>
     <table><thead><tr><th>Product</th><th>SKU</th><th class="num">Demand</th></tr></thead><tbody>`;
   const _demRow=p=>`<tr><td>${esc(p.name)}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="any" inputmode="decimal" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpDemand['${p.sku}']=+this.value||0;renderMRP()"></td></tr>`;
@@ -5307,6 +5336,112 @@ async function confirmSaveMRPPlan(hasExisting){
 }
 async function mrpGoDate(d){ MRPDATE=d; await renderMRP();
   toast('Now on '+d+' — press ☁ Sync demand to pull those rows in'); }
+
+/* ---- Clearing a trial demand -------------------------------------------
+   A demand row is written by whoever synced it — a custom order, a sheet
+   import, the Shopify pull, a hand-typed plot. Until now the ONLY way to take
+   one back out was the Data Cleanser, which wipes every demand row and every
+   saved plot in the database. That is far too big a hammer for "I was testing
+   the 21st and I want that trial gone".
+   So: clear ONE date, and within that date choose WHICH SOURCE to remove.
+   What this never does is delete the order that wrote the row. The custom
+   order stays exactly where it is — it simply stops saying "Added in Demand"
+   and goes back to "For Demand Planning", and ☁ Sync demand will bring it
+   back if it was cleared by mistake. */
+async function mrpClearDemand(date){
+  const d=String(date||MRPDATE||'').slice(0,10);
+  if(!d){ toast('Pick a plan date first',true); return; }
+  let rows=[]; try{ rows=(await db.list('demand',{})).filter(r=>String(r.plan_date||'').slice(0,10)===d); }catch(e){}
+  rows=rows.filter(r=>(+r.qty||0)!==0);
+  const NOSRC='\u0000';
+  const by={};
+  rows.forEach(r=>{ const lab=String(r.source||'').trim(); const k=lab||NOSRC;
+    const g=by[k]=by[k]||{key:k, label:(lab||'(no source recorded — typed or imported by hand)'), skus:0, packs:0, eg:[], ids:[], skuList:[]};
+    g.skus++; g.packs+=(+r.qty||0); if(g.eg.length<5) g.eg.push(r.sku);
+    if(r.id!==undefined && r.id!==null) g.ids.push(r.id);
+    g.skuList.push(r.sku); });
+  const groups=Object.values(by).sort((a,b)=>b.packs-a.packs);
+  let plot=null;
+  try{ plot=((await mrpPlans())||[]).find(pl=>String(pl.plan_date||pl.date||'').slice(0,10)===d)||null; }catch(e){}
+  if(!groups.length && !plot){ toast('Nothing recorded for '+d); return; }
+  const sel={}; groups.forEach(g=>sel[g.key]=true);
+  window._dcCtx={date:d, groups, plot, sel, plotSel:false, NOSRC};
+  drawDemandClear();
+}
+function drawDemandClear(){
+  const c=window._dcCtx; if(!c) return;
+  const g=c.groups;
+  const picked=g.filter(x=>c.sel[x.key]);
+  const tot={skus:picked.reduce((a,x)=>a+x.skus,0), packs:picked.reduce((a,x)=>a+x.packs,0)};
+  const pl=c.plot;
+  const plRef=pl?((pl.data&&pl.data.ref)||pl.ref||'saved plot'):'';
+  const plLocked=!!(pl&&pl.data&&pl.data.locked);
+  $('modal').innerHTML=`<div class="mwrap">
+    <div class="mhead">🗑 Clear demand for <b>${esc(c.date)}</b><span style="flex:1"></span><button class="btn sm sec" onclick="closeModal()">✕ Close</button></div>
+    <div class="mbody">
+      <div class="hint" style="margin-bottom:10px">These rows live in the <b>demand table</b>. Removing them does <b>not</b> delete the
+        custom orders or sheet rows that wrote them — those go back to <b>For Demand Planning</b>, and
+        <b>☁ Sync demand</b> will pull them in again if you clear one by mistake.</div>
+      ${g.length?`<table><thead><tr><th style="width:34px"></th><th>Written by</th><th class="num">SKUs</th><th class="num">Packs</th><th>For example</th></tr></thead><tbody>
+        ${g.map((x,i)=>`<tr><td><input type="checkbox" ${c.sel[x.key]?'checked':''} onchange="window._dcCtx.sel[window._dcCtx.groups[${i}].key]=this.checked;drawDemandClear()"></td>
+          <td>${esc(x.label)}</td><td class="num">${x.skus}</td><td class="num">${x.packs}</td>
+          <td class="mini" style="color:var(--muted)"><code>${x.eg.map(esc).join('</code> <code>')}</code>${x.skus>x.eg.length?' …':''}</td></tr>`).join('')}
+        </tbody></table>`:`<div class="hint">No demand rows on this date.</div>`}
+      ${pl?`<label class="sck" style="margin-top:12px;display:block"><input type="checkbox" ${c.plotSel?'checked':''}
+          onchange="window._dcCtx.plotSel=this.checked;drawDemandClear()"> Also delete the <b>saved demand plot</b> for this date
+          — <code>${esc(plRef)}</code>${plLocked?' <b style="color:#b23b2e">(LOCKED — production may already be planned against it)</b>':''}</label>`:''}
+      <div style="margin-top:12px;font-size:13px"><b>Selected:</b> ${tot.skus} row(s) · ${tot.packs} pack(s)${c.plotSel?' · and the saved plot':''}</div>
+    </div>
+    <div class="mfoot"><button class="btn" style="background:#b23b2e" onclick="mrpClearApply()">🗑 Remove selected</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
+}
+async function mrpClearApply(){
+  const c=window._dcCtx; if(!c) return;
+  const picks=c.groups.filter(x=>c.sel[x.key]);
+  if(!picks.length && !c.plotSel){ toast('Nothing selected',true); return; }
+  const what=picks.map(x=>'• '+x.label+' — '+x.skus+' SKU(s), '+x.packs+' pack(s)')
+    .concat(c.plotSel?['• the saved demand plot for this date']:[]).join('\n');
+  if(!confirm('Remove from '+c.date+':\n\n'+what+'\n\nThe orders that wrote these rows are NOT deleted.\nThis cannot be undone. Continue?')) return;
+  let gone=0; const errs=[];
+  for(const x of picks){
+    try{
+      if(isLive()){
+        /* delete by id where the table gives us one — exact, and it cannot
+           over-reach into another date. Fall back to date+SKU otherwise. */
+        if(x.ids.length===x.skus){
+          for(let i=0;i<x.ids.length;i+=150){
+            const chunk=x.ids.slice(i,i+150).map(v=>encodeURIComponent(v)).join(',');
+            await sb('demand?id=in.('+chunk+')',{method:'DELETE',prefer:'return=minimal'});
+          }
+        } else {
+          for(const sk of x.skuList){
+            await sb('demand?plan_date=eq.'+encodeURIComponent(c.date)+'&sku=eq.'+encodeURIComponent(sk),{method:'DELETE',prefer:'return=minimal'});
+          }
+        }
+      } else {
+        DEMO.demand=(DEMO.demand||[]).filter(r=>!(String(r.plan_date||'').slice(0,10)===c.date
+          && ((String(r.source||'').trim())||c.NOSRC)===x.key));
+      }
+      gone+=x.skus;
+      /* and out of the editor in front of you, so the screen agrees with the table */
+      if(c.date===MRPDATE) x.skuList.forEach(sk=>{ delete mrpDemand[sk]; delete mrpAdd[sk]; });
+    }catch(e){ errs.push(x.label); }
+  }
+  if(c.plotSel && c.plot){
+    try{
+      if(isLive() && c.plot.id){ await sb('mrp_plans?id=eq.'+c.plot.id,{method:'DELETE',prefer:'return=minimal'}); }
+      else { let a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]');
+             a=a.filter(pp=>String(pp.plan_date||pp.date||'').slice(0,10)!==c.date);
+             localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); }
+      mrpPlanCache=[];
+    }catch(e){ errs.push('the saved plot'); }
+  }
+  sysLog('mrp','clear','🗑 Cleared '+gone+' demand row(s) on '+c.date+(c.plotSel?' + the saved plot':'')+' by '+CURRENT_USER);
+  closeModal(); window._dcCtx=null;
+  toast(errs.length? ('Removed '+gone+' row(s); failed: '+errs.join(', ')) : ('Removed '+gone+' demand row(s) from '+c.date), !!errs.length);
+  await renderMRP();
+}
 function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; mrpAdd={...(d.add||{})}; mrpRemarks={...(d.remarks||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
 // A saved demand plot is immutable — VIEW it read-only, then print or download.
 async function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p;
