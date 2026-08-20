@@ -523,7 +523,7 @@ const MODULES = [
   {id:'sales',  label:'Sales',       items:['ffprofiles','ffcalc','custom_orders']},
   {id:'plan',   label:'Planning',    items:['mrp','wdt']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','receiving','supplies_reorder','sticker_reorder']},
-  {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
+  {id:'ops',    label:'Operations',  items:['prodplan','prodsched','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','variance_log']},
   {id:'help',   label:'Help', items:['guides']},
   {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
@@ -579,7 +579,19 @@ function _isSizeOnly(v){ return /^\s*\d+(\.\d+)?\s*(g|kg|ml|l|pc|pcs|pack|packs)
    any other supply is never allowed to name a batch.                        */
 async function _pbNameMap(){
   const prod={}, ing={};
-  try{ (await db.list('products',{})).forEach(p=>{ prod[p.sku]=p.name||p.sku; }); }catch(e){}
+  /* The production list showed a bare product NAME, which is not enough to
+     identify what was made — "Rabbit Meat (GC)" exists at 250 g and 500 g and
+     they are different runs. Name + variant + code, the way every printed
+     document reads it. */
+  try{ (await db.list('products',{})).forEach(p=>{
+        const nm=String(p.name||p.sku).trim();
+        const v=String(p.variant||'').trim();
+        /* the full thing, pack size included — prodLabel deliberately drops a
+           size-only variant, which is right on a customer document and wrong
+           here, where "Rabbit Meat (GC)" at 250 g and at 500 g are two
+           different runs. */
+        prod[p.sku]=nm+((v && nm.toLowerCase().indexOf(v.toLowerCase())<0)?(' '+v):'')+' ['+p.sku+']';
+      }); }catch(e){}
   try{ (await listIngredients()).forEach(i=>{
         if(i.is_supply || /sticker|supply/i.test(String(i.category||''))) return;   // never names a batch
         ing[i.sku]=i.name||i.sku; }); }catch(e){}
@@ -824,6 +836,7 @@ const MODELS = {
   refs:{ label:'Internal References', icon:'🔢', special:'refs' },
   notif:{ label:'Notifications', icon:'🔔', special:'notif' },
   cleanser:{ label:'Data Cleanser', icon:'🧹', special:'cleanser' },
+  prodsched:{ label:'Production Schedule', icon:'📅', special:'prodsched' },
   receiving:{ label:'Receiving', icon:'📥', special:'receiving' },
   supplies_reorder:{ label:'Supplies Reorder', icon:'🧻', special:'supplies_reorder' },
   sticker_reorder:{ label:'Sticker Reorder', icon:'🏷️', special:'sticker_reorder' },
@@ -1072,6 +1085,7 @@ function route(){
     if(m.special==='guides') return renderGuides();
     if(m.special==='supplies_reorder') return renderSuppliesReorder();
     if(m.special==='sticker_reorder') return renderStickerReorder();
+    if(m.special==='prodsched') return renderProdSched();
     if(m.special==='receiving') return renderReceiving();
     if(m.special==='sticker_po') return renderStickerPO();
     if(m.special==='approvals') return renderApprovals();
@@ -1144,16 +1158,69 @@ function controlPanel(){
 /* One-click answers to the three questions people actually open Production for:
    what is still a draft, what did we make, and was it product or prep. They set
    the same facet filters the drawer does, so the two never disagree. */
+/* A production list with no date window is a list of everything ever made. */
+let PB_FROM='', PB_TO='';
 function _pbChips(){
   const f=state.filters||{};
   const on=(k,v)=>((f[k]||[]).indexOf(v)>=0);
   const c=(k,v,label,title)=>`<button class="btn sec sm ${on(k,v)?'on':''}" title="${esc(title||'')}"
     onclick="pbChip('${k}','${esc(v).replace(/'/g,"&#39;")}')">${esc(label)}</button>`;
+  const dr=`<span class="mini" style="margin-left:8px">From <input type="date" value="${esc(PB_FROM)}" onchange="PB_FROM=this.value;route()"
+      style="padding:3px 5px;border:1px solid var(--line);border-radius:5px;font-size:11.5px"></span>
+    <span class="mini">to <input type="date" value="${esc(PB_TO)}" onchange="PB_TO=this.value;route()"
+      style="padding:3px 5px;border:1px solid var(--line);border-radius:5px;font-size:11.5px"></span>`;
   return c('status','draft','Drafts','Planned but not yet confirmed')
        + c('status','confirmed','Confirmed','Posted to stock')
        + c('_kind','Product (packs)','Products','Packs of a finished product')
        + c('_kind','Prep (raw → processed)','Prep','Raw turned into a processed ingredient')
-       + (Object.keys(f).some(k=>(f[k]||[]).length)?`<button class="btn sec sm" onclick="state.filters={};route()">✕ Clear</button>`:'');
+       + dr
+       + `<button class="btn sec sm" onclick="pbPrintList()" title="print what is on screen">🖨 Print</button>`
+       + ((Object.keys(f).some(k=>(f[k]||[]).length)||PB_FROM||PB_TO)
+          ?`<button class="btn sec sm" onclick="state.filters={};PB_FROM='';PB_TO='';route()">✕ Clear</button>`:'');
+}
+/* Print exactly what is on screen — same rows, same order, same window. A
+   printed list that quietly shows something else than the screen is worse
+   than no printed list. */
+function pbPrintList(){
+  const rows=state._rows||[];
+  if(!rows.length){ toast('Nothing on screen to print',true); return; }
+  const w=window.open('','_blank'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  const H=v=>esc(String(v==null?'':v));
+  const win=(PB_FROM||PB_TO)?((PB_FROM||'…')+' → '+(PB_TO||'…')):'all dates';
+  const byRun={}; rows.forEach(r=>{ const k=r.run_ref||r.batch_ref||'—'; (byRun[k]=byRun[k]||[]).push(r); });
+  const packs=rows.reduce((s,r)=>s+(+r.good_packs||0),0);
+  const kgs=rows.reduce((s,r)=>s+(+r.output_kg||0),0);
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Production — ${H(win)}</title><style>
+    @page{size:A4 landscape;margin:11mm}
+    body{font:11.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;margin:0}
+    h1{font-size:17px;margin:0 0 2px} .sub{color:#6b6a64;font-size:11px;margin-bottom:10px}
+    table{width:100%;border-collapse:collapse}
+    th{background:#f5f4f0;text-align:left;padding:5px 7px;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;
+       color:#555;border:1px solid #b9b7ae}
+    td{padding:5px 7px;border:1px solid #e2e0d8;vertical-align:top}
+    td.n{text-align:right;font-variant-numeric:tabular-nums}
+    tr.run td{background:#eceae3;font-weight:800;font-size:10.5px}
+    tr.tot td{background:#1a1a1a;color:#fff;font-weight:800}
+    .sku2{color:#8a887f;font-size:10px}
+    thead{display:table-header-group} tr{break-inside:avoid}
+  </style></head><body>
+  <h1>Production</h1>
+  <div class="sub">${H(win)} · ${rows.length} batch(es) · printed ${H(todayISO())}</div>
+  <table><thead><tr><th>Batch</th><th>Item</th><th>Kind</th><th>Status</th>
+    <th style="text-align:right">Good packs</th><th style="text-align:right">Output kg</th><th>Date</th><th>Operator</th></tr></thead><tbody>
+  ${Object.keys(byRun).sort().map(run=>
+    `<tr class="run"><td colspan="8">Run ${H(run)} · ${byRun[run].length} batch(es)</td></tr>`
+    +byRun[run].map(r=>`<tr><td>${H(r.batch_ref)}</td>
+      <td>${H(r._item||r.product_sku)} <span class="sku2">[${H(r.product_sku)}]</span></td>
+      <td>${r.kind==='output'?'Prep':'Product'}</td><td>${H(r.status)}</td>
+      <td class="n">${r.kind==='output'?'—':H(r.good_packs)}</td>
+      <td class="n">${r.kind==='output'?H(r.output_kg):'—'}</td>
+      <td>${H(String(r.production_date||'').slice(0,10))}</td><td>${H(r.operator||'')}</td></tr>`).join('')
+  ).join('')}
+  <tr class="tot"><td colspan="4" style="text-align:right">Total</td>
+    <td class="n">${packs}</td><td class="n">${Math.round(kgs*1000)/1000}</td><td colspan="2"></td></tr>
+  </tbody></table></body></html>`);
+  w.document.close(); w.focus(); setTimeout(()=>{ try{ w.print(); }catch(e){} },300);
 }
 function pbChip(k,v){
   state.filters=state.filters||{};
@@ -1261,6 +1328,14 @@ async function renderList(){
     poHidden=rows.filter(r=>PO_DONE.includes(String(r.status||''))).length;
     rows=rows.filter(r=>!PO_DONE.includes(String(r.status||'')));
   }
+  // Production: the date window from the chip bar
+  if(state.model==='production_batches' && (PB_FROM||PB_TO)){
+    rows=rows.filter(r=>{ const d=String(r.production_date||'').slice(0,10);
+      if(!d) return false;
+      if(PB_FROM && d<PB_FROM) return false;
+      if(PB_TO && d>PB_TO) return false;
+      return true; });
+  }
   // Ingredients hides kitchen supplies; the Supplies module shows only them (same table).
   if(state.model==='ingredients') rows=rows.filter(r=>!isSupplyItem(r));
   else if(m.supplyModel) rows=rows.filter(isSupplyItem);
@@ -1268,7 +1343,13 @@ async function renderList(){
   if(state.model==='suppliers'){ try{ await _tagSupplierTypes(rows); }catch(e){} }
   if(['products','ingredients','supplies'].includes(state.model)) rows.sort(cmpItems);   // warehouse ordering
   state._rows=rows; const bulk=!m.readonly;
-  const cols=m.list.map(n=>m.fields.find(f=>f.n===n)).filter(f=>f && fieldMode(state.model,f.n)!=='hide');
+  /* WHICH COLUMNS, AND IN WHAT ORDER, IS THE USER'S BUSINESS.
+     The list was a fixed set chosen when the module was written. Anything else
+     on the record — best before, operator, lot, supplier — could only be seen by
+     opening the row one at a time. The choice is remembered per module, per
+     browser, and falls back to the module's own list. */
+  const _pick=_colPick(state.model);
+  const cols=(_pick||m.list).map(n=>m.fields.find(f=>f.n===n)).filter(f=>f && fieldMode(state.model,f.n)!=='hide');
   /* Production: a batch's SKU is a product on a product batch and an INGREDIENT
      on an output batch, so neither master alone can name every row. */
   if(state.model==='production_batches' && rows.some(r=>r._item==null)){
@@ -1302,6 +1383,19 @@ async function renderList(){
     return `<td${L}>${esc(v)}</td>`;
   };
   const numCols=cols.filter(f=>['currency','number'].includes(f.t));
+  /* Click a heading to sort by it. Applied BEFORE grouping so a grouped list
+     still orders its items the way you asked. */
+  if(state._sortBy){
+    const f=m.fields.find(x=>x.n===state._sortBy);
+    const numeric=f && ['number','currency'].includes(f.t);
+    const dir=state._sortDir===-1?-1:1;
+    rows=rows.slice().sort((a,b)=>{
+      const x=a[state._sortBy], y=b[state._sortBy];
+      if(numeric) return ((+x||0)-(+y||0))*dir;
+      return String(x==null?'':x).localeCompare(String(y==null?'':y),undefined,{numeric:true})*dir;
+    });
+    state._rows=rows;
+  }
   const sumOf=(arr,f)=>arr.reduce((s,r)=>s+(+r[f.n]||0),0);
   const sumCell=(f,v)=>f.t==='currency'?`<td class="num"><b>${fmt(v)}</b></td>`:`<td class="num"><b>${num(Math.round(v*100)/100)}</b></td>`;
   let body='';
@@ -1339,12 +1433,65 @@ async function renderList(){
   }
   const foot = numCols.length&&rows.length? `<tfoot><tr style="background:#faf9f4">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td style="font-weight:700">Total · ${rows.length}</td>`; return numCols.includes(f)?sumCell(f,sumOf(rows,f)):'<td></td>'; }).join('')+`</tr></tfoot>`:'';
   $('content').innerHTML = `<div id="bulkbar" class="bulkbar" style="display:none"></div><div class="listcard">
-    <table class="mcards autow"><thead><tr>${bulk?'<th style="width:34px"><input type="checkbox" onclick="selAll(this.checked)"></th>':''}${cols.map((f,ci)=>`<th class="${['currency','number'].includes(f.t)?'num':''}" data-ci="${ci}">${f.l}<span class="colgrip" onmousedown="colDragStart(event,this)" title="drag to resize"></span></th>`).join('')}</tr></thead>
+    <table class="mcards autow"><thead><tr>${bulk?'<th style="width:34px"><input type="checkbox" onclick="selAll(this.checked)"></th>':''}${cols.map((f,ci)=>{
+      const on=state._sortBy===f.n, ar=on?(state._sortDir===-1?' ▾':' ▴'):'';
+      return `<th class="${['currency','number'].includes(f.t)?'num':''}" data-ci="${ci}">`
+        +`<span style="cursor:pointer;user-select:none" title="sort by ${esc(f.l)}" onclick="listSort('${esc(f.n)}')">${esc(f.l)}<span style="opacity:${on?1:.25}">${ar||' ⇅'}</span></span>`
+        +`<span class="colgrip" onmousedown="colDragStart(event,this)" title="drag to resize"></span></th>`; }).join('')}</tr></thead>
     <tbody>${body||`<tr><td colspan="${cols.length+(bulk?1:0)}" class="empty">No records</td></tr>`}</tbody>${foot}</table>
-    <div class="pager">${rows.length} record${rows.length!==1?'s':''}${poHidden?` <span class="mini">· <b>${poHidden}</b> cancelled / fully received hidden — <a onclick="state._poAll=true;route()" style="cursor:pointer;color:#4e7a3e">show them</a></span>`:''} <span class="mini" style="color:var(--muted)">· drag a column edge to resize, double-click it to go back to automatic</span></div></div>`;
+    <div class="pager"><button class="btn sec sm" onclick="openColPick()" title="choose which fields appear">⚙ Columns</button>
+      ${state._sortBy?`<button class="btn sec sm" onclick="state._sortBy='';route()">✕ Sort</button>`:''}
+      ${rows.length} record${rows.length!==1?'s':''}${poHidden?` <span class="mini">· <b>${poHidden}</b> cancelled / fully received hidden — <a onclick="state._poAll=true;route()" style="cursor:pointer;color:#4e7a3e">show them</a></span>`:''} <span class="mini" style="color:var(--muted)">· drag a column edge to resize, double-click it to go back to automatic</span></div></div>`;
   applyColWidths();
   bulkBar();
 }
+
+/* ---- Columns: sorting, and choosing which fields show ---------------------
+   Kept per module in this browser. Deliberately NOT shared: two people looking
+   at the same module usually want different columns, and forcing one on the
+   other is how a list stops being used. */
+function _colKey(model){ return 'wr_cols_'+model; }
+function _colPick(model){
+  try{ const a=JSON.parse(localStorage.getItem(_colKey(model))||'null');
+    return (Array.isArray(a)&&a.length)?a:null; }catch(e){ return null; }
+}
+function listSort(field){
+  if(state._sortBy===field) state._sortDir=(state._sortDir===-1)?1:-1;
+  else { state._sortBy=field; state._sortDir=1; }
+  route();
+}
+function openColPick(){
+  const m=MODELS[state.model]; if(!m) return;
+  const chosen=_colPick(state.model)||m.list;
+  const avail=m.fields.filter(f=>fieldMode(state.model,f.n)!=='hide');
+  const inList=n=>chosen.indexOf(n)>=0;
+  $('modal').innerHTML=`<div><h3>⚙ Columns — ${esc(m.label)}</h3>
+    <p class="mini">Tick what you want on the list. The order follows this list; drag is not needed —
+      untick and re-tick to move something to the end. Saved in this browser only, because two people
+      reading the same module rarely want the same columns.</p>
+    <div class="mscroll" style="max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px">
+      ${avail.map(f=>`<label style="display:flex;gap:8px;align-items:center;padding:4px 6px;cursor:pointer;border-radius:5px">
+        <input type="checkbox" ${inList(f.n)?'checked':''} onchange="_colToggle('${esc(f.n)}',this.checked)">
+        <span>${esc(f.l)}</span><span class="mini" style="color:var(--muted);margin-left:auto"><code>${esc(f.n)}</code>${f.t?' · '+esc(f.t):''}</span>
+      </label>`).join('')}
+    </div>
+    <div class="mini" id="colCount" style="margin-top:8px;color:var(--muted)">${chosen.length} column(s)</div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn" onclick="closeModal();route()">✅ Apply</button>
+      <button class="btn sec" onclick="_colReset()">↺ Back to the default</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+function _colToggle(field,on){
+  const m=MODELS[state.model]; const cur=(_colPick(state.model)||m.list).slice();
+  const i=cur.indexOf(field);
+  if(on && i<0) cur.push(field);
+  if(!on && i>=0) cur.splice(i,1);
+  if(!cur.length){ toast('A list needs at least one column',true); return; }
+  try{ localStorage.setItem(_colKey(state.model), JSON.stringify(cur)); }catch(e){}
+  const c=$('colCount'); if(c) c.textContent=cur.length+' column(s)';
+}
+function _colReset(){ try{ localStorage.removeItem(_colKey(state.model)); }catch(e){} closeModal(); route(); }
 
 /* -------- form view -------- */
 let formRec={}, formChildren=[], formIsNew=false, relCache={}, formTab=0;
@@ -2002,7 +2149,17 @@ async function saveForm(){
 // Turn a raw PostgREST/Supabase error into something a non-technical user can act on.
 function saveErrMsg(e){ const s=String(e&&e.message||e||'');
   if(/^401|JWT|not authenticated|Unauthorized/i.test(s)) return 'Save blocked — your sign-in expired. Sign in again and retry.';
-  if(/^40[03]|permission denied|row-level security|RLS|violates row-level/i.test(s)) return "Save blocked by access rules — your role can't write to this module. Ask an Admin to grant it.";
+  /* A MISSING COLUMN AND A LOCKED TABLE BOTH COME BACK AS 400, and calling both
+     of them "no permission" sent people hunting through roles for a schema
+     problem. PostgREST names the column in PGRST204; say so. */
+  const named=/Could not find the '([^']+)' column|column "?([a-z_0-9]+)"? of relation/i.exec(s);
+  if(named || /PGRST204/i.test(s)){
+    const c=named&&(named[1]||named[2]);
+    return "The database is missing a column this screen writes"+(c?(" — '"+c+"'"):"")
+      +". Run the latest SQL migration in Supabase; this is a schema gap, not a permission problem.";
+  }
+  if(/permission denied|row-level security|RLS|violates row-level/i.test(s)) return "Save blocked by access rules — your role can't write to this module. Ask an Admin to grant it.";
+  if(/^40[03]/.test(s)) return "The database refused that write ("+s.slice(0,120)+"). If it names a column, run the latest SQL migration.";
   if(/duplicate key|already exists|23505/i.test(s)) return 'That reference already exists — use a new reference number.';
   if(/foreign key|violates foreign key|23503/i.test(s)) return 'A linked record is missing — pick an existing value for the highlighted field.';
   if(/null value|not-null|23502/i.test(s)) return 'A required field is empty — fill every required field and retry.';
@@ -2083,11 +2240,249 @@ function repSet(k,v){ repCfg[k]=v; renderReport(); }
    Beginning (opening) + Received − Used + Produced ± Transfers ± Adjustments = Ending, per item,
    grouped like the count sheet (raw + its processed form together, products by family, supplies apart).
    Ending equals the ledger SUM(qty), so this both explains and cross-checks on-hand. */
-let LS_LOC='all', LS_ACT=false;
+let LS_LOC='all', LS_ACT=false, LS_CAT='all';
+/* Live Stock held four different kinds of thing in one list — meat, packs,
+   packaging, labels — and they answer different questions to different people.
+   A category button is the cheapest way to give each of them their own screen
+   without building four.
+
+   And for ingredients the top division is the ANIMAL, then vegetables, then
+   everything else — because that is how the freezer is arranged and how the
+   team talks. Raw and processed still sit together under one base material, so
+   "Carrots" carries "Carrots (raw)" and "Carrots (processed)" beneath it. */
+const LS_CATS=[{k:'all',l:'Everything',i:'🗂'},{k:'ingredient',l:'Ingredients',i:'🥩'},
+               {k:'product',l:'Products',i:'📦'},{k:'supply',l:'Supplies',i:'🧴'},
+               {k:'sticker',l:'Stickers',i:'🏷'}];
+const LS_ANIMALS=[['🐄 Beef','beef|buffalo|carabao'],['🐖 Pork','pork'],['🐓 Chicken','chicken'],
+                  ['🦆 Duck','duck'],['🐇 Rabbit','rabbit'],['🐐 Goat','goat'],['🐑 Lamb','lamb|mutton'],
+                  ['🦅 Quail','quail'],['🐊 Crocodile','crocodile'],['🦤 Ostrich','ostrich'],
+                  ['🐟 Fish','fish|sardine|mackerel|salmon|tuna'],['🥚 Egg','egg']];
+function _lsAnimalOf(it, sku){
+  const t=((it&&it.name)||'')+' '+(sku||'')+' '+((it&&it.category)||'');
+  const hit=LS_ANIMALS.find(([,re])=>new RegExp(re,'i').test(t));
+  if(hit) return hit[0];
+  if(/veg|fruit|berr|carrot|broccoli|squash|spinach|mushroom|seed|chia|kale|pumpkin/i.test(t)) return '🥬 Vegetables & fruit';
+  return '🧂 Other ingredients';
+}
 /* Blank on purpose. "Live" is the default because the question this screen
    answers is what is in the freezer NOW; a date range is something you reach
    for to explain a variance, not something to be dropped into. */
 let LS_FROM='', LS_TO='';
+/* ===================== Production Schedule =================================
+   Live Stock answers "what have we got". This answers the question the floor
+   actually asks the night before: "what happens to each item, day by day, and
+   where do we run out."
+
+   One row per item, one column per DAY. Each cell is that day's net movement,
+   so a row reads left to right as a story: opening, then what came in and went
+   out each day, then where it ends up — against what the week owes.
+
+   WHY THE COLUMNS ARE THESE COLUMNS.
+     Begin      what was there before the window opened. Without it the row
+                does not add up and nobody trusts the rest.
+     day cells  the NET for that day, with the detail on hover. A net is what a
+                planner needs; the breakdown is what an investigator needs, and
+                only one of them is looking.
+     Ending     Begin + every day. It must equal Live Stock's ending or one of
+                the two screens is lying.
+     Target     what the week owes — demand plots, the demand table, locked
+                custom orders. Zero is a real answer.
+     Remaining  Target − produced in the window. This is the number the kitchen
+                works from.
+     Cover      Ending ÷ Remaining. Below 1 means the shelf cannot cover what is
+                still owed, which is the only cell anyone should have to look at
+                on a busy morning.
+   Past days that already have movement are shaded; today is ruled; future days
+   are open boxes, because the schedule is half record and half plan.        */
+let PS_FROM='', PS_TO='', PS_CAT='product', PS_LOC='all', PS_ONLY=false, PS_Q='';
+function _psDefaults(){
+  if(PS_FROM&&PS_TO) return;
+  const t=new Date(); const mon=new Date(t); mon.setDate(t.getDate()-((t.getDay()+6)%7));
+  const sun=new Date(mon); sun.setDate(mon.getDate()+6);
+  PS_FROM=mon.toISOString().slice(0,10); PS_TO=sun.toISOString().slice(0,10);
+}
+function _psDays(){
+  const out=[]; let d=new Date(PS_FROM+'T00:00:00'); const end=new Date(PS_TO+'T00:00:00');
+  let guard=0;
+  while(d<=end && guard++<62){ out.push(d.toISOString().slice(0,10)); d.setDate(d.getDate()+1); }
+  return out;
+}
+async function renderProdSched(){
+  _psDefaults();
+  $('crumb').innerHTML='<b>Production Schedule</b>';
+  const cats=[{k:'product',l:'Products',i:'📦'},{k:'ingredient',l:'Ingredients',i:'🥩'},
+              {k:'supply',l:'Supplies',i:'🧴'},{k:'sticker',l:'Stickers',i:'🏷'}];
+  $('cp').innerHTML=`<div class="title">Production Schedule <span onclick="openKB('prodsched')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    ${cats.map(c=>`<button class="btn ${PS_CAT===c.k?'':'sec'} sm" onclick="PS_CAT='${c.k}';renderProdSched()">${c.i} ${c.l}</button>`).join('')}
+    <span class="mini" style="margin-left:8px">From <input type="date" value="${esc(PS_FROM)}" onchange="PS_FROM=this.value;renderProdSched()" style="padding:3px 5px;border:1px solid var(--line);border-radius:5px"></span>
+    <span class="mini">to <input type="date" value="${esc(PS_TO)}" onchange="PS_TO=this.value;renderProdSched()" style="padding:3px 5px;border:1px solid var(--line);border-radius:5px"></span>
+    <button class="btn sec sm" onclick="psWeek(-1)">‹ week</button><button class="btn sec sm" onclick="psWeek(1)">week ›</button>
+    <input value="${esc(PS_Q)}" placeholder="Search…" oninput="PS_Q=this.value;drawProdSched()" id="psQ"
+      style="min-width:150px;padding:5px 8px;border:1px solid var(--line);border-radius:6px">
+    <label class="mini"><input type="checkbox" ${PS_ONLY?'checked':''} onchange="PS_ONLY=this.checked;drawProdSched()"> only what is short</label>
+    <button class="btn sec sm" onclick="psPrint()">🖨 Print</button>
+    <div class="sp"></div><span style="color:var(--muted)">day by day, in and out, against what the week owes</span>`;
+  $('content').innerHTML='<div class="repcard"><div class="empty">Building the schedule…</div></div>';
+
+  const days=_psDays();
+  let mov=[], ings=[], prods=[];
+  try{ mov=await db.list('inventory_movements',{}); }catch(e){}
+  try{ ings=await listIngredients(); }catch(e){}
+  try{ prods=await db.list('products',{}); }catch(e){}
+  const im={}; ings.forEach(i=>im[i.sku]=i); const pm={}; prods.forEach(p=>pm[p.sku]=p);
+  const _bs={},_bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
+  const matOf=i=>{ if(!i||!i.is_intermediate) return (i&&i.name)||''; const p=_procParent(i,_bs,_bn); return (p&&p.name)||i.name; };
+
+  const kindOf=sku=>{ if(pm[sku]) return 'product'; const it=im[sku]||{};
+    if(/sticker|label/i.test(String(it.category||''))) return 'sticker';
+    return isSupplyItem(it)?'supply':'ingredient'; };
+
+  const acc={};
+  mov.forEach(v=>{
+    const sku=v.ref_sku; if(!sku) return;
+    if(PS_LOC!=='all' && String(v.location_code||'')!==PS_LOC) return;
+    if(kindOf(sku)!==PS_CAT) return;
+    const d=String(v.created_at||v.movement_date||'').slice(0,10);
+    const a=acc[sku]||(acc[sku]={sku, begin:0, day:{}, det:{}, made:0});
+    const q=+v.qty||0;
+    if(!d || d<PS_FROM){ a.begin+=q; return; }
+    if(d>PS_TO) return;
+    a.day[d]=(a.day[d]||0)+q;
+    const t=v.movement_type||'other';
+    (a.det[d]=a.det[d]||{})[t]=(a.det[d][t]||0)+q;
+    if(t==='batch_output'||t==='processing_in') a.made+=q;
+  });
+
+  // what the week owes: the same three sources the sticker screen reads
+  const target={};
+  if(PS_CAT==='product'){
+    try{ const plans=await mrpPlans();
+      const cands=(plans||[]).map(p=>({p,d:String(p.plan_date||p.date||'')})).filter(x=>x.d&&x.d>=PS_FROM&&x.d<=PS_TO);
+      cands.forEach(c=>{ const dm=((c.p.data||c.p).demand)||{}; Object.keys(dm).forEach(s=>{ target[s]=Math.max(+target[s]||0,+dm[s]||0); }); });
+    }catch(e){}
+    try{ (await db.list('demand',{})).forEach(r=>{ const d=String(r.plan_date||'').slice(0,10);
+      if(d>=PS_FROM&&d<=PS_TO) target[r.sku]=Math.max(+target[r.sku]||0,+r.qty||0); }); }catch(e){}
+    try{ const co=await coOpenDemandMap(); Object.keys(co).forEach(s=>{ target[s]=Math.max(+target[s]||0,co[s]); }); }catch(e){}
+  } else if(PS_CAT==='ingredient'){
+    try{ if(!window._prodNeedRows||!window._prodNeedRows.length) window._prodNeedRows=await prodNeedRows(); }catch(e){}
+    (window._prodNeedRows||[]).forEach(r=>{ target[r.sku]=Math.max(+target[r.sku]||0, r.needG||0); });
+  }
+  Object.keys(target).forEach(s=>{ if(!acc[s] && kindOf(s)===PS_CAT) acc[s]={sku:s,begin:0,day:{},det:{},made:0}; });
+
+  window._psDaysList=days;
+  window._psRows=Object.values(acc).map(a=>{
+    const isProd=!!pm[a.sku]; const it=isProd?pm[a.sku]:(im[a.sku]||{});
+    const isSup=!isProd&&isSupplyItem(it);
+    const isStk=!isProd&&/sticker|label/i.test(String(it.category||''));
+    const div=(isProd||isSup||isStk)?1:1000;
+    const unit=isProd?'packs':(isStk?'pcs':(isSup?(it.uom||'units'):'kg'));
+    let end=a.begin; days.forEach(d=>{ end+=(a.day[d]||0); });
+    const tgt=+target[a.sku]||0;
+    const remaining=Math.max(0, tgt-a.made);
+    const cover=remaining>0?(end/remaining):null;
+    let g1;
+    if(isProd) g1='📦 '+(it.group_1||'Products');
+    else if(isStk) g1='🏷 Stickers & labels';
+    else if(isSup) g1='🧴 Kitchen Supplies';
+    else g1=_lsAnimalOf(it,a.sku);
+    return {sku:a.sku, name:(isProd?prodLabel({...it,sku:a.sku},{noSku:true}):(it.name||a.sku)),
+      g1, g2:(isProd?(it.group_2||it.family||'Other'):(matOf(it)||a.sku)),
+      unit, div, begin:a.begin, day:a.day, det:a.det, end, made:a.made, target:tgt, remaining, cover};
+  }).filter(r=> r.begin||r.end||r.target||Object.keys(r.day).length);
+  drawProdSched();
+}
+function psWeek(n){ const f=new Date(PS_FROM+'T00:00:00'), t=new Date(PS_TO+'T00:00:00');
+  f.setDate(f.getDate()+7*n); t.setDate(t.getDate()+7*n);
+  PS_FROM=f.toISOString().slice(0,10); PS_TO=t.toISOString().slice(0,10); renderProdSched(); }
+const _psQ=(v,div)=> div===1000 ? (Math.round(v/1000*100)/100) : Math.round(v*100)/100;
+function _psDayTitle(det){
+  if(!det) return '';
+  const L={opening:'opening',receipt:'received',batch_output:'produced',processing_in:'processed in',
+    issue_to_batch:'issued to a batch',processing_out:'raw processed',transfer_in:'transferred in',
+    transfer_out:'transferred out',sale:'sold',refund:'refunded',return:'returned',
+    count_adjust:'count adjustment',thaw_loss:'drip',production:'production'};
+  return Object.keys(det).map(k=>(L[k]||k)+' '+(Math.round(det[k]*100)/100)).join(' · ');
+}
+function drawProdSched(){
+  const days=window._psDaysList||[]; let rows=(window._psRows||[]).slice();
+  const q=String(PS_Q||'').trim().toLowerCase();
+  if(q) rows=rows.filter(r=>(r.name+' '+r.sku+' '+r.g1+' '+r.g2).toLowerCase().includes(q));
+  if(PS_ONLY) rows=rows.filter(r=>r.cover!=null && r.cover<1);
+  const today=todayISO();
+  const dh=d=>{ const t=new Date(d+'T00:00:00');
+    return {dow:t.toLocaleDateString(undefined,{weekday:'short'}), dd:t.getDate(), past:d<today, is:d===today}; };
+  const short=rows.filter(r=>r.cover!=null&&r.cover<1).length;
+  const kpi=(l,v,s,c)=>`<div class="kpi"><div class="l">${l}</div><div class="v"${c?` style="color:${c}"`:''}>${v}</div><div class="s">${s||''}</div></div>`;
+  let h=`<div class="kpirow">
+    ${kpi('Items', rows.length, PS_FROM+' → '+PS_TO)}
+    ${kpi('Days', days.length, 'one column each')}
+    ${kpi('Cannot cover what is owed', short, short?'ending is short of remaining':'all covered', short?'var(--danger)':'#4e7a3e')}
+  </div>
+  <div class="repcard" style="margin-top:12px"><div style="overflow-x:auto" class="stickyhead">
+  <table style="min-width:${520+days.length*62}px"><thead><tr>
+    <th style="min-width:210px">Item</th><th class="num">Begin</th>
+    ${days.map(d=>{ const x=dh(d);
+      return `<th class="num" style="${x.is?'background:#e7ece3;border-bottom:2px solid #4e7a3e;':''}min-width:56px">
+        <span style="font-weight:800">${x.dow}</span><br><span style="font-weight:400;opacity:.7">${x.dd}</span></th>`; }).join('')}
+    <th class="num">Ending</th><th class="num">Target</th><th class="num">Remaining</th><th class="num">Cover</th></tr></thead><tbody>`;
+  const byG={}; rows.forEach(r=>{ (byG[r.g1]=byG[r.g1]||[]).push(r); });
+  const span=days.length+6;
+  Object.keys(byG).sort().forEach(g=>{
+    h+=`<tr class="grp"><td colspan="${span}" style="background:#e7f0e9;color:#2f5d33"><b>${esc(g)}</b> <span style="opacity:.55;font-weight:400">(${byG[g].length})</span></td></tr>`;
+    byG[g].sort((a,b)=>(a.cover==null?9:a.cover)-(b.cover==null?9:b.cover)||String(a.name).localeCompare(String(b.name)))
+      .forEach(r=>{
+      h+=`<tr><td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code> · ${esc(r.unit)}</div></td>
+        <td class="num mini" style="color:var(--muted)">${_psQ(r.begin,r.div)}</td>`;
+      days.forEach(d=>{ const v=r.day[d]||0; const x=dh(d);
+        const bg=x.is?'background:#f4f8f2;':(x.past?'':'background:#fcfcfa;');
+        h+=`<td class="num" style="${bg}${v?'':'color:var(--muted)'}" title="${esc(_psDayTitle(r.det[d]))}">`
+          +(v?`<b style="color:${v>0?'#1e6b2e':'var(--danger)'}">${v>0?'+':''}${_psQ(v,r.div)}</b>`:'·')+`</td>`; });
+      const cov=r.cover;
+      h+=`<td class="num"><b>${_psQ(r.end,r.div)}</b></td>
+        <td class="num mini" style="color:var(--muted)">${r.target?_psQ(r.target,r.div):'—'}</td>
+        <td class="num">${r.remaining?`<b style="color:var(--berry)">${_psQ(r.remaining,r.div)}</b>`:'—'}</td>
+        <td class="num">${cov==null?'<span class="mini" style="color:var(--muted)">—</span>'
+          :`<b style="color:${cov<1?'var(--danger)':(cov<1.5?'var(--earth,#b5762a)':'#4e7a3e')}">${Math.round(cov*100)}%</b>`}</td></tr>`;
+    });
+  });
+  h+=`</tbody></table></div>
+    <div class="hint" style="margin-top:8px">Each day cell is that day's <b>net</b> movement — hover for the breakdown.
+      <b>Ending</b> = Begin + every day, and it must match Live Stock or one of the two screens is wrong.
+      <b>Target</b> is what the window owes (demand plots, the demand table, locked custom orders);
+      <b>Remaining</b> is that less what has already been produced; <b>Cover</b> is Ending ÷ Remaining —
+      under 100% is the only cell worth looking at on a busy morning.</div></div>`;
+  $('content').innerHTML=h;
+}
+function psPrint(){
+  const days=window._psDaysList||[], rows=(window._psRows||[]);
+  if(!rows.length){ toast('Nothing to print',true); return; }
+  const w=window.open('','_blank'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  const H=v=>esc(String(v==null?'':v));
+  const dh=d=>{ const t=new Date(d+'T00:00:00'); return t.toLocaleDateString(undefined,{weekday:'short'})+' '+t.getDate(); };
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Production Schedule ${H(PS_FROM)} → ${H(PS_TO)}</title><style>
+    @page{size:A4 landscape;margin:9mm}
+    body{font:10px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;color:#1a1a1a;margin:0}
+    h1{font-size:15px;margin:0 0 2px}.sub{color:#6b6a64;font-size:10px;margin-bottom:8px}
+    table{width:100%;border-collapse:collapse;table-layout:fixed}
+    th{background:#f5f4f0;padding:4px 5px;font-size:8.5px;text-transform:uppercase;letter-spacing:.04em;color:#555;border:1px solid #b9b7ae}
+    td{padding:4px 5px;border:1px solid #dedcd4;text-align:right;font-variant-numeric:tabular-nums}
+    td.i{text-align:left} tr.g td{background:#e7f0e9;font-weight:800;text-align:left}
+    td.box{background:#fcfcfa;border:1px solid #8f8d85}
+    thead{display:table-header-group} tr{break-inside:avoid}
+  </style></head><body>
+  <h1>Production Schedule</h1>
+  <div class="sub">${H(PS_FROM)} → ${H(PS_TO)} · ${H(PS_CAT)} · printed ${H(todayISO())}</div>
+  <table><thead><tr><th style="width:150px">Item</th><th>Begin</th>${days.map(d=>`<th>${H(dh(d))}</th>`).join('')}
+    <th>Ending</th><th>Target</th><th>Remaining</th></tr></thead><tbody>
+  ${(()=>{ const byG={}; rows.forEach(r=>{ (byG[r.g1]=byG[r.g1]||[]).push(r); });
+    return Object.keys(byG).sort().map(g=>`<tr class="g"><td colspan="${days.length+5}">${H(g)}</td></tr>`
+      +byG[g].map(r=>`<tr><td class="i">${H(r.name)}</td><td>${_psQ(r.begin,r.div)}</td>`
+        +days.map(d=>{ const v=r.day[d]||0; return v?`<td>${v>0?'+':''}${_psQ(v,r.div)}</td>`:`<td class="box"></td>`; }).join('')
+        +`<td><b>${_psQ(r.end,r.div)}</b></td><td>${r.target?_psQ(r.target,r.div):'—'}</td><td>${r.remaining?_psQ(r.remaining,r.div):'—'}</td></tr>`).join('')).join(''); })()}
+  </tbody></table></body></html>`);
+  w.document.close(); w.focus(); setTimeout(()=>{ try{ w.print(); }catch(e){} },300);
+}
+
 async function renderLiveStock(){
   $('cp').innerHTML=`<div class="title">Live Stock <span onclick="openKB('stock_balance')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderLiveStock()">↻ Recompute</button>
@@ -2100,6 +2495,7 @@ async function renderLiveStock(){
       title="Everything before this date is folded into the opening column, so the ending figure stays correct. Blank = from the beginning."></span>
     <span class="mini">to <input type="date" value="${esc(LS_TO)}" onchange="LS_TO=this.value;renderLiveStock()"
       title="Stop the clock here. Blank = now — which is what live means."></span>
+    <span class="sp"></span>${LS_CATS.map(c=>`<button class="btn ${LS_CAT===c.k?'':'sec'} sm" onclick="LS_CAT='${c.k}';renderLiveStock()" title="${esc(c.l)}">${c.i} ${esc(c.l)}</button>`).join('')}
     ${(LS_FROM||LS_TO)?`<button class="btn sec sm" onclick="LS_FROM='';LS_TO='';renderLiveStock()">↺ Live</button>`
       :`<span class="tagf" style="background:#e2f0e4;color:#2d5c22">LIVE · as at now</span>`}
     <div class="sp"></div><span style="color:var(--muted)">begin + in + produced − used − sold ± moves = ending</span>`;
@@ -2141,15 +2537,23 @@ async function renderLiveStock(){
     const div=(isProd||isSup)?1:1000; const unit=isProd?'packs':(isSup?(it.uom||'units'):'kg');
     // 3-level grouping (Group › Subgroup › Item), matching the count sheet & master data.
     let g1,g2,grank;
+    const isStk=!isProd && /sticker|label/i.test(String(it.category||''));
     if(isProd){ g1='📦 '+(it.group_1||'Products'); g2=(it.group_2||it.family||'Other'); grank=_so(it); }
+    else if(isStk){ g1='🏷 Stickers & labels'; g2=(it.category||'Labels'); grank=900000; }
     else if(isSup){ g1='🧴 Kitchen Supplies'; g2=(it.category||'Supplies'); grank=800000; }
-    else { g1='🥩 '+(it.category||'Ingredients'); g2=(matOf(it)||a.sku); grank=400000+_grank(it.category)*1000+_so(it); }
+    else { /* animal first, then vegetables, then the rest — the freezer's own order */
+      const an=_lsAnimalOf(it,a.sku);
+      g1=an; g2=(matOf(it)||a.sku);
+      const ai=LS_ANIMALS.findIndex(([l])=>l===an);
+      grank=400000+((ai<0?90:ai)*1000)+_so(it); }
+    const kind=isProd?'product':(isStk?'sticker':(isSup?'supply':'ingredient'));
     const name=(it.name||a.sku)+((!isProd&&!isSup&&it.is_intermediate)?' — processed':'');
     const par=isProd?(+it.par_packs||0):(+it.reorder_g||+it.par_g||0);
     const below=par>0 && end<par, neg=end< -0.0001;
-    return {sku:a.sku, name, g1, g2, grank, unit, div, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf,
+    return {sku:a.sku, name, g1, g2, grank, unit, div, kind, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf,
             sold:a.sold, back:a.back, adj:a.adj, end, value:a.val, par, below, neg, sort_order:it.sort_order};
   }).filter(r=> r.begin||r.recv||r.prod||r.cons||r.tf||r.sold||r.back||r.adj);
+  if(LS_CAT!=='all') rows=rows.filter(r=>r.kind===LS_CAT);
   if(LS_ACT) rows=rows.filter(r=>r.below||r.neg);
 
   const nBelow=rows.filter(r=>r.below).length, nNeg=rows.filter(r=>r.neg).length;
@@ -2157,7 +2561,7 @@ async function renderLiveStock(){
   const mh=(typeof moneyHidden==='function'&&moneyHidden());
   const kpi=(l,val,s,col)=>`<div class="kpi"><div class="l">${l}</div><div class="v"${col?` style="color:${col}"`:''}>${val}</div><div class="s">${s||''}</div></div>`;
   let h=`<div class="kpirow">
-    ${kpi('Items in stock', rows.length, LS_LOC==='all'?'all sites':LS_LOC)}
+    ${kpi('Items in stock', rows.length, (LS_CAT==='all'?'':((LS_CATS.find(c=>c.k===LS_CAT)||{}).l+' · '))+(LS_LOC==='all'?'all sites':LS_LOC))}
     ${kpi('⚠ Below reorder/PAR', nBelow, 'need replenishing', nBelow?'var(--earth,#b5762a)':'')}
     ${kpi('🔴 Negative', nNeg, 'ledger to investigate', nNeg?'var(--danger)':'')}
     ${mh?'':kpi('Stock value', fmt(totVal), 'at moving-avg cost', 'var(--berry)')}
@@ -2853,24 +3257,58 @@ function recordPrintHtml(m, r, children){
   if(_isStickerPO(r)){
     lines=_stkPrintLines(children, window._stkFormProds, window._stkFormIngs);
   } else if(m.o2m && m.o2m.cols.some(c=>c.n==='product_sku')){
-    // Product-line documents (transfers / deliveries): grouped Group › Subgroup › Item, with SKU + name.
+    /* A TRANSFER SHEET IS A WORKING DOCUMENT, not a receipt. Whoever packs it
+       writes what they prepared, whoever receives it writes what arrived, and
+       both need somewhere to write. It printed only the system's own numbers,
+       so the boxes were drawn on the page by hand every time.
+
+       The item column also printed p.variant FIRST, which in this master is the
+       pack size — so a sheet read "500g" where a product name belongs. Full
+       name, then the variant, then the code. */
     const cols=m.o2m.cols; const kids=children||[];
-    const P=window._prodLineMap||{};
-    const numCols=cols.filter(c=>['number','currency'].includes(c.t));
-    const rows=kids.map(l=>{ const p=P[l.product_sku]||{}; return {...l, sku:l.product_sku, name:(p.variant||p.name||l.product_sku),
-      group_1:(p.group_1||'Products'), group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order}; });
-    const span=3+numCols.length; let n=0, body='';
+    const P=window._prodLineMap||{}; const IG=window._ingLineMap||{};
+    const isTr=(state.model==='transfers');
+    const numCols=cols.filter(c=>['number','currency'].includes(c.t) && !(isTr&&/^(sent_packs|received_packs)$/.test(c.n)));
+    const _nm=l=>{
+      if((l.kind||'product')!=='product'){ const g=IG[l.product_sku]||{}; return {n:(g.name||ingName(l.product_sku)||l.product_sku), v:'', g1:(g.g1||'Ingredients'), g2:(g.g2||'')}; }
+      const p=P[l.product_sku]||{};
+      const nm=p.name||l.product_sku, v=(p.variant&&String(p.variant)!==String(nm))?String(p.variant):'';
+      return {n:nm, v, g1:(p.group_1||'Products'), g2:(p.group_2||p.family||'Other'), so:p.sort_order};
+    };
+    const rows=kids.map(l=>{ const x=_nm(l);
+      return {...l, sku:l.product_sku, name:x.n, variant:x.v, group_1:x.g1, group_2:x.g2, sort_order:x.so}; });
+    const anyRecv=isTr && rows.some(r=>(+r.received_packs||0)>0);
+    const span=(isTr?6:3)+numCols.length; let n=0, body='';
+    const _blank='<td class="wr"></td>';
     hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
       body+=`<tr class="grp"><td colspan="${span}"><b>${esc(G.g1)}</b></td></tr>`;
       G.subs.forEach(S=>{
-        body+=`<tr class="cat"><td colspan="${span}">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`+
-          S.items.map(r=>{ n++; return `<tr><td>${n}</td><td>${esc(r.name)}</td><td>${esc(r.sku)}</td>`+numCols.map(c=>`<td style="text-align:right">${esc(r[c.n]==null?'':r[c.n])}</td>`).join('')+`</tr>`; }).join('');
+        if(S.g2 && !/^other$/i.test(String(S.g2))) body+=`<tr class="cat"><td colspan="${span}">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`;
+        body+=S.items.map(r=>{ n++;
+          const label=esc(r.name)+(r.variant?' '+esc(r.variant):'')+' <span class="sku2">['+esc(r.sku)+']</span>';
+          if(isTr) return `<tr><td>${n}</td><td>${label}</td>`
+            +`<td style="text-align:right">${esc(r.sent_packs==null?'':r.sent_packs)}</td>`
+            +_blank
+            +((anyRecv&&(+r.received_packs||0)>0)?`<td style="text-align:right">${esc(r.received_packs)}</td>`:_blank)
+            +_blank
+            +numCols.map(c=>`<td style="text-align:right">${esc(r[c.n]==null?'':r[c.n])}</td>`).join('')+`</tr>`;
+          return `<tr><td>${n}</td><td>${label}</td><td>${esc(r.sku)}</td>`+numCols.map(c=>`<td style="text-align:right">${esc(r[c.n]==null?'':r[c.n])}</td>`).join('')+`</tr>`;
+        }).join('');
       });
     });
-    const head=`<th>#</th><th>Item</th><th>SKU</th>`+numCols.map(c=>`<th style="text-align:right">${esc(c.l)}</th>`).join('');
+    const head=isTr
+      ? `<th>#</th><th>Item</th><th style="text-align:right">Sent</th><th style="text-align:right">Prepared</th><th style="text-align:right">Received</th><th>Remarks</th>`
+        +numCols.map(c=>`<th style="text-align:right">${esc(c.l)}</th>`).join('')
+      : `<th>#</th><th>Item</th><th>SKU</th>`+numCols.map(c=>`<th style="text-align:right">${esc(c.l)}</th>`).join('');
     const tot=numCols.map(c=>rows.reduce((s,r)=>s+(+r[c.n]||0),0));
-    const foot=`<tr class="tot"><td colspan="3" style="text-align:right">Total · ${n} item(s)</td>`+tot.map(v=>`<td style="text-align:right">${num(Math.round(v*100)/100)}</td>`).join('')+`</tr>`;
-    lines=`<h3>${esc(m.o2m.label)}</h3><table class="lines"><thead><tr>${head}</tr></thead><tbody>${body}${foot}</tbody></table>`;
+    const foot=isTr
+      ? `<tr class="tot"><td colspan="2" style="text-align:right">Total · ${n} item(s)</td>`
+        +`<td style="text-align:right">${num(Math.round(rows.reduce((s,r)=>s+(+r.sent_packs||0),0)*100)/100)}</td>`
+        +_blank+((anyRecv)?`<td style="text-align:right">${num(Math.round(rows.reduce((s,r)=>s+(+r.received_packs||0),0)*100)/100)}</td>`:_blank)+_blank
+        +tot.map(v=>`<td style="text-align:right">${num(Math.round(v*100)/100)}</td>`).join('')+`</tr>`
+      : `<tr class="tot"><td colspan="3" style="text-align:right">Total · ${n} item(s)</td>`+tot.map(v=>`<td style="text-align:right">${num(Math.round(v*100)/100)}</td>`).join('')+`</tr>`;
+    lines=`<h3>${esc(m.o2m.label)}</h3><table class="lines"><thead><tr>${head}</tr></thead><tbody>${body}${foot}</tbody></table>`
+      +(isTr?`<div class="signoff"><div>Prepared by ______________________</div><div>Sent by ______________________</div><div>Received by ______________________</div><div>Date ____________</div></div>`:'');
   } else if(m.o2m && m.o2m.cols.some(c=>c.n==='ingredient_sku')){
     /* Ingredient-line documents (a purchase order). It used to print the bare SKU
        in a flat list — a supplier cannot read RAW-BEEF-RAW-MEATY-BONES, and neither
@@ -2926,6 +3364,11 @@ function recordPrintHtml(m, r, children){
     table.lines{width:100%;border-collapse:collapse;font-size:12px}
     table.lines th{background:#4e7a3e;color:#fff;padding:6px 8px;font-weight:600}
     table.lines td{padding:5px 8px;border-bottom:1px solid #eee}
+    /* the columns somebody writes in get a real box, not a ruled line */
+    table.lines td.wr{border:1px solid #8f8d85;background:#fcfcfa;min-width:66px;height:22px}
+    table.lines th{white-space:nowrap}
+    .sku2{color:#8a887f;font-weight:400;font-size:10.5px}
+    .signoff{display:flex;flex-wrap:wrap;gap:26px;margin-top:20px;font-size:11px;color:#555}
     table.lines tr.tot td{font-weight:700;border-top:2px solid #4e7a3e;background:#f6f8f4}
     table.lines tr.grp td{background:#dbe8de;font-weight:800;color:#234a31}
     table.lines tr.cat td{background:#f2f6ef;font-weight:600;color:#4e7a3e}
@@ -2944,7 +3387,7 @@ async function printForm(){ const m=MODELS[state.model], r=formRec;
   if(m.o2m && m.o2m.cols.some(c=>c.n==='product_sku') && !window._prodLineMap){ window._prodLineMap={};
     try{ (await db.list('products',{})).forEach(p=>window._prodLineMap[p.sku]={name:p.name,variant:p.variant,box:(+p.box_size||1),group_1:p.group_1,group_2:p.group_2,family:p.family,sort_order:p.sort_order}); }catch(e){} }
   // …and the same for ingredient lines, so a printed PO reads in names and groups.
-  if(m.o2m && m.o2m.cols.some(c=>c.n==='ingredient_sku')){ window._ingLineMap={};
+  if(m.o2m && (m.o2m.cols.some(c=>c.n==='ingredient_sku') || state.model==='transfers')){ window._ingLineMap={};
     try{ const ai=await listIngredients();
       _outIngRows(ai,ai).forEach(x=>{ window._ingLineMap[x.sku]={name:x._nm||x.name, g1:x._g1, g2:x._g2, so:x._grank}; });
     }catch(e){} }
@@ -6356,13 +6799,21 @@ async function coOpenDemand(){
     pool[l.product_sku]=(pool[l.product_sku]||0)-take;
     owed[o.order_ref+'|'+l.product_sku]=(owed[o.order_ref+'|'+l.product_sku]||0)+(q-take);
   }); });
-  (lines||[]).forEach(l=>{ const o=keep[l.order_ref]; if(!o||!l.product_sku) return;
-    const q=owed[l.order_ref+'|'+l.product_sku]||0; if(!(q>0)) return;
+  /* ONE ENTRY PER ORDER+SKU, NOT PER LINE.
+     `owed` is keyed by order+SKU and already holds the order's WHOLE claim on
+     that SKU. Walking the LINES and adding that total each time counted it once
+     per line — and two lines share a SKU whenever two mixes have the same recipe
+     at the same pack size, which is exactly what the recipe hash is designed to
+     make happen. Gabrielle's 14 + 14 came out as 56. */
+  Object.keys(owed).forEach(k=>{
+    const q=owed[k]; if(!(q>0)) return;
+    const cut=k.indexOf('|'); const ref=k.slice(0,cut), sku=k.slice(cut+1);
+    const o=keep[ref]; if(!o) return;
     const needed=String(o.needed_date||o.order_date||'').slice(0,10);
-    const e=map[l.product_sku]=map[l.product_sku]||{packs:0,needed:'',orders:[]};
+    const e=map[sku]=map[sku]||{packs:0,needed:'',orders:[]};
     e.packs+=q;
     if(needed && (!e.needed || needed<e.needed)) e.needed=needed;       // soonest need drives urgency
-    e.orders.push({ref:l.order_ref, customer:o.customer_name||'', packs:q, needed});
+    e.orders.push({ref, customer:o.customer_name||'', packs:q, needed});
   });
   return map; }
 // Flat {sku: packs} for the demand map.
@@ -6384,8 +6835,15 @@ async function coDemandDiag(){
      exactly when it matters. Plotted orders drop off. */
   let plotted={};
   try{ const ev=await coPlanEvidence(); plotted=ev.inDemand||{}; }catch(e){}
-  // only a LOCKED plot counts — a draft plot is still being argued about
-  const _isPlotted=ls=>ls.some(l=>l.product_sku && plotted[l.product_sku] && plotted[l.product_sku].locked);
+  /* Already planned means EITHER a locked plot OR a row sitting in the demand
+     table — both are "this week owes it". Only checking plots left orders that
+     had been loaded straight into demand still sitting on the to-plan list,
+     which is how the same order gets added twice. A DRAFT plot does not count;
+     that week is still being argued about. */
+  const _isPlotted=ls=>ls.some(l=>{
+    const ev=l.product_sku && plotted[l.product_sku];
+    return !!ev && (ev.locked || ev.src==='row');
+  });
   const rows=(orders||[]).map(o=>{
     const ls=byOrder[o.order_ref]||[];
     const withSku=ls.filter(l=>l.product_sku);
@@ -6443,7 +6901,7 @@ async function coPlanEvidence(){
          a saved PLOT is what the Demand/MRP screen draws. An order can be
          truthfully in demand while that screen looks empty — which reads as a
          bug unless the badge says which one it found. */
-      if(!cur || (d && (!cur.date || d>cur.date))) inDemand[r.sku]={date:d, qty:+r.qty||0, src:'row'};
+      if(!cur || (d && (!cur.date || d>cur.date))) inDemand[r.sku]={date:d, qty:+r.qty||0, src:'row', from:String(r.source||'').trim()};
     });
   }catch(e){}
   /* THE SAVED DEMAND PLOT. This is where the first version went wrong: a plot
@@ -6475,7 +6933,10 @@ function coWhyText(ev, sku){
   if(d) return (d.src==='row' ? 'in the demand table ' : (d.locked?'in locked demand ':'on the demand plot '))
               +(d.ref?d.ref+' ':'')
               +(d.date?'for '+d.date+' ':'')+(d.qty?'· '+d.qty+' pack(s)':'')
-              +(d.src==='row' ? ' — no saved demand plot covers that date yet' : '');
+              /* say WHO put it there — a row written by a load or an import is not
+                 the same thing as a week somebody planned, and reading "in the
+                 demand table" without that is what makes it look invented. */
+              +(d.src==='row' ? (d.from?' (written by '+d.from+')':'')+' — no saved demand plot covers that date yet' : '');
   return '';
 }
 
@@ -9317,19 +9778,77 @@ async function prodSubstitute(){
   const boms=await db.list('bom_lines',{});
   const req=[]; const seen=new Set(); lines.forEach(l=>boms.filter(b=>b.product_sku===l.product_sku).forEach(b=>{ if(!seen.has(b.ingredient_sku)){ seen.add(b.ingredient_sku); req.push(b.ingredient_sku); } }));
   window._prodSub=window._prodSub||{};
-  const rows=req.map(sku=>{ const it=im[sku]||{}; const alt=(it.approved_alt||'').trim(); const chosen=window._prodSub[sku]||'';
-    const opts=_procIngOptions(ings,{selected:chosen, exclude:sku, placeholder:null,
-      star:o=>alt&&String(o.name||'').trim().toLowerCase()===alt.toLowerCase()});
-    return `<tr><td>${esc(it.name||sku)}<div class="mini"><code>${esc(sku)}</code>${alt?' · approved alt: <b>'+esc(alt)+'</b>':''}</div></td>
-      <td><select onchange="prodSetSub('${esc(sku)}',this.value)" style="width:280px"><option value="" ${!chosen?'selected':''}>— same (no change) —</option>${opts}</select></td></tr>`; }).join('');
-  $('modal').innerHTML=`<div><h3>🔁 Substitute BOM ingredients — this run</h3>
-    <p class="mini">When an ingredient is unavailable, swap it for another for <b>this production run only</b>. The recipe grams stay the same; the replacement is processed &amp; consumed instead, with its own yield &amp; cost. The finished product is unchanged.</p>
-    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Recipe ingredient</th><th>Replace with</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px"><b id="subCount">${Object.keys(window._prodSub).length}</b> substitution(s) set for this run</div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="closeModal();drawProdPlan()">✅ Apply</button><button class="btn sec" onclick="window._prodSub={};closeModal();drawProdPlan()">Clear all</button></div></div>`;
+  /* The replacement screen was a flat list of every recipe ingredient with a
+     long unsearchable dropdown beside it — fine for four ingredients, useless
+     at forty, which is what a real run has. It gets the production plan's own
+     habits: search, group, sort, and the on-hand figures that decide the swap
+     in the first place. */
+  window._subCtx={req, im, ings, oh:(window._prodSupOh||{})};
+  window._subQ=''; window._subG='cat'; window._subS='need';
+  drawSubPick();
   $('overlay').classList.add('on');
 }
-function prodSetSub(orig,val){ window._prodSub=window._prodSub||{}; if(!val||val===orig) delete window._prodSub[orig]; else window._prodSub[orig]=val; const c=$('subCount'); if(c)c.textContent=Object.keys(window._prodSub).length; }
+function drawSubPick(){
+  const C=window._subCtx||{req:[],im:{},ings:[],oh:{}};
+  const oh=C.oh||{};
+  const q=String(window._subQ||'').trim().toLowerCase();
+  let rows=C.req.map(sku=>{ const it=C.im[sku]||{};
+    const cl=_ksCat(it.category||'');
+    return {sku, name:it.name||sku, cat:cl.l||'—', color:cl.c,
+      alt:(it.approved_alt||'').trim(), chosen:(window._prodSub||{})[sku]||'',
+      need:(((window._prodNeedRows||[]).find(r=>r.sku===sku)||{}).needG)||0,
+      oh:+oh[sku]||0};
+  });
+  if(q) rows=rows.filter(r=>(r.name+' '+r.sku+' '+r.cat+' '+r.alt).toLowerCase().includes(q));
+  const S={need:(a,b)=>b.need-a.need, name:(a,b)=>String(a.name).localeCompare(String(b.name)),
+           short:(a,b)=>(a.oh-a.need)-(b.oh-b.need), set:(a,b)=>(b.chosen?1:0)-(a.chosen?1:0)};
+  rows.sort(S[window._subS]||S.need);
+  const groups={};
+  rows.forEach(r=>{ const g=(window._subG==='cat')?r.cat
+      :(window._subG==='short'?((r.oh<r.need)?'Short — needs a decision':'Enough on hand')
+      :(window._subG==='set'?(r.chosen?'Being replaced':'Unchanged'):'All'));
+    (groups[g]=groups[g]||[]).push(r); });
+  const gOrd=g=>/^Short|Being replaced/.test(g)?0:(/^Enough|Unchanged/.test(g)?2:1);
+  const kg=g=>(Math.round((+g||0)/10)/100);
+  const body=Object.keys(groups).sort((a,b)=>gOrd(a)-gOrd(b)||a.localeCompare(b)).map(g=>
+    `<tr class="grp"><td colspan="4" style="background:${/^Short|Being replaced/.test(g)?'#fbeceb':'#f2f2ec'};font-weight:800;padding:4px 8px">${esc(g)} <span class="mini" style="font-weight:400;color:var(--muted)">${groups[g].length}</span></td></tr>`
+    +groups[g].map(r=>{
+      const opts=_procIngOptions(C.ings,{selected:r.chosen, exclude:r.sku, placeholder:null,
+        star:o=>r.alt&&String(o.name||'').trim().toLowerCase()===r.alt.toLowerCase()});
+      const short=r.need>0 && r.oh<r.need;
+      return `<tr${r.chosen?' style="background:#f9f4f6"':''}>
+        <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${r.alt?' · approved alt: <b>'+esc(r.alt)+'</b>':''}</div></td>
+        <td class="num mini" style="color:var(--muted)">${r.need?kg(r.need)+' kg':'—'}</td>
+        <td class="num mini" style="color:${short?'var(--danger)':(r.oh>0?'#1e6b2e':'var(--muted)')}">${r.oh?kg(r.oh)+' kg':'—'}${short?' ⚠':''}</td>
+        <td><select onchange="prodSetSub('${esc(r.sku)}',this.value)" style="width:260px"><option value="" ${!r.chosen?'selected':''}>— same (no change) —</option>${opts}</select></td></tr>`;
+    }).join('')).join('');
+  $('modal').innerHTML=`<div><h3>🔁 Substitute BOM ingredients — this run</h3>
+    <p class="mini">When an ingredient is unavailable, swap it for another for <b>this production run only</b>. The recipe grams stay the same; the replacement is processed &amp; consumed instead, with its own yield &amp; cost. The finished product is unchanged.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
+      <input id="subQ" value="${esc(window._subQ||'')}" placeholder="Search ingredient, code or category…"
+        oninput="window._subQ=this.value;drawSubPick();_subFocus()" style="flex:1;min-width:200px;padding:6px 9px;border:1px solid var(--line);border-radius:6px">
+      <label class="mini">Group <select onchange="window._subG=this.value;drawSubPick()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+        <option value="cat" ${window._subG==='cat'?'selected':''}>Category</option>
+        <option value="short" ${window._subG==='short'?'selected':''}>Short of stock</option>
+        <option value="set" ${window._subG==='set'?'selected':''}>Being replaced</option>
+        <option value="none" ${window._subG==='none'?'selected':''}>No grouping</option></select></label>
+      <label class="mini">Sort <select onchange="window._subS=this.value;drawSubPick()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+        <option value="need" ${window._subS==='need'?'selected':''}>Most needed</option>
+        <option value="short" ${window._subS==='short'?'selected':''}>Shortest</option>
+        <option value="name" ${window._subS==='name'?'selected':''}>Name</option>
+        <option value="set" ${window._subS==='set'?'selected':''}>Replaced first</option></select></label>
+    </div>
+    <div class="mscroll" style="overflow-x:auto;max-height:420px"><table class="stickyhead"><thead><tr>
+      <th>Recipe ingredient</th><th class="num">Needed</th><th class="num">On hand</th><th>Replace with</th></tr></thead>
+      <tbody>${body||'<tr><td colspan="4" class="empty">Nothing matches that search.</td></tr>'}</tbody></table></div>
+    <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px"><b id="subCount">${Object.keys(window._prodSub).length}</b> substitution(s) set for this run</div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="closeModal();drawProdPlan()">✅ Apply</button><button class="btn sec" onclick="window._prodSub={};drawSubPick()">Clear all</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  modalWide(true);
+}
+function _subFocus(){ const el=$('subQ'); if(el && document.activeElement!==el){ el.focus(); try{ el.setSelectionRange(el.value.length,el.value.length); }catch(e){} } }
+function prodSetSub(orig,val){ window._prodSub=window._prodSub||{}; if(!val||val===orig) delete window._prodSub[orig]; else window._prodSub[orig]=val;
+  const c=$('subCount'); if(c)c.textContent=Object.keys(window._prodSub).length;
+  if(window._subG==='set'||window._subS==='set') drawSubPick(); }
 function prodRemainCell(i){ const l=prodPlanLines[i]; const el=$('prem'+i); if(!el)return;
   if(!(+prodTargetMap[l.product_sku]>0)){ el.innerHTML='<span class="mini" style="color:var(--muted)">—</span>'; return; }
   const rem=_prodRemain(l.product_sku,l.good_packs); el.innerHTML=`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`; }
@@ -12827,6 +13346,16 @@ const KB = {
        'The three buckets exist so the alarm stays meaningful. If made-to-order mixes sat in the same red number as a genuine missing product, nobody would look at the red number.',
        'PASIG ONLY. Bulacan is production stock and is not sellable until transferred; publishing it would let a customer buy what is not at the selling site.',
        'A negative Pasig balance would be published as ZERO, never as a negative. A negative balance is a counting problem to fix, not a number to broadcast.']},
+  prodsched:{d:'Day by day, what goes in and out of every item, against what the week owes.',
+    h:['One row per item, one column per day — the cell is that day\'s NET movement; hover for the breakdown',
+       'Switch between Products · Ingredients · Supplies · Stickers',
+       '“Only what is short” leaves just the rows whose Cover is under 100%',
+       '‹ week / week › moves the window; 🖨 prints it with blank boxes for the days still to come'],
+    l:['LIVE STOCK ANSWERS “WHAT HAVE WE GOT”. This answers the question the floor asks the night before: what happens to each item on each day, and where do we run out.',
+       'BEGIN is everything before the window opened, so the row adds up. ENDING = Begin + every day, and it must equal Live Stock\'s ending — if the two disagree, one of them is wrong and it is worth knowing which.',
+       'TARGET is what the window owes, taking the LARGEST of the three sources: saved demand plots, the demand table, and locked custom orders. REMAINING is that less what has already been produced — the number the kitchen actually works from.',
+       'COVER is Ending ÷ Remaining. Under 100% means the shelf cannot cover what is still owed. On a busy morning it is the only column anyone should have to read.',
+       'Past days are plain, today is ruled, future days are open — the sheet is half record and half plan, and it should look like it.']},
   receiving:{d:'Book in a delivery without opening the commercial side of the order.',
     h:['Only orders still waiting on goods are listed; tick "show completed" for the rest',
        'Ordered · Received · Still to come, in kilos — no prices anywhere on this screen',
