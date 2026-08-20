@@ -517,7 +517,10 @@
    so it sits with Administration at the bottom rather than at the top. */
 const MODULES = [
   {id:'analytics', label:'Analytics', items:['stock_balance','shopify','yields','reporting','margin','momentum']},
-  {id:'sales',  label:'Sales',       items:['custom_orders','ffcalc','ffprofiles']},
+  /* The order of a menu is a claim about the order of the work. Sales starts
+     with the customer, not the order form: look the pet up (or create it),
+     build the pack in the calculator, and only then does an order exist. */
+  {id:'sales',  label:'Sales',       items:['ffprofiles','ffcalc','custom_orders']},
   {id:'plan',   label:'Planning',    items:['mrp','wdt']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','receiving','supplies_reorder','sticker_reorder']},
   {id:'ops',    label:'Operations',  items:['prodplan','production_batches','transfers','count_sessions']},
@@ -783,7 +786,7 @@ const MODELS = {
                 {label:'🧴 Supplies', fn:"trPick('supply')"},{label:'🏷 Stickers', fn:"trPick('sticker')"},
                 {label:'⬇ Finished stock…', fn:'openTransferLoad'}],
     o2m:{field:'lines',model:'transfer_lines',fk:'transfer_ref',label:'What is moving',
-      cols:[{n:'kind',l:'Type',t:'select',o:['product','ingredient']},
+      cols:[{n:'kind',l:'Type',t:'select',o:['product','ingredient','sticker']},
             {n:'product_sku',l:'Item',t:'rel',relAny:['products','ingredients'],
              rel:(ln)=>((ln&&ln.kind==='ingredient')?'ingredients':'products')},
             {n:'sent_packs',l:'Sent',t:'number'},{n:'received_packs',l:'Received',t:'number',ro:true}]} },
@@ -1394,6 +1397,10 @@ async function openForm(idEnc){
   if(idEnc){ const pkval=decodeURIComponent(idEnc);
     const rows=await listForModel(state.model); formRec={...(rows.find(r=>String(r[m.pk])===pkval)||{})};
   } else { formRec={}; if(m.supplyModel) formRec.is_supply=true; if(m.status) formRec[m.status.f]=m.status.stages[0]; if(m.fields.find(f=>f.n==='order_date')) formRec.order_date=todayISO(); if(m.fields.find(f=>f.n==='transfer_date')) formRec.transfer_date=todayISO();
+    /* A transfer with no sites picked cannot say what is on hand anywhere, so
+       its item pickers open empty and read as broken. Stock is made at one site
+       and sold at the other; that is the transfer, so it is the default. */
+    if(state.model==='transfers'){ formRec.from_code=formRec.from_code||planProduceLoc(); formRec.to_code=formRec.to_code||_otherLoc(formRec.from_code); }
     // NOTE: document reference numbers are now assigned at SAVE (see saveForm), not here —
     // opening then discarding a new document no longer burns a sequence number.
   }
@@ -5209,11 +5216,32 @@ async function postTransfer(t){ try{
      between the two sites too, and when the app could only carry products the
      team moved them anyway — off the books. The line now says which ledger it
      belongs to, and ingredients are carried in GRAMS like everywhere else. */
-  let icm={}; try{ (await listIngredients()).forEach(i=>{ icm[i.sku]=(+i.moving_avg_cost_kg||+i.list_price_kg||0)/1000; }); }catch(e){}
+  let icm={}, isup={};
+  try{ (await listIngredients()).forEach(i=>{ icm[i.sku]=(+i.moving_avg_cost_kg||+i.list_price_kg||0)/1000;
+        if(isSupplyItem(i)) isup[i.sku]=(+i.list_price_kg||+i.moving_avg_cost_kg||0); }); }catch(e){}
   for(const l of lines){ const sent=Math.max(0,+l.sent_packs||0), recv=Math.max(0,+l.received_packs||0); if(sent<=0&&recv<=0) continue;
-    const kind=(l.kind==='ingredient')?'ingredient':'product';
-    const mult=(kind==='ingredient')?1000:1;                      // ingredient lines are typed in kg
-    const uc=(kind==='ingredient')?(icm[l.product_sku]||0):(cm[l.product_sku]||0);
+    const kind=(l.kind==='sticker')?'sticker':((l.kind==='ingredient')?'ingredient':'product');
+    /* A SUPPLY IS NOT KILOS. It is counted in its own unit — "box of 50's" —
+       and the ledger holds it that way, so multiplying by 1000 would turn two
+       boxes into two thousand. Only a food ingredient is stored as grams. */
+    const isSup=(kind==='ingredient') && (isup[l.product_sku]!=null);
+    const mult=(kind==='ingredient' && !isSup)?1000:1;
+    const uc=(kind==='ingredient')?(isSup?(isup[l.product_sku]||0):(icm[l.product_sku]||0)):(cm[l.product_sku]||0);
+    if(kind==='sticker'){
+      /* Stickers are not in the ledger at all — their count lives on the
+         product row, per site. So the transfer moves those two counters. */
+      try{
+        const ps=(await db.list('products',{})).filter(p=>p.sku===l.product_sku)[0];
+        if(ps){
+          const fCol='sticker_'+from+'_on_hand', tCol='sticker_'+to+'_on_hand';
+          const patch={};
+          if(sent>0) patch[fCol]=Math.max(0,(+ps[fCol]||0)-sent);
+          if(recv>0) patch[tCol]=(+ps[tCol]||0)+recv;
+          if(Object.keys(patch).length) await db.update('products','sku',l.product_sku,patch);
+        }
+      }catch(e){ console.warn('sticker transfer',e); }
+      n++; continue;
+    }
     if(sent>0) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:from,qty:-sent*mult,unit_cost:uc,movement_type:'transfer_out',note:'Transfer '+t.transfer_ref});
     if(recv>0) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:to,qty:recv*mult,unit_cost:uc,movement_type:'transfer_in',note:'Transfer '+t.transfer_ref});
     const gap=sent-recv; if(Math.abs(gap)>0.0001){ flags++; try{ await db.create('variance_log',{check_type:'4 · Transfer',source_ref:t.transfer_ref,expected:sent,actual:recv,gap_qty:-gap,gap_value:Math.round(uc*mult*gap*100)/100,location:'in-transit',responsible_user:CURRENT_USER,status:'open',note:l.product_sku+' sent '+sent+' vs received '+recv}); }catch(e){} }
@@ -6256,7 +6284,7 @@ let coRec={}, coLines=[]; let _coView='list'; let _coProd={}, _coIng=[];
    a production plan, confirmed packs — so nobody has to remember to move a card.  */
 const CO_FLOW=[
   {k:'draft',          l:'Draft',                b:'open',      d:'Editable quote. Nothing reserved, nothing in demand.'},
-  {k:'for_production', l:'For Production',       b:'confirmed', d:'Locked. Its packs go into the demand run.'},
+  {k:'for_production', l:'For Demand Planning',  b:'confirmed', d:'Locked, but on no demand plot yet — it still has to be planned into a week.'},
   {k:'in_demand',      l:'Added in Demand',      b:'invoiced',  d:'Counted in a demand plan / MRP.'},
   {k:'in_production',  l:'In Production',        b:'invoiced',  d:'On a DRAFT production plan whose date has not passed. Nothing is produced yet — confirming the run moves it on. An abandoned draft in the past does not count.'},
   {k:'partial',        l:'Partially Fulfilled',  b:'invoiced',  d:'At least one confirmed production, not all packs yet.'},
@@ -6349,12 +6377,22 @@ async function coDemandDiag(){
   try{ orders=await db.list('custom_orders',{}); }catch(e){ err=String(e&&e.message||e); }
   try{ lines=await db.list('custom_order_lines',{}); }catch(e){ err=err||String(e&&e.message||e); }
   const byOrder={}; (lines||[]).forEach(l=>{ (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
+  /* WHAT IS ALREADY PLANNED IS NOT STILL TO PLAN.
+     This card exists to answer "why is my order not in the run". An order that
+     is sitting inside a LOCKED demand plot is in the run — leaving it on the
+     list made the list untrustworthy, and a list nobody trusts gets ignored
+     exactly when it matters. Plotted orders drop off. */
+  let plotted={};
+  try{ const ev=await coPlanEvidence(); plotted=ev.inDemand||{}; }catch(e){}
+  // only a LOCKED plot counts — a draft plot is still being argued about
+  const _isPlotted=ls=>ls.some(l=>l.product_sku && plotted[l.product_sku] && plotted[l.product_sku].locked);
   const rows=(orders||[]).map(o=>{
     const ls=byOrder[o.order_ref]||[];
     const withSku=ls.filter(l=>l.product_sku);
     const packs=withSku.reduce((s,l)=>s+(+l.packs||0),0);
     const st=coStat(o.status);
     let reason='';
+    if(_isPlotted(ls))        return null;          // already on a locked plot
     if(st==='draft')          reason='Still a Draft — open it and press 🔒 Lock.';
     else if(st==='cancelled') reason='Cancelled.';
     else if(st==='completed') reason='Completed — every pack already produced.';
@@ -6363,7 +6401,7 @@ async function coDemandDiag(){
     else if(!(packs>0))       reason='Lines have a SKU but zero packs.';
     return {ref:o.order_ref, customer:o.customer_name||'', status:st, label:coStatLabel(o.status),
             needed:String(o.needed_date||'').slice(0,10), lines:ls.length, withSku:withSku.length, packs, reason};
-  }).sort((a,b)=>String(a.needed||'9999').localeCompare(String(b.needed||'9999')));
+  }).filter(Boolean).sort((a,b)=>String(a.needed||'9999').localeCompare(String(b.needed||'9999')));
   return {rows, err, counted:rows.filter(r=>!r.reason).length};
 }
 
@@ -6492,7 +6530,11 @@ async function coSyncStatuses(){
       next='in_demand';
       why[o.order_ref]=coWhyText({inDemand},(ls.find(l=>inDemand[l.product_sku])||{}).product_sku);
     }
-    else { next='for_production'; why[o.order_ref]='locked, not on any plan yet'; }
+    /* This used to say "For Production", which told the kitchen to expect work
+       that nobody had scheduled. A locked order with no demand plot behind it
+       is waiting on PLANNING, not on the floor — so it says so, and the next
+       action is obvious. */
+    else { next='for_production'; why[o.order_ref]='locked — waiting to be planned into a demand week'; }
     if(next!==cur){
       moved[o.order_ref]=next;
       try{ await db.update('custom_orders','order_ref',o.order_ref,{status:next}); o.status=next; }catch(e){}
@@ -6574,6 +6616,118 @@ async function coNotifyReady(){
 }
 function _coParse(s){ try{ return JSON.parse(s)||[]; }catch(e){ return []; } }
 function coBackToList(){ _coView='list'; renderCustomOrders(); }
+/* ============ Import a kitchen sheet ======================================
+   The Production Request workbook states grams OUTRIGHT — 474 g pork loin,
+   12 packs. The calculator does the opposite: it DERIVES grams from a pet's
+   weight and the PMR ratios. Pushing this sheet through the calculator would
+   mean inventing weights that happen to reproduce these numbers, and they
+   would not reproduce them exactly — so the sheet lands here instead, where
+   the grams survive untouched and the order comes out the same shape a
+   multi-pet send produces.
+
+   Columns: Mix # · Variant · Ingredient · Grams · Qty · Batch Production.
+   One mix becomes one order line, exactly like one dog does.               */
+function coImportSheet(){
+  $('modal').innerHTML=`<div><h3>📥 Import a kitchen sheet</h3>
+    <p class="mini">A Production Request export — <code>Mix #, Variant, Ingredient, Grams, Qty, Batch Production</code>.
+      Each mix becomes one line on the order, at its own pack size, with the grams exactly as written.
+      Ingredient names are matched to your master list the same way the calculator's are, and anything unmatched is listed for you to map.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+      <input type="file" id="coImpFile" accept=".csv,text/csv" style="display:none" onchange="coImpFile(event)">
+      <button class="btn sec" onclick="document.getElementById('coImpFile').click()">📄 Choose CSV</button>
+    </div>
+    <textarea id="coImpText" placeholder="…or paste the rows here" style="width:100%;height:120px;padding:8px;border:1px solid var(--line);border-radius:6px;font:12px ui-monospace,Menlo,monospace"></textarea>
+    <div id="coImpOut" class="hint" style="margin-top:8px">Nothing loaded yet.</div>
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" onclick="coImpRun()">▶ Read it</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+function coImpFile(ev){ const f=ev.target.files&&ev.target.files[0]; if(!f) return;
+  const r=new FileReader(); r.onload=()=>{ const t=$('coImpText'); if(t) t.value=String(r.result||''); coImpRun(); }; r.readAsText(f); }
+function _coImpParse(text){
+  /* comma OR tab, because this arrives as a CSV download and as a paste out of
+     the same sheet, and the two are not the same file */
+  const rows=_coSplitRows(String(text||'').replace(/\r\n?/g,'\n'), /,/.test(String(text||'').split('\n')[0]||'')?',':'\t');
+  if(!rows.length) return {mixes:[], warn:['nothing to read']};
+  const head=rows[0].map(c=>String(c||'').trim().toLowerCase());
+  const ix=n=>head.findIndex(h=>h.includes(n));
+  const cMix=ix('mix'), cVar=ix('variant'), cIng=ix('ingredient'), cG=ix('gram'), cQ=ix('qty');
+  const cB=head.findIndex(h=>h.includes('batch'));
+  if(cIng<0||cG<0) return {mixes:[], warn:['no Ingredient / Grams column — is this the right export?']};
+  const mixes=[]; const warn=[]; let cur=null;
+  rows.slice(1).forEach((r,n)=>{
+    const mix=String(r[cMix]||'').trim(), variant=String(r[cVar]||'').trim();
+    const ing=String(r[cIng]||'').trim();
+    const g=parseFloat(String(r[cG]||'').replace(/[^0-9.\-]/g,''));
+    const q=parseFloat(String(r[cQ]||'').replace(/[^0-9.\-]/g,''));
+    if(mix){ cur={mix, variant:variant||'', items:[], packs:0, total:0}; mixes.push(cur); }
+    if(!cur || !ing) return;
+    if(/^total/i.test(ing)){ if(g>0) cur.stated=g; return; }       // the sheet's own pack total
+    if(!(g>0)) return;
+    if(q>0 && !cur.packs) cur.packs=q;
+    /* The batch column is the sheet's own multiplication. When it disagrees
+       with grams x qty the sheet has a typo, and the honest thing is to say
+       which line rather than silently pick one of the two. */
+    if(cB>=0){ const bt=parseFloat(String(r[cB]||'').replace(/[^0-9.\-]/g,''));
+      if(bt>0 && q>0 && Math.abs(bt-g*q)>0.05)
+        warn.push((cur.variant||cur.mix)+' · '+ing+': sheet says '+bt+' g for the batch, but '+g+' × '+q+' = '+Math.round(g*q*10)/10); }
+    /* A line whose Qty differs from the rest of its mix is a typo in the sheet,
+       and it is the quiet kind: the batch column agrees with it, so the
+       arithmetic looks fine while one ingredient is short by an order of
+       magnitude. Gabrielle's sheet has exactly one — strawberry at 1 pack in a
+       14-pack mix. The import takes the PER-PACK grams either way, so the order
+       is right; the warning is for whoever has to fix the sheet. */
+    if(q>0 && cur.packs>0 && q!==cur.packs)
+      warn.push((cur.variant||cur.mix)+' · '+ing+': Qty is '+q+' but the rest of the mix is '+cur.packs
+        +' — the per-pack grams are used, but the sheet needs fixing');
+    cur.items.push({name:ing, grams:g});
+  });
+  mixes.forEach(m=>{ m.total=Math.round(m.items.reduce((s,x)=>s+x.grams,0)*10)/10;
+    if(m.stated && Math.abs(m.stated-m.total)>0.5) warn.push((m.variant||m.mix)+': lines add to '+m.total+' g, the sheet says '+m.stated+' g'); });
+  return {mixes:mixes.filter(m=>m.items.length), warn};
+}
+let _coImp=null;
+async function coImpRun(){
+  const t=($('coImpText')||{}).value||'';
+  const r=_coImpParse(t); _coImp=r;
+  const el=$('coImpOut'); if(!el) return;
+  if(!r.mixes.length){ el.innerHTML=`<span style="color:var(--danger)">Could not read it — ${esc((r.warn||[]).join('; ')||'no mixes found')}</span>`; return; }
+  const packs=r.mixes.reduce((s,m)=>s+(+m.packs||0),0);
+  const kg=r.mixes.reduce((s,m)=>s+m.total*(+m.packs||0),0)/1000;
+  let map={recipe:[],unmatched:[]};
+  try{ map=await _ffMapItems(r.mixes.flatMap(m=>m.items)); }catch(e){}
+  const un=[...new Set(map.unmatched||[])];
+  el.innerHTML=`<b>${r.mixes.length} mix(es)</b> · ${packs} packs · ${Math.round(kg*1000)/1000} kg<br>
+    <div style="max-height:150px;overflow:auto;margin:6px 0"><table><thead><tr><th>Mix</th><th class="num">Pack</th><th class="num">Packs</th><th class="num">Items</th></tr></thead><tbody>
+    ${r.mixes.map(m=>`<tr><td>${esc(m.variant||m.mix)}</td><td class="num">${m.total} g</td><td class="num">${m.packs||'—'}</td><td class="num">${m.items.length}</td></tr>`).join('')}
+    </tbody></table></div>
+    ${un.length?`<div style="color:var(--earth,#b5762a)"><b>${un.length}</b> ingredient(s) have no match yet: ${esc(un.slice(0,8).join(', '))}${un.length>8?' …':''} — you can map them after importing.</div>`:'<div style="color:#4e7a3e">Every ingredient matched your master list.</div>'}
+    ${(r.warn||[]).length?`<div style="color:var(--danger);margin-top:6px"><b>${r.warn.length} thing(s) to check in the sheet itself:</b><br>${r.warn.slice(0,5).map(esc).join('<br>')}${r.warn.length>5?'<br>…':''}</div>`:''}
+    <div style="margin-top:8px"><button class="btn" onclick="coImpApply()">＋ Create the order</button></div>`;
+}
+async function coImpApply(){
+  if(!_coImp||!_coImp.mixes.length){ toast('Nothing read yet',true); return; }
+  try{ (await db.list('products',{})).forEach(p=>_coProd[p.sku]=p); }catch(e){}
+  try{ _coIng=(await listIngredients()).filter(i=>!isSupplyItem(i)); }catch(e){}
+  const lines=[]; const un=[];
+  for(const m of _coImp.mixes){
+    const map=await _ffMapItems(m.items);
+    map.unmatched.forEach(u=>{ if(un.indexOf(u)<0) un.push(u); });
+    lines.push({line_type:'custom', product_sku:'', description:(m.variant||m.mix),
+      recipe:map.recipe, pack_size_g:m.total, packs:+m.packs||1, unit_price:0});
+  }
+  const name='';
+  coRec={order_ref:'', customer_name:name, contact:'', order_date:todayISO(), needed_date:todayISO(),
+    status:'draft', discount:0, delivery_fee:0, created_by:CURRENT_USER,
+    notes:'Imported from a Production Request kitchen sheet — '+lines.length+' mix(es), '
+      +lines.reduce((s,l)=>s+(+l.packs||0),0)+' packs. Grams are as written on the sheet.'};
+  coLines=lines;
+  closeModal();
+  _coView='form'; state.model='custom_orders'; state.view='special'; renderSide(); drawCOForm();
+  if(un.length){ toast(un.length+' ingredient(s) need mapping: '+un.slice(0,5).join(', '),true); coEditRecipe(0); }
+  else toast('Imported '+lines.length+' mix(es) — set the customer and needed date, then Lock');
+}
+
 function _coProdOptions(sel){ const list=Object.values(_coProd).filter(p=>p.active!==false && !p.is_custom);
   return hierGroups(list,{g1:'group_1',g2:'group_2'}).map(G=>G.subs.map(S=>`<optgroup label="${esc(G.g1+' › '+(S.g2||''))}">`+S.items.map(p=>`<option value="${esc(p.sku)}" ${sel===p.sku?'selected':''}>${esc(p.name||p.sku)}</option>`).join('')+`</optgroup>`).join('')).join(''); }
 /* ============ Kitchen Batch, printed from the order =======================
@@ -6688,6 +6842,7 @@ function drawCOForm(){
     ${coIsOpen(coRec.status)?`<button class="btn sec" onclick="coFulfil()">✓ Mark completed</button>`:''}
     ${!locked&&coRec.order_ref?`<button class="btn sec" onclick="coCancel()">✕ Cancel</button>`:''}
     <button class="btn sec" onclick="coKitchenBatch()" title="the Fresh Food Calculator's Kitchen Batch sheet, from this order">🍳 Kitchen Batch</button>
+    ${!locked?`<button class="btn sec" onclick="coImportSheet()" title="a Production Request CSV — one mix per line">📥 Import sheet</button>`:''}
     <button class="btn sec" onclick="coBackToList()">← Orders</button>
     <div class="sp"></div>${coStatBadge(coRec.status)} <span style="color:var(--muted)">${esc(coStatDef(coRec.status).d)}</span>`;
   const st=coRec.status||'quote';
@@ -7279,18 +7434,20 @@ function coImportOpen(){
   $('overlay').classList.add('on');
 }
 // Split pasted text into records. Handles Sheets' quoting of multi-line cells.
-function _coSplitRows(txt){
+function _coSplitRows(txt, sep){
+  sep=sep||'\t';
   const rows=[]; let row=[], cell='', q=false;
   for(let i=0;i<txt.length;i++){ const c=txt[i];
     if(q){ if(c==='"'){ if(txt[i+1]==='"'){ cell+='"'; i++; } else q=false; } else cell+=c; continue; }
     if(c==='"'){ q=true; continue; }
-    if(c==='\t'){ row.push(cell); cell=''; continue; }
+    if(c===sep){ row.push(cell); cell=''; continue; }
     if(c==='\r'){ continue; }
     if(c==='\n'){ row.push(cell); rows.push(row); row=[]; cell=''; continue; }
     cell+=c; }
   row.push(cell); rows.push(row);
   return rows.filter(r=>r.some(c=>String(c).trim()!==''));
 }
+/* the paste path had no separator, so it kept its old tab behaviour */
 // Pull pack size and pack count out of "Raw Quail Mix 350g x 42 packs" / "Mix 4 … 1kg x 28 packs".
 function _coParseReq(req){
   const t=String(req||'').replace(/\s+/g,' ').trim();
@@ -8595,6 +8752,11 @@ const KSHEET_CSS=`  :root{
     background:repeating-linear-gradient(0deg,transparent,transparent 25px,#e6e4dc 25px,#e6e4dc 26px);
   }
   .yield-record .yr-box.pre{color:#9a9a93;font-size:11px;text-align:right;padding-right:2px;}
+  /* the two halves of the day's summary, so a kilo is never read as a pack */
+  .day-summary tr.sec td{background:#eceae3;font-weight:800;font-size:10px;letter-spacing:.06em;
+    text-transform:uppercase;color:#4a4a44;padding:6px 8px;}
+  .kindtag{display:inline-block;font-size:8.5px;letter-spacing:.06em;text-transform:uppercase;font-weight:800;
+    background:#5C5C5C;color:#fff;border-radius:3px;padding:1px 5px;vertical-align:1px;margin-right:5px;}
   .yield-record table.yr th .sub{display:block;font-weight:400;opacity:.72;font-size:9px;letter-spacing:0;}
   .yield-record table.yr td{padding-top:9px;padding-bottom:9px;}
   .yield-record table.yr th{font-size:11px;letter-spacing:.02em;}
@@ -8900,11 +9062,26 @@ async function prodKitchenSheet(){
   });
 
   const fill=n=>Array.from({length:n},()=>'<div class="line"></div>').join('');
-  const summaryRows=items.map(x=>`<tr>
-      <td class="mix">${esc2([x.fmt,x.mixCat,x.name].filter(Boolean).join(' — '))}${(()=>{const pr=_ksProteins(x.ings,(x.name||"")+" "+(x.sku||"")); return pr?`<div class="prot">${esc2(pr)}</div>`:"";})()}<div class="sku">${esc2(x.sku)}</div></td>
+  /* TWO DIFFERENT THINGS WERE SHARING ONE TABLE.
+     A finished product and a processed ingredient both landed in this summary
+     as plain rows, so an ingredient read as a product filed under whatever
+     group its row happened to inherit — "Products › Other". They are not the
+     same kind of thing: one is packs a customer buys, the other is kilos that
+     go back on a shelf. Two headed sections, and the ingredient carries the
+     word INGREDIENT and its raw parent so it cannot be mistaken again.
+     A product's group is also only shown when it says something — "Other" as a
+     heading is a filing accident, not a category. */
+  const _grp=x=>[x.fmt,x.mixCat].filter(v=>v && !/^other$/i.test(String(v))).join(' — ');
+  const summaryRows=
+    (items.length?`<tr class="sec"><td colspan="3">Mga Produkto · Finished products</td></tr>`:'')
+    + items.map(x=>{ const g=_grp(x);
+      return `<tr>
+      <td class="mix">${g?esc2(g)+' — ':''}${esc2(x.name)}${(()=>{const pr=_ksProteins(x.ings,(x.name||"")+" "+(x.sku||"")); return pr?`<div class="prot">${esc2(pr)}</div>`:"";})()}<div class="sku">${esc2(x.sku)}</div></td>
       <td class="num">${x.packs}</td>
-      <td class="num">${x.packG} g</td></tr>`).join('')
-    + outItems.map(x=>`<tr><td class="mix">Output ingredient — ${esc2(x.name)}</td><td class="num">—</td><td class="num">${_ksKg(x.needG)}</td></tr>`).join('');
+      <td class="num">${x.packG} g</td></tr>`; }).join('')
+    + (outItems.length?`<tr class="sec"><td colspan="3">Sangkap na iproseso · Processed ingredients — to stock, not to a pack</td></tr>`:'')
+    + outItems.map(x=>`<tr><td class="mix"><span class="kindtag">Ingredient</span> ${esc2(x.name)}${x.raw?`<div class="prot">mula sa ${esc2(x.raw)}</div>`:''}<div class="sku">${esc2(x.sku)}</div></td>
+        <td class="num">—</td><td class="num">${_ksKg(x.needG)}</td></tr>`).join('');
 
   const cover=`<div id="coverSheet"><div class="cover">
     <div class="cover-title"><h1>Wholesome Rabbit — Daily Production Sheet</h1>
@@ -9003,9 +9180,9 @@ async function prodKitchenSheet(){
   }).join('');
 
   // Output ingredients to prep straight to stock (no finished pack) — same block styling.
-  const outBlock=outItems.length?`<div class="mix-block">
-    <div class="mix-title">Output ingredients — gawing processed stock</div>
-    <div class="mix-sub">Hindi ito napupunta sa pack. Iproseso at ibalik sa processed inventory.</div>
+  const outBlock=outItems.length?`<div class="mix-block" style="border-left:6px solid #5C5C5C">
+    <div class="mix-title"><span class="kindtag">Ingredient</span> Sangkap na iproseso — gawing processed stock</div>
+    <div class="mix-sub">HINDI ito produkto at walang pack. Iproseso at ibalik sa processed inventory.</div>
     <div class="mix-content"><div class="ingred-col">
       <table class="ingred">
         <thead><tr><th>Processed</th><th class="num">Raw to pull</th><th class="num">Target output</th></tr></thead>
@@ -12238,16 +12415,39 @@ async function mrpSheetSync(){ const a=AUTOS.sheets_demand;
    four different masters.
    Products and stickers move in WHOLE units. Ingredients and supplies move in
    kg, because that is how they are counted everywhere else in this app.       */
-let _trPickKind='product', _trPickRows=[], _trQty={}, _trSearch='', _trGroup='cat', _trSort='name';
+/* Defaults that match how the picker is actually used: you are standing at a
+   freezer deciding what to send, so the things you HAVE come first and the
+   biggest piles lead. Alphabetical-across-everything was a filing-cabinet
+   default on a warehouse screen. */
+let _trPickKind='product', _trPickRows=[], _trQty={}, _trSearch='', _trGroup='stock', _trSort='stock', _trHideZero=true;
+/* THREE DIFFERENT UNITS AND THREE DIFFERENT STORES, and pretending otherwise
+   is why the supplies and stickers tabs were wrong:
+
+     ingredients  kilos, held in the ledger as GRAMS
+     supplies     whole units of their own uom ("box of 50's") — the ledger
+                  holds them as units, not grams, so multiplying by 1000 turned
+                  two boxes into two thousand
+     stickers     pieces, and NOT in the ledger at all: sticker stock lives in
+                  products.sticker_<site>_on_hand, which is why every sticker
+                  read as zero here
+     products     whole packs, in the ledger                                  */
 const TR_KINDS={
-  ingredient:{l:'Ingredients', unit:'kg',    icon:'🥩', ledger:'ingredient'},
-  supply    :{l:'Supplies',    unit:'kg',    icon:'🧴', ledger:'ingredient'},
-  sticker   :{l:'Stickers',    unit:'pcs',   icon:'🏷', ledger:'ingredient'},
-  product   :{l:'Products',    unit:'packs', icon:'📦', ledger:'product'},
+  ingredient:{l:'Ingredients', unit:'kg',    icon:'🥩', ledger:'ingredient', mult:1000},
+  supply    :{l:'Supplies',    unit:'units', icon:'🧴', ledger:'ingredient', mult:1},
+  sticker   :{l:'Stickers',    unit:'pcs',   icon:'🏷', ledger:'sticker',    mult:1},
+  product   :{l:'Products',    unit:'packs', icon:'📦', ledger:'product',    mult:1},
 };
+function _otherLoc(from){
+  const locs=(typeof LOCS!=='undefined'&&LOCS.length)?LOCS.map(l=>l.code||l):['bulacan','pasig'];
+  return locs.find(c=>String(c)!==String(from))||'pasig';
+}
 function _trIsSticker(i){ return /sticker|label/i.test(String(i.category||'')); }
 async function _trOnHand(kind, loc){
   const oh={}, want=(TR_KINDS[kind]||{}).ledger||'product';
+  if(want==='sticker'){            // not a ledger item — it lives on the product row
+    try{ (await db.list('products',{})).forEach(p=>{ const v=+p['sticker_'+loc+'_on_hand']||0; if(v) oh[p.sku]=v; }); }catch(e){}
+    return oh;
+  }
   if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(b=>{
       if(String(b.kind||'')===want && String(b.location_code||'')===loc) oh[b.ref_sku]=(oh[b.ref_sku]||0)+(+b.on_hand||0); }); }catch(e){} }
   else (DEMO.inventory_movements||[]).forEach(m=>{
@@ -12255,22 +12455,33 @@ async function _trOnHand(kind, loc){
   return oh;
 }
 async function trPick(kind){
-  if(formIsNew){ toast('Save the transfer first',true); return; }
-  _trPickKind=kind; _trQty={}; _trSearch=''; _trGroup='cat'; _trSort='name';
+  /* This used to demand a saved transfer first, which was a rule borrowed from
+     receiving and did not belong here: the picker only fills formChildren in
+     memory, and the one thing it needs — which site to read stock from — is on
+     the unsaved form already. Being made to save an empty transfer before you
+     can put anything in it is backwards. */
+  _trPickKind=kind; _trQty={}; _trSearch=''; _trGroup='stock'; _trSort='stock'; _trHideZero=true;
   const from=formRec.from_code||'bulacan';
   const oh=await _trOnHand(kind, from);
   let rows=[];
   if(kind==='product'){
     let ps=[]; try{ ps=await db.list('products',{}); }catch(e){}
-    rows=ps.map(p=>({sku:p.sku,name:p.name||p.sku,cat:p.family||p.group_1||'Products',oh:+oh[p.sku]||0,div:1}));
+    rows=ps.map(p=>({sku:p.sku,name:p.name||p.sku,cat:p.group_1||p.family||'Products',oh:+oh[p.sku]||0,div:1,unit:'packs'}));
+  } else if(kind==='sticker'){
+    /* A sticker is named by the PRODUCT it goes on, and its stock is counted on
+       that product's row. Listing the sticker ingredients instead showed 22
+       rows all reading zero. */
+    let ps=[]; try{ ps=await db.list('products',{}); }catch(e){}
+    rows=ps.filter(p=>p.active!==false)
+      .map(p=>({sku:p.sku,name:(p.name||p.sku)+' — label',cat:p.group_1||p.family||'Labels',oh:+oh[p.sku]||0,div:1,unit:'pcs'}));
   } else {
     let ings=[]; try{ ings=await listIngredients(); }catch(e){}
     rows=ings.filter(i=>{ const st=_trIsSticker(i), sup=isSupplyItem(i);
-        if(kind==='sticker') return st;
         if(kind==='supply')  return sup && !st;
         return !sup && !st; })
       .map(i=>({sku:i.sku,name:i.name||i.sku,cat:i.category||'—',oh:+oh[i.sku]||0,
-                div:(kind==='sticker')?1:1000}));   // stickers are counted in pieces, food in grams
+                div:(kind==='supply')?1:1000,
+                unit:(kind==='supply')?(String(i.uom||'units').trim()||'units'):'kg'}));
   }
   _trPickRows=rows;
   drawTrPick();
@@ -12283,6 +12494,10 @@ function _trPickFoot(){ const el=$('trPickFoot'); if(!el) return;
 function trPickRows(){
   const q=String(_trSearch||'').trim().toLowerCase();
   let rows=_trPickRows.filter(r=>!q || (r.name+' '+r.sku+' '+r.cat).toLowerCase().includes(q));
+  /* 143 products, most of them empty, is not a list — it is a haystack. Nothing
+     with zero on hand can be sent anyway, so it is out of the way by default
+     and one click away when a correction genuinely needs it. */
+  if(_trHideZero && !q) rows=rows.filter(r=>r.oh>0 || _trQty[r.sku]>0);
   const S={name:(a,b)=>String(a.name).localeCompare(String(b.name)),
            stock:(a,b)=>b.oh-a.oh,
            sku:(a,b)=>String(a.sku).localeCompare(String(b.sku))};
@@ -12294,32 +12509,45 @@ function drawTrPick(){
   const rows=trPickRows();
   const groups={};
   rows.forEach(r=>{ const g=(_trGroup==='cat')?(r.cat||'—'):(_trGroup==='stock'?((r.oh>0)?'In stock':'Nothing on hand'):'All'); (groups[g]=groups[g]||[]).push(r); });
-  const body=Object.keys(groups).sort().map(g=>
-    `<tr class="grp"><td colspan="4" style="background:#f2f2ec;font-weight:800;padding:4px 8px">${esc(g)} <span class="mini" style="font-weight:400;color:var(--muted)">${groups[g].length}</span></td></tr>`
+  // "In stock" must lead — sorting the group names alphabetically put "Nothing
+  // on hand" first, which is the opposite of useful
+  const _gOrder=g=>(g==='In stock'?0:(g==='Nothing on hand'?2:1));
+  const body=Object.keys(groups).sort((a,b)=>_gOrder(a)-_gOrder(b)||a.localeCompare(b)).map(g=>
+    `<tr class="grp"><td colspan="4" style="background:${g==='In stock'?'#e7ece3':'#f2f2ec'};font-weight:800;padding:4px 8px">${esc(g)} <span class="mini" style="font-weight:400;color:var(--muted)">${groups[g].length}</span></td></tr>`
     +groups[g].map(r=>`<tr><td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code></div></td>
-      <td class="num mini" style="color:${r.oh>0?'#1e6b2e':'var(--muted)'}">${r.oh?((Math.round((r.oh/r.div)*1000)/1000)+' '+K.unit):'—'}</td>
+      <td class="num mini" style="color:${r.oh>0?'#1e6b2e':'var(--muted)'}">${r.oh?((Math.round((r.oh/r.div)*1000)/1000)+' '+esc(r.unit||K.unit)):'—'}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" value="${_trQty[r.sku]!=null?_trQty[r.sku]:''}"
         oninput="trPickSet('${esc(r.sku)}',this.value)" placeholder="0"
         style="width:92px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
-      <td class="mini" style="color:var(--muted)">${esc(K.unit)}</td></tr>`).join('')).join('');
-  $('modal').innerHTML=`<div><h3>${K.icon} Add ${esc(K.l.toLowerCase())} to this transfer</h3>
-    <p class="mini">Moving from <b>${esc(formRec.from_code||'bulacan')}</b> to <b>${esc(formRec.to_code||'pasig')}</b>.
-      Stock shown is what is at the FROM site right now. ${_trPickKind==='product'||_trPickKind==='sticker'?'Whole units.':'Type kilos — decimals are fine.'}</p>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+      <td class="mini" style="color:var(--muted)">${esc(r.unit||K.unit)}</td></tr>`).join('')).join('');
+  const nAll=_trPickRows.length, nStock=_trPickRows.filter(r=>r.oh>0).length;
+  $('modal').innerHTML=`<div>
+    <div style="display:flex;align-items:flex-start;gap:10px">
+      <div style="flex:1">
+        <h3 style="margin:0 0 4px">${K.icon} Add ${esc(K.l.toLowerCase())} to this transfer</h3>
+        <p class="mini" style="margin:0">Moving from <b>${esc(formRec.from_code||'bulacan')}</b> to <b>${esc(formRec.to_code||'pasig')}</b>.
+          Stock shown is what is at the FROM site right now. ${_trPickKind==='product'||_trPickKind==='sticker'?'Whole units.':'Type kilos — decimals are fine.'}</p>
+      </div>
+      <button class="btn sec sm" onclick="closeModal()" title="close without adding anything" style="flex:0 0 auto">✕ Close</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0 8px">
       <input id="trSearch" value="${esc(_trSearch)}" placeholder="Search name, code or category…" oninput="_trSearch=this.value;drawTrPick();_trFocusSearch()"
-        style="flex:1;min-width:200px;padding:6px 9px;border:1px solid var(--line);border-radius:6px">
+        style="flex:1;min-width:190px;padding:6px 9px;border:1px solid var(--line);border-radius:6px">
       <label class="mini">Group <select onchange="_trGroup=this.value;drawTrPick()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
-        <option value="cat" ${_trGroup==='cat'?'selected':''}>Category</option>
         <option value="stock" ${_trGroup==='stock'?'selected':''}>Has stock</option>
+        <option value="cat" ${_trGroup==='cat'?'selected':''}>Category</option>
         <option value="none" ${_trGroup==='none'?'selected':''}>No grouping</option></select></label>
       <label class="mini">Sort <select onchange="_trSort=this.value;drawTrPick()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
-        <option value="name" ${_trSort==='name'?'selected':''}>Name</option>
         <option value="stock" ${_trSort==='stock'?'selected':''}>Most stock</option>
+        <option value="name" ${_trSort==='name'?'selected':''}>Name</option>
         <option value="sku" ${_trSort==='sku'?'selected':''}>Code</option></select></label>
+      <label class="mini" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap">
+        <input type="checkbox" ${_trHideZero?'checked':''} onchange="_trHideZero=this.checked;drawTrPick()" style="margin:0">
+        only what is in stock <span style="color:var(--muted)">(${nStock} of ${nAll})</span></label>
     </div>
-    <div class="mscroll" style="max-height:380px;overflow:auto"><table class="stickyhead"><thead><tr>
+    <div class="mscroll" style="max-height:400px;overflow:auto"><table class="stickyhead"><thead><tr>
       <th>Item</th><th class="num">At ${esc(formRec.from_code||'bulacan')}</th><th class="num">Move</th><th></th></tr></thead>
-      <tbody>${body||'<tr><td colspan="4" class="empty">Nothing matches that search.</td></tr>'}</tbody></table></div>
+      <tbody>${body||`<tr><td colspan="4" class="empty">${_trHideZero&&!_trSearch?`Nothing at ${esc(formRec.from_code||'bulacan')} has stock. Untick “only what is in stock” to see all ${nAll}.`:'Nothing matches that search.'}</td></tr>`}</tbody></table></div>
     <div class="mini" id="trPickFoot" style="margin-top:8px;color:var(--muted)"></div>
     <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" onclick="trPickApply()">＋ Add to transfer</button>
       <button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
@@ -12356,7 +12584,9 @@ function trPickApply(){
    question the floor actually asks: "what did we make this week." */
 async function loadBulacanStock(){ return openTransferLoad(); }
 function openTransferLoad(){
-  const to=todayISO(); const from=new Date(Date.now()-6*864e5).toISOString().slice(0,10);
+  // no save required — this only stages lines in memory
+  const to=todayISO();
+  const from=new Date(Date.now()-6*864e5).toISOString().slice(0,10);
   $('modal').innerHTML=`<div><h3>⬇ Load finished stock from ${esc(planProduceLoc())}</h3>
     <p class="mini">Two ways, and they answer different questions. Everything on hand is right when the site is being
       emptied. A production window is right when you are sending <b>this week's run</b> and something else is deliberately
