@@ -8071,8 +8071,38 @@ function mdGetFeedType(){
 
 function mdPackSize(dog){
   // Returns EXACT (unrounded) pack size — batch totals must use exact to match manual sheet
+  if(dog && +dog.packSizeG>0) return +dog.packSizeG;   // a loaded sheet states it outright
   if(mdPackMode==='daily') return dog.weight*1000*(dog.multiplier/100);
   return 500;
+}
+/* ---- ONE RECIPE PER DOG ----------------------------------------------------
+   Multi-dog was built on the assumption that a household feeds every dog the
+   same thing at different volumes: one ingredient set, one ratio set, scaled by
+   each dog's pack size. Real orders are not like that — Gabrielle Pacheco's
+   sheet has pork, beef and chicken mixes side by side, with different vegetable
+   sets and different ratios, and no amount of scaling turns one of those into
+   another.
+
+   So a dog may now carry its OWN recipe: an explicit list of {item, grams, cat}
+   per pack. When it does, that is used verbatim and nothing is derived — which
+   is what a kitchen sheet needs, because the sheet states grams rather than
+   deriving them. A dog without one behaves exactly as before. */
+function mdRowsFor(dog){
+  if(dog && Array.isArray(dog.recipe) && dog.recipe.length){
+    return dog.recipe.filter(r=>+r.grams>0)
+      .map(r=>({item:String(r.item||'').trim(), grams:+r.grams||0, cat:r.cat||'muscle'}));
+  }
+  const scale=(typeof mdComputedFood!=='undefined'&&mdComputedFood>0)?(mdFoodPerPack(dog)/mdComputedFood):1;
+  return (mdComputedRows||[]).map(r=>({...r, grams:r.grams*scale}));
+}
+function mdAnyOwnRecipe(){ return (mdDogs||[]).some(d=>d&&Array.isArray(d.recipe)&&d.recipe.length); }
+/* Every distinct ingredient across every dog — the column list for the wide
+   matrix, which used to assume one shared recipe. */
+function mdAllRows(){
+  if(!mdAnyOwnRecipe()) return (mdComputedRows||[]);
+  const seen={}, out=[];
+  (mdDogs||[]).forEach(d=>mdRowsFor(d).forEach(r=>{ if(!seen[r.item]){ seen[r.item]=1; out.push({item:r.item,cat:r.cat,grams:0}); } }));
+  return out;
 }
 
 function mdDailyServing(dog){
@@ -8628,16 +8658,15 @@ function mdRefreshDogTable(){
 
 // ── Output A: Customer Serving Summary ────────────────────────────────────
 function mdDogCost(dog){
-  if(!mdComputedRows||!mdComputedRows.length) return null;
+  if((!mdComputedRows||!mdComputedRows.length) && !mdAnyOwnRecipe()) return null;
   const R=ADMIN_CONFIG.rates; const PKG=ADMIN_CONFIG.packaging;
   const ps=mdPackSize(dog);
-  const scale=mdComputedFood>0?mdFoodPerPack(dog)/mdComputedFood:1;
   const isCook=mdFeedingType==='cookable'||mdFeedingType==='sousVide';
   const laborPg=isCook?(R.labor_gc_pg||0):(R.labor_barf_pg||0);
   let ingCost=0;
-  const ingLines=mdComputedRows.map(r=>{
+  const ingLines=mdRowsFor(dog).map(r=>{
     const cpg=COST_PER_GRAM[r.item]??ADMIN_CONFIG.cpg[r.item]??0;
-    const g=r.grams*scale;
+    const g=r.grams;
     const c=+(g*cpg).toFixed(4);
     ingCost+=c;
     return{item:r.item,cat:r.cat,grams:g,cpg,cost:c};
@@ -8725,7 +8754,7 @@ function mdRenderOutputA(dogs){
 
 function mdRenderOutputB(){
   const el=document.getElementById('md-output-b');
-  if(!el||!mdComputedRows.length) return;
+  if(!el||(!mdComputedRows.length && !mdAnyOwnRecipe())) return;
   const validDogs=mdDogs.filter(d=>d.name.trim()&&d.weight>0);
   const gramsDisp=g=>g<0.5?g.toFixed(2)+'g':g<1?g.toFixed(1)+'g':Math.round(g)+'g';
   const LABELS={muscle:'Muscle meat',organ:'Organ meat',bones:'Raw meaty bones',
@@ -8771,7 +8800,7 @@ function mdRenderOutputB(){
 
 function mdRenderOutputC(dogs){
   const el=document.getElementById('md-output-c');
-  if(!el||!mdComputedRows.length) return;
+  if(!el||(!mdComputedRows.length && !mdAnyOwnRecipe())) return;
   const gramsDisp=g=>g<0.5?g.toFixed(2)+'g':g<1?g.toFixed(1)+'g':Math.round(g)+'g';
   const COLORS={muscle:'#1D9E75',organ:'#7F77DD',bones:'#D85A30',liver:'#BA7517',
     secreting:'#D4537E',veggies:'#639922',seeds:'#888780',fruit:'#E24B4A',
@@ -8796,20 +8825,20 @@ function mdRenderOutputC(dogs){
           <th style="${thLStyle}">Dog</th>
           <th style="${thStyle}">Pack size</th>
           <th style="${thStyle}">Packs</th>
-          ${mdComputedRows.map(r=>`<th style="${thStyle}" title="${r.item}">${r.item.length>12?r.item.substring(0,10)+'…':r.item}</th>`).join('')}
+          ${mdAllRows().map(r=>`<th style="${thStyle}" title="${r.item}">${r.item.length>12?r.item.substring(0,10)+'…':r.item}</th>`).join('')}
           <th style="${thStyle};color:#185fa5">Total kg</th>
         </tr></thead><tbody>`;
-    const totalsPerIng=mdComputedRows.map(()=>0);
+    const totalsPerIng=mdAllRows().map(()=>0);
     dogs.forEach((dog,i)=>{
-      const scale=mdComputedFood>0?mdFoodPerPack(dog)/mdComputedFood:1;
+      const _rf={}; mdRowsFor(dog).forEach(r=>{ _rf[r.item]=(_rf[r.item]||0)+r.grams; });
       const ps=mdPackSize(dog);
       const bg=i%2===0?'#fff':'#fafafa';
       html+=`<tr style="background:${bg}">
         <td style="padding:5px 8px;font-weight:500">${dog.name}</td>
         <td style="padding:5px 8px;text-align:right;font-weight:600;color:#185fa5">${Math.round(ps)}g</td>
         <td style="padding:5px 8px;text-align:right;font-weight:600;color:#555">${dog.packs}</td>
-        ${mdComputedRows.map((r,ri)=>{
-          const g=r.grams*scale;
+        ${mdAllRows().map((r,ri)=>{
+          const g=(_rf[r.item]!=null)?_rf[r.item]:0;
           totalsPerIng[ri]+=g*dog.packs;
           return `<td style="padding:5px 8px;text-align:right">${gramsDisp(g)}</td>`;
         }).join('')}
@@ -8825,7 +8854,7 @@ function mdRenderOutputC(dogs){
     </tr></tbody></table></div>`;
   } else {
     // Category matrix (wide ingredient list)
-    const cats=[...new Set(mdComputedRows.map(r=>r.cat))];
+    const cats=[...new Set(mdAllRows().map(r=>r.cat))];
     const thStyle='padding:6px 8px;font-size:11px;font-weight:600;color:#888;text-align:right;background:#f5f4f0;border-bottom:1.5px solid rgba(0,0,0,0.1)';
     const thLStyle='padding:6px 8px;font-size:11px;font-weight:600;color:#888;text-align:left;background:#f5f4f0;border-bottom:1.5px solid rgba(0,0,0,0.1)';
     html+=`<div style="overflow-x:auto;margin-bottom:12px">
@@ -8839,11 +8868,10 @@ function mdRenderOutputC(dogs){
         </tr></thead><tbody>`;
     const catTotals={};cats.forEach(c=>catTotals[c]=0);
     dogs.forEach((dog,i)=>{
-      const scale=mdComputedFood>0?mdFoodPerPack(dog)/mdComputedFood:1;
       const ps=mdPackSize(dog);
       const bg=i%2===0?'#fff':'#fafafa';
       const catG={};cats.forEach(c=>catG[c]=0);
-      mdComputedRows.forEach(r=>{ catG[r.cat]=(catG[r.cat]||0)+r.grams*scale; });
+      mdRowsFor(dog).forEach(r=>{ catG[r.cat]=(catG[r.cat]||0)+r.grams; });
       cats.forEach(c=>{ catTotals[c]+=(catG[c]||0)*dog.packs; });
       html+=`<tr style="background:${bg}">
         <td style="padding:5px 8px;font-weight:500">${dog.name}</td>
@@ -8865,10 +8893,9 @@ function mdRenderOutputC(dogs){
   // ── C2: Combined Total Batch ────────────────────────────────────────────
   const combined={};
   dogs.forEach(dog=>{
-    const scale=mdComputedFood>0?mdFoodPerPack(dog)/mdComputedFood:1;
-    mdComputedRows.forEach(r=>{
+    mdRowsFor(dog).forEach(r=>{
       if(!combined[r.item]) combined[r.item]={cat:r.cat,total:0};
-      combined[r.item].total+=r.grams*scale*dog.packs;
+      combined[r.item].total+=r.grams*dog.packs;
     });
   });
   const CAT_ORDER=['bones','muscle','organ','liver','secreting','veggies','seeds','fruit','fish','supplement'];
@@ -8914,7 +8941,7 @@ function mdRenderOutputC(dogs){
 
 function mdComputeSnapshot(){
   const dogs=mdDogs.filter(d=>d.name.trim()&&d.weight>0);
-  if(!dogs.length||!mdComputedRows.length) return null;
+  if(!dogs.length||(!mdComputedRows.length && !mdAnyOwnRecipe())) return null;
 
   // ── Customer Sheet ────────────────────────────────────────────────────────
   const customerDogs=dogs.map(dog=>{
@@ -8929,9 +8956,8 @@ function mdComputeSnapshot(){
   // ── Kitchen Batch ─────────────────────────────────────────────────────────
   const combined={};
   dogs.forEach(dog=>{
-    const scale=mdComputedFood>0?mdFoodPerPack(dog)/mdComputedFood:1;
-    mdComputedRows.forEach(r=>{
-      combined[r.item]=(combined[r.item]||0)+r.grams*scale*dog.packs;
+    mdRowsFor(dog).forEach(r=>{
+      combined[r.item]=(combined[r.item]||0)+r.grams*dog.packs;
     });
   });
   const kitchenIngredients={};
@@ -9267,6 +9293,37 @@ function mdMigrateOldProfiles(){
   });
 }
 
+/* ---- Loading a profile from a file ----------------------------------------
+   There was no way in. Profiles could only be created by typing into this
+   screen, so a kitchen sheet that already existed had to be re-keyed, and
+   re-keying is where the numbers change. This accepts one profile or a bundle
+   of them, writes them to the same store the dropdown reads, and loads the
+   first — nothing is overwritten without saying so.                         */
+function mdImportProfiles(file){
+  if(!file) return;
+  const rd=new FileReader();
+  rd.onload=e=>{
+    let data;
+    try{ data=JSON.parse(String(e.target.result||'')); }
+    catch(err){ alert('That is not valid JSON: '+err.message); return; }
+    const list=Array.isArray(data)?data:(Array.isArray(data.profiles)?data.profiles:[data]);
+    const good=list.filter(p=>p&&p.custName&&Array.isArray(p.dogs)&&p.dogs.length);
+    if(!good.length){ alert('No profiles in that file. Each one needs a custName and at least one dog.'); return; }
+    const existing=good.filter(p=>localStorage.getItem(mdProfileKey(p.custName)));
+    if(existing.length && !confirm(existing.length+' profile(s) already exist and will be replaced:\n\n'
+      +existing.map(p=>'• '+p.custName).join('\n')+'\n\nGo ahead?')) return;
+    let n=0, first='';
+    good.forEach(p=>{
+      const key=mdProfileKey(p.custName);
+      const payload={...p, key, savedAt:new Date().toISOString(), history:[]};
+      try{ localStorage.setItem(key, JSON.stringify(payload)); n++; if(!first) first=key; }catch(err){}
+    });
+    try{ mdPopulateSavedProfiles(); }catch(err){}
+    alert('Imported '+n+' profile(s).');
+    if(first){ try{ mdLoadProfile(first); }catch(err){} }
+  };
+  rd.readAsText(file);
+}
 function mdSaveProfile(silent=false){
   const custName = (document.getElementById('md-cust-name')?.value||'').trim();
   if(!custName){ if(!silent) alert('Please enter a customer name first.'); return; }
@@ -9330,6 +9387,10 @@ function mdSaveProfile(silent=false){
     ecoBagOverride:  mdEcoBagOverride  ?? (parseFloat(document.getElementById('md-eco-bag-cost')?.value)||null),
     thermalOverride: mdThermalOverride ?? (parseFloat(document.getElementById('md-thermal-cost')?.value)||null),
     excludedCats: {...mdExcludedCats},
+    /* Saved because the multi-dog screen HONOURS ratio overrides when it
+       computes but was not storing them, so a reloaded profile quietly
+       recomputed at the standard ratios and every gram moved. */
+    ratioOverrides: {...(typeof ratioOverrides!=='undefined'?ratioOverrides:{})},
     marginOverride: mdMarginOverride,
     validationSnapshot: mdValidationSnapshot||null,
     saveNote: mdSaveNote,
@@ -9509,6 +9570,10 @@ function mdLoadProfile(key){
     mdIncludeOilyFish = ing.includeOilyFish!==false;
     // Restore cost includes
     mdCostIncludes = {...{labor:true,electricity:true,water:true,transport:true,ecoBag:true,thermal:true,marketing:true,tf:true}, ...(p.costIncludes||{})};
+    /* Ratio overrides travel with the profile now. Without this a sheet loaded
+       at 20% vegetables silently recomputed at the standard 7% and every gram
+       on the page moved. */
+    if(typeof ratioOverrides!=='undefined') ratioOverrides = {...(p.ratioOverrides||{})};
     // Restore margin override
     mdMarginOverride = (p.marginOverride !== undefined) ? p.marginOverride : null;
     mdEcoBagOverride  = p.ecoBagOverride  !== undefined ? p.ecoBagOverride  : null;
@@ -9762,6 +9827,8 @@ function mdBuildHTML(){
     <button onclick="mdShowHistory()"
       style="padding:8px 12px;font-size:13px;font-weight:500;border:1.5px solid rgba(0,0,0,0.2);border-radius:8px;background:#fff;color:#555;cursor:pointer"
       title="View & restore previous versions">📋 History</button>
+    <label style="padding:8px 12px;font-size:13px;font-weight:500;border:1.5px solid rgba(0,0,0,0.2);border-radius:8px;background:#fff;color:#555;cursor:pointer"
+      title="Load a profile JSON — one profile, or a bundle of them">📥 Import<input type="file" accept=".json,application/json" style="display:none" onchange="mdImportProfiles(this.files[0]);this.value=''"></label>
     <button onclick="mdReset()"
       style="padding:8px 14px;font-size:13px;font-weight:500;border:1.5px solid #27ae60;border-radius:8px;background:#fff;color:#27ae60;cursor:pointer"
       title="Clear all fields and start a new profile">✦ New Profile</button>
@@ -10455,16 +10522,19 @@ function deleteCurrentEcProfile(){
      one line per dog. */
   window.__wrGetMulti=function(){
     if(typeof mdHasResults==='undefined' || !mdHasResults) return null;
-    if(typeof mdComputedRows==='undefined' || !mdComputedRows || !mdComputedRows.length) return null;
+    if(typeof mdRowsFor!=='function') return null;
+    if((typeof mdComputedRows==='undefined' || !mdComputedRows || !mdComputedRows.length) && !mdAnyOwnRecipe()) return null;
     var dogs=(typeof mdDogs!=='undefined'?mdDogs:[]).filter(function(d){ return d && String(d.name||'').trim() && +d.weight>0; });
     if(!dogs.length) return null;
     var ref=(typeof mdComputedFood!=='undefined'?+mdComputedFood:0)||0;
     var cust=((document.getElementById('md-cust-name')||{}).value||'').trim();
     var ft=(typeof mdFeedingType!=='undefined')?mdFeedingType:'';
     var out=dogs.map(function(d){
-      var scale=ref>0?(mdFoodPerPack(d)/ref):1;
-      var items=mdComputedRows.map(function(r){
-        return {name:String(r.item||'').trim(), grams:Math.round((+r.grams||0)*scale*10)/10, cat:r.cat};
+      /* mdRowsFor honours a dog's OWN recipe when it has one, and falls back to
+         scaling the shared one when it does not — so a loaded kitchen sheet
+         reaches the ERP with its grams untouched. */
+      var items=mdRowsFor(d).map(function(r){
+        return {name:String(r.item||'').trim(), grams:Math.round((+r.grams||0)*10)/10, cat:r.cat};
       }).filter(function(x){ return x.grams>0; });
       return { dog:String(d.name||'').trim(), packSize:Math.round(mdPackSize(d)*10)/10, packs:+d.packs||0, items:items };
     }).filter(function(x){ return x.packs>0 && x.items.length; });
