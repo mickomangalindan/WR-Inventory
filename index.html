@@ -520,10 +520,14 @@ const MODULES = [
   /* The order of a menu is a claim about the order of the work. Sales starts
      with the customer, not the order form: look the pet up (or create it),
      build the pack in the calculator, and only then does an order exist. */
-  {id:'sales',  label:'Sales',       items:['ffprofiles','ffcalc','custom_orders']},
+  /* Sales is the two ways an order arrives: designed one dog at a time in the
+     calculator, or drawn off the catalogue against par. Regular Packs sits
+     after Custom Orders because that is the order they are worked in — the
+     bespoke ones are already committed, the catalogue is what is left to decide. */
+  {id:'sales',  label:'Sales',       items:['ffprofiles','ffcalc','custom_orders','packreq']},
   {id:'plan',   label:'Planning',    items:['mrp','wdt']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','receiving','supplies_reorder','sticker_reorder']},
-  {id:'ops',    label:'Operations',  items:['prodplan','packreq','prodsched','production_batches','transfers','count_sessions']},
+  {id:'ops',    label:'Operations',  items:['prodplan','prodsched','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','variance_log']},
   {id:'help',   label:'Help', items:['guides']},
   {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
@@ -837,7 +841,7 @@ const MODELS = {
   notif:{ label:'Notifications', icon:'🔔', special:'notif' },
   cleanser:{ label:'Data Cleanser', icon:'🧹', special:'cleanser' },
   prodsched:{ label:'Production Schedule', icon:'📅', special:'prodsched' },
-  packreq:{   label:'Packs Production Request', icon:'🧮', special:'packreq' },
+  packreq:{   label:'Regular Packs', icon:'🧮', special:'packreq' },
   receiving:{ label:'Receiving', icon:'📥', special:'receiving' },
   supplies_reorder:{ label:'Supplies Reorder', icon:'🧻', special:'supplies_reorder' },
   sticker_reorder:{ label:'Sticker Reorder', icon:'🏷️', special:'sticker_reorder' },
@@ -2622,9 +2626,43 @@ function _pqDrift(rows){
     ${d.length?`<b style="color:var(--earth,#b5762a)">${d.length} product(s) disagree with our ledger at ${esc(_otherLoc(planProduceLoc())||'pasig')}</b> — shown per row.`
               :`It agrees with our ledger on every product.`}`;
 }
+/* The request, worked out once. Both the screen and Demand/MRP ask for it, and
+   a figure that differs between the two would be worse than no figure at all. */
+async function pqBuildRows(){
+  let prods=[], mom=[], movs=[];
+  try{ prods=await db.list('products',{}); }catch(e){}
+  try{ mom=await momLoad(); }catch(e){}
+  try{ movs=await db.list('inventory_movements',{}); }catch(e){}
+  const sellLoc=_otherLoc(planProduceLoc())||'pasig', makeLoc=planProduceLoc()||'bulacan';
+  const snap=await pqSnapLoad();
+  const shopBy={}; let shopSrc='the ledger at '+sellLoc;
+  if(snap && snap.qty && Object.keys(snap.qty).length){
+    shopSrc='a Shopify count taken '+(snap.at?new Date(snap.at).toLocaleString():'(undated)');
+    Object.keys(snap.qty).forEach(k=>{ shopBy[k]=Math.max(0,+snap.qty[k]||0); });
+  }
+  const ohBy={};
+  (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
+    const L=String(v.location_code||''); const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{};
+    o[L]=(o[L]||0)+(+v.qty||0); });
+  const soldBy={}; (mom||[]).forEach(r=>{ const w=+PQ.win||60;
+    soldBy[r.sku] = (w<=30?(+r.u30||0):(w<=60?(+r.u60||0):(w<=90?(+r.u90||0):(+r.u120||0)))); });
+  const rows=(prods||[]).filter(p=>!p.archived && !/sticker/i.test(String(p.group_1||'')))
+    .map(p=>{
+      const oh=ohBy[p.sku]||{};
+      const led=Object.keys(oh).reduce((a,k)=>a+oh[k],0);
+      const ledSell=Math.max(0,+oh[sellLoc]||0);
+      const shopQ=(shopBy[p.sku]!=null)?shopBy[p.sku]:ledSell;
+      const other=Math.max(0, led-shopQ);
+      return {sku:p.sku, name:prodLabel({...p},{noSku:true}), group_1:(p.group_1||'Products'),
+        group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order, box:(+p.box_size||0),
+        shop:shopQ, ledSell, drift:(shopBy[p.sku]!=null)?(shopQ-ledSell):null,
+        other, bul:Math.max(0,+oh[makeLoc]||0), sold:(+soldBy[p.sku]||0)};
+    });
+  return {rows, src:shopSrc, snap};
+}
 async function renderPackReq(){
-  $('crumb').innerHTML='<b>Packs Production Request</b>';
-  $('cp').innerHTML=`<div class="title">Packs Production Request <span onclick="openKB('packreq')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+  $('crumb').innerHTML='<b>Regular Packs</b>';
+  $('cp').innerHTML=`<div class="title">Regular Packs <span onclick="openKB('packreq')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn sec sm" onclick="renderPackReq()">↻ Refresh</button>
     <button class="btn sec sm" onclick="pqPrint()">🖨 Print</button>
     <button class="btn sec sm" onclick="pqCsv()">⬇ CSV</button>
@@ -2634,50 +2672,8 @@ async function renderPackReq(){
     <div class="sp"></div><span style="color:var(--muted)">what the shop can sell, what is already made, and what is still owed</span>`;
   $('content').innerHTML='<div class="repcard"><div class="empty">Reading stock and sales…</div></div>';
 
-  let prods=[], mom=[], movs=[];
-  try{ prods=await db.list('products',{}); }catch(e){}
-  try{ mom=await momLoad(); }catch(e){}
-  try{ movs=await db.list('inventory_movements',{}); }catch(e){}
-
-  /* ---- WHERE "SELLABLE" ACTUALLY COMES FROM -----------------------------
-     Not from Shopify. The Shopify sync is ONE WAY and it pulls ORDERS — the
-     token carries read_orders and read_products, nothing else. There is no
-     inventory feed, and `wr_shopify_stock` is not one either: it is this
-     ledger's own balance at the selling site, named for what WOULD be pushed
-     to Shopify if anything ever pushed. Its own comment says so.
-     So the default is the ledger, and it is labelled the ledger. A real
-     Shopify count can be loaded by hand — see pqShopImport — and when one is
-     loaded the screen says which figure it is using and how stale it is. */
-  const sellLoc=_otherLoc(planProduceLoc())||'pasig', makeLoc=planProduceLoc()||'bulacan';
-  const snap=await pqSnapLoad();
-  const shopBy={}; let shopSrc='the ledger at '+sellLoc;
-  if(snap && snap.qty && Object.keys(snap.qty).length){
-    shopSrc='a Shopify count taken '+(snap.at?new Date(snap.at).toLocaleString():'(undated)');
-    Object.keys(snap.qty).forEach(k=>{ shopBy[k]=Math.max(0,+snap.qty[k]||0); });
-  }
-  window._pqSnap=snap;
-  const ohBy={};
-  (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
-    const L=String(v.location_code||''); const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{};
-    o[L]=(o[L]||0)+(+v.qty||0); });
-  const soldBy={}; (mom||[]).forEach(r=>{ const w=+PQ.win||60;
-    soldBy[r.sku] = (w<=30?(+r.u30||0):(w<=60?(+r.u60||0):(w<=90?(+r.u90||0):(+r.u120||0)))); });
-
-  window._pqSrc=shopSrc;
-  window._pqRows=(prods||[]).filter(p=>!p.archived && !/sticker/i.test(String(p.group_1||'')))
-    .map(p=>{
-      const oh=ohBy[p.sku]||{};
-      const led=Object.keys(oh).reduce((a,k)=>a+oh[k],0);
-      const ledSell=Math.max(0,+oh[sellLoc]||0);
-      const shopQ=(shopBy[p.sku]!=null)?shopBy[p.sku]:ledSell;
-      /* everything the ledger knows about that the shop cannot yet sell —
-         Bulacan production and anything else off-site. One transfer away. */
-      const other=Math.max(0, led-shopQ);
-      return {sku:p.sku, name:prodLabel({...p},{noSku:true}), group_1:(p.group_1||'Products'),
-        group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order, box:(+p.box_size||0),
-        shop:shopQ, ledSell, drift:(shopBy[p.sku]!=null)?(shopQ-ledSell):null,
-        other, bul:Math.max(0,+oh[makeLoc]||0), sold:(+soldBy[p.sku]||0)};
-    });
+  const built=await pqBuildRows();
+  window._pqRows=built.rows; window._pqSrc=built.src; window._pqSnap=built.snap;
   pqDraw();
 }
 
@@ -3647,8 +3643,8 @@ const ADMIN_ONLY=['users','studio','connection','fieldacl','refs','notif','clean
    goods can be booked in without opening a purchase order full of prices.
 
    PURCHASING is payables, transfers and production. */
-const NAV_HIDE={ Warehouse:['mrp','purchase_orders','reporting','automations','margin','momentum','shopify'],
-                 Pasig:['mrp','prodplan','production_batches','purchase_orders','reporting','automations','margin'] };
+const NAV_HIDE={ Warehouse:['mrp','packreq','purchase_orders','reporting','automations','margin','momentum','shopify'],
+                 Pasig:['mrp','packreq','prodplan','production_batches','purchase_orders','reporting','automations','margin'] };
 const NAV_SHOW={ Purchasing:['home','purchase_orders','receiving','transfers','prodplan','production_batches',
                              'suppliers','ingredients','supplies','products','stock_balance',
                              'sticker_reorder','supplies_reorder','variance_log','guides'] };
@@ -5577,6 +5573,7 @@ async function renderMRP(){
       <button class="btn sm sec" onclick="openMRPImport()">📥 Import (xlsx / csv)</button>
       <button class="btn sm sec" onclick="mrpImport()">⬆ Paste</button>
       <button class="btn sm sec" onclick="mrpSheetSync()" title="Pulls the demand table for this plan date, plus every locked custom order regardless of its scheduled date">☁ Sync demand (sheets + custom orders)</button>
+      <button class="btn sm sec" onclick="mrpPullPackReq()" title="Work out the catalogue shortfall from par and sales, and load it into the plot below">🧮 Pull from Regular Packs</button>
       <button class="btn sm sec" onclick="mrpClearDemand(MRPDATE)" title="Remove the demand rows recorded against this date — by source, and without deleting the orders">🗑 Clear demand for this date</button></div>`;
   dh+=`<h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3>
     <table><thead><tr><th>Product</th><th>SKU</th><th class="num">Demand</th></tr></thead><tbody>`;
@@ -5911,6 +5908,43 @@ async function confirmSaveMRPPlan(hasExisting){
      html:demandPlotHtml(MRPDATE,g.ref,data), email:(SUPA&&SUPA.email)||'', telegram_chat_id:'' });
      toast('Demand plot sent to PDF / Drive / notify'); }
   renderMRP();
+}
+/* ---- The catalogue half of the week ------------------------------------
+   Custom orders arrive already committed — somebody ordered them. The regular
+   packs are the other half, and nobody orders those: they are worked out from
+   what sold, what is on the shelf, and what par says should be there. That sum
+   lives on the Regular Packs screen, so this asks that screen rather than
+   keeping a second copy of the arithmetic which could drift from it.
+   It loads into the plot in front of you and posts nothing — you still review
+   it and save the plot, exactly as with a sheet import. */
+async function mrpPullPackReq(){
+  showBusy('Working out the catalogue shortfall…');
+  let built;
+  try{ built=await pqBuildRows(); }
+  catch(e){ hideBusy(); toast('Could not read stock or sales — '+saveErrMsg(e),true); return; }
+  hideBusy();
+  const rows=(built.rows||[]).map(r=>({r,c:pqCalc(r)})).filter(x=>x.c.produce>0);
+  if(!rows.length){
+    toast('Nothing short at the current settings — every product is above its par',true);
+    return; }
+  const tot=rows.reduce((a,x)=>a+x.c.produce,0);
+  const noSales=(built.rows||[]).filter(r=>!(r.sold>0)).length;
+  if(!confirm('Load '+rows.length+' catalogue product(s) / '+Math.round(tot)+' pack(s) into the plot for '+MRPDATE+'?\n\n'
+    +rows.slice(0,8).map(x=>'• '+x.r.name+' — '+Math.round(x.c.produce)).join('\n')
+    +(rows.length>8?('\n… and '+(rows.length-8)+' more'):'')
+    +'\n\nWorked out at: lead '+PQ.lead+'d · movement '+PQ.move+'× · cycle '+PQ.cycle+'d · window '+PQ.win+'d · case '+PQ.cs
+    +'\nSellable read from '+built.src+'.'
+    +(noSales?('\n\n'+noSales+' product(s) have no sales in the window and so ask for nothing.'):'')
+    +'\n\nCustom-order SKUs already on the plot are left alone. Nothing is saved until you save the plot.')) return;
+  /* Custom orders are committed demand and are pulled by ☁ Sync demand — this
+     must never overwrite one with a par calculation. */
+  let co={}; try{ co=await coOpenDemandMap(); }catch(e){}
+  let n=0, skipped=0;
+  rows.forEach(x=>{ if(co[x.r.sku]!=null){ skipped++; return; }
+    mrpDemand[x.r.sku]=Math.round(x.c.produce); n++; });
+  sysLog('mrp',MRPDATE,'🧮 Regular Packs loaded into the plot — '+n+' SKU(s) / '+Math.round(tot)+' pack(s) by '+CURRENT_USER);
+  await renderMRP();
+  toast('Loaded '+n+' catalogue SKU(s)'+(skipped?(' · '+skipped+' left to their custom orders'):'')+' — review, then 💾 Save the plot');
 }
 async function mrpGoDate(d){ MRPDATE=d; await renderMRP();
   toast('Now on '+d+' — press ☁ Sync demand to pull those rows in'); }
@@ -14699,8 +14733,12 @@ const KB = {
        'The three buckets exist so the alarm stays meaningful. If made-to-order mixes sat in the same red number as a genuine missing product, nobody would look at the red number.',
        'PASIG ONLY. Bulacan is production stock and is not sellable until transferred; publishing it would let a customer buy what is not at the selling site.',
        'A negative Pasig balance would be published as ZERO, never as a negative. A negative balance is a counting problem to fix, not a number to broadcast.']},
-  packreq:{d:'The weekly regular-packs request: what the shop can sell, what is made but not yet moved, and what is still owed against par.',
-    b:['<b>Current stock</b> = <b>sellable now</b> + <b>made, not yet sellable</b>. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here both numbers come out of the ledger, and they are shown apart because the gap between them is a transfer somebody still has to do.',
+  packreq:{d:'The catalogue half of the week: what the shop can sell, what is made but not yet moved, and what is still owed against par.',
+    h:['It lives in SALES, after Custom Orders — the bespoke orders are already committed, this is what is left to decide.',
+       'Set the five levers on the toolbar: lead time · movement × · cycle days · sales window · case size. Movement can be overridden per product; leave the cell blank to use the global figure.',
+       '📥 Shopify count loads a real count by hand (Shopify → Products → Inventory → Export). ☁ Send to Demand writes the request as demand for a plan date. ▶ Send to Production Plan puts it straight on the run.',
+       'Or pull it from the other end: Demand/MRP → 🧮 Pull from Regular Packs loads the same answer into the plot.'],
+    l:['<b>Current stock</b> = <b>sellable now</b> + <b>made, not yet sellable</b>. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here both numbers come out of the ledger, and they are shown apart because the gap between them is a transfer somebody still has to do.',
        '<b>There is no Shopify inventory feed.</b> The Shopify sync is one way and pulls ORDERS — the token carries read_orders and read_products, nothing else. <code>wr_shopify_stock</code> is not a feed either: it is this ledger\'s own balance at the selling site, named for what WOULD be pushed if anything ever pushed. So <b>Sellable</b> is our ledger, kept current by the sales the sync posts.',
        'If you want the shop\'s OWN number, load it by hand: Shopify → Products → Inventory → Export, then <b>📥 Shopify count</b>. It is a snapshot, not a feed — the screen says how old it is, and any product where the count and our ledger disagree is flagged on its row. That gap is the finding: it means somebody adjusted one side and not the other.',
        '<b>☁ Send to Demand</b> writes the request into the demand table for a plan date, tagged <code>packs production request</code> — the same place the Google Sheet sync lands, so Demand/MRP picks it up. Re-sending replaces only the rows this screen wrote; a sheet import or a custom order on the same date is left alone.',
@@ -14715,6 +14753,7 @@ const KB = {
        '“Only what is short” leaves just the rows whose Cover is under 100%',
        '‹ week / week › moves the window; 🖨 prints it with blank boxes for the days still to come'],
     l:['LIVE STOCK ANSWERS “WHAT HAVE WE GOT”. This answers the question the floor asks the night before: what happens to each item on each day, and where do we run out.',
+       'On the Ingredients tab each row carries a “feeds …” line naming the products and ⚙ prep outputs that consume it — two on the face of it, the rest on hover, so a base material feeding thirty products costs one line rather than thirty. Untick 🔗 what it feeds to hide it.',
        'BEGIN is everything before the window opened, so the row adds up. ENDING = Begin + every day, and it must equal Live Stock\'s ending — if the two disagree, one of them is wrong and it is worth knowing which.',
        'TARGET is what the window owes, taking the LARGEST of the three sources: saved demand plots, the demand table, and locked custom orders. REMAINING is that less what has already been produced — the number the kitchen actually works from.',
        'COVER is Ending ÷ Remaining. Under 100% means the shelf cannot cover what is still owed. On a busy morning it is the only column anyone should have to read.',
@@ -14726,12 +14765,36 @@ const KB = {
     l:['A PURCHASE ORDER IS A COMMERCIAL DOCUMENT. It carries unit prices, discounts, delivery fees and what is still owed. Handing that to whoever is at the door hands over the supplier\'s pricing, so receiving gets its own screen with the money left out.',
        'THIS IS NOT A SECOND POSTING PATH. It opens the same receiving action the purchase order uses, so a delivery can never mean two different things depending on which screen booked it.',
        'The ledger stays the authority for what has already arrived — a line whose received figure was wiped still shows the delivery.']},
-  home:{d:'Your landing page — KPI tiles and quick links into every module.',h:['Glance at counts (ingredients, products, suppliers, open POs)','Click a card to jump into that module','Use the search box or ⌘K to find anything'],l:['KPIs are live counts from the database','Nothing is entered here — it summarizes other modules']},
+  sticker_po:{d:'A sticker order laid out the way the print shop reads it — one block per supplier, in the master artwork file\'s own format.',
+    h:['Pick the order from the dropdown; only POs whose reference carries [STICKERS] appear here.',
+       '🖨 Printer\'s copy (PDF) is the sheet you send to the shop. 📋 For Google Sheets copies the same layout to paste into a shared sheet.',
+       'Order the stickers themselves on Sticker Reorder — this screen only re-presents an order that already exists.'],
+    l:['A PRINT SHOP DOES NOT READ A PURCHASE ORDER. It reads artwork codes grouped by who prints them, which is why this exists alongside the ordinary PO rather than instead of it.',
+       'Sticker stock is NOT in the ledger. Counts live on products.sticker_<site>_on_hand, so a sticker never appears in a food balance and can never distort one.']},
+  guides:{d:'The written manuals — step-by-step, with screenshots.',
+    h:['📋 Weekly Inventory walks the count from start to posted.',
+       '🔄 Operating Workflow & Playbooks is the whole business in order, then one playbook per role.',
+       '↗ Open in new tab if you want the manual beside the app rather than inside it.'],
+    l:['Every module also carries its own ❔ beside its title — that is the short version, and it is the one kept closest to the code.',
+       'The manuals live in the guides/ folder next to the app. If a guide does not appear, that folder was not deployed with it.']},
+  home:{d:'Your landing page — KPI tiles and quick links into every module.',
+    h:['Glance at counts (ingredients, products, suppliers, open POs)','Click a card to jump into that module','Use the search box or ⌘K to find anything'],
+    l:['THE WEEK RUNS IN ONE DIRECTION. Sales (profiles → calculator → custom orders → Regular Packs) → Demand/MRP (plot and save the week) → Production Plan (make it) → Transfers (move it) → Weekly Count (prove it).',
+       'DEMAND ARRIVES IN TWO HALVES: custom orders are already committed by a customer; regular packs are worked out from par and what sold. Both land on the same demand plot.',
+       'KPIs are live counts from the database','Nothing is entered here — it summarizes other modules']},
   ingredients:{d:'Master list of everything you buy or make into product: raw meats, organs, veg, fruit, seeds, supplies, plus live animals and internal intermediates.',h:['Open a row to edit price, category, storage, par, lead time','Set the processing method + yield so costing is accurate','Mark live-animal / intermediate items with their flags'],l:['₱/kg usable = raw price ÷ processing yield — the true cost in a pack','moving_avg_cost auto-updates from goods receipts (perpetual costing)','Intermediates (e.g. Rabbit Ground Meat) derive cost from their source × dress-out yield']},
   products:{d:'Sellable finished goods, grouped into families with size variants, each with its own SKU, price and recipe (BOM).',h:['Open a product to edit price, pack size, feeding style','Edit the Recipe (BOM) lines — usable grams per pack','Add variants as separate products under the same family'],l:['BOM grams are USABLE grams in the pack','Raw needed for production = usable ÷ ingredient yield','Cost/pack is computed from actual ingredients issued at production']},
   suppliers:{d:'Your vendors with contacts, payment terms and how they sell (loose / case / head).',h:['Add or edit a vendor','Record payment term + delivery notes','Link vendors to ingredients via the ingredient record'],l:['Conservative costing uses the most-expensive supplier price','Backup suppliers are shown for sourcing decisions']},
   purchase_orders:{d:'Orders to vendors — request a quote, issue the PO, receive the goods.',h:['New → pick vendor → add ingredient lines → Save','Send RFQ → Enter quotation (vendor avail + price) → Issue PO','Receive order (posts to stock) — a delivery that does not close the order leaves it Partially received','Log notes & schedule activities in the chatter'],l:['Status flow: open → RFQ → quoted → ordered → partially received → fully received','Cancelled and fully received orders are hidden from the list by default — use “Showing every status” to see them','Send RFQ asks the vendor what they can supply; Enter quotation records their available qty + unit price','Issue PO sets the order qty from vendor availability (capped at what you requested) and sends the final PO','The billable amount = received qty × unit price − discount + delivery fee','Every status change is auto-logged with who + when']},
-  production_batches:{d:'Records a production run: which product, ingredients issued, packs out, rejects and waste.',h:['New → pick product → enter ingredients issued + packs produced','Set the output lot & date','Save to post to finished stock'],l:['Check 2 (usage) = actual issued vs recipe expected','Check 3 (yield/mass-balance) = usable produced vs packed + waste','Cost/pack = ingredient cost + labour + packaging ÷ good packs']},
+  production_batches:{d:'Every run that was confirmed: what was made, what went into it, and what it cost per pack.',
+    h:['The row carries the product name, its variant and its code — “Rabbit Meat (GC) 500g” at 250 g and at 500 g are different runs.',
+       'From / to dates filter the list to a period; 🖨 Print prints exactly the rows in that window, grouped by run.',
+       'Open a run to read and correct Ingredients used: ⇄ swaps one, ✕ takes one off and returns it to stock, and 💾 Save ingredients posts the difference.',
+       'Any heading sorts; ⚙ Columns chooses which fields the list shows, remembered per module.'],
+    l:['A RECORD IS NOT A FORM. If the run wrote down its thawing and yield weights, the record shows all six columns whatever the entry sheet is set to — the short sheet governs what has to be TYPED, never what can be READ BACK.',
+       'Correcting a line posts a reversing movement, so the ledger carries the audit trail; the issue line itself is deleted rather than zeroed, so no ghost ingredient appears on a future print.',
+       'Editing here is autosaved too — leave the screen and the edits are waiting when you come back, still unposted.',
+       'Cost/pack = ingredient cost + labour + packaging ÷ good packs']},
   transfers:{d:'Move anything between Bulacan and Pasig — finished packs, ingredients, supplies or labels. Sent vs received is Check 4.',
     h:['Four buttons: 🥩 Ingredients · 📦 Products · 🧴 Supplies · 🏷 Stickers — each opens the same search / group / sort picker',
        'Stock shown in the picker is what is at the FROM site right now',
@@ -14739,16 +14802,40 @@ const KB = {
     l:['ONE TRANSFER CAN CARRY FOUR KINDS OF THING. It used to carry only finished products, so meat, packaging and labels moved between sites off the books and both stock figures drifted.',
        'Products and stickers move in WHOLE units; ingredients and supplies move in KILOS, because that is how they are counted everywhere else. The line records which ledger it belongs to so the movement posts against the right one.',
        'sent − received = loss in transit → a Check 4 variance',
-       'Posts a transfer_out at the FROM site and a transfer_in at the TO site — never a single figure moved by hand']},
+       'Posts a transfer_out at the FROM site and a transfer_in at the TO site — never a single figure moved by hand',
+       'THE PRINTOUT IS A WORKING DOCUMENT. Product name and variant on one line with the code beneath, then Sent (filled in for you) · Prepared · Received · Remarks as real boxes to write in, and a sign-off row. Received prints the figure only once the transfer has actually been received.']},
   count_sessions:{d:'Weekly physical inventory with approval. Counted qty becomes the new book stock after approval.',h:['New → choose scope (All / Ingredients / Supplies / Stickers / Products)','Click "Load items" — book qty auto-fills (read-only)','Enter counted qty → Save draft → Approve & post'],l:['Book qty is computed from the ledger — you cannot edit it','On approval, counted−book posts as a count_adjust + a Check 3.5 shrinkage variance','Only approved counts change stock']},
   inventory_movements:{d:'The perpetual ledger — every stock in/out as one immutable row.',h:['Read-only — review receipts, issues, transfers, sales, adjustments','Filter/group to trace a specific item'],l:['On-hand & value are summed from here (never stored directly)','Signed qty: + in, − out; each row references the document that made it']},
-  stock_balance:{d:'Live on-hand and value per item/location, computed from the ledger.',h:['Read-only — see current stock at Bulacan & Pasig','Group by location or item'],l:['A database VIEW: SUM(qty) and SUM(qty×unit_cost) from movements','Updates the instant any document posts']},
-  variance_log:{d:'The resolution center for every reconciliation gap (3-way match, usage, yield, transfer, delivery, shrinkage).',h:['Open a variance to read the gap','Add a resolution note','Use status buttons: Mark Explained → Resolve'],l:['Each check writes here when a gap exceeds tolerance','Stamped with expected/actual, ₱ gap, location and responsible user','This is your single source of truth for leaks']},
-  mrp:{d:'Weekly replenishment planner: demand + lead time + PAR → order qty, then auto-create POs grouped by supplier.',h:['Enter demand per product (or Import/Upload by SKU, or Sync from Sheets)','Adjust any line with Manual ±kg','💾 Save plan to keep it; 🧾 Generate Draft POs to order'],l:['Order = weekly need + PAR + lead-time buffer − on-hand, ± manual, rounded up to Min Order','Raw need = usable ÷ yield; lead buffer = need × (lead days ÷ 7); order-by = plan date − lead','Auto-PO groups by each ingredient\'s DEFAULT supplier — when 2 suppliers exist, the default wins']},
+  stock_balance:{d:'Live on-hand and value per item and location, computed from the ledger.',
+    h:['Category buttons across the top: 🗂 Everything · 🥩 Ingredients · 📦 Products · 🧴 Supplies · 🏷 Stickers.',
+       'Ingredients group by ANIMAL first — 🐄 Beef, 🐖 Pork, 🐓 Chicken … — then 🥬 Vegetables & fruit, then 🧂 Other.',
+       'Read-only. Switch sites, or leave it on all sites to see the whole business.'],
+    l:['Raw and processed forms of the same base material stay together under one heading, because they are the same animal at two stages and reading them apart hides the real position.',
+       'Stock = SUM(qty) over inventory_movements; value = SUM(qty × unit_cost). It updates the instant any document posts.',
+       'THREE STORES, NOT ONE. Food ingredients are in the ledger in grams; supplies are in the ledger in their own unit; stickers are NOT in the ledger at all — they live on products.sticker_<site>_on_hand.']},
+  variance_log:{d:'The resolution center for every reconciliation gap (3-way match, usage, yield, drip, unexplained loss, transfer, delivery, shrinkage).',
+    h:['Open a variance to read the gap','Add a resolution note','Use status buttons: Mark Explained → Resolve'],
+    l:['Each check writes here when a gap exceeds tolerance, stamped with expected/actual, ₱ gap, location and responsible user.',
+       '3.6 · THAW LOSS is drip — weight that left the freezer and never reached the bowl. A freezer number.',
+       '3.7 · UNEXPLAINED LOSS is what is left after normal drip and normal trimming are both accounted for. It is the only one of the three loss figures worth an argument, which is why it is not averaged into a yield percentage where it would disappear.',
+       'Better-than-standard is logged as well as worse. A run that beat its standards by a wide margin is as likely to be a mis-weigh as a triumph.',
+       'This is your single source of truth for leaks']},
+  mrp:{d:'Weekly replenishment planner: demand + lead time + PAR → order qty, then auto-create POs grouped by supplier.',
+    h:['THE WEEK ARRIVES IN TWO HALVES. ☁ Sync demand pulls what customers have already committed — the demand table for this date plus every locked custom order. 🧮 Pull from Regular Packs works out the catalogue half from par and sales.',
+       'Type over anything, or 📥 Import / ⬆ Paste a sheet by SKU. Adjust an ingredient with Manual ±kg.',
+       '💾 Save plan writes the plot — and until you do, none of this is planned. 🧾 Generate Draft POs turns the ingredient need into orders.',
+       '⚠ “Demand exists on N date(s) you have not plotted” means rows are sitting in the demand table for a week nobody has planned. Open the date, or 🗑 Clear it if it was a trial.',
+       '🗑 Clear demand for this date removes rows BY SOURCE — the custom order or sheet import that wrote them is never deleted, and the saved plot is a separate, deliberate tick.'],
+    l:['A ROW IS NOT A PLAN. A line in the demand table is a quantity somebody pushed at a date. Only a SAVED PLOT counts as planned, which is why a custom order with a bare row still reads “not planned yet”.',
+       '🧮 Pull from Regular Packs asks the Regular Packs screen for its answer rather than keeping a second copy of the arithmetic — the two can never drift. It skips any SKU a custom order already owes, and saves nothing until you save the plot.',
+       'Order = weekly need + PAR + lead-time buffer − on-hand, ± manual, rounded up to Min Order',
+       'Raw need = usable ÷ yield; lead buffer = need × (lead days ÷ 7); order-by = plan date − lead',
+       'Auto-PO groups by each ingredient\'s DEFAULT supplier — when 2 suppliers exist, the default wins']},
   reporting:{d:'Standard reports (the 4 Checks + operational reports) and a custom pivot builder. The Checks trace one unit of value across the whole chain; the rest are day-to-day triggers.',h:['⭐ Standard: tap a card — Checks (ordered→received→paid, usage/yield, transfer, delivery), plus Low stock, Supplier payables, Expiring soon (FEFO), COGS drift, Gross margin, Sales momentum','🛠 Custom: choose Source → Measure (count/sum/avg) → Group by, then ★ Save','Most report rows are clickable — open the underlying item, PO or product'],l:['Check 1 = 3-way match (ordered vs received vs paid); Check 2/3 = ingredient usage & yield; Check 4 = produced→sent→received; Check 5 = delivery','Low stock / payables / expiring are operational; the variance log is where you close each gap','Custom reports are pivots saved per browser; for heavy BI, Metabase runs on the same Supabase database']},
   supplies:{d:'Kitchen supplies — packaging, labels/stickers and consumables (vacuum bags, ecobags, thermal pouches). Split out from food ingredients.',h:['Add/edit a supply with its unit cost, PAR and reorder point','Keep "Kitchen supply" ticked so it stays out of the Ingredients list','Group by Type; reorder via Purchasing → Supplies Reorder'],l:['Shares the ingredients table (is_supply = true) so stock & receiving still work','Cost/unit feeds Gross Margin packaging and PO value estimates','Received & counted in whole units (not kg)']},
   margin:{d:'Live gross margin per product: BOM raw cost + variable process & packaging + fees → GP% and a suggested price at your target.',h:['Edit the global rate model (per-gram utilities, labor, packaging, fees, target GM) then 💾 Save','Set each product’s Cost profile tab: deboning / butcher / sous-vide / ecobag / thermal','Tap a row to open the product; ⬆ Write total cost pushes COGS to products'],l:['Raw = BOM grams × ingredient moving-average cost (falls back to processed/list price)','Process = (electricity+water+transport) per gram + labor (plain OR deboning) ± butcher ± sous-vide','Packaging = vacuum + sticker + ecobag + thermal, pulled from Kitchen Supplies costs','Fees = (transaction+marketing) % of price; Suggested = fixed cost ÷ (1 − target − fees%)','Rates persist in Supabase (app_settings.cost_model) — shared with the whole team']},
-  momentum:{d:'Reads Shopify rolling sales (30/60/90/120 days) against live stock to show what to make now vs what’s overstocked.',h:['📊 Runway view: days of stock left per product, most urgent first','🎯 Quadrant view: momentum × stock for a two-axis read','Group by family or priority; 📥 Import/paste sales; tap a row to open the product'],l:['Momentum × = recent 30-day daily rate ÷ 120-day average (>1 = accelerating)','Days of cover = current stock ÷ recent daily rate','Stockout risk = low cover + steady/rising demand; overstock = high cover + slowing','Fed hourly from the “90-120 Day Demand” sheet into the sales_momentum table']},
+  momentum:{d:'Reads Shopify rolling sales (30/60/90/120 days) against live stock to show what to make now vs what’s overstocked.',h:['📊 Runway view: days of stock left per product, most urgent first','🎯 Quadrant view: momentum × stock for a two-axis read','Group by family or priority; 📥 Import/paste sales; tap a row to open the product'],l:['Momentum × = recent 30-day daily rate ÷ 120-day average (>1 = accelerating)','Days of cover = current stock ÷ recent daily rate','Stockout risk = low cover + steady/rising demand; overstock = high cover + slowing','Fed hourly from the “90-120 Day Demand” sheet into the sales_momentum table',
+       'THIS TABLE FEEDS REGULAR PACKS. The average daily sale behind every par and reorder point on that screen is read from here — a product with no sales in the window averages zero and so asks for nothing.']},
   sticker_reorder:{d:'Label demand per site — the larger of what the week owes and what PAR needs — turned into a sticker PO.',
     h:['Pick the site, review Need (demand vs PAR top-up)','Adjust Order where you want a different quantity — it rounds up to the printer\'s minimum pack','🧾 Generate Sticker PO — one draft per label supplier'],
     l:['THREE SOURCES FEED DEMAND, and it takes the LARGEST of them, never the sum: the latest saved demand plot, every locked custom order, and the demand table itself (where sheet imports and loaded multi-pet orders land). Reading only the plot meant a label promised to a customer never appeared here at all.',
@@ -14759,8 +14846,27 @@ const KB = {
   supplies_reorder:{d:'Supplies below their PAR, with the quantity to reorder, ready to turn into a supplier PO.',h:['Review items below PAR (reorder = PAR − on hand)','🧾 Generate Supplies PO — one draft per supplier, ready to send','Set each supply’s PAR & reorder in Kitchen Supplies'],l:['Simple PAR rule — supplies have no recipe so they aren’t in MRP','Reorder qty is in the item’s own unit','Generated POs are confirmed and priced at the supply’s unit cost']},
   ffprofiles:{d:'A searchable list of the Fresh Food Calculator’s saved customers, shared across devices via Supabase.',h:['Search by customer, pet, or feeding type','Open the 🧮 Calculator to build a pack for one (Load saved profile there)','Profiles sync from the calculator’s ☁ Sync'],l:['Reads the ffcalc_profiles table (run wr_ffcalc_profiles.sql once)','Each calculator save pushes here; the calculator pulls on load','Read-only here — edit in the calculator']},
   ffcalc:{d:'The full Fresh Food Calculator, embedded in the app — size a custom pack per pet, then push it straight into a Custom Order.',h:['Fill in the pet profile & feeding type, compute the pack (Feeding / Kitchen)','Click 📤 Send order to ERP (top-right) to import the recipe','It lands as a Custom Order — map any unmatched ingredient, then 🔒 Lock'],l:['Runs isolated in a frame so it never clashes with the ERP','Sending posts the per-pack recipe (ingredient + grams), pack size, packs, customer & price','The ERP matches ingredient names to your master SKUs; unmatched ones are flagged for you to pick']},
-  custom_orders:{d:'Customer-service quotes that lock into confirmed orders — each custom recipe becomes its own sellable SKU + BOM and flows into demand.',h:['＋ New quote → add standard products and/or custom recipes (ingredient + g/pack)','Edit freely while it is a quote; 🔒 Lock creates the SKUs + BOMs and pushes packs into demand','Pull the demand in Demand/MRP with ☁ Sync for the needed week'],l:['Each distinct custom recipe hashes to one CUST-… SKU (identical recipes reuse it)','Locking writes the order packs to the demand table keyed by the created SKU + needed date','A locked order can be marked fulfilled; cancel voids a quote']},
-  prodplan:{d:'Plan and confirm a production run — good packs per product plus any output ingredients to make, then the actual processed used / raw used / output created.',h:['Add products + Good packs, and/or add Output ingredients + Needed qty (target/remaining come from the latest demand plot)','✅ Confirm production → the popup uses existing processed stock first, then makes the shortfall from raw','Enter actual Processed used / Raw used / Output created — live yield = output ÷ raw'],l:['Posting draws processed stock first, then deducts raw + adds processed for the shortfall, runs the mix, outputs finished packs','Excess (processed used + output created − needed) returns to the processed ingredient’s stock','Best-before auto-stamps = production date + the product’s shelf-life days; real yield is recorded on the batch']},
+  custom_orders:{d:'Customer-service quotes that lock into confirmed orders — each custom recipe becomes its own sellable SKU + BOM and flows into demand.',
+    h:['＋ New quote → add standard products and/or custom recipes (ingredient + g/pack). Or design it in the Fresh Food Calculator and 📤 Send order to ERP.',
+       'Edit freely while it is a quote; 🔒 Lock creates the SKUs + BOMs and writes the packs into the demand table. After locking the recipe is read-only — it is a commitment now, not a draft.',
+       'A locked order sits at FOR DEMAND PLANNING until a saved plot covers it. Open Demand/MRP for the needed week, ☁ Sync demand, then 💾 Save the plot — only then does it read ADDED IN DEMAND.',
+       '🍳 Kitchen batch prints the customer\'s whole order the way the calculator lays it out: every mix against the categories, then the combined ingredient total.'],
+    l:['Each distinct custom recipe hashes to one CUST-… SKU, so two mixes with the same recipe at the same pack size REUSE it. That is deliberate — and it is why the owed packs are counted once per order per SKU, never once per line.',
+       'A ROW IS NOT A PLAN. Locking writes a demand row, but a row is only a quantity pushed at a date. The badge says “not planned yet … but no saved demand plot covers that date” until somebody plans that week.',
+       'An order already carrying a demand row drops off the “new demand to generate” list, so syncing twice cannot double it.',
+       'A locked order can be marked fulfilled; cancel voids a quote']},
+  prodplan:{d:'Plan and confirm a production run — good packs per product plus any output ingredients to make, then the four weights the kitchen actually takes.',
+    h:['Add products + Good packs, and/or add Output ingredients + Needed qty (target/remaining come from the latest demand plot).',
+       'A PREP-ONLY DAY IS A DAY. Take every product off with ✕, leave the output ingredients, and 💾 Save draft — it saves, and says “prep only, no packs on this run”.',
+       'Short of something? 🔎 Choose a replacement… searches every processed ingredient with grouping, sorting and the on-hand kilos beside each. For this run only; the recipe is untouched.',
+       '✅ Confirm production asks for FOUR weights per ingredient: Pulled Out (Processed) · + Raw Used · = Used in Packs · * Excess to Stock. Everything else is worked out.',
+       'Nothing you type is lost. It autosaves as you go; closing offers 💾 Keep and close / ↩ Back to the sheet / 🗑 Discard, and reopening the run brings it back.'],
+    l:['LOSS = pulled + raw − used − excess. It is measured, not estimated — it falls straight out of the four weights. Hover it to see how much is normal drip, how much is normal trimming, and how much is neither.',
+       'DRIP AND YIELD ARE DIFFERENT NUMBERS measured at different steps: drip is pulled − thawed (a freezer number, ledger type thaw_loss, variance 3.6); yield is created ÷ raw (a knife number). Neither formula touches the other\'s figures.',
+       'The remainder — what neither standard explains — is logged as variance 3.7 · Unexplained loss. Better than standard is logged too; an implausibly good run is as much a sign of a mis-weigh as a bad one.',
+       'Only PULLED OUT and RAW come off stock; EXCESS goes back into the same processed bin. Net on the processed SKU = excess − pulled.',
+       'A DRAFT POSTS NOTHING. Stock moves only on ✅ Confirm & post. Best-before auto-stamps = production date + the product\'s shelf-life days.',
+       '⚖ weigh the middle steps too restores the old six-weight sheet for a team that does weigh after thawing — their scale then wins and the split becomes exact.']},
   approvals:{d:'Review and approve bulk-edit change requests submitted by non-admin users.',h:['Open a pending request to see the exact field changes','✓ Approve & apply writes the changes','✕ Reject with a reason'],l:['Non-admin bulk edits queue here instead of writing directly','Approving applies every change atomically','Recent decisions are logged; Admin only']},
   connection:{d:'Connect the app to your Supabase project (LIVE) or run on local demo data.',h:['Paste your Supabase URL + anon key, or sign in','Green LIVE = connected; DEMO = local sample data','Sign out to switch projects'],l:['The anon key is safe in the client — RLS protects the data','Signed-in requests use your user token','Demo data lives only in this browser']},
   fieldacl:{d:'Hide or lock specific fields (like cost) per role.',h:['Pick a model and field','Set hide / read-only per role','Save — it applies on the next render'],l:['Controls what each role sees in lists and forms','Hiding cost fields also hides margin & value figures for that role','App-level control; enforce hard security with Supabase RLS']},
@@ -14778,6 +14884,7 @@ function openKB(key){ key=key||state.model||'home'; const k=KB[key]||{d:'Module 
   $('modal').innerHTML=`<h3>${title}</h3><p>${esc(k.d)}</p>
     <div style="margin-top:10px"><div style="font-weight:700;color:var(--berry);font-size:12px;text-transform:uppercase;letter-spacing:.05em">How to use</div><ul style="margin:6px 0 0;padding-left:20px">${(k.h||[]).map(x=>`<li>${esc(x)}</li>`).join('')||'<li>—</li>'}</ul></div>
     <div style="margin-top:14px"><div style="font-weight:700;color:var(--berry);font-size:12px;text-transform:uppercase;letter-spacing:.05em">The logic behind it</div><ul style="margin:6px 0 0;padding-left:20px">${(k.l||[]).map(x=>`<li>${esc(x)}</li>`).join('')||'<li>—</li>'}</ul></div>
+    ${k.t?`<div style="margin-top:14px;padding:9px 11px;background:#f6f8f4;border-left:3px solid #4e7a3e;border-radius:6px;font-size:13px">💡 ${esc(k.t)}</div>`:''}
     <div style="display:flex;margin-top:18px"><span style="flex:1"></span><button class="btn" onclick="closeModal()">Got it</button></div>`;
   $('overlay').classList.add('on'); }
 
