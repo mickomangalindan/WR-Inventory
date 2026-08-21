@@ -2447,29 +2447,215 @@ function pqCalc(r){
           alert:(cur<rop), pct:(newPar>0?cur/newPar:null)};
 }
 
+
+/* ---- A REAL SHOPIFY COUNT, WITHOUT AN AUTOMATION ------------------------
+   The one-way sync pulls ORDERS. The token carries read_orders and
+   read_products and nothing else, so there is no inventory feed to read — and
+   `wr_shopify_stock` is not one either: it is this ledger's own balance at the
+   selling site, named for what WOULD be pushed if anything ever pushed.
+
+   So if you want the shop's OWN number rather than ours, it has to come off a
+   Shopify export: Products → Inventory → Export, which gives a CSV with a SKU
+   column and an "Available" column per location. Drop it here. The snapshot is
+   stamped with the time it was taken and shared with the team through
+   app_settings, so nobody has to wonder whose browser it lives in.
+
+   It is a SNAPSHOT, not a feed. The screen says how old it is, and the drift
+   against our own ledger is worth more than either number alone — a gap means
+   somebody adjusted stock on one side and not the other. */
+async function pqSnapLoad(){
+  try{
+    if(isLive()){ const r=await sb('app_settings?select=value&key=eq.shopify_inventory');
+      const v=r&&r[0]&&r[0].value; if(v&&v.qty) return v; }
+    else { const v=(DEMO.app_settings||[]).filter(r=>r.key==='shopify_inventory').map(r=>r.value)[0];
+      if(v&&v.qty) return v; }
+  }catch(e){}
+  try{ const v=JSON.parse(localStorage.getItem('wr_shop_inv')||'null'); if(v&&v.qty) return v; }catch(e){}
+  return null;
+}
+async function pqSnapSave(snap){
+  try{ localStorage.setItem('wr_shop_inv', JSON.stringify(snap)); }catch(e){}
+  try{
+    if(isLive()) await sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
+      body:JSON.stringify({key:'shopify_inventory', value:snap})});
+    else { DEMO.app_settings=(DEMO.app_settings||[]).filter(r=>r.key!=='shopify_inventory')
+      .concat([{key:'shopify_inventory', value:snap}]); }
+  }catch(e){ toast('Saved on this browser only — '+saveErrMsg(e),true); }
+}
+async function pqSnapClear(){
+  if(!confirm('Drop the Shopify count and go back to the ledger at '+(_otherLoc(planProduceLoc())||'pasig')+'?')) return;
+  try{ localStorage.removeItem('wr_shop_inv'); }catch(e){}
+  try{
+    if(isLive()) await sb('app_settings?key=eq.shopify_inventory',{method:'DELETE',prefer:'return=minimal'});
+    else DEMO.app_settings=(DEMO.app_settings||[]).filter(r=>r.key!=='shopify_inventory');
+  }catch(e){}
+  toast('Back to the ledger'); renderPackReq();
+}
+function pqShopImport(){
+  $('modal').innerHTML=`<div class="mwrap">
+    <div class="mhead">📥 Load a Shopify inventory count<span style="flex:1"></span>
+      <button class="btn sm sec" onclick="closeModal()">✕ Close</button></div>
+    <div class="mbody">
+      <div class="hint" style="margin-bottom:10px">
+        In Shopify: <b>Products → Inventory → Export</b>. Open the CSV and paste it here, or choose the file.
+        The columns it needs are a <b>SKU</b> and an <b>Available</b> quantity — it will find them by name,
+        and if your export has one column per location it will use the one whose heading mentions
+        <b>${esc(_otherLoc(planProduceLoc())||'pasig')}</b>, or the first Available column it finds.
+        <br><br><b>This is a snapshot, not a feed.</b> It does not move stock, it does not post anything,
+        and it goes stale the moment the shop sells something. The screen will say how old it is.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <input type="file" id="pqFile" accept=".csv,.tsv,.txt" onchange="pqShopFile(event)">
+        <span class="mini" style="color:var(--muted)">…or paste below</span>
+      </div>
+      <textarea id="pqPaste" placeholder="SKU,Title,Available&#10;RASPGCGD0500,Rabbit Meat (GC) 500g,62&#10;…"
+        style="width:100%;height:180px;font-family:ui-monospace,Menlo,monospace;font-size:12px;padding:8px;border:1px solid var(--line);border-radius:6px"></textarea>
+      <div id="pqPrev" class="hint" style="margin-top:8px"></div>
+    </div>
+    <div class="mfoot"><button class="btn" onclick="pqShopParse()">Read it</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button>
+      <span style="flex:1"></span>
+      ${window._pqSnap?`<button class="btn sec" style="color:var(--danger)" onclick="closeModal();pqSnapClear()">🗑 Drop the current count</button>`:''}</div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
+}
+function pqShopFile(ev){ const f=ev.target.files&&ev.target.files[0]; if(!f) return;
+  const r=new FileReader(); r.onload=()=>{ const el=$('pqPaste'); if(el){ el.value=String(r.result||''); pqShopParse(); } };
+  r.readAsText(f); }
+function _pqSplit(line, sep){ const out=[]; let cur='', q=false;
+  for(let i=0;i<line.length;i++){ const c=line[i];
+    if(q){ if(c==='"'){ if(line[i+1]==='"'){ cur+='"'; i++; } else q=false; } else cur+=c; }
+    else if(c==='"') q=true;
+    else if(c===sep){ out.push(cur); cur=''; }
+    else cur+=c; }
+  out.push(cur); return out.map(x=>x.trim()); }
+function pqShopParse(){
+  const txt=String(($('pqPaste')||{}).value||'').trim();
+  const prev=$('pqPrev'); if(!prev) return;
+  if(!txt){ prev.innerHTML='<b style="color:var(--danger)">Nothing pasted yet.</b>'; return; }
+  const lines=txt.split(/\r?\n/).filter(x=>x.trim());
+  const sep=(lines[0].split('\t').length>lines[0].split(',').length)?'\t':',';
+  const hdr=_pqSplit(lines[0],sep).map(h=>h.toLowerCase());
+  const si=hdr.findIndex(h=>/(^|[^a-z])sku([^a-z]|$)|variant sku/.test(h));
+  const loc=String(_otherLoc(planProduceLoc())||'pasig').toLowerCase();
+  let qi=hdr.findIndex(h=>/available/.test(h) && h.includes(loc));
+  if(qi<0) qi=hdr.findIndex(h=>/available/.test(h));
+  if(qi<0) qi=hdr.findIndex(h=>/^(qty|quantity|on hand|stock)/.test(h));
+  if(si<0 || qi<0){
+    prev.innerHTML=`<b style="color:var(--danger)">Could not find the columns.</b> Needs a <b>SKU</b> column and an
+      <b>Available</b> (or Quantity) column. Found: <code>${esc(hdr.join(' | ').slice(0,300))}</code>`;
+    window._pqParsed=null; return;
+  }
+  const qty={}; let bad=0;
+  lines.slice(1).forEach(l=>{ const c=_pqSplit(l,sep);
+    const sku=String(c[si]||'').trim(); if(!sku) return;
+    const v=parseFloat(String(c[qi]||'').replace(/[^0-9.\-]/g,''));
+    if(!isFinite(v)){ bad++; return; }
+    qty[sku]=(qty[sku]||0)+v; });
+  const skus=Object.keys(qty);
+  if(!skus.length){ prev.innerHTML='<b style="color:var(--danger)">No rows read.</b>'; window._pqParsed=null; return; }
+  const known=new Set((window._pqRows||[]).map(r=>r.sku));
+  const match=skus.filter(k=>known.has(k)).length;
+  window._pqParsed={qty, at:new Date().toISOString(), by:CURRENT_USER,
+    col:hdr[qi], rows:skus.length, matched:match};
+  prev.innerHTML=`Read <b>${skus.length}</b> SKU(s) from the <b>${esc(hdr[qi])}</b> column
+    — <b style="color:${match?'#4e7a3e':'var(--danger)'}">${match}</b> match a product here${bad?`, ${bad} row(s) had no number`:''}.
+    ${match<skus.length?`<div class="mini" style="color:var(--muted);margin-top:4px">The ${skus.length-match} that do not match are left out — a code the ERP does not know is not stock the ERP can plan.</div>`:''}
+    <div style="margin-top:8px"><button class="btn" onclick="pqShopApply()">✅ Use this count</button></div>`;
+}
+async function pqShopApply(){
+  const P=window._pqParsed; if(!P){ toast('Read the file first',true); return; }
+  await pqSnapSave(P);
+  sysLog('packreq','shopify','📥 Shopify inventory count loaded — '+P.rows+' SKU(s), '+P.matched+' matched, by '+CURRENT_USER);
+  closeModal(); toast('Using the Shopify count from '+new Date(P.at).toLocaleString());
+  renderPackReq();
+}
+
+/* ---- and the other half of the loop ------------------------------------
+   The Google Sheet does not just work the request out — it is also what WRITES
+   the demand, and the app pulls that back through the sheets sync. Producing a
+   figure here and then retyping it into the sheet would be the worst of both.
+   So the request can post itself to the demand table for a plan date, exactly
+   the way the sheet's rows arrive, tagged with where it came from. */
+async function pqToDemand(){
+  const rows=(window._pqRows||[]).map(r=>({r,c:pqCalc(r)})).filter(x=>x.c.produce>0);
+  if(!rows.length){ toast('Nothing to send — no product is short at these settings',true); return; }
+  const d=prompt('Write these as demand for which plan date? (yyyy-mm-dd)',
+    (typeof MRPDATE!=='undefined'&&MRPDATE)||todayISO());
+  if(!d) return;
+  const date=String(d).slice(0,10);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)){ toast('That is not a date the plan can use',true); return; }
+  const tot=rows.reduce((a,x)=>a+x.c.produce,0);
+  if(!confirm('Write '+rows.length+' SKU(s) / '+Math.round(tot)+' pack(s) into the demand table for '+date+'?\n\n'
+    +'Any row this screen wrote for that date before is REPLACED. Rows written by anything else —\n'
+    +'a sheet import, a custom order, the Shopify pull — are left alone.\n\n'
+    +'This is demand, not production: nothing is made and no stock moves.')) return;
+  const src='packs production request';
+  let wrote=0, failed=0;
+  try{
+    if(isLive()){
+      await sb('demand?plan_date=eq.'+encodeURIComponent(date)+'&source=eq.'+encodeURIComponent(src),
+        {method:'DELETE',prefer:'return=minimal'});
+      const body=rows.map(x=>({sku:x.r.sku, qty:Math.round(x.c.produce), plan_date:date, source:src}));
+      for(let i=0;i<body.length;i+=200){
+        try{ await sb('demand',{method:'POST',prefer:'return=minimal',body:JSON.stringify(body.slice(i,i+200))}); wrote+=body.slice(i,i+200).length; }
+        catch(e){ failed+=body.slice(i,i+200).length; toast(saveErrMsg(e),true); }
+      }
+    } else {
+      DEMO.demand=(DEMO.demand||[]).filter(r=>!(String(r.plan_date||'').slice(0,10)===date && String(r.source||'')===src))
+        .concat(rows.map((x,i)=>({id:9000+i, sku:x.r.sku, qty:Math.round(x.c.produce), plan_date:date, source:src})));
+      wrote=rows.length;
+    }
+  }catch(e){ toast(saveErrMsg(e),true); return; }
+  sysLog('packreq','demand','☁ '+wrote+' SKU(s) / '+Math.round(tot)+' pack(s) written to demand for '+date+' by '+CURRENT_USER);
+  toast(failed?('Wrote '+wrote+', failed '+failed):('Wrote '+wrote+' demand row(s) for '+date+' — open Demand/MRP to plot them'));
+}
+
+/* Two counts that should agree and do not. That gap is the finding — it means
+   somebody adjusted stock on one side and not the other, and it is worth more
+   than either number on its own. */
+function _pqDrift(rows){
+  const d=(rows||[]).filter(r=>r.drift!=null && Math.abs(r.drift)>=1);
+  const s=window._pqSnap||{};
+  const age=s.at?Math.round((Date.now()-new Date(s.at).getTime())/36e5):null;
+  return `A count is only true at the moment it was taken${(age!=null)?` — this one is <b>${age<1?'under an hour':age+' hour(s)'}</b> old`:''},
+    and it does not move stock or post anything.
+    ${d.length?`<b style="color:var(--earth,#b5762a)">${d.length} product(s) disagree with our ledger at ${esc(_otherLoc(planProduceLoc())||'pasig')}</b> — shown per row.`
+              :`It agrees with our ledger on every product.`}`;
+}
 async function renderPackReq(){
   $('crumb').innerHTML='<b>Packs Production Request</b>';
   $('cp').innerHTML=`<div class="title">Packs Production Request <span onclick="openKB('packreq')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn sec sm" onclick="renderPackReq()">↻ Refresh</button>
     <button class="btn sec sm" onclick="pqPrint()">🖨 Print</button>
     <button class="btn sec sm" onclick="pqCsv()">⬇ CSV</button>
+    <button class="btn sec sm" onclick="pqShopImport()">📥 Shopify count</button>
+    <button class="btn sm" onclick="pqToDemand()">☁ Send to Demand</button>
     <button class="btn sm" onclick="pqToPlan()">▶ Send to Production Plan</button>
     <div class="sp"></div><span style="color:var(--muted)">what the shop can sell, what is already made, and what is still owed</span>`;
   $('content').innerHTML='<div class="repcard"><div class="empty">Reading stock and sales…</div></div>';
 
-  let prods=[], mom=[], shop=null, movs=[];
+  let prods=[], mom=[], movs=[];
   try{ prods=await db.list('products',{}); }catch(e){}
   try{ mom=await momLoad(); }catch(e){}
-  try{
-    if(isLive()) shop=await sb('wr_shopify_stock?select=*');
-  }catch(e){ shop=null; }
   try{ movs=await db.list('inventory_movements',{}); }catch(e){}
 
-  /* WHAT THE SHOP CAN SELL. Shopify's own figure when the sync is up; otherwise
-     the ledger at the selling site, which is what Shopify is meant to mirror. */
-  const shopBy={}; let shopSrc='the ledger at '+(_otherLoc(planProduceLoc())||'pasig');
-  if(shop && shop.length){ shopSrc='Shopify'; shop.forEach(r=>{ shopBy[r.variant_sku]=Math.max(0,+r.available_pasig||0); }); }
+  /* ---- WHERE "SELLABLE" ACTUALLY COMES FROM -----------------------------
+     Not from Shopify. The Shopify sync is ONE WAY and it pulls ORDERS — the
+     token carries read_orders and read_products, nothing else. There is no
+     inventory feed, and `wr_shopify_stock` is not one either: it is this
+     ledger's own balance at the selling site, named for what WOULD be pushed
+     to Shopify if anything ever pushed. Its own comment says so.
+     So the default is the ledger, and it is labelled the ledger. A real
+     Shopify count can be loaded by hand — see pqShopImport — and when one is
+     loaded the screen says which figure it is using and how stale it is. */
   const sellLoc=_otherLoc(planProduceLoc())||'pasig', makeLoc=planProduceLoc()||'bulacan';
+  const snap=await pqSnapLoad();
+  const shopBy={}; let shopSrc='the ledger at '+sellLoc;
+  if(snap && snap.qty && Object.keys(snap.qty).length){
+    shopSrc='a Shopify count taken '+(snap.at?new Date(snap.at).toLocaleString():'(undated)');
+    Object.keys(snap.qty).forEach(k=>{ shopBy[k]=Math.max(0,+snap.qty[k]||0); });
+  }
+  window._pqSnap=snap;
   const ohBy={};
   (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
     const L=String(v.location_code||''); const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{};
@@ -2482,13 +2668,15 @@ async function renderPackReq(){
     .map(p=>{
       const oh=ohBy[p.sku]||{};
       const led=Object.keys(oh).reduce((a,k)=>a+oh[k],0);
-      const shopQ=(shopSrc==='Shopify' && shopBy[p.sku]!=null)?shopBy[p.sku]:Math.max(0,+oh[sellLoc]||0);
+      const ledSell=Math.max(0,+oh[sellLoc]||0);
+      const shopQ=(shopBy[p.sku]!=null)?shopBy[p.sku]:ledSell;
       /* everything the ledger knows about that the shop cannot yet sell —
          Bulacan production and anything else off-site. One transfer away. */
       const other=Math.max(0, led-shopQ);
       return {sku:p.sku, name:prodLabel({...p},{noSku:true}), group_1:(p.group_1||'Products'),
         group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order, box:(+p.box_size||0),
-        shop:shopQ, other, bul:Math.max(0,+oh[makeLoc]||0), sold:(+soldBy[p.sku]||0)};
+        shop:shopQ, ledSell, drift:(shopBy[p.sku]!=null)?(shopQ-ledSell):null,
+        other, bul:Math.max(0,+oh[makeLoc]||0), sold:(+soldBy[p.sku]||0)};
     });
   pqDraw();
 }
@@ -2530,13 +2718,18 @@ function pqDraw(){
     </div>
     <div class="hint" style="margin:0 0 8px">
       <b>Current stock</b> is <b>sellable now</b> + <b>made, not yet sellable</b> — the same sum the sheet does by hand as
-      "Shopify + this week's production", except the second number here is read from the ledger rather than typed.
-      Sellable now comes from <b>${esc(window._pqSrc||'the ledger')}</b>.
+      "Shopify + this week's production", except both halves here are read rather than typed.
+      <br><b>Sellable now is read from ${esc(window._pqSrc||'the ledger')}.</b>
+      ${/^the ledger/.test(String(window._pqSrc||''))
+        ? `The Shopify sync is <b>one way and orders only</b> — there is no inventory feed, so this is our own balance at
+           <b>${esc(_otherLoc(planProduceLoc())||'pasig')}</b>, kept current by the sales the sync posts. If you want the shop's
+           own number instead, load a count with <b>📥 Shopify count</b>.`
+        : `${_pqDrift(rows)}`}
       ${noSales?`<br><b style="color:var(--earth,#b5762a)">${noSales} product(s) have no sales in the window</b> — their average is zero, so they ask for nothing. Import sales on the Sales Momentum screen to include them.`:''}
     </div>
     <div style="overflow-x:auto" class="stickyhead"><table style="min-width:1180px"><thead><tr>
       <th style="min-width:200px">Product</th>
-      <th class="num" title="what the shop can sell right now">Sellable</th>
+      <th class="num" title="what the shop can sell right now — ${esc(window._pqSrc||'the ledger')}">Sellable</th>
       <th class="num" title="made but still at ${esc(planProduceLoc()||'bulacan')} or otherwise off-shelf — one transfer away">Not yet<br>sellable</th>
       <th class="num" title="sellable + not yet sellable">Current<br>stock</th>
       <th class="num" title="units sold in the sales window">Sold<br>${PQ.win}d</th>
@@ -2562,7 +2755,8 @@ function pqDraw(){
       const c=calc[r.sku];
       h+=`<tr>
         <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${c.alert?' · <b style="color:var(--danger)">reorder needed</b>':''}</div></td>
-        <td class="num">${k0(r.shop)}</td>
+        <td class="num">${k0(r.shop)}${(r.drift!=null&&Math.abs(r.drift)>=1)
+          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="the Shopify count and our ledger at ${esc(_otherLoc(planProduceLoc())||'pasig')} disagree">${r.drift>0?'+':''}${k0(r.drift)} vs ledger</div>`:''}</td>
         <td class="num${r.other?'':' mini'}" style="${r.other?'color:var(--earth,#b5762a)':'color:var(--muted)'}">${r.other?k0(r.other):'—'}</td>
         <td class="num"><b>${k0(c.cur)}</b></td>
         <td class="num mini" style="color:var(--muted)">${r.sold?k0(r.sold):'—'}</td>
@@ -9670,6 +9864,17 @@ const KSHEET_CSS=`  :root{
     border:1.5px solid var(--line);border-radius:14px;padding:14px 18px;margin-bottom:18px;
     display:flex;flex-direction:column;
   }
+  /* The customer matrix: mixes down, categories across — the Kitchen Batch
+     layout, so the sheet the kitchen already knows is the sheet they get. */
+  .ksmx{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:8px;}
+  .ksmx th{background:#f6f7f3;color:#5a5a52;text-align:left;font-size:9.5px;letter-spacing:.04em;
+    text-transform:uppercase;padding:5px 7px;border-bottom:1.5px solid #d9d9d0;white-space:nowrap;}
+  .ksmx th.num,.ksmx td.num{text-align:right;font-variant-numeric:tabular-nums;}
+  .ksmx td{padding:5px 7px;border-bottom:1px solid #eeeee8;vertical-align:middle;}
+  .ksmx tbody tr:nth-child(even){background:#fbfbf8;}
+  .ksmx tfoot tr.totals-row td{background:#2f2f2b;color:#fff;font-weight:800;border-bottom:0;padding:6px 7px;}
+  .ksmx .ingred-note{margin-top:1px;}
+  .ksmx td:first-child{min-width:104px;}
   .mix-block .mix-title{font-size:17px;font-weight:800;margin:0 0 2px;}
   .mix-block .mix-prot{font-size:13px;font-weight:700;color:#1D9E75;margin:0 0 3px;letter-spacing:.01em}
   td.mix .prot{font-size:11px;font-weight:700;color:#1D9E75;margin-top:1px}
@@ -9898,6 +10103,8 @@ const KSHEET_CSS=`  :root{
     }
     /* Keep the whole recipe card together as one unbreakable unit */
     .mix-block, .mix-block *{break-inside:avoid !important;page-break-inside:avoid !important;}
+    .ksmx{font-size:9.5px !important;}
+    .ksmx th, .ksmx td{padding:3px 5px !important;}
     /* A4 at 14mm margins is ~688 CSS px, which is under the 760px phone
        breakpoint — without this the mix block prints stacked and the right-hand
        panel overshoots the page. Force the two-column layout back on. */
@@ -10027,6 +10234,26 @@ async function prodKitchenSheet(){
   const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
   const {ctx}=_outIngCtx(ings);
   const pm={}; try{ (await db.list('products',{})).forEach(p=>pm[p.sku]=p); }catch(e){}
+  /* ---- WHOSE ORDER IS THIS? ----------------------------------------------
+     A custom order is one customer and several mixes — one per dog. Printed as
+     separate blocks it became seven near-identical pages with the same notes on
+     each, and the kitchen had to add up the proteins themselves to know what to
+     pull. Resolve each custom SKU back to its customer so they can be printed
+     together, the way the Kitchen Batch sheet already does it. */
+  const custOf={};
+  try{
+    const [cos,cls]=await Promise.all([db.list('custom_orders',{}), db.list('custom_order_lines',{})]);
+    const byRef={}; (cos||[]).forEach(o=>byRef[o.order_ref]=o); let _seq=0;
+    (cls||[]).forEach(l=>{ const o=byRef[l.order_ref]; if(!o||!l.product_sku) return;
+      const cur=custOf[l.product_sku];
+      const d=String(o.needed_date||o.order_date||'');
+      /* keep the order the customer's own sheet lists them in — a batch read
+         out of alphabetical order is a batch somebody has to re-check against
+         the original. */
+      if(!cur || d>cur.d) custOf[l.product_sku]={name:(o.customer_name||'').trim(), ref:o.order_ref, d,
+        seq:(+l.id||+l.line_no||_seq++)};
+    });
+  }catch(e){}
   // one ingredient row, resolved from the masterlist
   const ingRow=(sku,gramsPerPack)=>{ const it=im[sku]||{}; const cl=_countIngClass(it,ctx)||{};
     const cat=_ksCat(cl.g1||it.category||'');
@@ -10048,7 +10275,9 @@ async function prodKitchenSheet(){
        a sheet headed "Raw Feeding — BARF Mix — 500g" and had to work out which
        mix that was. Use the product's real name, with the variant appended only
        when it says something the name does not. */
+    const _c=custOf[l.product_sku];
     return {sku:l.product_sku, packs, packG, perPack,
+      customer:(_c&&_c.name)||'', orderRef:(_c&&_c.ref)||'', seq:(_c&&_c.seq!=null)?_c.seq:9e9,
       fmt:p.group_1||'', mixCat:p.group_2||'',
       name:prodLabel({...p, sku:l.product_sku, name:(p.name||l.name||l.product_sku)},{noSku:true}),
       animal:p.animal||'Dog', ings:bom};
@@ -10116,7 +10345,106 @@ async function prodKitchenSheet(){
 
   // ---- one block per mix, exactly the dashboard's .mix-block ----
   const combined=new Map();
-  const mixBlocks=items.map(x=>{
+  /* Custom-order mixes are printed together, one block per CUSTOMER, laid out
+     like the Kitchen Batch sheet: a matrix of mixes against categories, then the
+     combined ingredient list for the whole batch, then ONE set of reminders
+     rather than the same paragraph seven times. Everything else keeps its own
+     block, because a catalogue product genuinely is its own run. */
+  const _isCust=x=>!!(x.customer) || /^CUST-/i.test(String(x.sku||''));
+  const custItems=items.filter(_isCust);
+  const plainItems=items.filter(x=>!_isCust(x));
+  const byCustomer={};
+  custItems.forEach(x=>{ const k=x.customer||'Custom orders'; (byCustomer[k]=byCustomer[k]||[]).push(x); });
+
+  const _mergeRow=(x)=>{ x.ings.forEach(i=>{ const key=i.name;
+      if(!combined.has(key)) combined.set(key,{cat:i.cat, grams:0, bones:i.bones, sku:i.sku});
+      combined.get(key).grams+=i.grams*x.packs; }); };
+
+  const custBlocks=Object.keys(byCustomer).sort().map(cust=>{
+    const list=byCustomer[cust].slice().sort((a,b)=>(a.seq-b.seq)||String(a.name).localeCompare(String(b.name)));
+    list.forEach(_mergeRow);
+    // which categories this customer's batch actually touches — no empty columns
+    const cats=KSHEET_ORDER.filter(k=>list.some(x=>x.ings.some(i=>i.cat===k)));
+    const catLbl=k=>(KSHEET_CATS.find(z=>z.k===k)||{}).l||k;
+    const catCol=(x,k)=>x.ings.filter(i=>i.cat===k).reduce((s,i)=>s+i.grams,0);
+    const totPacks=list.reduce((s,x)=>s+x.packs,0);
+    const totKg=list.reduce((s,x)=>s+(x.perPack*x.packs),0);
+    // the batch's own ingredient breakdown, grouped the way the kitchen pulls
+    const own=new Map();
+    list.forEach(x=>x.ings.forEach(i=>{ const e=own.get(i.name)||{cat:i.cat,grams:0,sku:i.sku,bones:i.bones};
+      e.grams+=i.grams*x.packs; own.set(i.name,e); }));
+    const ownRows=KSHEET_ORDER.map(k=>{
+      const es=[...own.entries()].filter(([,v])=>v.cat===k).sort((a,b)=>b[1].grams-a[1].grams);
+      if(!es.length) return '';
+      const c=KSHEET_CATS.find(z=>z.k===k);
+      return `<tr class="cat-band"><td colspan="3" style="background:${c.c}22;color:${c.c};font-weight:800;padding:3px 8px">${_ksDot(k)}${esc2(c.l)}</td></tr>`
+        +es.map(([nm,v])=>`<tr><td><span class="ingred-name">${esc2(nm)}${v.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span></td>
+          <td class="num">${Math.round(v.grams)}g</td><td class="num">${_ksKg(v.grams)}</td></tr>`).join('');
+    }).join('');
+    const ownTotal=[...own.values()].reduce((s,v)=>s+v.grams,0);
+    // one set of reminders for the whole batch, deduplicated
+    /* "Custom Orders" is a GROUP, not a feeding type — the type is written in
+       the subgroup or the mix name ("Mix 2 Raw Quail", "BARF Cookable"). Read
+       all three, or the batch prints with no reminders at all. */
+    const _fmtOf=x=>[x.fmt,x.mixCat,x.name].filter(Boolean).join(' ');
+    const notes=[...new Set(list.flatMap(x=>_ksPrepNotes(_fmtOf(x),x.ings)))];
+    const _feedTypes=[...new Set(list.map(x=>{
+      const f=_fmtOf(x);
+      return /gently\s*cooked/i.test(f)?'Gently Cooked':(/cookable/i.test(f)?'Cookable':(/raw|barf|pmr/i.test(f)?'Raw Feeding':''));
+    }).filter(Boolean))];
+    /* Never echo the customer's name back at them as if it were a feeding
+       type — on a custom product the subgroup is often the customer. */
+    const fmts=_feedTypes.join(' · ')
+      || [...new Set(list.map(x=>x.mixCat).filter(g=>g && g.trim().toLowerCase()!==String(cust).trim().toLowerCase()))].join(' · ');
+    return `<div class="mix-block">
+      <div class="mix-title">🍳 Kitchen Batch — ${esc2(cust)}</div>
+      ${fmts?`<div class="mix-prot">${esc2(fmts)}</div>`:''}
+      <div class="mix-sub"><b>${totPacks} packs</b> across ${list.length} mix${list.length===1?'':'es'} · ${_ksKg(totKg)}${list[0].orderRef?`<span class="sku-badge">${esc2(list[0].orderRef)}</span>`:''}</div>
+      <table class="ksmx">
+        <thead><tr><th>Mix</th><th class="num">Pack size</th><th class="num">Packs</th>
+          ${cats.map(k=>`<th class="num" style="color:${(KSHEET_CATS.find(z=>z.k===k)||{}).c}">${esc2(catLbl(k))}</th>`).join('')}
+          <th class="num">Total kg</th></tr></thead>
+        <tbody>${list.map(x=>`<tr><td><b>${esc2(x.name)}</b><div class="ingred-note"><code>${esc2(x.sku)}</code></div></td>
+          <td class="num">${Math.round(x.packG)}g</td><td class="num">${x.packs}</td>
+          ${cats.map(k=>{ const g=catCol(x,k); return `<td class="num"${g?'':' style="color:#b9b7ae"'}>${g?Math.round(g)+'g':'—'}</td>`; }).join('')}
+          <td class="num"><b>${_ksKg(x.perPack*x.packs)}</b></td></tr>`).join('')}</tbody>
+        <tfoot><tr class="totals-row"><td>TOTAL</td><td class="num">—</td><td class="num">${totPacks} packs</td>
+          ${cats.map(k=>`<td class="num">${_ksKg(list.reduce((s,x)=>s+catCol(x,k)*x.packs,0))}</td>`).join('')}
+          <td class="num"><b>${_ksKg(totKg)}</b></td></tr></tfoot>
+      </table>
+      <div class="mix-content" style="margin-top:12px">
+        <div class="ingred-col">
+          <h3 style="margin:0 0 4px">📦 Combined Total Batch — all mixes</h3>
+          <table class="ingred"><thead><tr><th>Ingredient</th><th class="num">Total g</th><th class="num">Total kg</th></tr></thead>
+            <tbody>${ownRows}</tbody>
+            <tfoot><tr class="totals-row"><td>GRAND TOTAL</td><td class="num">${Math.round(ownTotal)}g</td><td class="num"><b>${_ksKg(ownTotal)}</b></td></tr></tfoot>
+          </table>
+        </div>
+        <div class="notes-panel">
+          <div class="notes-block"><h3>Mga Paalala sa Paghahanda</h3>
+            <ul>${notes.map(nn=>`<li>${esc2(nn)}</li>`).join('')
+              || '<li>Tingnan ang order sheet para sa feeding type (Raw / Cookable / Gently Cooked) bago maghanda.</li>'}</ul></div>
+          <div class="tracking-2col">
+            <div class="tracking-block"><h3>Pagsubaybay sa Produksyon</h3>
+              <div class="track-row"><span>Petsa</span><div class="fill-line">${esc2(prodPlanDate)}</div></div>
+              <div class="track-row"><span>Planadong packs</span><div class="fill-line">${totPacks}</div></div>
+              <div class="track-row"><span>Aktwal na nagawa</span><div class="fill-line"></div></div>
+              <div class="track-row"><span>Ginawa ni</span><div class="fill-line"></div></div>
+              <div class="track-row"><span>Sinuri ni</span><div class="fill-line"></div></div></div>
+            <div class="tracking-block"><h3>Packaging</h3>
+              <div class="track-row"><span>Vacuum bags nagamit</span><div class="fill-line"></div></div>
+              <div class="track-row"><span>Stickers nagamit</span><div class="fill-line"></div></div>
+              <div class="track-row"><span>Vacuum bags nasayang</span><div class="fill-line"></div></div>
+              <div class="track-row"><span>Stickers nasayang</span><div class="fill-line"></div></div></div>
+          </div>
+        </div>
+        <div class="notes-free"><h3>Mga Tala</h3>
+          <div class="lined-area"><div></div><div></div><div></div><div></div></div></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  const mixBlocks=custBlocks+plainItems.map(x=>{
     const totalPackGrams=x.packG*x.packs;
     const rows=x.ings.map(i=>{
       const totalG=i.grams*x.packs;
@@ -10231,15 +10559,21 @@ async function prodKitchenSheet(){
      the run is reading straight down the page, not hunting for figures.
      Two weighings for the freezer draw, because drip loss you estimate is a
      number nobody ever improves; drip loss you weigh is one you can argue with. */
-  const _yrHead=paPrintHead({value:false});
+  const _yrHead=paPrintHead({hide:['value','loss']});
   const _blank=`<td class="num"><span class="yr-box"></span></td>`;
   /* The row was a hardcoded run of blanks, so the moment the sheet lost two
      columns every figure sat under the wrong heading. It follows the list now,
      like the heading above it does. */
-  const _yrCols=paCols().filter(c=>c.k!=='value');
+  /* LOSS is not a box anybody fills in — it is what the app works out from the
+     four weights afterwards. Printing a box for it invited somebody to guess a
+     figure the sheet is meant to derive, so it comes off the paper form. */
+  const _yrCols=paCols({hide:['value','loss']});
+  /* And nothing is pre-printed in USED IN PACKS. A figure already on the page
+     is a figure that gets copied rather than weighed — which is exactly how the
+     plan quietly becomes the record. The needed qty is right there in the first
+     column to compare against. */
   const _yrRow=need=>_yrCols.map(c=>c.k==='needed'
-    ? `<td class="num"><b>${_ksKg(need)}</b></td>`
-    : (c.k==='used' ? `<td class="num"><span class="yr-box pre">${_ksKg(need)}</span></td>` : _blank)).join('');
+    ? `<td class="num"><b>${_ksKg(need)}</b></td>` : _blank).join('');
   const yieldRecordHtml=KSHEET_ORDER.map(k=>{
     const entries=[...combined.entries()].filter(([,v])=>v.cat===k).sort((a,b)=>b[1].grams-a[1].grams);
     if(!entries.length) return '';
@@ -10324,6 +10658,95 @@ async function prodSubstitute(){
   drawSubPick();
   $('overlay').classList.add('on');
 }
+
+/* ---- Choosing the replacement -------------------------------------------
+   A native <select> cannot be searched, and this one carried every processed
+   ingredient in the masterlist. Picking "Beef Spleen" out of it meant scrolling
+   a list of a hundred with no idea which of them were even in the freezer.
+   So the choice gets its own panel — the same habits as the list behind it:
+   type to find, group, sort, and the on-hand figure that decides the swap.  */
+function subPickOpen(sku){
+  const C=window._subCtx||{}; const it=(C.im||{})[sku]||{};
+  window._subPick={sku, name:it.name||sku,
+    alt:String(it.approved_alt||'').trim(),
+    need:(((window._prodNeedRows||[]).find(r=>r.sku===sku)||{}).needG)||0};
+  window._spQ=''; window._spG='cat'; window._spS='stock';
+  drawSubPickOne();
+}
+function subPickBack(){ window._subPick=null; drawSubPick(); }
+function subPickSet(val){
+  const P=window._subPick; if(!P) return;
+  prodSetSub(P.sku, val||'');
+  window._subPick=null; drawSubPick();
+  toast(val?('Replacing '+P.name+' with '+(((window._subCtx||{}).im||{})[val]||{}).name):('“'+P.name+'” left as it is'));
+}
+function drawSubPickOne(){
+  const P=window._subPick; if(!P){ drawSubPick(); return; }
+  const C=window._subCtx||{req:[],im:{},ings:[],oh:{}};
+  const oh=C.oh||{};
+  const q=String(window._spQ||'').trim().toLowerCase();
+  const chosen=(window._prodSub||{})[P.sku]||'';
+  let rows=(C.ings||[]).filter(i=>isProcessedItem(i) && i.sku!==P.sku).map(i=>{
+    const cl=_ksCat(i.category||'');
+    return {sku:i.sku, name:i.name||i.sku, cat:cl.l||'—', color:cl.c,
+      base:_lsAnimalOf(i,i.sku),
+      oh:+oh[i.sku]||0,
+      isAlt:!!(P.alt && String(i.name||'').trim().toLowerCase()===P.alt.toLowerCase()),
+      inRun:(C.req||[]).indexOf(i.sku)>=0};
+  });
+  if(q) rows=rows.filter(r=>(r.name+' '+r.sku+' '+r.cat+' '+r.base).toLowerCase().includes(q));
+  const S={stock:(a,b)=>(b.isAlt-a.isAlt)||(b.oh-a.oh)||String(a.name).localeCompare(String(b.name)),
+           name:(a,b)=>(b.isAlt-a.isAlt)||String(a.name).localeCompare(String(b.name)),
+           alt:(a,b)=>(b.isAlt-a.isAlt)||(b.inRun-a.inRun)||(b.oh-a.oh)};
+  rows.sort(S[window._spS]||S.stock);
+  const groups={};
+  rows.forEach(r=>{ const g=(window._spG==='cat')?r.cat
+      :(window._spG==='base'?r.base
+      :(window._spG==='stock'?((r.oh>0)?'In the freezer':'Nothing on hand'):'All'));
+    (groups[g]=groups[g]||[]).push(r); });
+  const gOrd=g=>/^In the freezer/.test(g)?0:(/^Nothing on hand/.test(g)?2:1);
+  const kg=g=>(Math.round((+g||0)/10)/100);
+  const keys=Object.keys(groups).sort((a,b)=>gOrd(a)-gOrd(b)||a.localeCompare(b));
+  const body=keys.map(g=>
+    `<tr class="grp"><td colspan="4" style="background:#f2f2ec;font-weight:800;padding:4px 8px">${esc(g)}
+      <span class="mini" style="font-weight:400;color:var(--muted)">${groups[g].length}</span></td></tr>`
+    +groups[g].map(r=>`<tr${r.sku===chosen?' style="background:#eef5ee"':''}>
+      <td><b>${esc(r.name)}</b>${r.isAlt?' <span class="mini" style="color:#4e7a3e;font-weight:700">★ approved alternative</span>':''}
+        ${r.inRun?' <span class="mini" style="color:var(--earth,#b5762a)">already used on this run</span>':''}
+        <div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code></div></td>
+      <td class="mini" style="color:var(--muted)"><span class="cat-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${r.color};margin-right:5px"></span>${esc(r.cat)}</td>
+      <td class="num" style="color:${r.oh>0?'#1e6b2e':'var(--muted)'}">${r.oh?kg(r.oh)+' kg':'—'}</td>
+      <td class="num"><button class="btn sm ${r.sku===chosen?'':'sec'}" onclick="subPickSet('${esc(r.sku)}')">${r.sku===chosen?'✓ chosen':'Use this'}</button></td></tr>`).join('')
+  ).join('');
+  $('modal').innerHTML=`<div class="mwrap">
+    <div class="mhead">Replace <b>${esc(P.name)}</b> with…<span style="flex:1"></span>
+      <button class="btn sm sec" onclick="subPickBack()">‹ Back to the list</button></div>
+    <div class="mbody">
+      <p class="mini" style="margin:0 0 8px">For <b>this run only</b>. The recipe grams stay the same — ${P.need?('<b>'+kg(P.need)+' kg</b> is needed'):'the recipe figure is used'} — and the replacement is processed and consumed instead, with its own yield and cost.${P.alt?' The masterlist names <b>'+esc(P.alt)+'</b> as the approved alternative.':''}</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
+        <input id="spQ" value="${esc(window._spQ||'')}" placeholder="🔎 type a name, code, category or animal…"
+          oninput="window._spQ=this.value;drawSubPickOne();_spFocus()" style="flex:1;min-width:220px;padding:6px 9px;border:1px solid var(--line);border-radius:6px">
+        <label class="mini">Group <select onchange="window._spG=this.value;drawSubPickOne()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+          <option value="cat" ${window._spG==='cat'?'selected':''}>Category</option>
+          <option value="base" ${window._spG==='base'?'selected':''}>Animal / base material</option>
+          <option value="stock" ${window._spG==='stock'?'selected':''}>What is in the freezer</option>
+          <option value="none" ${window._spG==='none'?'selected':''}>No grouping</option></select></label>
+        <label class="mini">Sort <select onchange="window._spS=this.value;drawSubPickOne()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+          <option value="stock" ${window._spS==='stock'?'selected':''}>Most on hand</option>
+          <option value="name" ${window._spS==='name'?'selected':''}>Name</option>
+          <option value="alt" ${window._spS==='alt'?'selected':''}>Approved alternative first</option></select></label>
+      </div>
+      <div class="mscroll" style="overflow-x:auto;max-height:400px"><table class="stickyhead"><thead><tr>
+        <th>Ingredient</th><th>Category</th><th class="num">On hand</th><th class="num">Choose</th></tr></thead>
+        <tbody>${body||'<tr><td colspan="4" class="empty">Nothing matches that search.</td></tr>'}</tbody></table></div>
+    </div>
+    <div class="mfoot"><button class="btn sec" onclick="subPickSet('')">↺ Leave it as it is</button>
+      <span style="flex:1"></span>
+      <span class="mini" style="color:var(--muted);align-self:center">${rows.length} candidate(s)</span></div></div>`;
+  modalWide(true); $('overlay').classList.add('on'); _spFocus();
+}
+function _spFocus(){ const el=$('spQ'); if(el && document.activeElement!==el){ el.focus(); try{ el.setSelectionRange(el.value.length,el.value.length); }catch(e){} } }
+
 function drawSubPick(){
   const C=window._subCtx||{req:[],im:{},ings:[],oh:{}};
   const oh=C.oh||{};
@@ -10349,14 +10772,16 @@ function drawSubPick(){
   const body=Object.keys(groups).sort((a,b)=>gOrd(a)-gOrd(b)||a.localeCompare(b)).map(g=>
     `<tr class="grp"><td colspan="4" style="background:${/^Short|Being replaced/.test(g)?'#fbeceb':'#f2f2ec'};font-weight:800;padding:4px 8px">${esc(g)} <span class="mini" style="font-weight:400;color:var(--muted)">${groups[g].length}</span></td></tr>`
     +groups[g].map(r=>{
-      const opts=_procIngOptions(C.ings,{selected:r.chosen, exclude:r.sku, placeholder:null,
-        star:o=>r.alt&&String(o.name||'').trim().toLowerCase()===r.alt.toLowerCase()});
       const short=r.need>0 && r.oh<r.need;
       return `<tr${r.chosen?' style="background:#f9f4f6"':''}>
         <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${r.alt?' · approved alt: <b>'+esc(r.alt)+'</b>':''}</div></td>
         <td class="num mini" style="color:var(--muted)">${r.need?kg(r.need)+' kg':'—'}</td>
         <td class="num mini" style="color:${short?'var(--danger)':(r.oh>0?'#1e6b2e':'var(--muted)')}">${r.oh?kg(r.oh)+' kg':'—'}${short?' ⚠':''}</td>
-        <td><select onchange="prodSetSub('${esc(r.sku)}',this.value)" style="width:260px"><option value="" ${!r.chosen?'selected':''}>— same (no change) —</option>${opts}</select></td></tr>`;
+        <td>${r.chosen
+          ? `<button class="btn sm" style="max-width:250px;text-align:left" onclick="subPickOpen('${esc(r.sku)}')">⇄ ${esc((C.im[r.chosen]||{}).name||r.chosen)}</button>
+             <button class="btn sm sec" title="put the recipe ingredient back" onclick="prodSetSub('${esc(r.sku)}','');drawSubPick()">✕</button>`
+          : `<button class="btn sm sec" onclick="subPickOpen('${esc(r.sku)}')">🔎 Choose a replacement…</button>
+             ${r.alt?`<div class="mini" style="color:var(--muted);margin-top:2px">approved: ${esc(r.alt)}</div>`:''}`}</td></tr>`;
     }).join('')).join('');
   $('modal').innerHTML=`<div><h3>🔁 Substitute BOM ingredients — this run</h3>
     <p class="mini">When an ingredient is unavailable, swap it for another for <b>this production run only</b>. The recipe grams stay the same; the replacement is processed &amp; consumed instead, with its own yield &amp; cost. The finished product is unchanged.</p>
@@ -10839,7 +11264,11 @@ try{ PA_SIMPLE=localStorage.getItem('wr_pa_full')!=='1'; }catch(e){}
 /* `{full:true}` forces the long list regardless of the setting. A RECORD is
    not a form: the short sheet exists to make ENTERING a run easier, and it must
    never decide how much of a run already entered you are allowed to see. */
-function paCols(opts){ return (opts&&opts.full)?PA_COLS_FULL:(PA_SIMPLE?PA_COLS_SIMPLE:PA_COLS_FULL); }
+function paCols(opts){
+  const base=(opts&&opts.full)?PA_COLS_FULL:(PA_SIMPLE?PA_COLS_SIMPLE:PA_COLS_FULL);
+  const hide=(opts&&opts.hide)||null;
+  return hide?base.filter(c=>hide.indexOf(c.k)<0):base;
+}
 function paSpan(noValue,opts){ return paCols(opts).filter(c=>!(noValue&&c.k==='value')).length+1; }
 function paToggleSimple(on){
   PA_SIMPLE=!on;
@@ -11232,7 +11661,12 @@ async function prodActualsApply(){
        argued with instead of quietly inflating everybody's yield. */
     let _thawKg=0, _thawVal=0;
     for(const x of acts){
-      const t=Math.round((+x.thawLossKg||0)*1000*100)/100;   // grams
+      /* Take the drip from the SAME calculation the screen showed, not from a
+         field somebody has to remember to keep in step. A stale or missing
+         thawLossKg meant the drip silently never posted — the stock still net
+         out right, but the loss vanished into the yield, which is the one thing
+         this whole split exists to prevent. */
+      const t=Math.round(Math.max(0,_paCalc(x).thaw)*1000*100)/100;   // grams
       if(!(t>0)) continue;
       _thawKg+=t/1000; _thawVal+=(t/1000)*((+x.outCostG||0)*1000);
       try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:x.sku,location_code:planProduceLoc(),
@@ -14267,6 +14701,9 @@ const KB = {
        'A negative Pasig balance would be published as ZERO, never as a negative. A negative balance is a counting problem to fix, not a number to broadcast.']},
   packreq:{d:'The weekly regular-packs request: what the shop can sell, what is made but not yet moved, and what is still owed against par.',
     b:['<b>Current stock</b> = <b>sellable now</b> + <b>made, not yet sellable</b>. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here both numbers come out of the ledger, and they are shown apart because the gap between them is a transfer somebody still has to do.',
+       '<b>There is no Shopify inventory feed.</b> The Shopify sync is one way and pulls ORDERS — the token carries read_orders and read_products, nothing else. <code>wr_shopify_stock</code> is not a feed either: it is this ledger\'s own balance at the selling site, named for what WOULD be pushed if anything ever pushed. So <b>Sellable</b> is our ledger, kept current by the sales the sync posts.',
+       'If you want the shop\'s OWN number, load it by hand: Shopify → Products → Inventory → Export, then <b>📥 Shopify count</b>. It is a snapshot, not a feed — the screen says how old it is, and any product where the count and our ledger disagree is flagged on its row. That gap is the finding: it means somebody adjusted one side and not the other.',
+       '<b>☁ Send to Demand</b> writes the request into the demand table for a plan date, tagged <code>packs production request</code> — the same place the Google Sheet sync lands, so Demand/MRP picks it up. Re-sending replaces only the rows this screen wrote; a sheet import or a custom order on the same date is left alone.',
        'The formulas are the sheet\'s, unchanged: Ave./day = units sold ÷ window; LT demand = Ave./day × lead time; Safety = LT demand × movement; ROP = LT demand + Safety; PAR = Ave./day × cycle; New Par = PAR rounded up to a case; To produce = New Par + Safety − Current stock.',
        'The five levers sit on the toolbar. <b>Movement</b> can also be set per product — leave the cell blank to use the global figure. Everything is remembered on this browser.',
        'Sales come from the <b>Sales Momentum</b> table. A product with no sales in the window averages zero and asks for nothing, which is why the count of those is called out above the table.',
