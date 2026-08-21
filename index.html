@@ -523,7 +523,7 @@ const MODULES = [
   {id:'sales',  label:'Sales',       items:['ffprofiles','ffcalc','custom_orders']},
   {id:'plan',   label:'Planning',    items:['mrp','wdt']},
   {id:'purch',  label:'Purchasing',  items:['purchase_orders','receiving','supplies_reorder','sticker_reorder']},
-  {id:'ops',    label:'Operations',  items:['prodplan','prodsched','production_batches','transfers','count_sessions']},
+  {id:'ops',    label:'Operations',  items:['prodplan','packreq','prodsched','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','variance_log']},
   {id:'help',   label:'Help', items:['guides']},
   {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
@@ -837,6 +837,7 @@ const MODELS = {
   notif:{ label:'Notifications', icon:'🔔', special:'notif' },
   cleanser:{ label:'Data Cleanser', icon:'🧹', special:'cleanser' },
   prodsched:{ label:'Production Schedule', icon:'📅', special:'prodsched' },
+  packreq:{   label:'Packs Production Request', icon:'🧮', special:'packreq' },
   receiving:{ label:'Receiving', icon:'📥', special:'receiving' },
   supplies_reorder:{ label:'Supplies Reorder', icon:'🧻', special:'supplies_reorder' },
   sticker_reorder:{ label:'Sticker Reorder', icon:'🏷️', special:'sticker_reorder' },
@@ -1047,8 +1048,26 @@ function toggleNav(force){
   if(sc) sc.classList.toggle('on', open);
   if(t) t.setAttribute('aria-expanded', String(open));
 }
-document.addEventListener('keydown', e=>{ if(e.key==='Escape') toggleNav(false); });
+document.addEventListener('keydown', e=>{ if(e.key!=='Escape') return;
+  /* Escape on the actuals sheet goes through the SAME door as the Close button.
+     A key that silently threw away twenty minutes of weighing was the worst of
+     the ways to lose it, because nobody meant to press it. */
+  if(window._prodAct && $('overlay') && $('overlay').classList.contains('on')){ paClose(); return; }
+  toggleNav(false); });
+
+/* The tab, the browser, the laptop lid. The draft has already been written, so
+   this only exists to stop somebody believing the work went somewhere it did not. */
+window.addEventListener('beforeunload', e=>{
+  let dirty=false;
+  try{ dirty=(window._prodAct && paDirty()) || (typeof _pbDirty!=='undefined' && _pbDirty && !!_pbRef); }catch(_){}
+  if(!dirty) return;
+  e.preventDefault(); e.returnValue='';   // the browser shows its own wording
+});
 function openModel(model){
+  /* Leaving a batch whose ingredients were edited and never saved. The draft is
+     already kept, so this is a courtesy, not a rescue — but somebody who walks
+     away thinking they saved should be told they did not. */
+  if(typeof _pbDirty!=='undefined' && _pbDirty && _pbRef){ pbGuard().then(ok=>{ if(ok){ _pbDirty=false; openModel(model); } }); return; }
   toggleNav(false);            // picking a module closes the drawer behind it
   if(model==='home'){ state={model:'home',view:'home',search:'',groupBy:'',recId:null}; renderSide(); renderDashboard(); return; }
   const m=MODELS[model];
@@ -1086,6 +1105,7 @@ function route(){
     if(m.special==='supplies_reorder') return renderSuppliesReorder();
     if(m.special==='sticker_reorder') return renderStickerReorder();
     if(m.special==='prodsched') return renderProdSched();
+    if(m.special==='packreq')   return renderPackReq();
     if(m.special==='receiving') return renderReceiving();
     if(m.special==='sticker_po') return renderStickerPO();
     if(m.special==='approvals') return renderApprovals();
@@ -1747,26 +1767,54 @@ async function pbLoad(){
     const created= G(x.created_g, 0);
     const frozen = Math.max(G(x.frozen_g!=null?x.frozen_g:x.drawn_g, thawed), 0);
     return { sku:r.sku, name:_outName(it,cl)||it.name||r.sku, cat:cat.k, catLabel:cat.l, color:cat.c,
-      type:'A', yield:((+it.yield_pct||100)/100)||1, outCostG:(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000,
+      type:'A', yield:((+it.yield_pct||100)/100)||1, thawPct:(+it.thaw_loss_pct||0),
+      outCostG:(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000,
       planG:r.planG, ledG:r.ledG,
       // the same field names the confirm screen uses, so _paCalc just works
       neededKg:Math.round(r.planG/10)/100,
       frozenOutKg:Math.round(frozen/10)/100, procUsedKg:Math.round(thawed/10)/100,
       actualRawKg:Math.round(G(x.actual_raw_g,0)/10)/100, actualMadeKg:Math.round(created/10)/100,
-      usedKg:Math.round(used/10)/100, excessKg:Math.round(G(x.excess_g,0)/10)/100, excessAnchor:false };
+      usedKg:Math.round(used/10)/100, excessKg:Math.round(G(x.excess_g,0)/10)/100, excessAnchor:false,
+      /* THIS ROW IS HISTORY. The short sheet is for recording a run as it
+         happens, where the two middle weights are a burden nobody should carry.
+         A batch you have opened afterwards already HAS them — from the ledger,
+         from the issue line — and re-deriving them would quietly rewrite what
+         the kitchen actually did into something tidier. So the record always
+         shows what was recorded; only the columns follow the short/long
+         setting, never the figures. */
+      advTouched:true,
+      /* did this run actually record the two middle weights, or are they
+         standing in for figures nobody wrote down? */
+      _recorded:(G(x.thawed_g,null)!=null || created>0) };
   }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat)||b.usedKg-a.usedKg);
+  _pbApplyDraft();
+}
+/* Edits somebody made to this record and never saved. Merged back on top of
+   what is stored, so leaving the screen — or losing the tab — costs nothing. */
+function _pbApplyDraft(){
+  window._pbRestored=null;
+  const d=pbDraftRead(); if(!d) return;
+  let hit=0;
+  d.rows.forEach(r=>{ const x=(_pbRows||[]).find(z=>z.sku===r.sku);
+    if(!x){ if(r._added){ const y=_pbRowFor(r.sku,r.usedKg||0,0); Object.assign(y,r); _pbRows.push(y); hit++; } return; }
+    ['frozenOutKg','procUsedKg','actualRawKg','actualMadeKg','usedKg','excessKg','excessAnchor',
+     '_removed','_swappedFrom','_swappedFromName'].forEach(f=>{ if(r[f]!==undefined) x[f]=r[f]; });
+    hit++; });
+  if(hit){ _pbDirty=true; window._pbRestored=new Date(d.at).toLocaleString(); }
+  else pbDraftClear();
 }
 const _pbKg=g=>(Math.round((+g||0)/10)/100).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:3})+' kg';
 /* Editing works exactly as it does on the confirm screen — same rules, same
    anchoring — because it is the same code path. */
 function pbEdit(i,field,v){
   const x=_pbRows[i]; if(!x) return;
+  if(field==='procUsedKg'||field==='actualMadeKg') x.advTouched=true;
   x[field]=(v===''||v==null)?0:(parseFloat(v)||0);
   if(field==='usedKg')   x.excessAnchor=false;
   if(field==='excessKg') x.excessAnchor=true;
   const c=_paCalc(x);
   if(x.excessAnchor) x.usedKg=c.used; else x.excessKg=c.excess;
-  _pbDirty=true; pbDraw();
+  _pbDirty=true; pbDraftSave(); pbDraw();
 }
 /* ---- Correcting WHICH ingredient was used, not just how much -------------
    A quantity edit answers "we used more". It cannot answer "we used the wrong
@@ -1776,6 +1824,7 @@ function pbEdit(i,field,v){
    right one instead. Modelling it as remove + add makes that automatic, and
    leaves both movements on the record. */
 function _pbRowFor(sku, usedKg, planG){
+  /* an ingredient added to a record after the fact is history too */
   const it=(_pbIngs||[]).find(i=>i.sku===sku)||{sku,name:sku};
   const cat=_ksCat(it.category||'');
   return { sku, name:it.name||sku, cat:cat.k, catLabel:cat.l, color:cat.c,
@@ -1783,7 +1832,7 @@ function _pbRowFor(sku, usedKg, planG){
     outCostG:(+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000,
     planG:+planG||0, ledG:0, neededKg:Math.round((+planG||0)/10)/100,
     frozenOutKg:0, procUsedKg:Math.round((+usedKg||0)*1000)/1000, actualRawKg:0, actualMadeKg:0,
-    usedKg:Math.round((+usedKg||0)*1000)/1000, excessKg:0, excessAnchor:false, _added:true };
+    usedKg:Math.round((+usedKg||0)*1000)/1000, excessKg:0, excessAnchor:false, advTouched:true, _added:true };
 }
 function pbSwap(i,sku){
   if(!sku) return;
@@ -1804,7 +1853,7 @@ function pbRemove(i){
   const x=_pbRows[i]; if(!x) return;
   if(x._added && !x.ledG){ _pbRows.splice(i,1); }      // never posted; just drop it
   else { x._removed=!x._removed; delete x._swappedFor; }
-  _pbDirty=true; pbDraw();
+  _pbDirty=true; pbDraftSave(); pbDraw();
 }
 function _pbPick(id,cur,fn){
   const groups={};
@@ -1815,7 +1864,7 @@ function _pbPick(id,cur,fn){
       +groups[g].map(it=>`<option value="${esc(it.sku)}" ${it.sku===cur?'selected':''}>${esc(it.name||it.sku)}</option>`).join('')
       +`</optgroup>`).join('')}</select>`;
 }
-function pbReset(){ pbLoad().then(pbDraw); }
+function pbReset(){ pbDraftClear(); window._pbRestored=null; pbLoad().then(pbDraw); }
 async function pbSave(){
   if(!_pbRef) return;
   const packs=+formRec.good_packs||0;
@@ -1869,6 +1918,7 @@ async function pbSave(){
     +(swaps.length?(', swapped: '+swaps.join('; ')):'')
     +(posted?(', '+posted+' stock adjustment(s) posted'):', no stock change')+' · ₱'+cpp+'/pack');
   toast('Saved · '+wrote+' ingredient line(s)'+(dropped?(' · '+dropped+' removed'):'')+(posted?(' · '+posted+' stock adjustment(s)'):''));
+  pbDraftClear(); window._pbRestored=null;   // it is in the database now, not a draft
   await pbLoad(); pbDraw(); renderForm();
 }
 function pbDraw(){
@@ -1883,16 +1933,39 @@ function pbDraw(){
   const num=(i,f,val,ttl)=>`<input type="number" step="any" inputmode="decimal" value="${Math.round((+val||0)*1000)/1000}"
     title="${esc(ttl)}" oninput="pbEdit(${i},'${f}',this.value)"
     style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px">`;
-  const T={plan:0,frozen:0,thawed:0,raw:0,made:0,used:0,exc:0,php:0};
+  /* If this run wrote down its thawed and created weights, the record shows
+     them — the short sheet is about what a person has to TYPE during a run, not
+     about how much of a finished run they are allowed to read back. */
+  const _hist=_pbRows.some(x=>x._recorded);
+  const _CO=paCols({full:_hist});
+  const T={plan:0,frozen:0,thawed:0,raw:0,made:0,used:0,exc:0,php:0,loss:0,over:0};
   let body='',last='';
   _pbRows.forEach((x,i)=>{
     const c=_paCalc(x);
     if(!x._removed){
       T.plan+=c.needed; T.frozen+=c.frozen; T.thawed+=c.proc; T.raw+=c.raw; T.made+=c.made;
-      T.used+=c.used; T.exc+=c.excess; T.php+=c.used*x.outCostG*1000; }
+      T.used+=c.used; T.exc+=c.excess; T.php+=c.used*x.outCostG*1000;
+      T.loss+=c.loss; T.over+=c.over; }
     if(x.cat!==last){ last=x.cat;
-      body+=`<tr class="grp"><td colspan="9" style="background:${x.color};color:#fff;font-weight:700;padding:4px 9px">${esc(x.catLabel)}</td></tr>`; }
+      body+=`<tr class="grp"><td colspan="${_CO.length+1}" style="background:${x.color};color:#fff;font-weight:700;padding:4px 9px">${esc(x.catLabel)}</td></tr>`; }
     const gap=c.needed>0?c.used-c.needed:0;
+    const R=x._removed;
+    const _cell=k=>{
+      switch(k){
+        case 'needed': return `<td class="num mini" style="color:var(--muted)">${c.needed?_pa2(c.needed)+' kg':'—'}</td>`;
+        case 'frozen': return `<td class="num">${R?'—':num(i,'frozenOutKg',x.frozenOutKg,'weight out of the freezer, still frozen')}</td>`;
+        case 'thawed': return `<td class="num">${R?'—':num(i,'procUsedKg',x.procUsedKg,'the same batch weighed again after thawing')}</td>`;
+        case 'raw':    return `<td class="num">${R?'—':num(i,'actualRawKg',x.actualRawKg,'raw pulled and worked on for this ingredient')}</td>`;
+        case 'created':return `<td class="num">${R?'—':num(i,'actualMadeKg',x.actualMadeKg,'processed output that came off that raw')}</td>`;
+        case 'used':   return `<td class="num">${R?'0':num(i,'usedKg',x.usedKg,'what went into the product — the only figure that moves stock'+(c.needed?' · recipe '+_pa2(c.needed)+' kg':''))}
+          ${(!R&&c.needed&&Math.abs(gap)>=0.001)?`<div class="mini" style="color:${gap>0?'var(--earth,#b5762a)':'#4e7a3e'}">${(gap>0?'+':'')+_pa2(gap)} vs recipe</div>`:''}</td>`;
+        case 'excess': return `<td class="num">${R?'—':num(i,'excessKg',x.excessKg,'kept back and returned to processed stock')}
+          ${(!R&&c.short)?'<div class="mini" style="color:var(--danger)">short</div>':''}</td>`;
+        case 'loss':   return `<td class="num">${R?'—':paLossCell(x)}</td>`;
+        case 'value':  return `<td class="num">${R?'—':fmt(c.used*x.outCostG*1000)}</td>`;
+        default:       return '<td class="num">—</td>';
+      }
+    };
     body+=`<tr style="box-shadow:inset 4px 0 0 ${x.color}${x._removed?';opacity:.5':''}">
       <td><b style="${x._removed?'text-decoration:line-through':''}">${esc(x.name)}</b>
         <span class="mini" style="white-space:nowrap">
@@ -1902,36 +1975,40 @@ function pbDraw(){
         ${x._removed?`<div class="mini" style="color:var(--danger)">coming off the run — ${_pbKg(x.ledG)} goes back to stock</div>`:''}
         ${(x._added&&!x._swappedFrom)?'<div class="mini" style="color:var(--berry)">not in the recipe — added</div>':''}
         ${window._pbSwapOn===i?`<div style="margin-top:4px">${_pbPick('pbSwap'+i,x.sku,'pbSwap('+i+',this.value)')}</div>`:''}</td>
-      <td class="num mini" style="color:var(--muted)">${c.needed?_pa2(c.needed)+' kg':'—'}</td>
-      <td class="num">${x._removed?'—':num(i,'frozenOutKg',x.frozenOutKg,'weight out of the freezer, before thawing')}</td>
-      <td class="num">${x._removed?'—':num(i,'procUsedKg',x.procUsedKg,'the same batch weighed again after thawing')}</td>
-      <td class="num">${x._removed?'—':num(i,'actualRawKg',x.actualRawKg,'raw pulled and trimmed for this ingredient')}</td>
-      <td class="num">${x._removed?'—':num(i,'actualMadeKg',x.actualMadeKg,'processed output that came off that raw')}</td>
-      <td class="num">${x._removed?'0':num(i,'usedKg',x.usedKg,'what went into the product — the only figure that moves stock'+(c.needed?' · recipe '+_pa2(c.needed)+' kg':''))}
-        ${(c.needed&&Math.abs(gap)>=0.001)?`<div class="mini" style="color:${gap>0?'var(--earth,#b5762a)':'#4e7a3e'}">${(gap>0?'+':'')+_pa2(gap)} vs recipe</div>`:''}</td>
-      <td class="num">${x._removed?'—':num(i,'excessKg',x.excessKg,'kept back and returned to processed stock')}
-        ${c.excess<-0.0005?'<div class="mini" style="color:var(--danger)">short</div>':''}</td>
-      <td class="num">${x._removed?'—':fmt(c.used*x.outCostG*1000)}</td></tr>
-    ${x._removed?'':`<tr class="parecap"><td colspan="9">${_paRecap(x)}</td></tr>`}`;
+      ${_CO.map(k=>_cell(k.k)).join('')}</tr>
+    ${x._removed?'':`<tr class="parecap"><td colspan="${_CO.length+1}">${_paRecap(x)}</td></tr>`}`;
   });
   el.innerHTML=`<div class="repcard" style="margin:0 0 12px">
     <div class="repbar"><span>Ingredients used — ${_pbRows.filter(x=>!x._removed).length} item(s)</span>
-      <span class="mini" style="color:var(--muted)">${packs?packs+' packs · ':''}same columns as the confirm screen — editable</span>
+      <span class="mini" style="color:var(--muted)">${packs?packs+' packs · ':''}${(_hist&&PA_SIMPLE)
+        ?'this run recorded its thawing and yield weights, so they are shown here in full'
+        :'same columns as the confirm screen — editable'}</span>
+      ${_hist?'':paToggleBtn()}
       <span style="flex:1"></span>
       ${_pbPick('pbAddSel','','pbAddIng(this.value);this.value=\'\'')}
       ${bar}
       ${_pbDirty?`<button class="btn sm" onclick="pbSave()">💾 Save ingredients</button>
                   <button class="btn sec sm" onclick="pbReset()">↺ Undo</button>`:''}</div>
-    <div class="hint" style="margin:0 0 8px">${PA_HELP}</div>
-    <div style="overflow-x:auto"><table class="pa">${paHead()}
+    ${window._pbRestored?`<div style="margin:0 0 8px;padding:8px 10px;border:1px solid #b9d3bd;background:#f1f7f1;border-radius:6px;font-size:12.5px">
+      ↩ <b>Your unsaved edits are back</b> — typed at ${esc(window._pbRestored)} and kept on this browser. Nothing has been posted yet:
+      press <b>💾 Save ingredients</b> to commit them.
+      <button class="btn sm sec" style="margin-left:8px" onclick="pbDropDraft()">✕ Discard and show what is recorded</button></div>`:''}
+    <div class="hint" style="margin:0 0 8px">${_hist?PA_HELP_FULL:PA_HELP}</div>
+    <div style="overflow-x:auto"><table class="pa">${paHead({full:_hist})}
       <tbody>${body}</tbody>
       <tfoot><tr style="font-weight:700;border-top:2px solid var(--line)">
-        <td>Total</td><td class="num mini" style="color:var(--muted)">${T.plan?_pa2(T.plan)+' kg':'—'}</td>
-        <td class="num">${_pa2(T.frozen)} kg</td><td class="num">${_pa2(T.thawed)} kg</td>
-        <td class="num">${T.raw?_pa2(T.raw)+' kg':'—'}</td><td class="num">${T.made?_pa2(T.made)+' kg':'—'}</td>
-        <td class="num">${_pa2(T.used)} kg</td><td class="num">${Math.abs(T.exc)>0.0005?_pa2(T.exc)+' kg':'—'}</td>
-        <td class="num">${fmt(T.php)}</td></tr>
-        ${packs?`<tr><td colspan="8" class="mini" style="color:var(--muted)">Ingredient cost per pack — ${fmt(T.php)} ÷ ${packs} packs</td>
+        <td>Total</td>${_CO.map(k=>{ switch(k.k){
+          case 'needed': return `<td class="num mini" style="color:var(--muted)">${T.plan?_pa2(T.plan)+' kg':'—'}</td>`;
+          case 'frozen': return `<td class="num">${_pa2(T.frozen)} kg</td>`;
+          case 'thawed': return `<td class="num">${_pa2(T.thawed)} kg</td>`;
+          case 'raw':    return `<td class="num">${T.raw?_pa2(T.raw)+' kg':'—'}</td>`;
+          case 'created':return `<td class="num">${T.made?_pa2(T.made)+' kg':'—'}</td>`;
+          case 'used':   return `<td class="num">${_pa2(T.used)} kg</td>`;
+          case 'excess': return `<td class="num">${Math.abs(T.exc)>0.0005?_pa2(T.exc)+' kg':'—'}</td>`;
+          case 'loss':   return `<td class="num" title="every kilo the four weights do not account for, across the whole run">${Math.abs(T.loss)>0.0005?_pa2(T.loss)+' kg':'—'}${Math.abs(T.over)>0.0005?`<div class="mini" style="color:var(--danger)">${T.over>0?'+':''}${_pa2(T.over)} vs standard</div>`:''}</td>`;
+          case 'value':  return `<td class="num">${fmt(T.php)}</td>`;
+          default: return '<td></td>'; } }).join('')}</tr>
+        ${packs?`<tr><td colspan="${_CO.length}" class="mini" style="color:var(--muted)">Ingredient cost per pack — ${fmt(T.php)} ÷ ${packs} packs</td>
           <td class="num"><b>${fmt(T.php/packs)}</b>${formRec.cost_per_pack!=null?`<div class="mini" style="color:${Math.abs((+formRec.cost_per_pack||0)-T.php/packs)<0.01?'var(--muted)':'var(--earth,#b5762a)'}">saved on the batch: ${fmt(formRec.cost_per_pack)}</div>`:'<div class="mini" style="color:var(--danger)">nothing saved on the batch yet</div>'}</td></tr>`:''}
       </tfoot></table></div></div>`;
 }
@@ -2004,12 +2081,12 @@ async function pbRunSheet(){
       <thead><tr><th>Ingredient</th><th>Batch</th><th class="n">Raw used</th><th class="n">Created</th><th class="n">Yield</th></tr></thead><tbody>${prep}</tbody></table>`:''}
     <h2>Ingredients used</h2>
     <table><colgroup><col style="width:22%"><col style="width:9%"><col style="width:11%"><col style="width:11%"><col style="width:9%"><col style="width:10%"><col style="width:10%"><col style="width:9%"><col style="width:9%"></colgroup>
-      <thead>${paPrintHead({cls:'n',sub:'psub'})}</thead>
+      <thead>${paPrintHead({cls:'n',sub:'psub',full:true})}</thead>
       <tbody>${body||'<tr><td colspan="9">Nothing recorded.</td></tr>'}
       <tr class="tot"><td>Total</td><td class="n">${kg(T.need)}</td><td class="n">${kg(T.f)}</td><td class="n">${kg(T.t)}</td>
         <td class="n">${kg(T.raw)}</td><td class="n">${kg(T.made)}</td><td class="n">${kg(T.u)}</td><td class="n">${kg(T.e)}</td><td class="n">${P(T.p)}</td></tr>
       </tbody></table>
-    <div class="note">${PA_STEPS}<br>
+    <div class="note">${PA_STEPS_FULL}<br>
       <b>Used in Product</b> is the only figure that moves stock. <b>Excess to Stock</b> = (Thawed + Created) − Used in Product.
       <b>Value</b> = used × the ingredient's carrying cost at printing.</div>
     <div style="margin-top:18px;font-size:11px">Checked by ____________________________   Date ______________</div>
@@ -2295,6 +2372,12 @@ let LS_FROM='', LS_TO='';
    Past days that already have movement are shaded; today is ruled; future days
    are open boxes, because the schedule is half record and half plan.        */
 let PS_FROM='', PS_TO='', PS_CAT='product', PS_LOC='all', PS_ONLY=false, PS_Q='';
+/* "Where does this one go?" is the question asked of every ingredient row, and
+   answering it in a column of its own would have cost the width of two days.
+   It rides under the name instead, two consumers deep, the rest on hover — and
+   it can be switched off entirely for a day when only the numbers matter. */
+let PS_USED=true; try{ PS_USED=localStorage.getItem('wr_ps_used')!=='0'; }catch(e){}
+function psToggleUsed(on){ PS_USED=!!on; try{ localStorage.setItem('wr_ps_used', on?'1':'0'); }catch(e){} drawProdSched(); }
 function _psDefaults(){
   if(PS_FROM&&PS_TO) return;
   const t=new Date(); const mon=new Date(t); mon.setDate(t.getDate()-((t.getDay()+6)%7));
@@ -2307,6 +2390,269 @@ function _psDays(){
   while(d<=end && guard++<62){ out.push(d.toISOString().slice(0,10)); d.setDate(d.getDate()+1); }
   return out;
 }
+
+/* ============ PACKS PRODUCTION REQUEST =======================================
+   The weekly "what do we make?" sheet, brought inside.
+
+   The Google Sheet it replaces has to compute Current Stock as
+   `Shopify inventory + this week's production`, because Shopify is the only
+   stock number it can see and Shopify does not know about anything sitting in
+   Bulacan. The ERP does not have that problem — the ledger holds both sites —
+   so the addition is not a workaround here, it is just a column split: what the
+   shop can already sell, and what is made but not yet moved. They are shown
+   apart because the difference is a transfer somebody still has to do.
+
+   Every formula below is the sheet's, kept deliberately identical so the two can
+   be checked against each other:
+     Ave./day     = units sold in the sales window ÷ window days
+     LT demand    = Ave./day × lead time
+     Safety stock = LT demand × movement factor
+     ROP          = LT demand + Safety stock
+     PAR          = Ave./day × cycle days
+     New Par      = PAR rounded UP to a whole case
+     To Produce   = New Par + Safety stock − Current stock
+     Alert        = Current stock < ROP
+   The variables — lead time, movement, cycle, window, case size — are the
+   levers, so they are on the toolbar rather than buried in a formula.        */
+const PQ_DEF={lead:8, move:1, cycle:21, win:60, cs:12, minPacks:0};
+let PQ=Object.assign({},PQ_DEF);
+try{ PQ=Object.assign({},PQ_DEF,JSON.parse(localStorage.getItem('wr_packreq')||'{}')); }catch(e){}
+let PQ_MOVE={};   // per-SKU movement override — the one variable that is genuinely per product
+try{ PQ_MOVE=JSON.parse(localStorage.getItem('wr_packreq_move')||'{}')||{}; }catch(e){}
+let PQ_Q='', PQ_ONLY=true, PQ_GROUP='hier';
+function pqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0);
+  try{ localStorage.setItem('wr_packreq',JSON.stringify(PQ)); }catch(e){} pqDraw(); }
+function pqReset(){ PQ=Object.assign({},PQ_DEF); PQ_MOVE={};
+  try{ localStorage.removeItem('wr_packreq'); localStorage.removeItem('wr_packreq_move'); }catch(e){}
+  renderPackReq(); }
+function pqMove(sku,v){ const n=parseFloat(v);
+  if(!(n>=0) || n===PQ.move) delete PQ_MOVE[sku]; else PQ_MOVE[sku]=n;
+  try{ localStorage.setItem('wr_packreq_move',JSON.stringify(PQ_MOVE)); }catch(e){} pqDraw(); }
+const _pqCeil=(v,step)=>{ const s=+step||0; if(!(s>0)) return Math.ceil(v); return Math.ceil(v/s)*s; };
+
+function pqCalc(r){
+  const win=Math.max(1,+PQ.win||60);
+  const perDay = (+r.sold||0)/win;
+  const lead   = Math.max(0,+PQ.lead||0);
+  const move   = (PQ_MOVE[r.sku]!=null)?+PQ_MOVE[r.sku]:Math.max(0,+PQ.move||0);
+  const ltd    = perDay*lead;
+  const safety = ltd*move;
+  const rop    = ltd+safety;
+  const par    = perDay*Math.max(0,+PQ.cycle||0);
+  const newPar = _pqCeil(par, PQ.cs);
+  const cur    = (+r.shop||0)+(+r.other||0);
+  const need   = newPar + safety - cur;
+  const produce= Math.max(0, _pqCeil(Math.max(0,need), PQ.cs));
+  return {perDay, lead, move, ltd, safety, rop, par, newPar, cur, produce,
+          alert:(cur<rop), pct:(newPar>0?cur/newPar:null)};
+}
+
+async function renderPackReq(){
+  $('crumb').innerHTML='<b>Packs Production Request</b>';
+  $('cp').innerHTML=`<div class="title">Packs Production Request <span onclick="openKB('packreq')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <button class="btn sec sm" onclick="renderPackReq()">↻ Refresh</button>
+    <button class="btn sec sm" onclick="pqPrint()">🖨 Print</button>
+    <button class="btn sec sm" onclick="pqCsv()">⬇ CSV</button>
+    <button class="btn sm" onclick="pqToPlan()">▶ Send to Production Plan</button>
+    <div class="sp"></div><span style="color:var(--muted)">what the shop can sell, what is already made, and what is still owed</span>`;
+  $('content').innerHTML='<div class="repcard"><div class="empty">Reading stock and sales…</div></div>';
+
+  let prods=[], mom=[], shop=null, movs=[];
+  try{ prods=await db.list('products',{}); }catch(e){}
+  try{ mom=await momLoad(); }catch(e){}
+  try{
+    if(isLive()) shop=await sb('wr_shopify_stock?select=*');
+  }catch(e){ shop=null; }
+  try{ movs=await db.list('inventory_movements',{}); }catch(e){}
+
+  /* WHAT THE SHOP CAN SELL. Shopify's own figure when the sync is up; otherwise
+     the ledger at the selling site, which is what Shopify is meant to mirror. */
+  const shopBy={}; let shopSrc='the ledger at '+(_otherLoc(planProduceLoc())||'pasig');
+  if(shop && shop.length){ shopSrc='Shopify'; shop.forEach(r=>{ shopBy[r.variant_sku]=Math.max(0,+r.available_pasig||0); }); }
+  const sellLoc=_otherLoc(planProduceLoc())||'pasig', makeLoc=planProduceLoc()||'bulacan';
+  const ohBy={};
+  (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
+    const L=String(v.location_code||''); const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{};
+    o[L]=(o[L]||0)+(+v.qty||0); });
+  const soldBy={}; (mom||[]).forEach(r=>{ const w=+PQ.win||60;
+    soldBy[r.sku] = (w<=30?(+r.u30||0):(w<=60?(+r.u60||0):(w<=90?(+r.u90||0):(+r.u120||0)))); });
+
+  window._pqSrc=shopSrc;
+  window._pqRows=(prods||[]).filter(p=>!p.archived && !/sticker/i.test(String(p.group_1||'')))
+    .map(p=>{
+      const oh=ohBy[p.sku]||{};
+      const led=Object.keys(oh).reduce((a,k)=>a+oh[k],0);
+      const shopQ=(shopSrc==='Shopify' && shopBy[p.sku]!=null)?shopBy[p.sku]:Math.max(0,+oh[sellLoc]||0);
+      /* everything the ledger knows about that the shop cannot yet sell —
+         Bulacan production and anything else off-site. One transfer away. */
+      const other=Math.max(0, led-shopQ);
+      return {sku:p.sku, name:prodLabel({...p},{noSku:true}), group_1:(p.group_1||'Products'),
+        group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order, box:(+p.box_size||0),
+        shop:shopQ, other, bul:Math.max(0,+oh[makeLoc]||0), sold:(+soldBy[p.sku]||0)};
+    });
+  pqDraw();
+}
+
+function pqDraw(){
+  let rows=(window._pqRows||[]).slice();
+  const q=String(PQ_Q||'').trim().toLowerCase();
+  if(q) rows=rows.filter(r=>(r.name+' '+r.sku+' '+r.group_1+' '+r.group_2).toLowerCase().includes(q));
+  const calc={}; rows.forEach(r=>calc[r.sku]=pqCalc(r));
+  let show=rows;
+  if(PQ_ONLY) show=rows.filter(r=>calc[r.sku].produce>0);
+  const nAlert=rows.filter(r=>calc[r.sku].alert).length;
+  const totProduce=rows.reduce((a,r)=>a+calc[r.sku].produce,0);
+  const noSales=rows.filter(r=>!(r.sold>0)).length;
+  const kpi=(l,v,s,c)=>`<div class="kpi"><div class="l">${l}</div><div class="v"${c?` style="color:${c}"`:''}>${v}</div><div class="s">${s||''}</div></div>`;
+  const nm=(l,k,ttl,step)=>`<label class="mini" title="${esc(ttl)}" style="display:inline-flex;gap:4px;align-items:center">${l}
+    <input type="number" step="${step||1}" inputmode="decimal" value="${PQ[k]}" onchange="pqSet('${k}',this.value)"
+      style="width:56px;text-align:right;padding:3px 5px;border:1px solid var(--line);border-radius:5px"></label>`;
+
+  let h=`<div class="kpirow">
+    ${kpi('To produce', Math.round(totProduce), 'packs, across '+rows.filter(r=>calc[r.sku].produce>0).length+' product(s)', totProduce?'var(--berry)':'#4e7a3e')}
+    ${kpi('Below reorder point', nAlert, nAlert?'current stock under ROP':'every product above ROP', nAlert?'var(--danger)':'#4e7a3e')}
+    ${kpi('Sellable now', Math.round(rows.reduce((a,r)=>a+r.shop,0)), 'from '+esc(window._pqSrc||'the ledger'))}
+    ${kpi('Made, not yet sellable', Math.round(rows.reduce((a,r)=>a+r.other,0)), 'waiting on a transfer', 'var(--earth,#b5762a)')}
+  </div>
+  <div class="repcard" style="margin-top:12px">
+    <div class="repbar" style="flex-wrap:wrap;gap:10px">
+      <span>The levers</span>
+      ${nm('Lead time (days)','lead','days between asking for packs and having them')}
+      ${nm('Movement ×','move','safety-stock multiplier — raise it for a product whose sales jump about','any')}
+      ${nm('Cycle (days)','cycle','how many days of cover a full par is meant to hold')}
+      ${nm('Sales window','win','days of sales history the average is taken from — 30, 60, 90 or 120')}
+      ${nm('Case size','cs','New Par and To Produce are rounded up to a whole case of this many packs')}
+      <button class="btn sec sm" onclick="pqReset()">↺ Defaults</button>
+      <span style="flex:1"></span>
+      <input value="${esc(PQ_Q)}" placeholder="Search…" oninput="PQ_Q=this.value;pqDraw()"
+        style="min-width:150px;padding:5px 8px;border:1px solid var(--line);border-radius:6px">
+      <label class="mini"><input type="checkbox" ${PQ_ONLY?'checked':''} onchange="PQ_ONLY=this.checked;pqDraw()"> only what needs producing</label>
+    </div>
+    <div class="hint" style="margin:0 0 8px">
+      <b>Current stock</b> is <b>sellable now</b> + <b>made, not yet sellable</b> — the same sum the sheet does by hand as
+      "Shopify + this week's production", except the second number here is read from the ledger rather than typed.
+      Sellable now comes from <b>${esc(window._pqSrc||'the ledger')}</b>.
+      ${noSales?`<br><b style="color:var(--earth,#b5762a)">${noSales} product(s) have no sales in the window</b> — their average is zero, so they ask for nothing. Import sales on the Sales Momentum screen to include them.`:''}
+    </div>
+    <div style="overflow-x:auto" class="stickyhead"><table style="min-width:1180px"><thead><tr>
+      <th style="min-width:200px">Product</th>
+      <th class="num" title="what the shop can sell right now">Sellable</th>
+      <th class="num" title="made but still at ${esc(planProduceLoc()||'bulacan')} or otherwise off-shelf — one transfer away">Not yet<br>sellable</th>
+      <th class="num" title="sellable + not yet sellable">Current<br>stock</th>
+      <th class="num" title="units sold in the sales window">Sold<br>${PQ.win}d</th>
+      <th class="num" title="units sold ÷ window days">Ave.<br>/day</th>
+      <th class="num" title="average daily sale × lead time">LT<br>demand</th>
+      <th class="num" title="the safety multiplier for this product — type to override the global one">Move<br>×</th>
+      <th class="num" title="lead-time demand × movement">Safety<br>stock</th>
+      <th class="num" title="reorder point — lead-time demand + safety stock">ROP</th>
+      <th class="num" title="average daily sale × cycle days">PAR</th>
+      <th class="num" title="PAR rounded up to a whole case">New<br>Par</th>
+      <th class="num" title="current stock as a share of New Par">% of<br>par</th>
+      <th class="num" title="New Par + safety stock − current stock, rounded up to a case">To<br>produce</th></tr></thead><tbody>`;
+  const k0=v=>Math.round(v).toLocaleString('en-PH');
+  const k1=v=>(Math.round(v*10)/10).toLocaleString('en-PH',{minimumFractionDigits:1,maximumFractionDigits:1});
+  const groups={};
+  show.forEach(r=>{ const g=(PQ_GROUP==='hier')?r.group_1:'All products'; (groups[g]=groups[g]||[]).push(r); });
+  const span=14;
+  Object.keys(groups).sort().forEach(g=>{
+    const gr=groups[g];
+    h+=`<tr class="grp"><td colspan="${span}" style="background:#e7f0e9;color:#2f5d33"><b>${esc(g)}</b>
+      <span style="opacity:.55;font-weight:400">· ${gr.length} · to produce ${k0(gr.reduce((a,r)=>a+calc[r.sku].produce,0))}</span></td></tr>`;
+    gr.sort((a,b)=>calc[b.sku].produce-calc[a.sku].produce||String(a.name).localeCompare(String(b.name))).forEach(r=>{
+      const c=calc[r.sku];
+      h+=`<tr>
+        <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${c.alert?' · <b style="color:var(--danger)">reorder needed</b>':''}</div></td>
+        <td class="num">${k0(r.shop)}</td>
+        <td class="num${r.other?'':' mini'}" style="${r.other?'color:var(--earth,#b5762a)':'color:var(--muted)'}">${r.other?k0(r.other):'—'}</td>
+        <td class="num"><b>${k0(c.cur)}</b></td>
+        <td class="num mini" style="color:var(--muted)">${r.sold?k0(r.sold):'—'}</td>
+        <td class="num mini" style="color:var(--muted)">${k1(c.perDay)}</td>
+        <td class="num mini" style="color:var(--muted)">${k0(c.ltd)}</td>
+        <td class="num"><input type="number" step="any" inputmode="decimal" value="${PQ_MOVE[r.sku]!=null?PQ_MOVE[r.sku]:''}" placeholder="${PQ.move}"
+          onchange="pqMove('${esc(r.sku)}',this.value)" title="blank uses the global ${PQ.move}×"
+          style="width:52px;text-align:right;padding:3px 4px;border:1px solid var(--line);border-radius:5px"></td>
+        <td class="num mini" style="color:var(--muted)">${k0(c.safety)}</td>
+        <td class="num mini" style="color:var(--muted)">${k0(c.rop)}</td>
+        <td class="num mini" style="color:var(--muted)">${k0(c.par)}</td>
+        <td class="num">${k0(c.newPar)}</td>
+        <td class="num">${c.pct==null?'<span class="mini" style="color:var(--muted)">—</span>'
+          :`<b style="color:${c.pct<0.5?'var(--danger)':(c.pct<1?'var(--earth,#b5762a)':'#4e7a3e')}">${Math.round(c.pct*100)}%</b>`}</td>
+        <td class="num">${c.produce?`<b style="color:var(--berry)">${k0(c.produce)}</b>`:'<span class="mini" style="color:var(--muted)">—</span>'}</td></tr>`;
+    });
+  });
+  if(!show.length) h+=`<tr><td colspan="${span}" class="empty">${PQ_ONLY?'Nothing needs producing at these settings — untick “only what needs producing” to see every product.':'No products match that search.'}</td></tr>`;
+  h+=`</tbody></table></div></div>`;
+  $('content').innerHTML=h;
+  if(typeof applyStickyHeads==='function') applyStickyHeads($('content'));
+}
+
+/* Straight onto the plan, so the request is not retyped into the run. */
+async function pqToPlan(){
+  const rows=(window._pqRows||[]).map(r=>({r,c:pqCalc(r)})).filter(x=>x.c.produce>0);
+  if(!rows.length){ toast('Nothing to send — no product is short at these settings',true); return; }
+  const tot=rows.reduce((a,x)=>a+x.c.produce,0);
+  if(!confirm('Send '+rows.length+' product(s), '+Math.round(tot)+' pack(s) to the Production Plan for '+(prodPlanDate||todayISO())+'?\n\n'
+    +rows.slice(0,8).map(x=>'• '+x.r.name+' — '+Math.round(x.c.produce)).join('\n')
+    +(rows.length>8?('\n… and '+(rows.length-8)+' more'):'')
+    +'\n\nExisting lines are kept; a product already on the plan has its planned packs raised to this figure.')) return;
+  rows.forEach(x=>{
+    const ex=prodPlanLines.find(l=>l.product_sku===x.r.sku);
+    if(ex) ex.planned_packs=Math.max(+ex.planned_packs||0, Math.round(x.c.produce));
+    else prodPlanLines.push({product_sku:x.r.sku, name:x.r.name, planned_packs:Math.round(x.c.produce),
+      good_packs:0, reject_packs:0, waste_g:0, output_lot:''});
+  });
+  sysLog('prodplan',prodRunRef||'(new)','🧮 '+rows.length+' product(s) / '+Math.round(tot)+' pack(s) sent from the Packs Production Request by '+CURRENT_USER);
+  toast(rows.length+' product(s) added to the plan');
+  openModel('prodplan');
+}
+
+function _pqTable(){
+  const rows=(window._pqRows||[]).map(r=>({r,c:pqCalc(r)}));
+  return PQ_ONLY?rows.filter(x=>x.c.produce>0):rows;
+}
+function pqCsv(){
+  const H=['Product','SKU','Sellable','Not yet sellable','Current stock','Sold '+PQ.win+'d','Ave/day','Lead time','LT demand','Movement','Safety stock','ROP','PAR','New Par','Alert','To produce'];
+  const q=v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+  const body=_pqTable().map(({r,c})=>[r.name,r.sku,Math.round(r.shop),Math.round(r.other),Math.round(c.cur),Math.round(r.sold),
+    Math.round(c.perDay*100)/100,c.lead,Math.round(c.ltd),c.move,Math.round(c.safety),Math.round(c.rop),
+    Math.round(c.par),Math.round(c.newPar),(c.alert?'Reorder Needed':'OK'),Math.round(c.produce)].map(q).join(','));
+  const blob=new Blob([[H.map(q).join(',')].concat(body).join('\n')],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='wr-packs-production-request-'+todayISO()+'.csv'; document.body.appendChild(a); a.click(); a.remove();
+  toast('CSV downloaded');
+}
+function pqPrint(){
+  const rows=_pqTable();
+  const k=v=>Math.round(v).toLocaleString('en-PH');
+  const w=window.open('','_pq','width=1100,height=900'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  const body=rows.map(({r,c},i)=>`<tr><td>${i+1}</td><td>${esc(r.name)}<span class="s">${esc(r.sku)}</span></td>
+    <td class="n">${k(r.shop)}</td><td class="n">${r.other?k(r.other):'—'}</td><td class="n"><b>${k(c.cur)}</b></td>
+    <td class="n">${k(c.rop)}</td><td class="n">${k(c.newPar)}</td>
+    <td class="n"><b>${c.produce?k(c.produce):'—'}</b></td><td class="wr"></td><td class="wr"></td></tr>`).join('');
+  w.document.write(`<html><head><meta charset="utf-8"><title>Packs Production Request</title><style>
+    @page{margin:14mm;size:A4}
+    *{box-sizing:border-box} body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:12px}
+    h1{color:#4e7a3e;font-size:19px;margin:0} .hd{border-bottom:3px solid #4e7a3e;padding-bottom:8px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:flex-end}
+    .lv{color:#666;font-size:11px;margin-bottom:10px}
+    table{width:100%;border-collapse:collapse;table-layout:fixed}
+    th{background:#4e7a3e;color:#fff;padding:5px 7px;text-align:left;font-size:11px}
+    td{padding:5px 7px;border-bottom:1px solid #eee;vertical-align:middle}
+    td.n,th.n{text-align:right} .s{display:block;color:#8a887f;font-size:9.5px}
+    td.wr{border:1px solid #6f6d66;background:#fff;height:28px}
+    tr{page-break-inside:avoid} thead{display:table-header-group}
+    .ft{margin-top:18px;color:#888;font-size:10px;border-top:1px solid #eee;padding-top:6px}
+  </style></head><body>
+    <div class="hd"><h1>🐇 Wholesome Rabbit</h1><div style="text-align:right"><div style="font-size:12px;color:#666">Packs Production Request</div><div style="font-size:15px;font-weight:700">${esc(todayISO())}</div></div></div>
+    <div class="lv">Lead time ${PQ.lead} day(s) · movement ${PQ.move}× · cycle ${PQ.cycle} day(s) · sales window ${PQ.win} day(s) · case ${PQ.cs} pack(s)
+      · sellable figures from ${esc(window._pqSrc||'the ledger')}</div>
+    <table><colgroup><col style="width:4%"><col style="width:30%"><col style="width:8%"><col style="width:8%"><col style="width:8%"><col style="width:7%"><col style="width:7%"><col style="width:8%"><col style="width:10%"><col style="width:10%"></colgroup>
+      <thead><tr><th>#</th><th>Product</th><th class="n">Sellable</th><th class="n">Not yet</th><th class="n">Current</th>
+      <th class="n">ROP</th><th class="n">New Par</th><th class="n">To produce</th><th>Made</th><th>Remarks</th></tr></thead>
+      <tbody>${body}</tbody></table>
+    <p class="ft">Generated ${new Date().toLocaleString()} · ${esc(CURRENT_USER)}</p></body></html>`);
+  w.document.close(); w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},250);
+}
+
 async function renderProdSched(){
   _psDefaults();
   $('crumb').innerHTML='<b>Production Schedule</b>';
@@ -2320,6 +2666,7 @@ async function renderProdSched(){
     <input value="${esc(PS_Q)}" placeholder="Search…" oninput="PS_Q=this.value;drawProdSched()" id="psQ"
       style="min-width:150px;padding:5px 8px;border:1px solid var(--line);border-radius:6px">
     <label class="mini"><input type="checkbox" ${PS_ONLY?'checked':''} onchange="PS_ONLY=this.checked;drawProdSched()"> only what is short</label>
+    ${PS_CAT==='ingredient'?`<label class="mini" title="show, under each ingredient, the products and prep outputs that consume it"><input type="checkbox" ${PS_USED?'checked':''} onchange="psToggleUsed(this.checked)"> 🔗 what it feeds</label>`:''}
     <button class="btn sec sm" onclick="psPrint()">🖨 Print</button>
     <div class="sp"></div><span style="color:var(--muted)">day by day, in and out, against what the week owes</span>`;
   $('content').innerHTML='<div class="repcard"><div class="empty">Building the schedule…</div></div>';
@@ -2369,6 +2716,31 @@ async function renderProdSched(){
   }
   Object.keys(target).forEach(s=>{ if(!acc[s] && kindOf(s)===PS_CAT) acc[s]={sku:s,begin:0,day:{},det:{},made:0}; });
 
+  /* ---- WHERE EACH INGREDIENT ENDS UP ------------------------------------
+     Two different journeys, and the schedule has to show both:
+       • a recipe line — this ingredient goes into that product, N g a pack;
+       • a prep step   — this RAW is what that processed output is made from.
+     Read once, for ingredients only, so the other three categories pay
+     nothing for it. */
+  const usedIn={};
+  if(PS_CAT==='ingredient'){
+    try{ (await db.list('bom_lines',{})).forEach(b=>{
+      if(!b.ingredient_sku || !b.product_sku) return;
+      const pr=pm[b.product_sku]; if(!pr) return;
+      (usedIn[b.ingredient_sku]=usedIn[b.ingredient_sku]||[]).push(
+        {n:prodLabel({...pr,sku:b.product_sku},{noSku:true}), k:'product', g:+b.processed_g||0});
+    }); }catch(e){}
+    ings.forEach(it=>{ if(!it.is_intermediate) return;
+      const par=_procParent(it,_bs,_bn); if(!par||par.sku===it.sku) return;
+      (usedIn[par.sku]=usedIn[par.sku]||[]).push({n:it.name||it.sku, k:'output', g:0});
+    });
+    Object.keys(usedIn).forEach(k=>{
+      const seen={}; usedIn[k]=usedIn[k].filter(x=>seen[x.k+'|'+x.n]?false:(seen[x.k+'|'+x.n]=true))
+        .sort((a,b)=>(a.k===b.k?0:(a.k==='output'?-1:1))||(b.g-a.g)||String(a.n).localeCompare(String(b.n)));
+    });
+  }
+  window._psUsedIn=usedIn;
+
   window._psDaysList=days;
   window._psRows=Object.values(acc).map(a=>{
     const isProd=!!pm[a.sku]; const it=isProd?pm[a.sku]:(im[a.sku]||{});
@@ -2403,6 +2775,18 @@ function _psDayTitle(det){
     count_adjust:'count adjustment',thaw_loss:'drip',production:'production'};
   return Object.keys(det).map(k=>(L[k]||k)+' '+(Math.round(det[k]*100)/100)).join(' · ');
 }
+/* Two names and a count. The full list is in the tooltip, so a base material
+   feeding thirty products costs one line here rather than thirty. */
+function _psUsedLine(sku){
+  if(!PS_USED || PS_CAT!=='ingredient') return '';
+  const u=(window._psUsedIn||{})[sku]||[];
+  if(!u.length) return '';
+  const lab=x=>(x.k==='output'?'⚙ ':'')+x.n+(x.g?' ('+(Math.round(x.g*10)/10)+' g/pack)':'');
+  const head=u.slice(0,2).map(x=>(x.k==='output'?'⚙ ':'')+x.n).join(' · ');
+  const more=u.length>2?(' +'+(u.length-2)+' more'):'';
+  return `<div class="mini" style="color:var(--muted);margin-top:2px" title="${esc(u.map(lab).join('\n'))}">
+    <span style="opacity:.6">feeds</span> ${esc(head)}${more}</div>`;
+}
 function drawProdSched(){
   const days=window._psDaysList||[]; let rows=(window._psRows||[]).slice();
   const q=String(PS_Q||'').trim().toLowerCase();
@@ -2431,7 +2815,7 @@ function drawProdSched(){
     h+=`<tr class="grp"><td colspan="${span}" style="background:#e7f0e9;color:#2f5d33"><b>${esc(g)}</b> <span style="opacity:.55;font-weight:400">(${byG[g].length})</span></td></tr>`;
     byG[g].sort((a,b)=>(a.cover==null?9:a.cover)-(b.cover==null?9:b.cover)||String(a.name).localeCompare(String(b.name)))
       .forEach(r=>{
-      h+=`<tr><td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code> · ${esc(r.unit)}</div></td>
+      h+=`<tr><td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code> · ${esc(r.unit)}</div>${_psUsedLine(r.sku)}</td>
         <td class="num mini" style="color:var(--muted)">${_psQ(r.begin,r.div)}</td>`;
       days.forEach(d=>{ const v=r.day[d]||0; const x=dh(d);
         const bg=x.is?'background:#f4f8f2;':(x.past?'':'background:#fcfcfa;');
@@ -7065,13 +7449,19 @@ async function coPlanEvidence(){
 function coWhyText(ev, sku){
   const p=(ev.planned||{})[sku], d=(ev.inDemand||{})[sku];
   if(p) return 'on production plan '+(p.ref||'(draft)')+(p.date?' for '+p.date:'');
-  if(d) return (d.src==='row' ? 'in the demand table ' : (d.locked?'in locked demand ':'on the demand plot '))
-              +(d.ref?d.ref+' ':'')
-              +(d.date?'for '+d.date+' ':'')+(d.qty?'· '+d.qty+' pack(s)':'')
-              /* say WHO put it there — a row written by a load or an import is not
-                 the same thing as a week somebody planned, and reading "in the
-                 demand table" without that is what makes it look invented. */
-              +(d.src==='row' ? (d.from?' (written by '+d.from+')':'')+' — no saved demand plot covers that date yet' : '');
+  /* A ROW IS NOT A PLAN. A line sitting in the demand table means somebody
+     pushed a quantity at a date; it does not mean anyone has planned the week.
+     Leading with "in the demand table" made an unplanned order read as handled,
+     so the state comes first and the evidence comes after it. */
+  if(d) return (d.src==='row')
+    ? 'not planned yet'
+      +(d.qty?' — '+d.qty+' pack(s)':' —')+' sitting in the demand table'
+      +(d.date?' for '+d.date:'')
+      +(d.from?' (written by '+d.from+')':'')
+      +', but no saved demand plot covers that date'
+    : (d.locked?'in locked demand ':'on the demand plot ')
+      +(d.ref?d.ref+' ':'')
+      +(d.date?'for '+d.date+' ':'')+(d.qty?'· '+d.qty+' pack(s)':'');
   return '';
 }
 
@@ -7095,7 +7485,9 @@ async function coSyncStatuses(){
   const ev=await coPlanEvidence();
   const planned=ev.planned, inDemand=ev.inDemand;
   // plus whatever is typed into the demand run on screen right now
-  Object.keys(mrpDemand||{}).forEach(s=>{ if((+mrpDemand[s]||0)>0 && !inDemand[s]) inDemand[s]={date:(typeof MRPDATE!=='undefined'?MRPDATE:''), qty:+mrpDemand[s]||0}; });
+  Object.keys(mrpDemand||{}).forEach(s=>{ if((+mrpDemand[s]||0)>0 && !inDemand[s])
+    inDemand[s]={date:(typeof MRPDATE!=='undefined'?MRPDATE:''), qty:+mrpDemand[s]||0,
+                 src:'row', from:'the demand screen, not saved yet'}; });
 
   const byOrder={}; (lines||[]).forEach(l=>{ if(l.product_sku) (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
   // attribute produced packs soonest-needed-first so a shared SKU cannot complete two orders at once
@@ -7122,8 +7514,19 @@ async function coSyncStatuses(){
       next='in_production';
       why[o.order_ref]=coWhyText({planned},(ls.find(l=>planned[l.product_sku])||{}).product_sku);
     }
-    else if(ls.some(l=>inDemand[l.product_sku])){
+    /* ONLY A SAVED PLOT COUNTS AS "Added in Demand".
+       A bare row in the demand table is a quantity somebody pushed at a date —
+       an import, a sync, a load. Nobody has planned that week, nothing is
+       reserved, and the kitchen has no DP reference to work from. Promoting on
+       a row alone told the board an order was handled when the only thing that
+       had happened was a row appearing. A row now leaves the order exactly
+       where it was, waiting to be planned, and says so. */
+    else if(ls.some(l=>{ const d=inDemand[l.product_sku]; return d && d.src!=='row'; })){
       next='in_demand';
+      why[o.order_ref]=coWhyText({inDemand},(ls.find(l=>{ const d=inDemand[l.product_sku]; return d && d.src!=='row'; })||{}).product_sku);
+    }
+    else if(ls.some(l=>inDemand[l.product_sku])){
+      next='for_production';
       why[o.order_ref]=coWhyText({inDemand},(ls.find(l=>inDemand[l.product_sku])||{}).product_sku);
     }
     /* This used to say "For Production", which told the kitchen to expect work
@@ -9830,6 +10233,13 @@ async function prodKitchenSheet(){
      number nobody ever improves; drip loss you weigh is one you can argue with. */
   const _yrHead=paPrintHead({value:false});
   const _blank=`<td class="num"><span class="yr-box"></span></td>`;
+  /* The row was a hardcoded run of blanks, so the moment the sheet lost two
+     columns every figure sat under the wrong heading. It follows the list now,
+     like the heading above it does. */
+  const _yrCols=paCols().filter(c=>c.k!=='value');
+  const _yrRow=need=>_yrCols.map(c=>c.k==='needed'
+    ? `<td class="num"><b>${_ksKg(need)}</b></td>`
+    : (c.k==='used' ? `<td class="num"><span class="yr-box pre">${_ksKg(need)}</span></td>` : _blank)).join('');
   const yieldRecordHtml=KSHEET_ORDER.map(k=>{
     const entries=[...combined.entries()].filter(([,v])=>v.cat===k).sort((a,b)=>b[1].grams-a[1].grams);
     if(!entries.length) return '';
@@ -9840,8 +10250,7 @@ async function prodKitchenSheet(){
         const n=_needBySku[v.sku]||{}; const need=(n.needG!=null)?n.needG:v.grams;
         return `<tr><td><span class="ingred-name">${esc2(name)}${v.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span>
           ${n.ohProcG?('<div class="ingred-note">nasa freezer: '+_ksKg(n.ohProcG)+(n.yieldPct?(' · yield '+n.yieldPct+'%'):'')+'</div>'):''}</td>
-          <td class="num"><b>${_ksKg(need)}</b></td>${_blank}${_blank}${_blank}${_blank}
-          <td class="num"><span class="yr-box pre">${_ksKg(need)}</span></td>${_blank}</tr>`; }).join('')}
+          ${_yrRow(need)}</tr>`; }).join('')}
       </tbody></table></div>`;
   }).join('');
 
@@ -9867,17 +10276,9 @@ async function prodKitchenSheet(){
     </div>
     <div class="card combined-section yield-record">
       <h2>Talaan ng Yield ng Sangkap · Ingredient Yield Record</h2>
-      <p class="hint">Isulat ang <b>aktwal</b> na timbang habang ginagawa. Apat na hakbang:<br>
-        <b>1 · Pulled Out (Processed) → Thawed Processed</b> — timbangin paglabas sa freezer, tunawin, timbangin ulit. Ang pagkakaiba ay tubig na nawala.<br>
-        <b>2 · + Raw Pulled Out → Processed Created</b> — hilaw na hinugot at ginamit, at kung magkano ang nagawa mula rito.<br>
-        <b>3 · = Used in Product</b> — nakasulat na ang kailangan; palitan lang kung mas marami o mas kaunti ang ginamit.<br>
-        <b>4 · * Excess to Stock</b> — ang natira, babalik sa processed stock.</p>
+      <p class="hint">Isulat ang <b>aktwal</b> na timbang habang ginagawa. Apat na hakbang:<br>${PA_STEPS_TL}</p>
       <div id="yieldRecord">${yieldRecordHtml}
-        <div class="yr-legend">
-          <span><b>Drip loss</b> = Pulled Out (Processed) − Thawed Processed</span>
-          <span><b>Yield</b> = Processed Created ÷ Raw Pulled Out</span>
-          <span><b>Excess to Stock</b> = (Thawed + Created) − Used in Product</span>
-        </div>
+        <div class="yr-legend">${PA_LEGEND_TL}</div>
         <div class="card" style="margin-top:20px">
           <h2 style="margin-bottom:14px;">Pangkalahatang Sign-Off (Araw ng Produksyon)</h2>
           <div class="mix-content">
@@ -9989,22 +10390,40 @@ function prodRemainCell(i){ const l=prodPlanLines[i]; const el=$('prem'+i); if(!
   const rem=_prodRemain(l.product_sku,l.good_packs); el.innerHTML=`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`; }
 function prodAddLine(sku){ if(!sku)return; if(prodPlanLines.some(l=>l.product_sku===sku)){ drawProdPlan(); return; } const p=(window._prodAllProducts||[]).find(x=>x.sku===sku)||{}; prodPlanLines.push({product_sku:sku,name:p.name||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:0,reject_packs:0,waste_g:0,output_lot:''}); drawProdPlan(); }
 function prodDelLine(i){ prodPlanLines.splice(i,1); drawProdPlan(); prodPackTouch(); }
-async function prodPersist(status){
+/* `status` writes the product lines. Pass allowEmpty when the run is legitimately
+   product-free — a prep-only day, where every product came off the plan and only
+   output ingredients are being made. Refusing to save that run was the bug: the
+   removals never reached the database, the old plan document kept the deleted
+   lines, and reopening the plan brought every one of them back. */
+async function prodPersist(status, allowEmpty){
   const active=prodPlanLines.filter(l=>(+l.planned_packs||0)>0||(+l.good_packs||0)>0);
-  if(!active.length){ toast('Nothing to save — load demand or enter packs',true); return null; }
+  if(!active.length && !allowEmpty){ toast('Nothing to save — load demand or enter packs',true); return null; }
   if(!prodRunRef){ prodRunRef=(await genRef('PR',{date:prodPlanDate})).ref; }
   const recs=active.map((l,i)=>({batch_ref:prodRunRef+'/'+_p2(i+1), run_ref:prodRunRef, product_sku:l.product_sku, planned_packs:+l.planned_packs||0, good_packs:+l.good_packs||0, reject_packs:+l.reject_packs||0, waste_g:+l.waste_g||0, output_lot:l.output_lot||'', production_date:prodPlanDate, status, operator:CURRENT_USER}));
   if(isLive()){
-    try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef),{method:'DELETE',prefer:'return=minimal'}); }catch(e){}
-    try{ await sb('production_batches',{method:'POST',prefer:'return=minimal',body:JSON.stringify(recs)}); }catch(e){ toast(e.message,true); return null; }
-  } else { DEMO.production_batches=(DEMO.production_batches||[]).filter(b=>b.run_ref!==prodRunRef).concat(recs); }
+    /* The delete is what actually removes a line somebody took off the plan, so
+       it has to run even when nothing is going back in. It deliberately spares
+       kind='output' rows: those are confirmed prep records, not draft product
+       lines, and a later draft save must not quietly destroy them. */
+    try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef)+'&kind=is.null',{method:'DELETE',prefer:'return=minimal'}); }catch(e){}
+    try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef)+'&kind=neq.output',{method:'DELETE',prefer:'return=minimal'}); }catch(e){}
+    if(recs.length){ try{ await sb('production_batches',{method:'POST',prefer:'return=minimal',body:JSON.stringify(recs)}); }catch(e){ toast(e.message,true); return null; } }
+  } else { DEMO.production_batches=(DEMO.production_batches||[]).filter(b=>!(b.run_ref===prodRunRef && b.kind!=='output')).concat(recs); }
   return recs;
 }
-async function prodSaveDraft(){ const r=await prodPersist('draft'); if(r){ await prodSavePlanDoc('draft');
-  sysLog('production_batches',prodRunRef,'📝 Draft production plan saved ('+r.length+' batches) by '+CURRENT_USER); drawProdPlan();
+async function prodSaveDraft(){
+  /* A prep-only day is a real day. If there are output ingredients on the plan
+     the run saves even with no product lines at all — that is precisely how you
+     record "we made no packs today, we only broke down carcasses". */
+  const anyOut=prodOutLines.some(l=>(+l.needed_kg||0)>0||(+l.raw_kg||0)>0);
+  const anyProd=prodPlanLines.some(l=>(+l.planned_packs||0)>0||(+l.good_packs||0)>0);
+  if(!anyProd && !anyOut && !prodRunRef){ toast('Nothing to save — load demand, enter packs, or add an output ingredient',true); return; }
+  const r=await prodPersist('draft', anyOut||!!prodRunRef); if(r){ await prodSavePlanDoc('draft');
+  sysLog('production_batches',prodRunRef,'📝 Draft production plan saved ('+r.length+' product line(s), '+prodOutLines.length+' output ingredient(s)) by '+CURRENT_USER); drawProdPlan();
   try{ await coSyncStatuses(); }catch(e){}      // a custom SKU on a plan → "In Production"
   let sh=[]; try{ sh=await _prodShortages(); }catch(e){}
-  if(sh.length){ _prodShortWarn(sh, 'Draft saved · '+prodRunRef); } else { toast('Draft saved · '+prodRunRef+' · ✓ stock covers the run'); }
+  if(sh.length){ _prodShortWarn(sh, 'Draft saved · '+prodRunRef); }
+  else { toast('Draft saved · '+prodRunRef+(r.length?' · ✓ stock covers the run':' · prep only, no packs on this run')); }
 } }
 
 /* ---- Draft plans you can come back to ---------------------------------------
@@ -10203,13 +10622,24 @@ async function openProdActuals(){
          the yield figure, which is a DIFFERENT loss (trimming raw down to
          processed) measured at a different step. Conflating them makes both
          numbers lies. Two weighings, so the drip is measured, not guessed. */
-      frozenOutKg, thawTouched:false,
+      frozenOutKg,
+      /* A PREP LINE THAT WAS WEIGHED. If the plan carries a thawed weight the
+         team put on a scale, that is a measurement, not a gap to be modelled —
+         so the row opts out of the short sheet's derivation and keeps it. */
+      thawTouched:(type==='B' && _ol.thawed_kg!=='' && _ol.thawed_kg!=null),
       thawLossKg:Math.round((frozenOutKg-procUsedKg)*1000)/1000,
       /* What actually goes INTO the product. It starts at what the recipe needs,
          because that is the plan — but the kitchen decides on the day, and a mix
          that takes a little more or less should be recorded as it happened
          rather than forced back to the plan. Whatever is left is excess. */
-      usedKg:Math.round(neededG/10)/100, excessKg:0, excessAnchor:false,
+      /* A PREP RUN MAKES TO STOCK. Seeding `used` with the needed qty made the
+         short sheet claim a standalone prep put its whole output into a pack,
+         which it never does — everything it makes is kept. So for type B the
+         excess is the anchor and starts at the whole expected output. */
+      usedKg:(type==='B')?0:Math.round(neededG/10)/100,
+      excessKg:(type==='B')?Math.round((thawedG+shortG)/10)/100:0,
+      excessAnchor:(type==='B'),
+      advTouched:(type==='B' && _ol.thawed_kg!=='' && _ol.thawed_kg!=null),
       procUsedKg, actualRawKg:Math.round(rawG/10)/100, actualMadeKg:Math.round(shortG/10)/100 }; };
   const A=Object.keys(agg).map(sku=>mk(sku,agg[sku].neededG,'A'));
   const B=prodOutLines.filter(l=>(+l.needed_kg||0)>0).map(l=>mk(l.ingredient_sku,(+l.needed_kg||0)*1000,'B'));
@@ -10221,6 +10651,22 @@ async function openProdActuals(){
   const _bySheet=(u,v)=>((_ord[u.sku]!=null?_ord[u.sku]:9e9)-(_ord[v.sku]!=null?_ord[v.sku]:9e9));
   A.sort(_bySheet); B.sort(_bySheet);
   window._prodAct=A.concat(B);
+  /* What the PLAN says, before anybody touches it. Kept so "has this been
+     typed in?" is answered by comparison rather than by a flag somebody has to
+     remember to set. */
+  window._paSeed=_paSnap(window._prodAct);
+  /* …and then whatever they had already typed, if the sheet was closed or the
+     browser died before the run was posted. Merged by SKU, so a plan that has
+     since changed still gets its new lines. */
+  window._paRestored=null;
+  const _d=paDraftRead();
+  if(_d){
+    let hit=0;
+    window._prodAct.forEach(x=>{ const r=_d.rows[x.sku]; if(!r) return;
+      PA_DRAFT_FIELDS.forEach(f=>{ if(r[f]!==undefined) x[f]=r[f]; }); hit++; });
+    if(hit && paDirty()) window._paRestored=new Date(_d.at).toLocaleString();
+    else paDraftClear();
+  }
   drawProdActuals();
 }
 /* ---- Actuals maths, in one place so the row, the recap and the totals agree ----
@@ -10233,7 +10679,50 @@ async function openProdActuals(){
    yieldPct        actualMade ÷ actualRaw — the REAL yield for this run
    totalKg         procUsed + actualMade — everything available to the mix
    excessKg        total − needed — what goes back into processed stock          */
+/* ---- FOUR NUMBERS, NOT SIX -------------------------------------------------
+   The kitchen weighs four things and only four: what came out of the freezer,
+   what raw was used, what went into the packs, and what was kept back. Asking
+   them to ALSO weigh the thawed material and the processed output was asking
+   for two more scale readings in the middle of a run, and those two were the
+   ones that came back wrong or blank.
+   Everything that is missing is one number: L = pulled + raw − used − excess.
+   That is the run's total loss, and it is MEASURED — it falls straight out of
+   the four weights, with nothing to fudge.
+   Splitting L into drip and knife-work is the only part that needs thought:
+     • raw = 0  → nothing was butchered, so every gram of L is freezer-side.
+     • pulled = 0 → nothing was thawed, so every gram of L is knife-side.
+     • both     → the split is MODELLED from the item's own standards, and the
+                  screen says so rather than pretending it was weighed.
+   A team that does weigh the thawed material can still say so; their scale
+   then wins and the split becomes exact again. */
+/* Only a row BUILT for the short sheet is derived. `advTouched` is set to a
+   real boolean by the two places that construct these rows — the confirm screen
+   and the batch record — so a row that never carried the flag is one somebody
+   assembled by hand with its own middle weights, and those are left alone. */
+function paIsSimple(x){ return !!(PA_SIMPLE && x && x.advTouched===false); }
+function paDerive(x){
+  if(!paIsSimple(x)) return;
+  const P=(x.type==='A')?Math.max(0,+x.frozenOutKg||0):Math.max(0,+x.frozenOutKg||0);
+  const R=Math.max(0,+x.actualRawKg||0);
+  const U=Math.max(0,+x.usedKg||0), E=(+x.excessKg||0);
+  const L=Math.round((P+R-U-E)*1000)/1000;              // the whole loss, measured
+  const drip=Math.min(0.9,Math.max(0,(+x.thawPct||0)/100));
+  /* Drip can never be negative — nothing gains weight coming out of a freezer.
+     When L itself is negative the run put MORE into the product than it took
+     out of stock, which is not a drip problem, it is a mis-weigh; the impossible
+     part is left on the raw side where the yield will scream about it, and the
+     Loss column goes negative so the screen can say so. */
+  let thaw;
+  if(P<=0)      thaw=0;                                  // nothing was thawed
+  else if(R<=0) thaw=Math.max(0,L);                      // nothing was butchered
+  else          thaw=Math.min(Math.max(0,L), Math.round(P*drip*1000)/1000);
+  thaw=Math.round(thaw*1000)/1000;
+  x.thawLossKg=thaw;
+  x.procUsedKg=Math.round((P-thaw)*1000)/1000;           // what reached the bowl
+  x.actualMadeKg=Math.round((R-(L-thaw))*1000)/1000;     // what came off the raw
+}
 function _paCalc(x){
+  paDerive(x);
   const needed=+x.neededKg||0, proc=(x.type==='A')?(+x.procUsedKg||0):0;
   const raw=+x.actualRawKg||0, made=+x.actualMadeKg||0;
   /* Thaw loss is weight that leaves the FREEZER but never reaches the bowl. So
@@ -10261,10 +10750,35 @@ function _paCalc(x){
      Type an EXCESS and it takes over: from then on, raising Processed created
      raises what goes into the product rather than growing the leftovers. */
   let used, excess;
-  if(x.excessAnchor){ excess=Math.round((+x.excessKg||0)*1000)/1000; used=Math.round((total-excess)*1000)/1000; }
+  if(paIsSimple(x)){
+    /* Both ends are weighed, so neither chases the other. What does not balance
+       shows up in the Loss column, which is the point. */
+    used=Math.max(0,+x.usedKg||0); excess=Math.round((+x.excessKg||0)*1000)/1000;
+  }
+  else if(x.excessAnchor){ excess=Math.round((+x.excessKg||0)*1000)/1000; used=Math.round((total-excess)*1000)/1000; }
   else { used=(x.usedKg==null||x.usedKg==='')?needed:Math.max(0,+x.usedKg||0);
          excess=Math.round((total-used)*1000)/1000; }
-  return {needed,proc,raw,made,used,shortfall,stdYield,yieldPct,total,excess,thaw,drawn,frozen,thawPct,thawYield};
+  /* ---- the loss, and an honest account of where it came from --------------
+     loss        pulled + raw − used − excess. Measured, not estimated.
+     dripNormal  what this item's standard drip says the freezer should cost.
+     trimNormal  what its standard yield says the knife should cost.
+     over        everything else — spillage, spoilage, over-trim, a mis-weigh.
+                 This is the only one of the three worth arguing about, and the
+                 three always add back to `loss`.                             */
+  const loss=Math.round((frozen+raw-used-excess)*1000)/1000;
+  const dripNormal=Math.round(frozen*Math.min(0.9,Math.max(0,(+x.thawPct||0)/100))*1000)/1000;
+  const trimNormal=Math.round(raw*(1-(x.yield||1))*1000)/1000;
+  const over=Math.round((loss-dripNormal-trimNormal)*1000)/1000;
+  const lossCertain=(frozen<=0||raw<=0);   // only one path was used, so the split is fact
+  /* COMING UP SHORT, in whichever way the sheet can express it.
+     On the long sheet it shows as a negative excess: more went into the product
+     than the run made available. On the short sheet used and excess are both
+     weighed, so the same impossibility surfaces as a NEGATIVE loss — more came
+     out of the bowl and the bin than ever went into them. One flag, both. */
+  const short=(excess<-0.0005) || (paIsSimple(x) && (frozen+raw-used-excess)<-0.0005);
+  const lossPct=(frozen+raw)>0?Math.round((loss/(frozen+raw))*1000)/10:0;
+  return {needed,proc,raw,made,used,shortfall,stdYield,yieldPct,total,excess,thaw,drawn,frozen,thawPct,thawYield,
+          loss,dripNormal,trimNormal,over,lossCertain,lossPct,short};
 }
 const _pa2=v=>(Math.round(v*1000)/1000);
 // Plain-language recap under each row. This is the part that stops the "wait, is
@@ -10279,6 +10793,17 @@ function _paRecap(x){
   bits.push(`available <b>${_pa2(c.total)}</b> kg → used <b>${_pa2(c.used)}</b> in the product${Math.abs(c.used-c.needed)>0.0005?` <span style="color:var(--berry)">(recipe said ${_pa2(c.needed)})</span>`:''}`);
   bits.push(c.excess>0.0005?`<b style="color:#4e7a3e">${_pa2(c.excess)} kg excess to stock</b>`
     :(c.excess<-0.0005?`<b style="color:var(--danger)">${_pa2(-c.excess)} kg SHORT — used more than the run made available</b>`:'nothing left over'));
+  if(paIsSimple(x)){
+    /* Say the subtraction out loud. This is the sentence that stops "where did
+       the other two kilos go?" from being a conversation. */
+    const acct=[];
+    if(c.dripNormal>0.0005) acct.push(`${_pa2(c.dripNormal)} normal drip`);
+    if(c.trimNormal>0.0005) acct.push(`${_pa2(c.trimNormal)} normal trimming`);
+    const over=c.over>0.0005?`<b style="color:var(--danger)">${_pa2(c.over)} kg unaccounted for</b>`
+             :(c.over<-0.0005?`<b style="color:#4e7a3e">${_pa2(-c.over)} kg better than standard</b>`:'nothing unexplained');
+    bits.push(`loss <b style="color:var(--earth,#b5762a)">${_pa2(c.loss)}</b> kg${c.lossPct?` (${c.lossPct}%)</b>`:''} = ${acct.length?acct.join(' + ')+' + ':''}${over}`
+      +(c.lossCertain?'':` <span style="color:var(--muted)">· split modelled, only the total is weighed</span>`));
+  }
   return bits.join(' · ');
 }
 // Numeric input that survives a decimal point: oninput only touches the model and
@@ -10289,7 +10814,7 @@ function _paRecap(x){
    afterwards, and the printed sheet. When each carried its own headings, the
    same figure had three names and nobody could carry a habit from one to the
    next. One list now, one order, everywhere.                                  */
-const PA_COLS=[
+const PA_COLS_FULL=[
   {k:'needed',  op:'',  a:'Needed',    b:'Qty',          f:null},
   {k:'frozen',  op:'',  a:'Pulled Out',b:'(Processed)',  f:'frozenOutKg'},
   {k:'thawed',  op:'→', a:'Thawed',    b:'Processed',    f:'procUsedKg'},
@@ -10299,35 +10824,96 @@ const PA_COLS=[
   {k:'excess',  op:'*', a:'Excess',    b:'to Stock',     f:'excessKg'},
   {k:'value',   op:'',  a:'Value',     b:'',             f:null},
 ];
+/* The default sheet. Four weights, one loss, one value. */
+const PA_COLS_SIMPLE=[
+  {k:'needed',  op:'',  a:'Needed',    b:'Qty',          f:null},
+  {k:'frozen',  op:'',  a:'Pulled Out',b:'(Processed)',  f:'frozenOutKg'},
+  {k:'raw',     op:'+', a:'Raw',       b:'Used',         f:'actualRawKg'},
+  {k:'used',    op:'=', a:'Used in',   b:'Packs',        f:'usedKg'},
+  {k:'excess',  op:'*', a:'Excess',    b:'to Stock',     f:'excessKg'},
+  {k:'loss',    op:'−', a:'Loss',      b:'drip + waste', f:null},
+  {k:'value',   op:'',  a:'Value',     b:'',             f:null},
+];
+let PA_SIMPLE=true;
+try{ PA_SIMPLE=localStorage.getItem('wr_pa_full')!=='1'; }catch(e){}
+/* `{full:true}` forces the long list regardless of the setting. A RECORD is
+   not a form: the short sheet exists to make ENTERING a run easier, and it must
+   never decide how much of a run already entered you are allowed to see. */
+function paCols(opts){ return (opts&&opts.full)?PA_COLS_FULL:(PA_SIMPLE?PA_COLS_SIMPLE:PA_COLS_FULL); }
+function paSpan(noValue,opts){ return paCols(opts).filter(c=>!(noValue&&c.k==='value')).length+1; }
+function paToggleSimple(on){
+  PA_SIMPLE=!on;
+  try{ localStorage.setItem('wr_pa_full', on?'1':'0'); }catch(e){}
+  /* Coming back to the short sheet, the two middle weights are derived again —
+     otherwise a number typed in the long view would quietly outrank the four. */
+  /* only the LIVE confirm screen goes back to deriving — an opened batch record
+     is history and keeps the weights it was posted with, in either view. */
+  if(PA_SIMPLE) (window._prodAct||[]).forEach(x=>{ if(x && !x.thawTouched) x.advTouched=false; });
+  if(window._prodAct && $('modal') && $('overlay').classList.contains('on')) drawProdActuals();
+  if(typeof _pbRows!=='undefined' && _pbRows.length && $('pbIng')) pbDraw();
+}
+function paToggleBtn(){
+  return `<label class="mini" style="display:inline-flex;gap:5px;align-items:center;color:var(--muted);cursor:pointer;white-space:nowrap"
+    title="The short sheet asks for four weights and works the rest out. Tick this to weigh and type the thawed and processed figures yourself.">
+    <input type="checkbox" ${PA_SIMPLE?'':'checked'} onchange="paToggleSimple(this.checked)"> ⚖ weigh the middle steps too</label>`;
+}
 /* The operator belongs IN the heading. Read left to right the row is a
-   sentence: pulled out → thawed, plus raw pulled out → processed created,
-   = used in product, * whatever is left. Without the symbols the eight
-   columns look like eight unrelated boxes to fill, which is exactly how
-   they were being filled. */
-const PA_OP_TITLE={'→':'becomes','+':'and also','=':'goes into the product','*':'and the remainder is kept'};
+   sentence: pulled out, plus raw used, = used in packs, * what is kept back,
+   − what never arrived. Without the symbols the columns look like unrelated
+   boxes to fill, which is exactly how they were being filled. */
+const PA_OP_TITLE={'→':'becomes','+':'and also','=':'goes into the product','*':'and the remainder is kept','−':'and this never arrived'};
 function _paOp(c,style){ return c.op
   ? `<span title="${esc(PA_OP_TITLE[c.op]||'')}" style="${style||'opacity:.55;font-weight:400;margin-right:3px'}">${esc(c.op)}</span>` : ''; }
 function paHead(opts){ opts=opts||{};
-  const cols=PA_COLS.filter(c=>opts.value!==false||c.k!=='value');
+  const cols=paCols(opts).filter(c=>opts.value!==false||c.k!=='value');
   return `<thead><tr><th>Ingredient</th>`+cols.map(c=>
     `<th class="num">${_paOp(c)}${esc(c.a)}${c.b?`<br><span style="font-weight:400;opacity:.8">${esc(c.b)}</span>`:''}</th>`).join('')+`</tr></thead>`;
 }
 /* The same headings for a printed page, where the class names differ. */
 function paPrintHead(opts){ opts=opts||{};
   const cls=(opts.cls||'num'), sub=(opts.sub||'sub');
-  const cols=PA_COLS.filter(c=>opts.value!==false||c.k!=='value');
+  const cols=paCols(opts).filter(c=>opts.value!==false||c.k!=='value');
   return `<tr><th>Ingredient</th>`+cols.map(c=>
     `<th class="${cls}">${_paOp(c,'opacity:.6;font-weight:400;margin-right:2px')}${esc(c.a)}`
     +(c.b?`<span class="${sub}">${esc(c.b)}</span>`:'')+`</th>`).join('')+`</tr>`;
 }
-const PA_STEPS=`<b>1 · Pulled Out (Processed) → Thawed Processed</b> — weigh what leaves the freezer, thaw it, weigh it again. The difference is drip loss.<br>
+const PA_STEPS_SIMPLE=`<b>1 · Pulled Out (Processed)</b> — weigh what left the freezer, still frozen.<br>
+      <b>2 · + Raw Used</b> — weigh the raw that was pulled and worked on.<br>
+      <b>3 · = Used in Packs</b> — what actually went into the product. Starts at the recipe figure; change it if the kitchen allocated more or less.<br>
+      <b>4 · * Excess to Stock</b> — weigh what was kept back and returned to the freezer.`;
+/* The bench sheet is in Tagalog, and it has to say the SAME thing as the screen
+   — otherwise the kitchen fills in one set of boxes and the office reads
+   another. So it comes off the same switch. */
+const PA_STEPS_TL_SIMPLE=`<b>1 · Pulled Out (Processed)</b> — timbangin ang inilabas sa freezer, habang yelo pa.<br>
+        <b>2 · + Raw Used</b> — timbangin ang hilaw na hinugot at ginamit.<br>
+        <b>3 · = Used in Packs</b> — nakasulat na ang kailangan; palitan lang kung mas marami o mas kaunti ang ginamit.<br>
+        <b>4 · * Excess to Stock</b> — timbangin ang natira na ibinalik sa freezer.`;
+const PA_STEPS_TL_FULL=`<b>1 · Pulled Out (Processed) → Thawed Processed</b> — timbangin paglabas sa freezer, tunawin, timbangin ulit. Ang pagkakaiba ay tubig na nawala.<br>
+        <b>2 · + Raw Pulled Out → Processed Created</b> — hilaw na hinugot at ginamit, at kung magkano ang nagawa mula rito.<br>
+        <b>3 · = Used in Product</b> — nakasulat na ang kailangan; palitan lang kung mas marami o mas kaunti ang ginamit.<br>
+        <b>4 · * Excess to Stock</b> — ang natira, babalik sa processed stock.`;
+Object.defineProperty(window,'PA_STEPS_TL',{get(){ return PA_SIMPLE?PA_STEPS_TL_SIMPLE:PA_STEPS_TL_FULL; }});
+Object.defineProperty(window,'PA_LEGEND_TL',{get(){ return PA_SIMPLE
+  ? `<span><b>Loss</b> = Pulled Out + Raw Used − Used in Packs − Excess to Stock</span>
+     <span><b>Kasama rito</b> ang tubig na nawala sa pagtunaw at ang natapon o nasayang</span>
+     <span><b>Huwag hulaan</b> — timbangin ang apat, kami na ang bahala sa iba</span>`
+  : `<span><b>Drip loss</b> = Pulled Out (Processed) − Thawed Processed</span>
+     <span><b>Yield</b> = Processed Created ÷ Raw Pulled Out</span>
+     <span><b>Excess to Stock</b> = (Thawed + Created) − Used in Product</span>`; }});
+const PA_STEPS_FULL=`<b>1 · Pulled Out (Processed) → Thawed Processed</b> — weigh what leaves the freezer, thaw it, weigh it again. The difference is drip loss.<br>
       <b>2 · Raw Pulled Out → Processed Created</b> — what was pulled and trimmed, and what came off it. That ratio is the run's real yield.<br>
       <b>3 · = Used in Product</b> — starts at the needed qty because that is the plan; change it if the kitchen allocated more or less on the day.<br>
       <b>4 · * Excess to Stock</b> — the remainder. Whatever the product did not take goes back into processed stock.`;
-const PA_HELP=`Four steps, left to right, all <b>actual weights off the scale</b>:<br>
-      ${PA_STEPS}<br>
-      <span style="color:var(--muted)">Steps 3 and 4 are two ends of one number, so type into whichever you actually counted — the other follows.
-      Type an <b>excess</b> and any extra <b>processed created</b> goes into the product instead of growing the leftovers.</span>`;
+Object.defineProperty(window,'PA_STEPS',{get(){ return PA_SIMPLE?PA_STEPS_SIMPLE:PA_STEPS_FULL; }});
+const PA_HELP_FULL=`Six weights off the scale, left to right:<br>${PA_STEPS_FULL}<br>
+     <span style="color:var(--muted)">Steps 3 and 4 are two ends of one number, so type into whichever you actually counted — the other follows.</span>`;
+Object.defineProperty(window,'PA_HELP',{get(){ return PA_SIMPLE
+  ? `Four weights off the scale, left to right:<br>${PA_STEPS_SIMPLE}<br>
+     <span style="color:var(--muted)">The <b>Loss</b> column is everything the four weights do not account for — <b>pulled + raw − used − excess</b>.
+     Hover it to see how much of that is normal drip, how much is normal trimming, and how much is neither.
+     Nothing in that column is typed, so nothing in it can be talked into a better number.</span>`
+  : `Six weights off the scale, left to right:<br>${PA_STEPS_FULL}<br>
+     <span style="color:var(--muted)">Steps 3 and 4 are two ends of one number, so type into whichever you actually counted — the other follows.</span>`; }});
 function _paNum(i,field,w,title){
   const x=(window._prodAct||[])[i]||{};
   return `<input id="pa_${field}_${i}" type="number" step="any" inputmode="decimal" value="${x[field]}" title="${esc(title||'')}"
@@ -10340,6 +10926,11 @@ function _paEdit(i,field,v){
   /* Typing the frozen weight moves the thawed weight with it at the standard
      drip — until the team types a thawed weight of their own, at which point
      their scale wins and we stop guessing on their behalf. */
+  /* On the short sheet the two middle weights are DERIVED, so nothing here may
+     write them and nothing may re-default the raw off them — all four cells are
+     the operator's own scale readings and stay exactly as typed. */
+  if(paIsSimple(x)){ _paCalc(x); _paRefresh(); paDraftSave(); return; }
+  if(field==='procUsedKg'||field==='actualMadeKg') x.advTouched=true;
   if(field==='procUsedKg') x.thawTouched=true;
   if(field==='frozenOutKg' && !x.thawTouched){
     const t=Math.min(0.9,Math.max(0,(+x.thawPct||0)/100));
@@ -10354,27 +10945,53 @@ function _paEdit(i,field,v){
      is not being typed in always shows the number it will actually post. */
   { const c=_paCalc(x);
     if(x.excessAnchor) x.usedKg=c.used; else x.excessKg=c.excess; }
-  _paRefresh();
+  _paRefresh(); paDraftSave();
 }
 // Repaint only the computed cells — never the inputs, so the caret stays put.
 function _paRefresh(){
   (window._prodAct||[]).forEach((x,i)=>{
     const c=_paCalc(x);
-    const uz=$('pa_usedKg_'+i);   if(uz && document.activeElement!==uz) uz.value=c.used;
-    const ex=$('pa_excessKg_'+i); if(ex && document.activeElement!==ex) ex.value=c.excess;
-
+    if(!paIsSimple(x)){
+      const uz=$('pa_usedKg_'+i);   if(uz && document.activeElement!==uz) uz.value=c.used;
+      const ex=$('pa_excessKg_'+i); if(ex && document.activeElement!==ex) ex.value=c.excess;
+      const rw=$('parw'+i); if(rw && document.activeElement!==rw) rw.value=x.actualRawKg;
+      const md=$('pamd'+i); if(md && document.activeElement!==md) md.value=x.actualMadeKg;
+    }
+    const ls=$('paloss'+i); if(ls) ls.innerHTML=paLossCell(x);
+    const vv=$('paval'+i);  if(vv) vv.innerHTML=fmt(c.used*(+x.outCostG||0)*1000);
     const r=$('parc'+i); if(r) r.innerHTML=_paRecap(x);
-    const rw=$('parw'+i); if(rw && document.activeElement!==rw) rw.value=x.actualRawKg;
-    const md=$('pamd'+i); if(md && document.activeElement!==md) md.value=x.actualMadeKg;
   });
   const w=$('paWarn');
-  if(w){ const n=(window._prodAct||[]).filter(x=>_paCalc(x).excess<-0.0005).length;
+  if(w){ const n=(window._prodAct||[]).filter(x=>_paCalc(x).short).length;
     w.style.display=n?'block':'none';
     if(n) w.innerHTML=`<b>${n} ingredient(s) come up short</b> — more was used in the product than the run made available, so stock will go negative. Raise <b>Processed created</b>, or lower <b>Used in product</b>.`; }
 }
 // Recompute raw + output defaults from the edited Processed-used (keeps processed-first sound).
-function _paSync(i){ const x=(window._prodAct||[])[i]; if(!x)return; const short=Math.max(0,(+x.neededKg||0)-(+x.procUsedKg||0));
+function _paSync(i){ const x=(window._prodAct||[])[i]; if(!x)return;
+  if(paIsSimple(x)) return;   // the four weights are the operator's, not ours
+  const short=Math.max(0,(+x.neededKg||0)-(+x.procUsedKg||0));
   x.actualMadeKg=Math.round(short*1000)/1000; x.actualRawKg=Math.round((short/(x.yield||1))*1000)/1000; }
+/* The Loss cell. One number on the face of it; the whole account on hover. */
+function paLossCell(x,id){
+  const c=_paCalc(x); const k=v=>_pa2(v);
+  const parts=[];
+  if(c.loss<-0.0005) parts.push('MORE came out of the product and the leftovers than ever went in — '
+    +k(-c.loss)+' kg that cannot exist. One of the four weights is wrong.');
+  if(c.dripNormal>0.0005) parts.push(k(c.dripNormal)+' kg normal drip ('+Math.round((+x.thawPct||0)*10)/10+'% of '+k(c.frozen)+' kg pulled)');
+  if(c.trimNormal>0.0005) parts.push(k(c.trimNormal)+' kg normal trimming (standard yield '+c.stdYield+'% on '+k(c.raw)+' kg raw)');
+  parts.push((c.over>0.0005?('+'+k(c.over)+' kg MORE than the standards allow')
+            : c.over<-0.0005?(k(-c.over)+' kg LESS than the standards allow')
+            : 'nothing beyond the standards'));
+  parts.push(c.lossCertain
+    ? (c.raw<=0?'Only frozen stock was used, so all of this is freezer-side.'
+              :'No frozen stock was used, so all of this is knife-side.')
+    : 'Both frozen and raw were used, so the split between drip and trimming is worked out from this item\'s own standards — only the total is weighed.');
+  const col=(c.loss<-0.0005||c.over>0.0005)?'var(--danger)':(c.loss>0.0005?'var(--earth,#b5762a)':'var(--muted)');
+  return `<span id="${id||''}" title="${esc('pulled '+k(c.frozen)+' + raw '+k(c.raw)+' − used '+k(c.used)+' − excess '+k(c.excess)+' = '+k(c.loss)+' kg\n\n· '+parts.join('\n· '))}"
+    style="color:${col};font-weight:${Math.abs(c.over)>0.0005?'700':'400'}">${k(c.loss)}</span>`
+    +(Math.abs(c.over)>0.0005?`<div class="mini" style="color:var(--danger)">${c.over>0?'+':''}${k(c.over)} vs standard</div>`
+      :(c.lossCertain?'':'<div class="mini" style="color:var(--muted)">split modelled</div>'));
+}
 function _paRow(x,i){
   const c=_paCalc(x);
   const procCell = x.type==='A'
@@ -10385,35 +11002,166 @@ function _paRow(x,i){
   const _col=_c?_c.color:'#5C5C5C';
   /* Which product each kilo is for. The aggregate says how much to weigh out;
      this says where it goes, which is what gets asked when a mix runs short. */
+  const cell=k=>{
+    switch(k){
+      case 'needed': return `<td class="num"><b>${_pa2(c.needed)}</b>${x.type==='A'?`<div class="mini" style="color:var(--muted)">in stock ${x.ohKg}</div>`:''}</td>`;
+      case 'frozen': return x.type==='A'
+        ? `<td class="num">${_paNum(i,'frozenOutKg',78,'weigh what comes OUT of the freezer, still frozen — on hand '+x.ohKg+' kg')}</td>`
+        : `<td class="num">${_paNum(i,'frozenOutKg',78,'processed stock pulled from the freezer for this prep, if any')}</td>`;
+      case 'thawed': return x.type==='A'
+        ? `<td class="num">${_paNum(i,'procUsedKg',78,'weigh the SAME batch again after thawing — the difference is drip loss')}</td>`
+        : `<td class="num mini" style="color:var(--muted)">—</td>`;
+      case 'raw':    return `<td class="num"><input type="number" step="any" inputmode="decimal" id="parw${i}" value="${x.actualRawKg}" oninput="_paEdit(${i},'actualRawKg',this.value)" style="width:78px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>`;
+      case 'created':return `<td class="num"><input type="number" step="any" inputmode="decimal" id="pamd${i}" value="${x.actualMadeKg}" oninput="_paEdit(${i},'actualMadeKg',this.value)" style="width:78px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>`;
+      case 'used':   return `<td class="num">${_paNum(i,'usedKg',78, x.type==='B'?'a prep run makes to stock — normally nothing goes into a pack here':'what actually went into the product. Starts at the recipe figure — change it if the kitchen allocated more or less.')}
+        ${(!PA_SIMPLE&&x.excessAnchor)?'<div class="mini" style="color:var(--muted)">= available − excess</div>'
+          :(Math.abs(c.used-c.needed)>0.0005?`<div class="mini" style="color:var(--berry)">recipe ${_pa2(c.needed)}</div>`:'')}</td>`;
+      case 'excess': return `<td class="num">${_paNum(i,'excessKg',78, x.type==='B'?'weigh what this prep made and put away — on a prep run this is the whole output':'weigh what is kept back and returned to processed stock')}
+        ${(!PA_SIMPLE&&!x.excessAnchor)?'<div class="mini" style="color:var(--muted)">= available − used</div>':''}
+        ${c.short?'<div class="mini" style="color:var(--danger)">short</div>':''}</td>`;
+      case 'loss':   return `<td class="num" id="paloss${i}">${paLossCell(x)}</td>`;
+      /* The confirm screen used to print a Value HEADING with no cell under it,
+         so every row sat one column left of its own heading from there on. */
+      case 'value':  return `<td class="num" id="paval${i}">${fmt(c.used*(+x.outCostG||0)*1000)}</td>`;
+      default:       return '<td class="num mini" style="color:var(--muted)">—</td>';
+    }
+  };
   return `<tr style="box-shadow:inset 4px 0 0 ${_col}"><td><span class="cat-dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${_col};margin-right:6px"></span><b>${esc(x.name)}</b></td>
-    <td class="num"><b>${_pa2(c.needed)}</b>${x.type==='A'?`<div class="mini" style="color:var(--muted)">in stock ${x.ohKg}</div>`:''}</td>
-    ${procCell}
-    <td class="num"><input type="number" step="any" inputmode="decimal" id="parw${i}" value="${x.actualRawKg}" oninput="_paEdit(${i},'actualRawKg',this.value)" style="width:78px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
-    <td class="num"><input type="number" step="any" inputmode="decimal" id="pamd${i}" value="${x.actualMadeKg}" oninput="_paEdit(${i},'actualMadeKg',this.value)" style="width:78px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
-    <td class="num">${_paNum(i,'usedKg',78,'what actually went into the product. Starts at the recipe figure — change it if the kitchen allocated more or less.')}
-      ${x.excessAnchor?'<div class="mini" style="color:var(--muted)">= available − excess</div>'
-        :(Math.abs(c.used-c.needed)>0.0005?`<div class="mini" style="color:var(--berry)">recipe ${_pa2(c.needed)}</div>`:'')}</td>
-    <td class="num">${_paNum(i,'excessKg',78,'what is kept back and put into processed stock. Type here instead and the product takes whatever is left, so more Processed created goes into the mix rather than into the leftovers.')}
-      ${x.excessAnchor?'':'<div class="mini" style="color:var(--muted)">= available − used</div>'}
-      ${c.excess<-0.0005?'<div class="mini" style="color:var(--danger)">short</div>':''}</td></tr>
-  <tr class="parecap"><td colspan="8" id="parc${i}">${_paRecap(x)}</td></tr>`;
+    ${paCols().map(k=>cell(k.k)).join('')}</tr>
+  <tr class="parecap"><td colspan="${paSpan()}" id="parc${i}">${_paRecap(x)}</td></tr>`;
 }
+
+/* ============ NOTHING TYPED IS EVER LOST ====================================
+   Recording a run is twenty minutes of weighing and typing. Closing the sheet
+   — a mis-click, a phone call, a browser that reloaded — threw all of it away
+   with no warning, and the answer from the floor was to type it all again.
+   Two things fix that, and both are needed:
+     1. an AUTOSAVE, so the work survives even the cases nobody can be asked
+        about: a crash, a flat battery, a tab closed by accident;
+     2. an EXIT PROMPT, so leaving on purpose is a decision rather than an
+        accident.
+   The draft lives in this browser only. It is not stock and it is not a record
+   — it is the sheet somebody is still filling in.                            */
+const PA_DRAFT_FIELDS=['frozenOutKg','procUsedKg','actualRawKg','actualMadeKg','usedKg','excessKg',
+                       'advTouched','thawTouched','excessAnchor'];
+function paDraftKey(){ return 'wr_pa_draft_'+(prodPlanDate||todayISO()); }
+function _paSnap(a){ const o={};
+  (a||[]).forEach(x=>{ const r={}; PA_DRAFT_FIELDS.forEach(f=>r[f]=x[f]); o[x.sku]=r; });
+  return o; }
+let _paDraftT=null;
+function paDraftSave(now){
+  if(!window._prodAct) return;
+  clearTimeout(_paDraftT);
+  const go=()=>{ try{
+      localStorage.setItem(paDraftKey(), JSON.stringify(
+        {at:new Date().toISOString(), ref:prodRunRef||'', by:CURRENT_USER, rows:_paSnap(window._prodAct)}));
+    }catch(e){}                       // a full quota must never block the kitchen
+    _paMarkSaved(); };
+  if(now) go(); else _paDraftT=setTimeout(go,500);
+}
+function paDraftRead(){ try{ const d=JSON.parse(localStorage.getItem(paDraftKey())||'null');
+  return (d&&d.rows&&Object.keys(d.rows).length)?d:null; }catch(e){ return null; } }
+function paDraftClear(key){ try{ localStorage.removeItem(key||paDraftKey()); }catch(e){} }
+/* Anything typed that is not what the plan seeded. Compared field by field, so
+   a value typed back to its original is honestly "not dirty". */
+function paDirty(){
+  const a=window._prodAct||[], seed=window._paSeed||{};
+  return a.some(x=>{ const s=seed[x.sku]; if(!s) return true;
+    return ['frozenOutKg','procUsedKg','actualRawKg','actualMadeKg','usedKg','excessKg']
+      .some(f=>Math.abs((+x[f]||0)-(+s[f]||0))>0.0005); });
+}
+function _paMarkSaved(){ const el=$('paSaved'); if(!el) return;
+  el.textContent='✓ kept '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  el.style.opacity='1'; setTimeout(()=>{ if($('paSaved')) $('paSaved').style.opacity='.45'; },1200);
+}
+/* Leaving the sheet. Three ways out, all of them named, because "Cancel" next
+   to twenty minutes of typing should never be a one-click hole. */
+function paClose(){
+  if(!paDirty()){ paDraftClear(); window._prodAct=null; closeModal(); return; }
+  $('modal').innerHTML=`<div class="mwrap"><div class="mhead">Keep what you have typed?</div>
+    <div class="mbody">
+      <div class="hint" style="margin-bottom:12px">You have weights on this sheet that have not been posted.
+        <b>Keeping</b> them puts the sheet back exactly as it is the next time you confirm this run — on this browser.
+        Nothing is posted to stock either way; only <b>✅ Confirm &amp; post</b> does that.</div>
+      <table><tbody>${(window._prodAct||[]).filter(x=>{ const s=(window._paSeed||{})[x.sku]||{};
+        return ['frozenOutKg','actualRawKg','usedKg','excessKg'].some(f=>Math.abs((+x[f]||0)-(+s[f]||0))>0.0005); })
+        .slice(0,8).map(x=>{ const c=_paCalc(x);
+        return `<tr><td>${esc(x.name)}</td><td class="num mini" style="color:var(--muted)">pulled ${_pa2(c.frozen)} · raw ${_pa2(c.raw)} · used ${_pa2(c.used)} · excess ${_pa2(c.excess)}</td></tr>`;
+      }).join('')}</tbody></table>
+    </div>
+    <div class="mfoot"><button class="btn" onclick="paCloseKeep()">💾 Keep and close</button>
+      <button class="btn sec" onclick="drawProdActuals()">↩ Back to the sheet</button>
+      <span style="flex:1"></span>
+      <button class="btn sec" style="color:var(--danger)" onclick="paCloseDiscard()">🗑 Discard what I typed</button></div></div>`;
+  modalWide(false); $('overlay').classList.add('on');
+}
+function paCloseKeep(){ paDraftSave(true); window._prodAct=null; closeModal();
+  toast('Kept on this browser — reopen the run to carry on'); }
+function paCloseDiscard(){
+  if(!confirm('Throw away everything typed on this sheet? It cannot be brought back.')) return;
+  paDraftClear(); window._prodAct=null; window._paSeed=null; closeModal(); toast('Sheet discarded');
+}
+function paStartFresh(){
+  if(!confirm('Start this sheet again from the plan? What you typed earlier is thrown away.')) return;
+  paDraftClear(); window._paRestored=null; window._prodAct=null; openProdActuals();
+}
+
+/* ---- the same protection on the batch record ---------------------------- */
+function pbDraftKey(ref){ return 'wr_pb_draft_'+(ref||_pbRef||''); }
+let _pbDraftT=null;
+function pbDraftSave(){
+  if(!_pbRef) return;
+  clearTimeout(_pbDraftT);
+  _pbDraftT=setTimeout(()=>{ try{
+    localStorage.setItem(pbDraftKey(), JSON.stringify({at:new Date().toISOString(), by:CURRENT_USER,
+      rows:(_pbRows||[]).map(x=>({sku:x.sku, frozenOutKg:x.frozenOutKg, procUsedKg:x.procUsedKg,
+        actualRawKg:x.actualRawKg, actualMadeKg:x.actualMadeKg, usedKg:x.usedKg, excessKg:x.excessKg,
+        excessAnchor:x.excessAnchor, _removed:!!x._removed, _added:!!x._added,
+        _swappedFrom:x._swappedFrom||'', _swappedFromName:x._swappedFromName||'', name:x.name}))}));
+  }catch(e){} },500);
+}
+function pbDraftRead(ref){ try{ const d=JSON.parse(localStorage.getItem(pbDraftKey(ref))||'null');
+  return (d&&d.rows&&d.rows.length)?d:null; }catch(e){ return null; } }
+function pbDraftClear(ref){ try{ localStorage.removeItem(pbDraftKey(ref)); }catch(e){} }
+function pbDropDraft(){
+  if(!confirm('Throw away the unsaved edits on this batch and show what is recorded?')) return;
+  pbDraftClear(); window._pbRestored=null; pbLoad().then(pbDraw);
+}
+/* Leaving a record with edits nobody posted. The draft is already kept, so this
+   is about telling them — not about rescuing the data. */
+async function pbGuard(){
+  if(!_pbDirty || !_pbRef) return true;
+  const yes=confirm('The ingredients on '+_pbRef+' have edits you have not saved.\n\n'
+    +'OK — save them now.\nCancel — leave them unsaved (they are kept on this browser, and this batch will\n'
+    +'reopen with them until you save or discard).');
+  if(yes){ try{ await pbSave(); }catch(e){ toast('Could not save — '+saveErrMsg(e),true); return false; } }
+  return true;
+}
+
 function drawProdActuals(){
   const a=window._prodAct||[]; const A=a.filter(x=>x.type==='A'), B=a.filter(x=>x.type==='B');
   const idx=(x)=>a.indexOf(x);
   const head=paHead();
-  const short=a.filter(x=>_paCalc(x).excess<-0.0005);
+  const short=a.filter(x=>_paCalc(x).short);
   $('modal').innerHTML=`<div><h3>Confirm production — record what actually happened</h3>
     <div style="margin:6px 0 10px;padding:9px 11px;background:#f6f8f4;border-radius:8px;font-size:12.5px;line-height:1.5">
       ${PA_HELP}
+      <div style="margin-top:7px">${paToggleBtn()}</div>
     </div>
+    ${window._paRestored?`<div style="margin:0 0 10px;padding:8px 10px;border:1px solid #b9d3bd;background:#f1f7f1;border-radius:6px;font-size:12.5px">
+      ↩ <b>Picked up where you left off</b> — the weights you typed at ${esc(window._paRestored)} are back on the sheet.
+      Nothing was posted to stock.
+      <button class="btn sm sec" style="margin-left:8px" onclick="paStartFresh()">✕ Start fresh from the plan</button></div>`:''}
     <div id="paWarn" style="display:${short.length?'block':'none'};margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px"><b>${short.length} ingredient(s) come up short</b> — more is going into the product than the run made available, so stock will go negative. Raise <b>Processed created</b>, or lower <b>Used in product</b>.</div>
     ${A.length?`<div class="mini" style="margin:6px 0 2px;font-weight:700">For products (mix ingredients)</div>
     <div class="mscroll" style="overflow-x:auto"><table class="pa">${head}<tbody>${A.map(x=>_paRow(x,idx(x))).join('')}</tbody></table></div>`:''}
     ${B.length?`<div class="mini" style="margin:12px 0 2px;font-weight:700">Output ingredients (make to stock)</div>
     <div class="mscroll" style="overflow-x:auto"><table class="pa">${head}<tbody>${B.map(x=>_paRow(x,idx(x))).join('')}</tbody></table></div>`:''}
-    <div class="mfoot"><button class="btn" onclick="prodActualsApply()">✅ Confirm &amp; post</button><button class="btn sec" onclick="closeModal()">Cancel</button>
-      <span style="flex:1"></span><span class="mini" style="color:var(--muted);align-self:center">${a.length} ingredient(s) in this run</span></div></div>`;
+    <div class="mfoot"><button class="btn" onclick="prodActualsApply()">✅ Confirm &amp; post</button>
+      <button class="btn sec" onclick="paClose()">Close</button>
+      <span style="flex:1"></span>
+      <span class="mini" id="paSaved" style="color:var(--muted);align-self:center;opacity:.45"></span>
+      <span class="mini" style="color:var(--muted);align-self:center">${a.length} ingredient(s) in this run</span></div></div>`;
   modalWide(true); $('overlay').classList.add('on');
 }
 /* Read the run back before it posts. Deliberately a summary in words rather than
@@ -10426,7 +11174,7 @@ function prodConfirmPrompt(acts){
   let drip=0, raw=0, made=0, thawed=0, excess=0; const short=[], big=[];
   acts.forEach(x=>{ const c=_paCalc(x);
     drip+=c.thaw; raw+=c.raw; made+=c.made; thawed+=c.proc; excess+=c.excess;
-    if(c.excess<-0.0005) short.push(`${x.name} — ${k(-c.excess)} kg short`);
+    if(c.short) short.push(`${x.name} — ${k(Math.max(-c.excess, -(c.loss)))} kg short`);
     if(c.raw>0 && c.yieldPct && c.stdYield && c.yieldPct < c.stdYield-10)
       big.push(`${x.name} — yield ${c.yieldPct}% against a ${c.stdYield}% standard`);
     if(c.thaw<-0.0005) big.push(`${x.name} — thawed weight is ABOVE the frozen weight, check the two figures`);
@@ -10465,7 +11213,14 @@ async function prodActualsApply(){
   try{
     let recs=[];
     if(anyProd){ recs=await prodPersist('confirmed'); if(!recs){ _postLock=false; return; } }
-    else if(!prodRunRef){ prodRunRef=(await genRef('PR',{date:prodPlanDate})).ref; }   // output-only run
+    else {
+      /* OUTPUT-ONLY RUN. This used to skip prodPersist entirely, which meant any
+         draft product rows saved earlier against this run_ref were never deleted:
+         they sat in production_batches as drafts for ever, and reopening the date
+         resurrected the very products the team had taken off the plan. */
+      if(!prodRunRef){ prodRunRef=(await genRef('PR',{date:prodPlanDate})).ref; }
+      else { recs=(await prodPersist('confirmed', true))||[]; }
+    }
     const cm=await prodCostMap(); const bm=await prodBOMMap();
     const DEFAULT_FG_SHELF=4; const _shelfBy={}; try{ (await db.list('products',{})).forEach(p=>_shelfBy[p.sku]=+p.shelf_life_days||0); }catch(e){}
     const totProc={}; recs.forEach(r=>{ const packs=+r.good_packs||0; (bm[r.product_sku]||[]).forEach(line=>{ totProc[line.ingredient_sku]=(totProc[line.ingredient_sku]||0)+line.processed_g*packs; }); });
@@ -10489,6 +11244,29 @@ async function prodActualsApply(){
         note:(x.name||x.sku)+' — '+(Math.round(t/10)/100)+' kg lost thawing (drip), not part of the mix'}); }catch(e){}
     }
     if(_thawKg>0) sysLog('production_batches',prodRunRef,'💧 Thaw loss '+(Math.round(_thawKg*1000)/1000)+' kg ('+fmt(_thawVal)+') recorded separately from yield');
+
+    /* ---- 3.7 · THE LOSS NOBODY ORDERED -----------------------------------
+       Total loss minus what this item's own standards say normal drip and
+       normal trimming should cost. It is the only one of the three loss
+       numbers worth an argument, so it gets a variance line of its own
+       rather than being averaged into a yield percentage where it disappears.
+       Better-than-standard is logged too — an implausibly good run is as much
+       a sign of a mis-weigh as a bad one. */
+    let _wKg=0, _wVal=0;
+    for(const x of acts){
+      const c=_paCalc(x);
+      if(Math.abs(c.over)<0.02) continue;                        // 20 g of scale noise is not a finding
+      _wKg+=c.over; _wVal+=c.over*((+x.outCostG||0)*1000);
+      try{ await db.create('variance_log',{check_type:'3.7 · Unexplained loss',source_ref:prodRunRef,
+        expected:Math.round((c.dripNormal+c.trimNormal)*1000)/1000, actual:Math.round(c.loss*1000)/1000,
+        gap_qty:-(Math.round(c.over*1000)/1000), gap_value:Math.round(c.over*((+x.outCostG||0)*1000)*100)/100,
+        location:planProduceLoc(), responsible_user:CURRENT_USER, status:'open',
+        note:(x.name||x.sku)+' — pulled '+_pa2(c.frozen)+' + raw '+_pa2(c.raw)+' − used '+_pa2(c.used)+' − excess '+_pa2(c.excess)
+             +' = '+_pa2(c.loss)+' kg lost; standards allow '+_pa2(c.dripNormal+c.trimNormal)+' kg, so '
+             +(c.over>0?_pa2(c.over)+' kg is unaccounted for':_pa2(-c.over)+' kg better than standard')
+             +(c.lossCertain?'':' · drip/trim split modelled, total is weighed')}); }catch(e){}
+    }
+    if(Math.abs(_wKg)>0.0005) sysLog('production_batches',prodRunRef,(_wKg>0?'⚠ ':'✅ ')+_pa2(Math.abs(_wKg))+' kg '+(_wKg>0?'unaccounted for':'better than standard')+' ('+fmt(Math.abs(_wVal))+') across the run');
 
     // 1) processing per output (aggregate): consume raw (actual), produce processed (actual made)
     for(const x of acts){ const rawG=Math.round((+x.actualRawKg||0)*1000*100)/100; const madeG=Math.round((+x.actualMadeKg||0)*1000*100)/100;
@@ -10615,6 +11393,9 @@ async function prodActualsApply(){
     }
     toast('Confirmed · '+posted+' product(s)'+(nOut?', '+nOut+' output ingredient(s)':'')+', '+drawn+' issue(s), yield captured'
       +((_lblDone||_supDone)?(' · '+_lblDone+' label + '+_supDone+' supply line(s) deducted'):'')+(failed?(' · ⚠ '+failed+' failed'):''), failed>0);
+    /* posted — the sheet is a record now, and a leftover draft would offer to
+       "restore" figures that are already in the ledger. */
+    paDraftClear(); window._paSeed=null; window._paRestored=null;
     prodRunRef=''; prodPlanLines=[]; prodOutLines=[]; prodPackStk=[]; prodPackSup=[]; window._prodAct=null; window._prodSub={}; closeModal(); await renderProdPlan();
   }catch(e){ toast(e.message,true); } finally{ _postLock=false; }
 }
@@ -11575,7 +12356,10 @@ function sparkline(vals,w,h){ w=w||66; h=h||20; const n=vals.length; if(!n) retu
 
 async function momLoad(){
   if(isLive()){ try{ return await sb('sales_momentum?select=*&limit=2000'); }catch(e){ return []; } }
-  return window._momDemo || JSON.parse(localStorage.getItem('wr_mom')||'[]');
+  if(window._momDemo) return window._momDemo;
+  const d=(typeof DEMO!=='undefined' && DEMO.sales_momentum)||null;
+  if(d && d.length) return d;
+  return JSON.parse(localStorage.getItem('wr_mom')||'[]');
 }
 function momMetrics(r, stockUnits){
   const u30=+r.u30||0, u120=+r.u120||0, daily30=u30/30;
@@ -13481,6 +14265,13 @@ const KB = {
        'The three buckets exist so the alarm stays meaningful. If made-to-order mixes sat in the same red number as a genuine missing product, nobody would look at the red number.',
        'PASIG ONLY. Bulacan is production stock and is not sellable until transferred; publishing it would let a customer buy what is not at the selling site.',
        'A negative Pasig balance would be published as ZERO, never as a negative. A negative balance is a counting problem to fix, not a number to broadcast.']},
+  packreq:{d:'The weekly regular-packs request: what the shop can sell, what is made but not yet moved, and what is still owed against par.',
+    b:['<b>Current stock</b> = <b>sellable now</b> + <b>made, not yet sellable</b>. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here both numbers come out of the ledger, and they are shown apart because the gap between them is a transfer somebody still has to do.',
+       'The formulas are the sheet\'s, unchanged: Ave./day = units sold ÷ window; LT demand = Ave./day × lead time; Safety = LT demand × movement; ROP = LT demand + Safety; PAR = Ave./day × cycle; New Par = PAR rounded up to a case; To produce = New Par + Safety − Current stock.',
+       'The five levers sit on the toolbar. <b>Movement</b> can also be set per product — leave the cell blank to use the global figure. Everything is remembered on this browser.',
+       'Sales come from the <b>Sales Momentum</b> table. A product with no sales in the window averages zero and asks for nothing, which is why the count of those is called out above the table.',
+       '<b>▶ Send to Production Plan</b> puts the request straight onto the run — existing lines are kept, and a product already on the plan has its planned packs raised rather than replaced.'],
+    t:'Change the sales window before you argue with a number. A 60-day average through a promotion month is not the same product as a 60-day average without one.'},
   prodsched:{d:'Day by day, what goes in and out of every item, against what the week owes.',
     h:['One row per item, one column per day — the cell is that day\'s NET movement; hover for the breakdown',
        'Switch between Products · Ingredients · Supplies · Stickers',
