@@ -551,6 +551,19 @@ function statusLabel(model,v){ const s=String(v==null?'':v); return ((STATUS_LAB
    and every message that names it follows. */
 const WR_SQL_FILE='sql/wr_20260817_ALL.sql';
 const PO_LIVE=['confirmed','partial','received'];
+/* ---- WHEN AN ORDER STOPS BEING A DRAFT --------------------------------------
+   Up to the moment it is issued, a purchase order is a working document: add a
+   line, drop one, change a quantity — nobody outside has seen it.
+   The moment it is ISSUED it is a commitment somebody else is acting on, and
+   editing its lines by hand is how a document that a supplier is delivering
+   against quietly stops matching the delivery. Worse, that hand-edit path is
+   the one that emptied PO-08152026 V01.03.
+   So the line editor locks at 'confirmed'. What genuinely still happens after
+   issue — the supplier sends something that was never ordered — is recorded
+   where it belongs, in RECEIVING, which posts the stock, prices it, stamps the
+   line ordered = 0 and raises a variance. That is auditable; a hand-edit is
+   not. */
+function poLinesLocked(rec){ return PO_LIVE.includes(String((rec||{}).status||'')); }
 /* Hidden from the PO list unless you ask for them: a cancelled order is dead, a
    fully received one is history. Both stay one click away. */
 const PO_DONE=['received','cancelled'];
@@ -972,12 +985,50 @@ const db = {
     if(isLive()) return await sb(T+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'DELETE', prefer:'return=minimal'});
     DEMO[T]=(DEMO[T]||[]).filter(r=>r[pk]!==pkval);
   },
-  async replaceChildren(o2m, parentVal, rows){
+  /* ---- REPLACING A RECORD'S LINES IS THE MOST DANGEROUS WRITE IN THE APP ----
+     This used to DELETE every child and then insert the new set. Two ways that
+     ends in an empty document, and both have happened:
+
+       1. The caller hands over an EMPTY set. Any screen that saves before its
+          children have finished loading — or after a modal reset them — wipes a
+          purchase order that had a dozen lines and three deliveries against it,
+          and reports "Saved".
+       2. The DELETE succeeds and the INSERT fails. Two HTTP calls are not a
+          transaction, so a 400 on the second leaves the record with nothing.
+
+     Both are now impossible:
+       · An empty set is REFUSED over a parent that has lines. Emptying a
+         document has to be a deliberate act — remove the lines one by one —
+         never a side effect of pressing Save on a screen that had not loaded.
+       · The INSERT happens FIRST, and the old rows are deleted BY ID only once
+         it has succeeded. A failure now leaves duplicates, which anyone can
+         see and fix, instead of nothing, which nobody can recover.
+     `allowEmpty` exists for the one caller that legitimately clears a document:
+     deleting the parent record itself. */
+  async replaceChildren(o2m, parentVal, rows, allowEmpty){
+    rows=rows||[];
+    const existing=await this.children(o2m, parentVal).catch(()=>[]);
+    if(existing.length && !rows.length && !allowEmpty){
+      throw new Error('Refusing to clear the '+existing.length+' line(s) on this record. '
+        +'Nothing was changed. If you really mean to empty it, remove the lines one at a time.');
+    }
     if(isLive()){
-      await sb(o2m.model+'?'+o2m.fk+'=eq.'+encodeURIComponent(parentVal),{method:'DELETE',prefer:'return=minimal'});
+      const oldIds=existing.map(r=>r.id).filter(v=>v!=null);
       if(rows.length) await sb(o2m.model,{method:'POST',body:JSON.stringify(rows),prefer:'return=minimal'});
+      if(oldIds.length){
+        for(let i=0;i<oldIds.length;i+=100){
+          const chunk=oldIds.slice(i,i+100).map(v=>encodeURIComponent(v)).join(',');
+          await sb(o2m.model+'?id=in.('+chunk+')',{method:'DELETE',prefer:'return=minimal'});
+        }
+      } else if(existing.length){
+        // no id column to aim at — the old wholesale delete, but only after the insert landed
+        await sb(o2m.model+'?'+o2m.fk+'=eq.'+encodeURIComponent(parentVal)
+          +(rows.length?'&id=is.null':''),{method:'DELETE',prefer:'return=minimal'});
+      }
     } else {
-      DEMO[o2m.model]=(DEMO[o2m.model]||[]).filter(r=>r[o2m.fk]!==parentVal).concat(rows);
+      const keep=new Set(existing.map(r=>r.id).filter(v=>v!=null));
+      DEMO[o2m.model]=(DEMO[o2m.model]||[])
+        .filter(r=>!(r[o2m.fk]===parentVal && (keep.size?keep.has(r.id):true))).concat(rows);
     }
   }
 };
@@ -1172,6 +1223,7 @@ function controlPanel(){
     ${chips}
     <div class="search">🔎<input id="q" placeholder="Search ${m.label}${['products','ingredients'].includes(state.model)?' — type keywords…':'...'}" value="${esc(state.search)}" oninput="onSearch(this.value)"></div>
     ${(FILTERS[state.model]&&state.view==='list')?`<button class="btn sec sm ${_advCount()?'on':''}" onclick="openFilters()">🎛 Filters${_advCount()?' ('+_advCount()+')':''}</button>`:''}
+    ${(state.model==='purchase_orders'&&state.view==='list'&&state._poPlain)?`<button class="btn sec sm" onclick="state._poPlain=0;route()" title="back to order → receive → pay on one row">💳 Purchasing view</button>`:''}
     ${state.view!=='report'?gb:''}
     ${m.archivable?`<button class="btn sec sm" onclick="state.showArchived=!state.showArchived;route()">${state.showArchived?'Hide archived':'Show archived'}</button>`:''}
     ${(state.model==='purchase_orders'&&state.view==='list')?`<button class="btn sec sm ${state._poWS!==false?'on':''}" onclick="state._poWS=${state._poWS!==false?'false':'true'};route()">${state._poWS!==false?'✕ Ungroup':'⑃ Week → Status'}</button>`:''}
@@ -1259,13 +1311,16 @@ function onSearch(v){ state.search=v; clearTimeout(searchTimer); searchTimer=set
 const FILTERS={
   products:[ {k:'group_1',l:'Group'},{k:'group_2',l:'Subgroup'},{k:'feeding_style',l:'Feeding style'},{k:'variant',l:'Variant'} ],
   ingredients:[ {k:'_type',l:'Type'},{k:'ingredient_group',l:'Group'},{k:'category',l:'Category'},{k:'supplier',l:'Supplier'} ],
-  production_batches:[ {k:'_kind',l:'Kind'},{k:'status',l:'Status'},{k:'run_ref',l:'Run'},{k:'_week',l:'Week'},{k:'operator',l:'Operator'} ]
+  production_batches:[ {k:'_kind',l:'Kind'},{k:'status',l:'Status'},{k:'run_ref',l:'Run'},{k:'_week',l:'Week'},{k:'operator',l:'Operator'} ],
+  purchase_orders:[ {k:'status',l:'Status'},{k:'supplier_name',l:'Supplier'},{k:'_week',l:'Week ordered'},{k:'created_by',l:'Raised by'} ],
+  transfers:[ {k:'status',l:'Status'},{k:'from_code',l:'From'},{k:'to_code',l:'To'} ],
+  custom_orders:[ {k:'status',l:'Status'},{k:'customer_name',l:'Customer'} ]
 };
 function ingType(r){ if(isSupplyItem(r)) return /sticker|label/i.test(String(r.category||'')+' '+String(r.name||''))?'Sticker':'Supply'; return r.is_intermediate?'Processed':'Raw'; }
 function _rowFacet(model,r,k){
   if(k==='_type') return ingType(r);
   if(k==='_kind') return (r.kind==='output')?'Prep (raw → processed)':'Product (packs)';
-  if(k==='_week') return _wkLabel(r.production_date);
+  if(k==='_week') return _wkLabel(r.production_date||r.order_date||r.transfer_date);
   return r[k];
 }
 // "Aug 17 – Aug 23" from any date in that Mon–Sun week — one label per week, sortable by the Monday
@@ -1650,10 +1705,14 @@ async function renderForm(){
       notebook=`<div class="notebook"><div class="nbtabs"><button class="on">🏷️ Sticker Order Lines</button></div><div class="lines">
         ${t.html}<div class="pager">${t.n} sticker(s) · ${t.linked} with artwork link · ${t.n-t.linked} pending · <span style="color:var(--muted)">manage links in Master Data → Products (sticker fields)</span></div></div></div>`;
     } else {
-      notebook=`<div class="notebook"><div class="nbtabs"><button class="on">${o.label}</button></div><div class="lines">
+      const _poLock=(state.model==='purchase_orders') && poLinesLocked(formRec);
+      notebook=`<div class="notebook"><div class="nbtabs"><button class="on">${o.label}</button>${_poLock?`<span class="mini" style="margin-left:10px;color:var(--muted);align-self:center">🔒 issued — lines are fixed</span>`:''}</div><div class="lines">
       <table class="autow"><thead><tr>${o.cols.map((c,ci)=>`<th data-ci="${ci}" class="${c.t==='number'?'num':''}">${c.l}<span class="colgrip" onmousedown="colDragStart(event,this)" title="drag to resize"></span></th>`).join('')}<th style="width:28px"></th></tr></thead><tbody id="lineBody"></tbody></table>
-      ${m.o2mLoader?`<button class="btn sm sec" style="margin-right:8px" onclick="${m.o2mLoader.fn}()">${m.o2mLoader.label}</button>`:''}
-      ${(m.o2mLoaders||[]).map(b=>`<button class="btn sm sec" style="margin-right:6px" onclick="${b.fn.indexOf('(')>0?b.fn:b.fn+'()'}">${b.label}</button>`).join('')}<span class="addrow" onclick="addLine()">＋ Add a line</span></div></div>`;
+      ${_poLock?`<div class="hint" style="margin-top:6px">This order has been issued, so its lines can no longer be edited here — the supplier is delivering against this document.
+        Something arrived that is not on it? Record it in <b>📦 Receive the rest</b>, which posts the stock, prices it, marks the line <b>ordered 0</b> and raises a variance.
+        Genuinely wrong order? <b>✖ Cancel</b> it and raise a new one.</div>`
+      :`${m.o2mLoader?`<button class="btn sm sec" style="margin-right:8px" onclick="${m.o2mLoader.fn}()">${m.o2mLoader.label}</button>`:''}
+      ${(m.o2mLoaders||[]).map(b=>`<button class="btn sm sec" style="margin-right:6px" onclick="${b.fn.indexOf('(')>0?b.fn:b.fn+'()'}">${b.label}</button>`).join('')}<span class="addrow" onclick="addLine()">＋ Add a line</span>`}</div></div>`;
     }
   }
   const titleField = m.fields.find(f=>f.n===m.name)||m.fields[0];
@@ -2105,9 +2164,12 @@ function renderLines(){
   const o=MODELS[state.model].o2m; const tb=$('lineBody'); if(!tb) return;
   setTimeout(applyColWidths,0);   // saved widths survive a line re-render
   const PM=window._prodLineMap||{};
+  /* An ISSUED purchase order is a commitment. Its lines are read-only from here
+     on; what still arrives unordered goes through Receiving. */
+  const _lock=(state.model==='purchase_orders') && poLinesLocked(formRec);
   tb.innerHTML=formChildren.map((ln,i)=>`<tr>${o.cols.map(c=>{
     let v=ln[c.n]==null?'':ln[c.n];
-    const ro=(typeof c.ro==='function'?c.ro(ln,formRec):c.ro)?'disabled':'';
+    const ro=(_lock||(typeof c.ro==='function'?c.ro(ln,formRec):c.ro))?'disabled':'';
     if(ro&&(c.n==='received_packs'||c.n==='received_kg')&&(v===''||v==null)) v=0; // captured at receiving
     // Product picker: show the SKU under the name so both are visible on the line.
     if(c.t==='rel'){const _rel=(typeof c.rel==='function')?c.rel(ln,formRec):c.rel; const opts=relCache[_rel]||[];
@@ -2125,14 +2187,20 @@ function renderLines(){
     if(c.t==='number'){ const sc=+c.scale||1; const disp=(v===''||v==null)?'':(sc!==1?(Math.round((+v/sc)*1e6)/1e6):v);
       return `<td class="num"><input type="number" step="any" value="${esc(disp)}" oninput="lSetNum(${i},'${c.n}',this.value,${sc})" ${ro} ${ro?'title="From the recipe" style="background:#f4f5f8;color:#8a93a5"':''}></td>`; }
     return `<td><input value="${esc(v)}" oninput="lSet(${i},'${c.n}',this.value)" ${ro}></td>`;
-  }).join('')}<td><span class="btn link" style="color:var(--danger)" onclick="delLine(${i})">✕</span></td></tr>`).join('');
+  }).join('')}<td>${_lock?'':`<span class="btn link" style="color:var(--danger)" onclick="delLine(${i})">✕</span>`}</td></tr>`).join('');
 }
 // Transfer send: boxes + loose packs → total sent_packs.
 function trSetBoxLoose(i,boxV,looseV){ const l=formChildren[i]; const box=((window._prodLineMap||{})[l.product_sku]||{}).box||1;
   if(boxV!=null) l._sbx=(boxV===''?'':(+boxV||0)); if(looseV!=null) l._slo=(looseV===''?'':(+looseV||0));
   if((l._sbx===''||l._sbx==null)&&(l._slo===''||l._slo==null)){ l.sent_packs=''; } else { l.sent_packs=(+l._sbx||0)*box+(+l._slo||0); } }
-function addLine(){ formChildren.push({}); renderLines(); }
-function delLine(i){ formChildren.splice(i,1); renderLines(); }
+function addLine(){
+  if(state.model==='purchase_orders' && poLinesLocked(formRec)){
+    toast('This order has been issued — add what arrived in 📦 Receive the rest instead, so it posts to stock and is priced.',true); return; }
+  formChildren.push({}); renderLines(); }
+function delLine(i){
+  if(state.model==='purchase_orders' && poLinesLocked(formRec)){
+    toast('This order has been issued — its lines cannot be removed. Cancel the order if it is wrong.',true); return; }
+  formChildren.splice(i,1); renderLines(); }
 function lSet(i,n,v){ formChildren[i][n]=v; }
 // number line-setter with an optional display scale (e.g. show kg, store grams)
 function lSetNum(i,n,v,sc){ sc=+sc||1; formChildren[i][n]=(v===''||v==null)?'':(sc!==1?(+v*sc):+v); }
@@ -2221,6 +2289,17 @@ async function saveForm(){
       const clean=formChildren.filter(l=>Object.values(l).some(x=>x!=='' && x!=null)).map(l=>{
         const row={...l, [m.o2m.fk]:pkval}; delete row.id;   // id is a generated identity — never re-insert it (live save would 400)
         m.o2m.cols.forEach(c=>{if(c.t==='number'&&row[c.n]!=='')row[c.n]=+row[c.n];}); return row;});
+      /* A form whose lines are empty is only ever ONE of two things: a record
+         that genuinely has none, or a screen that saved before its lines
+         arrived. The second is what emptied a live purchase order, so an empty
+         set is checked against the database rather than trusted. */
+      if(!clean.length){
+        let had=[]; try{ had=await db.children(m.o2m, pkval); }catch(e){}
+        if(had.length){
+          toast('Not saved — this record has '+had.length+' line(s) but the form is showing none. Reopen it and try again.',true);
+          return;
+        }
+      }
       await db.replaceChildren(m.o2m, pkval, clean);
     }
     sysLog(state.model, pkval, formIsNew?('📝 Created by '+CURRENT_USER):('✏️ Updated by '+CURRENT_USER));
@@ -2280,7 +2359,7 @@ async function deleteForm(){
   if(dep.checkFailed){ toast("Can't verify what this record is linked to right now — delete blocked to avoid orphaning data. Try again in a moment.",true); return; }
   if(dep.total>0){ const alt=m.archivable?'Archive it instead':(m.cancelable?'Cancel it instead':'Remove those first'); toast(`Can't delete — used by ${dep.total} record(s): ${dep.detail}. ${alt}.`,true); return; }
   if(!confirm('Permanently delete '+pkval+'? This cannot be undone — for master data or documents, prefer Archive/Cancel.')) return;
-  try{ if(m.o2m) await db.replaceChildren(m.o2m, pkval, []); await db.del(state.model,m.pk,pkval); relCache={}; toast('Deleted'); state.view='list'; route(); }
+  try{ if(m.o2m) await db.replaceChildren(m.o2m, pkval, [], true); await db.del(state.model,m.pk,pkval); relCache={}; toast('Deleted'); state.view='list'; route(); }
   catch(e){ toast(e.message,true); }
 }
 
@@ -4686,6 +4765,12 @@ async function wpLoad(){
   const pays =await db.list('po_payments',{})||[];
   const byPo={}; lines.forEach(l=>{ (byPo[l.po_ref]=byPo[l.po_ref]||[]).push(l); });
   const payBy={}; pays.forEach(p=>{ (payBy[p.po_ref]=payBy[p.po_ref]||[]).push(p); });
+  /* Searchable text per order: nobody remembers a PO number, they remember
+     "the one with the pork loin". Built once here rather than per keystroke. */
+  window._puSkuByPo={};
+  Object.keys(byPo).forEach(ref=>{
+    window._puSkuByPo[ref]=byPo[ref].map(l=>String(l.ingredient_sku||'')+' '+ingName(l.ingredient_sku)).join(' ');
+  });
   _wpRows=orders.map(o=>{
     const ls=byPo[o.po_ref]||[]; const ps=payBy[o.po_ref]||[];
     const gross=ls.reduce((s,l)=>s+poOrderQty(l)*(+l.price_kg||0),0);
@@ -4781,6 +4866,27 @@ function wpBody(){
    So: one list, every cell a way into the order, filtered by clickable chips
    instead of by hunting.                                                      */
 let _puFilter='all', _puWeeks=true, _puOpenWk={};
+/* THE ONE THING THIS SCREEN NEVER HAD. Purchase Orders does not go through the
+   standard list — it has its own combined order/receipt/payment view — so it
+   never inherited the search box and the 🎛 Filters button every other module
+   gets. With twenty-odd live orders that is fine; with a year of them it is
+   not, and "find Mayee's order from the 15th" became a scroll. */
+let _puQ='', _puSup='';
+function puSetQ(v){ _puQ=v; const el=$('puBody'); if(el) el.innerHTML=puBody(); puCount(); }
+function puSetSup(v){ _puSup=v; const el=$('puBody'); if(el) el.innerHTML=puBody(); puCount(); }
+function puClearFind(){ _puQ=''; _puSup=''; renderPurchasing(); }
+function puCount(){ const el=$('puFound'); if(!el) return;
+  const n=puRows().length, all=(_wpRows||[]).length;
+  el.textContent=(n===all)?(all+' order(s)'):(n+' of '+all+' order(s)');
+  el.style.color=(n===all)?'var(--muted)':'var(--berry)'; }
+function _puMatch(r){
+  if(_puSup && String(r.supplier||'')!==_puSup) return false;
+  const q=String(_puQ||'').trim().toLowerCase();
+  if(!q) return true;
+  const hay=[r.ref, r.supplier, r.status, statusLabel('purchase_orders',r.status)||'', r.date,
+             (window._puSkuByPo&&window._puSkuByPo[r.ref])||''].join(' ').toLowerCase();
+  return q.split(/\s+/).filter(Boolean).every(t=>hay.includes(t));
+}
 function puSet(f){ _puFilter=(f===_puFilter&&f!=='all')?'all':f; renderPurchasing(); }
 function puToggleWk(w){ _puOpenWk[w]=!_puOpenWk[w]; const el=$('puBody'); if(el) el.innerHTML=puBody(); }
 function puMode(){ _puWeeks=!_puWeeks; _puOpenWk={}; renderPurchasing(); }
@@ -4799,7 +4905,8 @@ const PU_CHIPS=[
   {k:'settled',    l:'Settled',          t:'p', m:r=>r.payStat==='settled'&&r.net>0.5},
   {k:'fleet',      l:'Courier owed',     t:'p', m:r=>(r.fleetDue-r.fleetPaid)>0.5},
 ];
-function puRows(){ const c=PU_CHIPS.find(x=>x.k===_puFilter)||PU_CHIPS[0]; return (_wpRows||[]).filter(c.m); }
+function puRows(){ const c=PU_CHIPS.find(x=>x.k===_puFilter)||PU_CHIPS[0];
+  return (_wpRows||[]).filter(c.m).filter(_puMatch); }
 function _puChipHtml(){
   const T={o:'Order',d:'Delivery',p:'Payment'};
   let last='';
@@ -5085,6 +5192,7 @@ async function renderPurchasing(){
   $('cp').innerHTML=`<div class="title">Purchase Orders <span onclick="openKB('purchasing')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="state.model='purchase_orders';state.view='form';openForm('')">＋ New order</button>
     <button class="btn sec sm" onclick="puMode()">${_puWeeks?'☰ Flat list':'🗓 By week'}</button>
+    <button class="btn sec sm" onclick="state._poPlain=1;route()" title="the ordinary grid, with 🎛 Filters, Group By and ⚙ Columns">▦ Grid</button>
     <label class="mini">Show <select onchange="_wpN=+this.value;renderPurchasing()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
       ${[4,8,13,26,52].map(n=>`<option value="${n}" ${_wpN===n?'selected':''}>${n} weeks</option>`).join('')}</select></label>
     <button class="btn sec sm" onclick="wpPrint()">🖨 Print</button>
@@ -5147,7 +5255,17 @@ async function renderPurchasing(){
     </div>
 
     <div class="repcard" style="flex:1;min-width:0">
-      <div class="repbar"><span>${esc((PU_CHIPS.find(c=>c.k===_puFilter)||PU_CHIPS[0]).l)} — ${puRows().length} order(s)</span>
+      <div class="repbar" style="flex-wrap:wrap;gap:8px">
+        <span>${esc((PU_CHIPS.find(c=>c.k===_puFilter)||PU_CHIPS[0]).l)}</span>
+        <input id="puQ" value="${esc(_puQ)}" placeholder="🔎 order no · supplier · status · ingredient…"
+          oninput="puSetQ(this.value)" style="min-width:210px;flex:1;padding:5px 9px;border:1px solid var(--line);border-radius:6px">
+        <label class="mini">Supplier <select onchange="puSetSup(this.value)" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+          <option value="">All</option>
+          ${[...new Set((_wpRows||[]).map(r=>r.supplier).filter(Boolean))].sort()
+            .map(x=>`<option value="${esc(x)}" ${x===_puSup?'selected':''}>${esc(x)}</option>`).join('')}</select></label>
+        ${(_puQ||_puSup)?`<button class="btn sec sm" onclick="puClearFind()">✕ Clear</button>`:''}
+        <span class="mini" id="puFound" style="color:var(--muted)">${puRows().length===(_wpRows||[]).length?((_wpRows||[]).length+' order(s)'):(puRows().length+' of '+(_wpRows||[]).length+' order(s)')}</span>
+        <span style="flex:1"></span>
         <span class="mini" style="color:var(--muted)"><span style="color:#4e7a3e">■</span> paid
           <span style="color:#c9482f">■</span> owed <span style="color:#d9c48a">■</span> not yet delivered · every row opens the order</span></div>
       <div style="overflow-x:auto" class="stickyhead"><table style="min-width:860px"><thead><tr>
@@ -6806,6 +6924,8 @@ async function openPOReceive(){
   window._poOrd=lines.map(l=>poOrderQty(l));    // order qty (vendor avail)
   window._poAlready=lines.map(l=>_poAlreadyOf(l,_led));   // received so far, per the LEDGER
   await loadBins();
+  try{ window._rcIngs=(await listIngredients()).slice()
+    .sort((a,b)=>String(a.name||a.sku).localeCompare(String(b.name||b.sku))); }catch(e){ window._rcIngs=[]; }
   const _isSup=_isStickerPO(formRec) || /\[SUPPLIES\]/i.test(String(formRec.po_ref||''));
   const defLoc=_isSup?'':'bulacan';   // supplies/stickers may go to Pasig — don't presume
   window._rcN=lines.length;
@@ -6831,11 +6951,66 @@ async function openPOReceive(){
       <td><input id="rc_bin${i}" value="${esc(binOf(l.ingredient_sku,defLoc))}" placeholder="bin" style="width:72px;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
       <td id="rc_flag${i}" style="font-size:12px;white-space:nowrap"></td></tr>`; }).join('')}
     </tbody></table></div>
+    <div id="rcExtra"></div>
+    <div style="margin-top:8px">
+      <button class="btn sec sm" onclick="rcAddRow()">＋ Something arrived that is not on this order</button>
+      <span class="mini" style="color:var(--muted);margin-left:6px">a substitution, a top-up, or an item the supplier put on the same delivery</span>
+    </div>
     <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px"><input type="checkbox" id="rc_final"> <b>Final delivery</b> — close this PO (received). Leave unticked if more batches are coming.</label>
     <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" onclick="poReceiveApply()">📦 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
-  window._rcLines=lines;
+  window._rcLines=lines; window._rcExtra=[];
   $('overlay').classList.add('on');
   lines.forEach((l,i)=>rcFlag(i));
+}
+/* ---- SOMETHING ARRIVED THAT WAS NEVER ORDERED ---------------------------
+   It happens on nearly every delivery: the supplier substitutes a cut, throws
+   in a top-up, or puts a second item on the same truck. Until now the receiving
+   screen could only see lines that were already on the order, so the only way
+   to record it was to open the order, add a line by hand and save — which is
+   exactly the path that emptied PO-08152026 V01.03.
+   Now it is part of receiving, where it belongs: name it, price it, weigh it.
+   A new line is written on the order with ORDERED = 0, so the document says
+   plainly that this was delivered but never ordered, and the receipt posts to
+   stock like any other. */
+function rcAddRow(){
+  (window._rcExtra=window._rcExtra||[]).push({sku:'', kg:'', price:'', bin:''});
+  drawRcExtra();
+}
+function rcDelRow(i){ (window._rcExtra||[]).splice(i,1); drawRcExtra(); }
+function rcSetExtra(i,f,v){ const r=(window._rcExtra||[])[i]; if(!r) return; r[f]=v;
+  if(f==='sku'){ const it=((relCache['ingredients']||[]).find(x=>x.v===v)||{});
+    const ing=(window._rcIngs||[]).find(x=>x.sku===v);
+    if(ing && (r.price===''||r.price==null)) r.price=(+ing.list_price_kg||+ing.moving_avg_cost_kg||'')||'';
+    drawRcExtra(); }
+}
+function drawRcExtra(){
+  const el=$('rcExtra'); if(!el) return;
+  const rows=window._rcExtra||[];
+  if(!rows.length){ el.innerHTML=''; return; }
+  const loc=($('rc_loc')||{}).value||'bulacan';
+  el.innerHTML=`<div style="margin-top:10px;padding:8px 10px;border:1px solid #e0b400;background:#fffdf3;border-radius:8px">
+    <div class="mini" style="font-weight:700;margin-bottom:6px">Not on this order — delivered anyway</div>
+    <table style="width:100%"><thead><tr><th>Ingredient</th><th class="num">Received</th><th class="num">₱ / unit</th><th>Bin</th><th></th></tr></thead><tbody>
+    ${rows.map((r,i)=>`<tr>
+      <td>${_ingPick('rcx'+i, r.sku, 'rcSetExtra('+i+',\'sku\',this.value)')}</td>
+      <td><input type="number" step="any" value="${esc(String(r.kg))}" oninput="rcSetExtra(${i},'kg',this.value)"
+        style="width:92px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td><input type="number" step="any" value="${esc(String(r.price))}" oninput="rcSetExtra(${i},'price',this.value)"
+        style="width:92px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td><input value="${esc(String(r.bin||binOf(r.sku,loc)||''))}" oninput="rcSetExtra(${i},'bin',this.value)"
+        placeholder="bin" style="width:72px;padding:5px;border:1px solid var(--line);border-radius:5px"></td>
+      <td><span class="btn link" style="color:var(--danger);font-size:12px" onclick="rcDelRow(${i})">✕</span></td></tr>`).join('')}
+    </tbody></table>
+    <div class="mini" style="color:var(--muted);margin-top:6px">Each of these adds a line to the order with <b>ordered 0</b>, so the record shows it was delivered without being ordered.
+      <b>₱ / unit starts at the item's last known price</b> (its list price, or its moving-average cost) — <b>overwrite it with what the supplier is actually charging</b>, because this is what goes onto the bill.
+      Left at zero it still posts to stock, but it bills nothing and the variance will say so.</div>
+  </div>`;
+}
+function _ingPick(id,sel,onch){
+  const list=(window._rcIngs||[]);
+  return `<select id="${id}" onchange="${onch}" style="min-width:210px;padding:5px;border:1px solid var(--line);border-radius:5px">
+    <option value="">— pick an ingredient —</option>
+    ${list.map(i=>`<option value="${esc(i.sku)}" ${i.sku===sel?'selected':''}>${esc(i.name||i.sku)}</option>`).join('')}</select>`;
 }
 // refresh each line's bin to the chosen warehouse's bin
 function rcReloadBins(){ const loc=($('rc_loc')||{}).value||'bulacan'; (window._rcLines||[]).forEach((l,i)=>{ const b=$('rc_bin'+i); if(b) b.value=binOf(l.ingredient_sku,loc); }); }
@@ -6907,20 +7082,55 @@ async function _poReceiveApply(){
       else if(g< -0.0001){ notes.push(ingName(l.ingredient_sku)+': ordered '+oq+' → received '+total+'kg (over '+(-g)+')');
         _vars.push({check_type:'1 · PO fulfilment',source_ref:formRec.po_ref,expected:oq,actual:total,gap_qty:-g,gap_value:Math.round(-g*pr*100)/100,location:loc,responsible_user:CURRENT_USER,status:'open',note:ingName(l.ingredient_sku)+' ordered '+oq+' vs received '+total+' (over)'}); } }
     return {po_ref:formRec.po_ref, ingredient_sku:l.ingredient_sku, ordered_kg:l.ordered_kg, available_kg:l.available_kg, price_kg:l.price_kg, received_kg:total}; });
+  /* ---- and whatever arrived that was never ordered ---------------------- */
+  const extras=(window._rcExtra||[])
+    .map(r=>({sku:String(r.sku||'').trim(), kg:+r.kg||0, price:Math.max(0,+r.price||0), bin:r.bin}))
+    .filter(r=>r.sku && r.kg>0);
+  const _dupe=extras.filter(r=>lines.some(l=>l.ingredient_sku===r.sku));
+  if(_dupe.length){
+    toast('Already on this order: '+_dupe.map(r=>ingName(r.sku)).join(', ')+' — receive it on its own line instead.',true);
+    return; }
+  const _blank=(window._rcExtra||[]).filter(r=>(String(r.sku||'').trim()?0:1)+( (+r.kg||0)>0?0:1) === 1);
+  if(_blank.length){ toast('An unordered line needs BOTH an ingredient and a quantity — fill it in or remove it.',true); return; }
+  extras.forEach(r=>{ anyNow=true;
+    deltas.push({ingredient_sku:r.sku, recvKg:r.kg, priceKg:r.price});
+    if(r.bin!==undefined && r.bin!==null) setBin(r.sku, loc, r.bin);
+    /* ordered 0 is the whole point: the document must say this was delivered
+       and never ordered, rather than quietly pretending it was on the PO. */
+    updated.push({po_ref:formRec.po_ref, ingredient_sku:r.sku, ordered_kg:0, available_kg:0,
+                  price_kg:r.price, received_kg:r.kg});
+    notes.push(ingName(r.sku)+': '+r.kg+' received, NOT on the order');
+    _vars.push({check_type:'1 · PO fulfilment', source_ref:formRec.po_ref, expected:0, actual:r.kg,
+      gap_qty:r.kg, gap_value:Math.round(r.kg*r.price*100)/100, location:loc,
+      responsible_user:CURRENT_USER, status:'open',
+      note:ingName(r.sku)+' — '+r.kg+' delivered against '+formRec.po_ref+' but never ordered'
+           +(r.price?(' · billed at ₱'+r.price+'/unit'):' · NO PRICE ENTERED, so it is billed at zero')});
+  });
   if(!anyNow && !isFinal){ toast('Enter a quantity received, or tick Final delivery to close',true); return; }
   if(anyNow && !loc){ toast('Pick the receiving warehouse',true); return; }
   // fully received on every line?
   const complete=updated.every(u=>(+u.received_kg||0) >= poOrderQty(u)-0.0001);
   const willClose = isFinal || complete;
   try{
-    await poPatchLines(lines, updated, ['received_kg']);
+    if(extras.length){
+      /* The order is GROWING, so the ids no longer line up one-for-one and the
+         patch path cannot be used. replaceChildren now inserts before it
+         deletes and refuses an empty set, so this is safe — but the existing
+         lines are re-sent in full so nothing is lost on the way through. */
+      await db.replaceChildren(MODELS.purchase_orders.o2m, formRec.po_ref, updated.map(u=>{
+        const row={...u}; delete row.id; return row; }));
+    } else {
+      await poPatchLines(lines, updated, ['received_kg']);
+    }
     formChildren=updated;
     if(deltas.length){ const res=await postReceiptDelta(formRec, deltas, loc); }
     // A PO with one delivery in and another still to come now says so.
     formRec.status = willClose ? 'received' : 'partial';
     await formUpdate('purchase_orders','po_ref',formRec.po_ref,{status:formRec.status});
     const batchQty=deltas.reduce((s,d)=>s+(+d.recvKg||0),0);
-    sysLog('purchase_orders',formRec.po_ref, '📦 '+(willClose?'Final receipt':'Batch receipt')+' by '+CURRENT_USER+' — '+Math.round(batchQty*100)/100+' unit(s) this batch'+(willClose?' · PO closed':' · still open for more')+(notes.length?(' — '+notes.join('; ')):''));
+    sysLog('purchase_orders',formRec.po_ref, '📦 '+(willClose?'Final receipt':'Batch receipt')+' by '+CURRENT_USER+' — '+Math.round(batchQty*100)/100+' unit(s) this batch'
+      +(extras.length?(' · '+extras.length+' item(s) NOT on the order'):'')
+      +(willClose?' · PO closed':' · still open for more')+(notes.length?(' — '+notes.join('; ')):''));
     for(const v of _vars){ try{ await db.create('variance_log',v); }catch(e){} }
     if(willClose) notifyRecordDone('purchase_orders', formRec.po_ref);   // PDF → Drive → notify only when closed
     closeModal(); renderForm();
