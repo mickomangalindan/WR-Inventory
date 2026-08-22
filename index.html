@@ -763,12 +763,17 @@ const MODELS = {
     o2m:{ field:'lines', model:'po_lines', fk:'po_ref', label:'Order Lines',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Requested (kg)',t:'number'},{n:'available_kg',l:'Order qty · vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
 
+  /* A ledger row used to show only a code. RASPGCGD0500 tells the person
+     reading it nothing, and it cannot be searched for by the name everybody
+     actually uses. The row now carries name + variant + code — and _item is
+     what the search reads, so "rabbit" finds it. */
   inventory_movements:{ label:'Inventory Moves', icon:'📊', name:'id', pk:'id', readonly:true,
-    searchOn:['ref_sku','movement_type','location_code','kind','note'],
-    fields:[{n:'created_at',l:'When',t:'text'},{n:'kind',l:'Kind',t:'text'},{n:'ref_sku',l:'Item',t:'text'},
+    searchOn:['_item','ref_sku','movement_type','location_code','kind','note'],
+    fields:[{n:'created_at',l:'When',t:'text'},{n:'kind',l:'Kind',t:'text'},
+      {n:'_item',l:'Item',t:'text'},{n:'ref_sku',l:'Code',t:'text'},
       {n:'location_code',l:'Location',t:'text'},{n:'qty',l:'Qty',t:'number'},{n:'unit_cost',l:'Unit cost',t:'currency'},
       {n:'movement_type',l:'Type',t:'text'}],
-    list:['created_at','movement_type','ref_sku','location_code','qty'], groups:[[],[]] },
+    list:['created_at','movement_type','_item','location_code','qty'], groups:[[],[]] },
 
   stock_balance:{ label:'Live Stock', icon:'📈', name:'ref_sku', pk:'ref_sku', readonly:true, special:'livestock',
     searchOn:['ref_sku','location_code','kind'],
@@ -1306,7 +1311,64 @@ function pbChip(k,v){
   route();
 }
 let searchTimer;
-function onSearch(v){ state.search=v; clearTimeout(searchTimer); searchTimer=setTimeout(()=>route(),250); }
+/* ---- THE SEARCH BOX USED TO FIGHT BACK ---------------------------------
+   Every keystroke re-rendered the whole screen, and the toolbar is part of
+   that render — so the <input> the person was typing into was destroyed and
+   a fresh one built in its place. The value survived (it is written back from
+   state.search) but the FOCUS and the CARET did not. Typing felt like it
+   stuck on every letter; holding backspace was worse, because each redraw
+   dropped the key repeat.
+   The fix is not to redraw less — the list genuinely has to change. It is to
+   put the person back where they were: same box, same caret position, as if
+   nothing had been rebuilt underneath them. */
+let _qCaret=null;
+function _qRestore(){
+  if(!_qCaret) return;
+  const el=$('q'); if(!el) return;
+  if(document.activeElement!==el) el.focus();
+  try{ el.setSelectionRange(_qCaret.s, _qCaret.e); }catch(e){}
+}
+function onSearch(v){
+  state.search=v;
+  const el=$('q');
+  _qCaret = el ? {s:el.selectionStart, e:el.selectionEnd} : null;
+  clearTimeout(searchTimer);
+  searchTimer=setTimeout(()=>{
+    Promise.resolve(route()).then(()=>{
+      /* twice on purpose: once for a synchronous render, once after an async
+         one has finished painting. Re-focusing an already-focused box is a
+         no-op, so the second call costs nothing when the first was enough. */
+      _qRestore(); setTimeout(_qRestore,60); setTimeout(_qRestore,200);
+    });
+  },250);
+}
+/* ---- ONE NAME FOR AN ITEM, WHEREVER IT IS SHOWN -------------------------
+   A ledger row, a stock line and a demand row all carry nothing but a code.
+   Product Name + Variant + [CODE] is what a person recognises, and it is what
+   they type when they search. Built once, cached, and used by Inventory Moves,
+   Live Stock and Demand alike, so the same item never reads three ways. */
+let _itemMapCache=null;
+async function _itemNameMap(force){
+  if(_itemMapCache && !force) return _itemMapCache;
+  const prod={}, ing={};
+  try{ (await db.list('products',{})).forEach(p=>{
+        const nm=String(p.name||p.sku).trim(), v=String(p.variant||'').trim();
+        prod[p.sku]=nm+((v && nm.toLowerCase().indexOf(v.toLowerCase())<0)?(' '+v):'');
+      }); }catch(e){}
+  try{ (await listIngredients()).forEach(i=>{ ing[i.sku]=String(i.name||i.sku).trim(); }); }catch(e){}
+  _itemMapCache={prod,ing};
+  return _itemMapCache;
+}
+/* `withCode` false gives just the readable half — for a cell that already
+   prints the code on its own line underneath. */
+function _itemName(M, sku, kind, withCode){
+  if(!sku) return '';
+  M=M||{prod:{},ing:{}};
+  const nm=(kind==='product') ? (M.prod[sku]||M.ing[sku]) : (M.ing[sku]||M.prod[sku]);
+  const label=nm||String(sku);
+  return (withCode===false)?label:(label+' ['+sku+']');
+}
+
 /* ---- Advanced search & filters (products / ingredients) ---- */
 const FILTERS={
   products:[ {k:'group_1',l:'Group'},{k:'group_2',l:'Subgroup'},{k:'feeding_style',l:'Feeding style'},{k:'variant',l:'Variant'} ],
@@ -1393,6 +1455,13 @@ async function renderList(){
       if(state.model==='production_batches'){                  // resolve the name BEFORE searching it
         try{ const M=await _pbNameMap(); rows.forEach(r=>{ if(!r.kind) r.kind='product'; r._item=_pbName(M,r.product_sku,r.kind); }); }catch(e){}
       }
+      rows=applyAdvFilter(state.model, rows);
+    } else if(state.model==='inventory_movements'){
+      /* Resolve the code to a readable name BEFORE the search runs, so typing
+         "rabbit" finds the rows and not just the person who knows the code. */
+      rows=await db.list(state.model,{});
+      try{ const M=await _itemNameMap();
+        rows.forEach(r=>{ r._item=_itemName(M, r.ref_sku, r.kind); }); }catch(e){}
       rows=applyAdvFilter(state.model, rows);
     } else { rows=await db.list(state.model,{search:state.search}); }
   }
@@ -2401,6 +2470,26 @@ function repSet(k,v){ repCfg[k]=v; renderReport(); }
    grouped like the count sheet (raw + its processed form together, products by family, supplies apart).
    Ending equals the ledger SUM(qty), so this both explains and cross-checks on-hand. */
 let LS_LOC='all', LS_ACT=false, LS_CAT='all';
+/* Live Stock had category buttons and a site picker but no way to find ONE
+   item among two hundred. The search reads the item's name, its code, its
+   group and its base material, so "rabbit", "RASP", "meatballs" and "Gently
+   Cooked" all land. The flag filter answers the other question people come
+   here with: show me only what is negative, or only what is below par. */
+let LS_Q='', LS_FLAG='';
+function lsSetQ(v){ LS_Q=v; drawLiveStock(); setTimeout(_lsFocus,0); }
+function lsSetFlag(v){ LS_FLAG=v; drawLiveStock(); }
+function lsClearFind(){ LS_Q=''; LS_FLAG=''; LS_ACT=false; renderLiveStock(); }
+function _lsFocus(){ const el=$('lsQ'); if(el && document.activeElement!==el){ el.focus();
+  try{ el.setSelectionRange(el.value.length, el.value.length); }catch(e){} } }
+function _lsMatch(r){
+  if(LS_FLAG==='neg'   && !r.neg)   return false;
+  if(LS_FLAG==='below' && !r.below) return false;
+  if(LS_FLAG==='ok'    && (r.neg||r.below)) return false;
+  const q=String(LS_Q||'').trim().toLowerCase();
+  if(!q) return true;
+  const hay=[r.name, r.sku, r.g1, r.g2, r.unit, r.kind].join(' ').toLowerCase();
+  return q.split(/\s+/).filter(Boolean).every(t=>hay.includes(t));
+}
 /* Live Stock held four different kinds of thing in one list — meat, packs,
    packaging, labels — and they answer different questions to different people.
    A category button is the cheapest way to give each of them their own screen
@@ -3149,6 +3238,15 @@ async function renderLiveStock(){
     <span class="mini">to <input type="date" value="${esc(LS_TO)}" onchange="LS_TO=this.value;renderLiveStock()"
       title="Stop the clock here. Blank = now — which is what live means."></span>
     <span class="sp"></span>${LS_CATS.map(c=>`<button class="btn ${LS_CAT===c.k?'':'sec'} sm" onclick="LS_CAT='${c.k}';renderLiveStock()" title="${esc(c.l)}">${c.i} ${esc(c.l)}</button>`).join('')}
+    <span class="sp"></span>
+    <input id="lsQ" value="${esc(LS_Q)}" placeholder="🔎 name, code, group…" oninput="lsSetQ(this.value)"
+      style="min-width:180px;padding:5px 9px;border:1px solid var(--line);border-radius:6px">
+    <label class="mini">Show <select onchange="lsSetFlag(this.value)" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+      <option value=""${LS_FLAG===''?' selected':''}>Everything</option>
+      <option value="neg"${LS_FLAG==='neg'?' selected':''}>🔴 Negative only</option>
+      <option value="below"${LS_FLAG==='below'?' selected':''}>⚠ Below reorder/PAR</option>
+      <option value="ok"${LS_FLAG==='ok'?' selected':''}>✅ Healthy only</option></select></label>
+    ${(LS_Q||LS_FLAG)?`<button class="btn sec sm" onclick="lsClearFind()">✕ Clear</button>`:''}
     ${(LS_FROM||LS_TO)?`<button class="btn sec sm" onclick="LS_FROM='';LS_TO='';renderLiveStock()">↺ Live</button>`
       :`<span class="tagf" style="background:#e2f0e4;color:#2d5c22">LIVE · as at now</span>`}
     <div class="sp"></div><span style="color:var(--muted)">begin + in + produced − used − sold ± moves = ending</span>`;
@@ -3200,7 +3298,12 @@ async function renderLiveStock(){
       const ai=LS_ANIMALS.findIndex(([l])=>l===an);
       grank=400000+((ai<0?90:ai)*1000)+_so(it); }
     const kind=isProd?'product':(isStk?'sticker':(isSup?'supply':'ingredient'));
-    const name=(it.name||a.sku)+((!isProd&&!isSup&&it.is_intermediate)?' — processed':'');
+    /* Product Name + Variant, so "Rabbit Meat (GC)" at 250 g and at 500 g are
+       two readable rows rather than the same words twice. The code prints
+       under it, which is what people search by when they have the label. */
+    const name=(isProd
+        ? prodLabel({...it, sku:a.sku},{noSku:true})
+        : ((it.name||a.sku)+((!isSup&&it.is_intermediate)?' — processed':'')));
     const par=isProd?(+it.par_packs||0):(+it.reorder_g||+it.par_g||0);
     const below=par>0 && end<par, neg=end< -0.0001;
     return {sku:a.sku, name, g1, g2, grank, unit, div, kind, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf,
@@ -3209,12 +3312,25 @@ async function renderLiveStock(){
   if(LS_CAT!=='all') rows=rows.filter(r=>r.kind===LS_CAT);
   if(LS_ACT) rows=rows.filter(r=>r.below||r.neg);
 
+  /* Recomputing the whole ledger on every keystroke would make the search
+     unusable on a hundred thousand movements. Compute once, keep the rows,
+     and let the search re-draw from them. */
+  window._lsAll=rows;
+  window._lsTotVal=Object.values(acc).reduce((s,a)=>s+a.val,0);
+  window._lsProdSet=pm;
+  drawLiveStock();
+}
+function drawLiveStock(){
+  const pm=window._lsProdSet||{};
+  const rows=(window._lsAll||[]).filter(_lsMatch);
+  const nAll=(window._lsAll||[]).length;
   const nBelow=rows.filter(r=>r.below).length, nNeg=rows.filter(r=>r.neg).length;
-  const totVal=Object.values(acc).reduce((s,a)=>s+a.val,0);
+  const totVal=window._lsTotVal||0;
   const mh=(typeof moneyHidden==='function'&&moneyHidden());
   const kpi=(l,val,s,col)=>`<div class="kpi"><div class="l">${l}</div><div class="v"${col?` style="color:${col}"`:''}>${val}</div><div class="s">${s||''}</div></div>`;
   let h=`<div class="kpirow">
-    ${kpi('Items in stock', rows.length, (LS_CAT==='all'?'':((LS_CATS.find(c=>c.k===LS_CAT)||{}).l+' · '))+(LS_LOC==='all'?'all sites':LS_LOC))}
+    ${kpi('Items in stock', rows.length+(rows.length===nAll?'':(' <span class="mini" style="color:var(--muted)">of '+nAll+'</span>')),
+      (LS_CAT==='all'?'':((LS_CATS.find(c=>c.k===LS_CAT)||{}).l+' · '))+(LS_LOC==='all'?'all sites':LS_LOC)+((LS_Q||LS_FLAG)?' · filtered':''))}
     ${kpi('⚠ Below reorder/PAR', nBelow, 'need replenishing', nBelow?'var(--earth,#b5762a)':'')}
     ${kpi('🔴 Negative', nNeg, 'ledger to investigate', nNeg?'var(--danger)':'')}
     ${mh?'':kpi('Stock value', fmt(totVal), 'at moving-avg cost', 'var(--berry)')}
@@ -3227,7 +3343,7 @@ async function renderLiveStock(){
   const byG1={}; rows.forEach(r=>{ (byG1[r.g1]=byG1[r.g1]||[]).push(r); });
   h+=`<div class="repcard"><div style="overflow-x:auto"><table><thead><tr>
     <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num" title="Sold on Shopify, less anything refunded or returned">−Sold</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
-  if(!rows.length) h+=`<tr><td colspan="${mh?11:12}" class="empty">${LS_ACT?'Nothing needs action ✅':'No stock movements yet.'}</td></tr>`;
+  if(!rows.length) h+=`<tr><td colspan="${mh?11:12}" class="empty">${(LS_Q||LS_FLAG)?'Nothing matches that search.':(LS_ACT?'Nothing needs action ✅':'No stock movements yet.')}</td></tr>`;
   Object.keys(byG1).sort((a,b)=>_gmin(byG1[a])-_gmin(byG1[b])||cmpGroupKeys(a,b)).forEach(g1=>{
     const g1list=byG1[g1]; const gval=g1list.reduce((s,r)=>s+r.value,0);
     h+=`<tr style="background:#e7f0e9"><td colspan="${mh?10:10}"><b>${esc(g1)}</b> <span class="mini">· ${g1list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
@@ -3240,7 +3356,7 @@ async function renderLiveStock(){
       const cl=r.below||r.neg?' style="cursor:pointer"':' style="cursor:pointer"';
       const model=pm[r.sku]?'products':'ingredients';
       h+=`<tr${cl} onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open item">
-        <td>${esc(r.name)}</td><td class="mini">${esc(r.unit)}</td>
+        <td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code></div></td><td class="mini">${esc(r.unit)}</td>
         <td class="num">${qf(r.begin,r.div)}</td><td class="num">${r.recv?qf(r.recv,r.div):'—'}</td><td class="num">${r.prod?qf(r.prod,r.div):'—'}</td>
         <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td>
         <td class="num"${(r.sold||r.back)?' title="sold '+qf(r.sold,r.div)+(r.back?' · back '+qf(r.back,r.div):'')+'"':''}>${(r.sold||r.back)?qf(r.sold+r.back,r.div):'—'}</td>
@@ -3251,6 +3367,8 @@ async function renderLiveStock(){
   h+=`</tbody></table></div>
     <div class="hint" style="margin-top:8px"><b>Ending = Begin + In + Prod − Used ± Transfer ± Adjust</b>, straight from the ledger — so it both explains and equals current on-hand. Ingredients show in <b>kg</b>, finished goods in <b>packs</b>, supplies in their unit. Rows open the item; <b style="color:var(--earth,#b5762a)">⚠ reorder</b> = at/below reorder or PAR, <b style="color:var(--danger)">🔴 negative</b> = a ledger gap to fix. ${LS_LOC==='all'?'Showing both sites combined — switch Site to split Bulacan vs Pasig.':''}</div></div>`;
   $('content').innerHTML=h;
+  if(typeof applyStickyHeads==='function') applyStickyHeads($('content'));
+  _lsFocus();
 }
 
 /* -------- settings / connection -------- */
@@ -4450,7 +4568,14 @@ async function wdtLoad(){
   let plot=null;
   if(_wdtPlotRef) plot=plots.find(x=>(((x.data&&x.data.ref)||x.ref||'')===_wdtPlotRef))||null;
   if(!plot && _wdtDate) plot=plots.find(x=>String(x.plan_date||x.date||'').slice(0,10)===String(_wdtDate))||null;
-  if(!plot && !_wdtDate && !_wdtPlotRef) plot=plots[0]||null;
+  /* A DRAFT PLOT IS NOT A PLAN. Falling back to plots[0] meant a plot somebody
+     saved as a draft for a later week outranked the locked plot the kitchen is
+     actually working to, and the screen opened on a week nobody had committed.
+     Prefer the newest LOCKED plot; only if none is locked does the newest of
+     any kind stand in. */
+  if(!plot && !_wdtDate && !_wdtPlotRef){
+    plot=plots.find(x=>!!(x.data&&x.data.locked)) || plots[0] || null;
+  }
   const date=plot?String(plot.plan_date||plot.date||'').slice(0,10):wdtWeekOf(_wdtDate);
   /* "As of" is an explicit choice, not a silent default. Left blank the report
      is live and counts everything, which is what it did before this existed —
@@ -5407,7 +5532,7 @@ async function renderWDT(){
   let h=`<div class="repcard"><div class="repbar" style="flex-wrap:wrap;gap:10px">
       <span>Demand plot</span>
       <select onchange="wdtPickPlot(this.value)" style="max-width:340px">
-        <option value="" ${!_wdtPlotRef?'selected':''}>— latest saved plot —</option>
+        <option value="" ${!_wdtPlotRef?'selected':''}>— latest LOCKED plot —</option>
         ${_wdtPlots.map(x=>`<option value="${esc(x.ref)}" ${_wdtPlotRef===x.ref?'selected':''}>${esc(x.ref||'(no ref)')} · ${esc(x.date)}${x.locked?' · locked':''}</option>`).join('')}
       </select>
       <span class="mini" style="color:var(--muted)">week of</span>
@@ -5428,7 +5553,7 @@ async function renderWDT(){
       <div class="stile"><div class="v" style="color:${none?'var(--danger)':'#4e7a3e'}">${none}</div><div class="l">With nothing on hand</div></div>
       <div class="stile"><div class="v">${cust}</div><div class="l">Custom SKUs</div></div></div>
     <div class="hint" style="margin:0 0 8px"><b>Priority is by cover, not by size.</b> A product with none in the freezer against an outstanding order leads the list, whatever the quantity — that is the one that stops a delivery. Sorted least-covered first.</div>
-    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr><th>#</th><th>Product</th><th class="num">Target</th><th class="num">Made</th><th class="num">Still to make</th><th class="num">On hand</th><th>Cover</th><th>Where it came from</th></tr></thead><tbody>
+    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr><th>#</th><th>Product</th><th class="num">Target</th><th class="num">Made</th><th class="num">Still to make</th><th class="num" title="Finished packs at BOTH sites added together — Bulacan and Pasig. It is what the business holds, not what the shop can sell.">On hand<div class="mini" style="font-weight:400;opacity:.75">both sites</div></th><th>Cover</th><th>Where it came from</th></tr></thead><tbody>
     ${_wdtRows.map((r,i)=>`<tr${r.unplanned?' style="background:#f6f8f4"':(r.remaining>0&&r.oh<=0?' style="background:#fdf3f0"':'')}>
       <td class="mini" style="color:var(--muted)">${i+1}</td>
       <td><b>${esc(r.name)}</b>${r.isCustom?' <span class="tagf" style="background:#f3e8f7;color:#6b3f7a">CUSTOM</span>':''}${r.unplanned?' <span class="tagf" style="background:#eef1ea;color:#4e7a3e">MADE, NOT PLANNED</span>':''}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code> · ${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div></td>
@@ -5695,7 +5820,10 @@ async function renderMRP(){
       <button class="btn sm sec" onclick="mrpClearDemand(MRPDATE)" title="Remove the demand rows recorded against this date — by source, and without deleting the orders">🗑 Clear demand for this date</button></div>`;
   dh+=`<h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3>
     <table><thead><tr><th>Product</th><th>SKU</th><th class="num">Demand</th></tr></thead><tbody>`;
-  const _demRow=p=>`<tr><td>${esc(p.name)}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="any" inputmode="decimal" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpDemand['${p.sku}']=+this.value||0;renderMRP()"></td></tr>`;
+  /* Name + Variant, then the code beneath. "Rabbit Meat (GC)" exists at 250 g
+     and 500 g and they are different rows to plan — the variant is the only
+     thing that tells them apart. */
+  const _demRow=p=>`<tr><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div></td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="any" inputmode="decimal" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpDemand['${p.sku}']=+this.value||0;renderMRP()"></td></tr>`;
   // custom-order SKUs are planned in the card above, not here
   const catalogue=prods.filter(p=>!coAll[p.sku]);
   hierGroups(catalogue,{g1:'group_1',g2:'group_2'}).forEach(G=>{
@@ -7043,19 +7171,30 @@ async function postReceiptDelta(po, deltas, loc){
   loc=loc||'bulacan';
   const secure=await useSecure();
   const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i); let n=0, costErr=0;
+  const failed=[]; let posted=0;
   const stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.ref_sku&&s.location_code===loc&&s.kind==='ingredient') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
   const batchNote='PO '+po.po_ref+' R'+Date.now();   // unique per batch → no double-post guard needed
   for(const d of deltas){ const recvKg=+d.recvKg||0; if(!(recvKg>0)) continue;
     const isSup=/(supply|supplement)/i.test((im[d.ingredient_sku]||{}).category||'');
     const g=isSup?recvKg:recvKg*1000, priceKg=Math.max(0,+d.priceKg||0);
-    try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:d.ingredient_sku,location_code:loc,qty:g,unit_cost:(isSup?priceKg:priceKg/1000),movement_type:'receipt',note:batchNote}); }catch(e){ continue; }
+    /* THIS `catch` USED TO BE A SILENT `continue`.
+       A failed insert vanished — no counter, no toast, no log entry — and the
+       caller then wrote "Batch receipt — 89.42 unit(s)" into the activity log
+       using what was TYPED rather than what was WRITTEN. On PO-08152026 V01.03
+       that put 187.25 kg of receipts in the log that never reached stock, and
+       nobody could have known: the screen said it worked.
+       Now every failure is counted and carried back to the caller, which
+       refuses to report a receipt that did not happen. */
+    try{ await db.create('inventory_movements',{kind:'ingredient',ref_sku:d.ingredient_sku,location_code:loc,qty:g,unit_cost:(isSup?priceKg:priceKg/1000),movement_type:'receipt',note:batchNote}); }
+    catch(e){ failed.push({sku:d.ingredient_sku, kg:recvKg, why:String(e&&e.message||e).slice(0,120)}); continue; }
+    posted+=recvKg;
     if(isSup){ n++; continue; }
     if(secure){ try{ await sb('rpc/wr_roll_cost',{method:'POST',body:JSON.stringify({p_sku:d.ingredient_sku,p_recv_kg:recvKg,p_price_kg:priceKg})}); }catch(e){ costErr++; } }
     else { const it=im[d.ingredient_sku]; if(it){ const ohG=Math.max(0,stock[d.ingredient_sku]||0), oldAvg=+it.moving_avg_cost_kg||priceKg;
       const newAvg=(ohG+g)>0?((ohG*oldAvg+g*priceKg)/(ohG+g)):priceKg;
       try{ await db.update('ingredients','sku',d.ingredient_sku,{moving_avg_cost_kg:Math.round(newAvg*100)/100,last_price_kg:priceKg}); stock[d.ingredient_sku]=ohG+g; }catch(e){ costErr++; } } }
     n++; }
-  return {n,costErr};
+  return {n,costErr,failed,posted};
 }
 async function _poReceiveApply(){
   const lines=formChildren||[]; const notes=[]; const _vars=[]; const deltas=[];
@@ -7123,13 +7262,33 @@ async function _poReceiveApply(){
       await poPatchLines(lines, updated, ['received_kg']);
     }
     formChildren=updated;
-    if(deltas.length){ const res=await postReceiptDelta(formRec, deltas, loc); }
+    let _res=null;
+    if(deltas.length){
+      _res=await postReceiptDelta(formRec, deltas, loc);
+      /* NOTHING GOT IN. Do not close the PO, do not move its status, and do not
+         write a log line that says a delivery arrived. Say what broke. */
+      if(!_res.n){
+        toast('NOTHING was posted to stock — '+(( _res.failed[0]||{}).why||'the ledger refused every line')
+          +'. The order is unchanged; fix the cause and post again.', true);
+        sysLog('purchase_orders',formRec.po_ref,'⛔ Receipt FAILED by '+CURRENT_USER+' — 0 of '
+          +deltas.length+' line(s) reached stock · '+((_res.failed[0]||{}).why||'unknown'));
+        return;
+      }
+      if(_res.failed.length){
+        toast(_res.failed.length+' line(s) did NOT reach stock: '
+          +_res.failed.map(f=>ingName(f.sku)+' '+f.kg).join(', ')+'. The rest posted.', true);
+      }
+    }
     // A PO with one delivery in and another still to come now says so.
     formRec.status = willClose ? 'received' : 'partial';
     await formUpdate('purchase_orders','po_ref',formRec.po_ref,{status:formRec.status});
-    const batchQty=deltas.reduce((s,d)=>s+(+d.recvKg||0),0);
+    /* WHAT WAS WRITTEN, NOT WHAT WAS TYPED. The log used to add up the boxes
+       on the form; if the ledger rejected a line the log still claimed it. */
+    const batchQty=_res?_res.posted:deltas.reduce((s,d)=>s+(+d.recvKg||0),0);
     sysLog('purchase_orders',formRec.po_ref, '📦 '+(willClose?'Final receipt':'Batch receipt')+' by '+CURRENT_USER+' — '+Math.round(batchQty*100)/100+' unit(s) this batch'
       +(extras.length?(' · '+extras.length+' item(s) NOT on the order'):'')
+      +((_res&&_res.failed.length)?(' · ⛔ '+_res.failed.length+' line(s) REJECTED by the ledger: '
+          +_res.failed.map(f=>ingName(f.sku)+' '+f.kg+' ('+f.why+')').join('; ')):'')
       +(willClose?' · PO closed':' · still open for more')+(notes.length?(' — '+notes.join('; ')):''));
     for(const v of _vars){ try{ await db.create('variance_log',v); }catch(e){} }
     if(willClose) notifyRecordDone('purchase_orders', formRec.po_ref);   // PDF → Drive → notify only when closed
