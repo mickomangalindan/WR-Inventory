@@ -4572,7 +4572,7 @@ function stickerSheets(pieces, perSheet){ pieces=+pieces||0; perSheet=+perSheet|
    order that is already in the freezer is not urgent; twelve packs with none
    on hand is.
    ============================================================================ */
-let _wdtDate='', _wdtRows=[], _wdtCo=[], _wdtRaw=[], _wdtSrc={};
+let _wdtDate='', _wdtRows=[], _wdtCo=[], _wdtRaw=[], _wdtSrc={}, _wdtCarry=[];
 /* Which SAVED plot to read, and the date to read the world as at. Defaulting to
    "the latest plot" is right most days, but a week is often reviewed after the
    fact — and then "how much had we made by Friday" is a different question from
@@ -4582,7 +4582,257 @@ let _wdtPlotRef='', _wdtAsOf='', _wdtPlots=[];
    "made" was anything from the plot date onwards for ever, so last month's run
    still counted against this week. Blank = the plot's own week. */
 let _wdtFrom='', _wdtTo='';
+/* ---- ONE WINDOW, BOTH SIDES ------------------------------------------
+   The target was one week — the plot's plan_date, and the demand table
+   filtered to that exact date. Production was a RUNNING TOTAL: every batch
+   from that date onward with no ceiling at all, forward-dated ones included.
+   So packs made next week quietly paid off this week's target and
+   "Still to make" always read low. A subtraction is only meaningful when
+   both halves measure the same days.
+
+   WEEK mode bounds both sides to the plot's Mon–Sun. RUN mode makes both
+   sides cumulative from the plot's date, which is the honest way to ask
+   "how much of the backlog have we cleared since we locked this?".
+   Whichever is on is written on the screen. */
+let _wdtMode='week';
+let _wdtWeeks=4, _wdtOnlyOwed=true, _wdtMatrix=null;
+function wdtSetMode(m){ _wdtMode=(m==='run'||m==='matrix')?m:'week'; renderWDT(); }
+function wdtSetWeeks(n){ _wdtWeeks=Math.max(2,Math.min(10,+n||4)); renderWDT(); }
+function wdtToggleOwed(){ _wdtOnlyOwed=!_wdtOnlyOwed; renderWDT(); }
+/* Monday of the week a date falls in — the matrix has to bucket by week, and
+   two plots in the same week must land in one column, not two. */
+function _wdtMonday(d){
+  const t=new Date(String(d||'')+'T00:00:00');
+  if(isNaN(t.getTime())) return '';
+  t.setDate(t.getDate()-((t.getDay()+6)%7));
+  return t.toISOString().slice(0,10);
+}
+function _wdtWeekEnd(d){
+  const t=new Date(String(d||'')+'T00:00:00');
+  if(isNaN(t.getTime())) return '';
+  t.setDate(t.getDate()+6);
+  return t.toISOString().slice(0,10);
+}
 function wdtWeekOf(d){ return d||MRPDATE||todayISO(); }
+/* ---- THE RUNNING TARGET, WEEK BY WEEK --------------------------------
+   One number for "still to make" cannot say WHICH week is starving, so a
+   backlog caused by missing ingredients looks the same as one nobody started.
+   This lays the weeks out side by side.
+
+   Two rules make it honest:
+
+   1. FIFO. A batch is not tied to the week it was made in — a run on Tuesday
+      may be paying off a fortnight-old order. Production pays the OLDEST
+      outstanding week first and spills forward, so catching up actually
+      clears the old column instead of leaving it red for ever. Same
+      soonest-first rule coOpenDemand already uses.
+
+   2. Ingredient stock is allocated, not counted twice. Ten products can each
+      "have enough" beef while sharing one 12 kg box. Products are served in
+      priority order and each one consumes what it needs, so READY means
+      READY once everything ahead of it has taken its share.
+   ---------------------------------------------------------------------- */
+function _wdtMatrixHtml(){
+  const M=_wdtMatrix;
+  if(!M) return '<div class="empty">Loading the weeks…</div>';
+  if(M.err) return '<div class="empty">⚠ '+esc(M.err)+'</div>';
+  const all=M.rows||[];
+  const rows=_wdtOnlyOwed?all.filter(r=>r.still>0):all;
+  const hidden=all.length-rows.length;
+  const owedTot=all.reduce((s,r)=>s+r.still,0);
+  const blocked=all.filter(r=>r.still>0&&r.ready===false).length;
+  const readyN =all.filter(r=>r.still>0&&r.ready===true).length;
+  const wk=M.weeks||[];
+  const perWeek=wk.map((w,i)=>all.reduce((s,r)=>s+(r.cells[i]?r.cells[i].still:0),0));
+
+  let h=`<div class="smart" style="margin:8px 0">
+      <div class="stile"><div class="v" style="color:${owedTot?'var(--berry)':'#4e7a3e'}">${owedTot}</div><div class="l">Still to make · all weeks</div></div>
+      <div class="stile"><div class="v" style="color:${blocked?'var(--danger)':'#4e7a3e'}">${blocked}</div><div class="l">Blocked — ingredient short</div></div>
+      <div class="stile"><div class="v" style="color:#4e7a3e">${readyN}</div><div class="l">Ready to make now</div></div>
+    </div>
+    <div class="hint" style="margin:0 0 8px"><b>Ordered the way the team decides.</b> Lowest stock on hand <i>and</i> fast moving are one question, so the list is sorted by <b>days of cover</b> — what is on hand divided by how fast it sells. Five packs of a slow mover outranks nothing; twenty of a bestseller is urgent.<br><b>A batch pays the oldest week first.</b> Production is not tied to the week it was made in — a run today may be clearing a fortnight-old order, so it settles the oldest outstanding week and spills forward. Each cell shows <b>still owed</b> over the target, with what was actually made that week underneath. <b>Can make?</b> allocates ingredient stock in the same priority order, because ten products sharing one box of beef cannot each claim it.</div>
+    <div class="repbar" style="margin:0 0 8px;gap:8px;flex-wrap:wrap">
+      <span class="mini" style="color:var(--muted)">weeks</span>
+      <select onchange="wdtSetWeeks(this.value)" style="max-width:90px">
+        ${[2,3,4,6,8].map(n=>`<option value="${n}" ${_wdtWeeks===n?'selected':''}>${n}</option>`).join('')}
+      </select>
+      <button class="btn ${_wdtOnlyOwed?'':'sec'} sm" onclick="wdtToggleOwed()">${_wdtOnlyOwed?'Showing only what is still owed':'Showing everything'}</button>
+      ${hidden>0?`<span class="mini" style="color:var(--muted)">${hidden} fully-made product(s) hidden</span>`:''}
+    </div>
+    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr>
+      <th>#</th><th>Product</th>
+      ${wk.map((w,i)=>`<th class="num" title="Week of ${esc(w.mon)} to ${esc(w.end)}">${esc(w.label)}${perWeek[i]?`<div class="mini" style="font-weight:400;color:var(--berry)">${perWeek[i]} owed</div>`:'<div class="mini" style="font-weight:400;opacity:.6">clear</div>'}</th>`).join('')}
+      <th class="num">Still to make</th>
+      <th class="num" title="Finished packs at BOTH sites added together.">On hand<div class="mini" style="font-weight:400;opacity:.75">both sites</div></th>
+      <th class="num" title="On hand divided by how fast it sells — low stock and fast moving in one number. Velocity comes from Sales Momentum, the same figures the Packs Production Request uses. This drives the order of the list.">Days<br>cover</th>
+      <th>Can make?</th></tr></thead><tbody>`;
+
+  h+= rows.map((r,i)=>`<tr${r.ready===false?' style="background:#fdf3f0"':''}>
+      <td class="mini" style="color:var(--muted)">${i+1}</td>
+      <td><b>${esc(r.name)}</b>${r.isCustom?' <span class="tagf" style="background:#f3e8f7;color:#6b3f7a">CUSTOM</span>':''}
+        <div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code> · ${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div></td>
+      ${r.cells.map(c=>`<td class="num">${(c.target||c.made||c.still)?`<b style="color:${c.still?'var(--berry)':'#4e7a3e'}">${c.still}</b><span class="mini" style="color:var(--muted)"> / ${c.target}</span>${c.made?`<div class="mini" style="color:var(--muted)">made ${c.made}</div>`:''}`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>`).join('')}
+      <td class="num"><b style="color:${r.still?'var(--berry)':'#4e7a3e'}">${r.still}</b></td>
+      <td class="num">${r.oh}</td>
+      <td class="num">${!r.velKnown
+          ? `<span class="mini" style="color:var(--muted)" title="No sales in the momentum window — velocity unknown, so cover cannot be worked out.">no sales</span>`
+          : `<b style="color:${r.daysCover<7?'var(--danger)':(r.daysCover<14?'var(--berry)':'#4e7a3e')}">${Math.round(r.daysCover*10)/10}d</b>
+             <div class="mini" style="color:var(--muted)">${Math.round(r.perDay*10)/10}/day</div>`}</td>
+      <td>${r.still===0?'<span class="mini" style="color:var(--muted)">—</span>'
+            : r.ready===true?'<span class="badge b-received">ready</span>'
+            : r.ready===false?`<span class="badge b-open" style="background:#fbe3dd;color:#8a3520">short</span>
+                 <div class="mini" style="color:var(--danger)">${esc(r.shortName)} · need ${num(Math.round(r.needG/100)/10)}kg, have ${num(Math.round(r.haveG/100)/10)}kg</div>`
+            : '<span class="mini" style="color:var(--muted)">no recipe</span>'}</td></tr>`).join('')
+    || `<tr><td colspan="${wk.length+6}" class="empty">${_wdtOnlyOwed?'Nothing outstanding across these weeks — every target has been made.':'No demand or production in this window.'}</td></tr>`;
+
+  h+=`</tbody></table></div><div class="pager">${rows.length} product(s)${hidden>0?' · '+hidden+' hidden':''} · weeks ${esc(M.first||'')} → ${esc(M.last||'')}</div>`;
+  return h;
+}
+
+async function wdtMatrixLoad(plots, pBy, stock){
+  const endMon=_wdtMonday(_wdtSrc.date||_wdtDate||todayISO())||_wdtMonday(todayISO());
+  const weeks=[];
+  for(let i=_wdtWeeks-1;i>=0;i--){
+    const t=new Date(endMon+'T00:00:00'); t.setDate(t.getDate()-7*i);
+    const mon=t.toISOString().slice(0,10);
+    const e=new Date(t.getTime()+6*864e5).toISOString().slice(0,10);
+    weeks.push({mon, end:e, label:_wkLabel(mon)});
+  }
+  const first=weeks[0].mon, last=weeks[weeks.length-1].end;
+
+  // --- target per SKU per week: plots, the demand table, custom orders
+  const tgt={};                                   // sku -> [per week]
+  const bump=(sku,wi,q)=>{ if(!(q>0)) return;
+    (tgt[sku]=tgt[sku]||weeks.map(()=>0))[wi]=Math.max(tgt[sku][wi], q); };
+  const wIdx=d=>{ const m=_wdtMonday(d); return weeks.findIndex(w=>w.mon===m); };
+
+  (plots||[]).forEach(pl=>{
+    const d=String(pl.plan_date||pl.date||'').slice(0,10); const i=wIdx(d);
+    if(i<0) return;
+    const dm=(pl.data&&pl.data.demand)||{};
+    Object.keys(dm).forEach(sku=>bump(sku,i,+dm[sku]||0));
+  });
+  try{ let rows;
+    if(isLive()) rows=await sb('demand?select=sku,qty,plan_date&plan_date=gte.'+encodeURIComponent(first)+'&plan_date=lte.'+encodeURIComponent(last));
+    else rows=(DEMO.demand||[]).filter(r=>String(r.plan_date||'')>=first&&String(r.plan_date||'')<=last);
+    (rows||[]).forEach(r=>{ const i=wIdx(r.plan_date); if(i>=0) bump(r.sku,i,+r.qty||0); });
+  }catch(e){}
+  /* A custom order belongs to the week it is NEEDED, not the week it was
+     raised. One needed before the window opens sits in the first column —
+     dropping it would hide the oldest debt, which is the one that matters. */
+  const co=await coOpenDemand().catch(()=>({}));
+  Object.keys(co).forEach(sku=>{
+    const nd=(co[sku]&&co[sku].needed)||'';
+    let i=nd?wIdx(nd):-1;
+    if(i<0) i = (nd && nd < first) ? 0 : -1;
+    if(i<0) return;
+    bump(sku,i,+co[sku].packs||0);
+  });
+
+  // --- production per week (by the date it was made)
+  const mk={};
+  try{ let rows;
+    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,production_date,kind&status=eq.confirmed&production_date=gte.'+encodeURIComponent(first));
+    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed'&&String(b.production_date||'')>=first);
+    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{
+      const i=wIdx(b.production_date); if(i<0) return;
+      (mk[b.product_sku]=mk[b.product_sku]||weeks.map(()=>0))[i]+= (+b.good_packs||0);
+    });
+  }catch(e){}
+  Object.keys(mk).forEach(sku=>{ if(!tgt[sku]) tgt[sku]=weeks.map(()=>0); });
+
+  // --- FIFO: the pool pays the oldest outstanding week first
+  const rows=Object.keys(tgt).map(sku=>{
+    const T=tgt[sku], M=mk[sku]||weeks.map(()=>0);
+    let pool=M.reduce((a,b)=>a+b,0);
+    const cells=T.map((t,i)=>{
+      const pay=Math.min(pool, t); pool-=pay;
+      return {target:t, made:M[i], still:Math.max(0,t-pay)};
+    });
+    const p=pBy[sku]||{sku,name:sku};
+    const still=cells.reduce((a,c)=>a+c.still,0);
+    const firstOwed=cells.findIndex(c=>c.still>0);
+    return {sku, name:prodLabel(p,{noSku:true}), g1:p.group_1||'Products',
+            g2:p.group_2||p.family||'Other',
+            cells, still, spare:pool, oh:+stock[sku]||0,
+            firstOwed:firstOwed<0?99:firstOwed,
+            isCustom:/^CUST-/.test(sku)};
+  }).filter(r=>r.still>0 || r.cells.some(c=>c.target>0||c.made>0))
+    .sort((a,b)=> a.firstOwed-b.firstOwed || b.still-a.still);
+
+  await _wdtBlockers(rows);
+  await _wdtVelocity(rows);
+  /* HOW THE TEAM ACTUALLY PRIORITISES: lowest stock on hand, and whether the
+     item moves fast. Those are one question, not two — five packs of something
+     nobody buys is fine, twenty packs of a bestseller is not. Days of cover
+     answers both at once, so it drives the order. Something still owed with no
+     stock and steady sales leads the list; a slow mover sitting on a month of
+     cover sinks, whatever the quantity. */
+  rows.sort((a,b)=>
+      (b.still>0?1:0)-(a.still>0?1:0)
+   || a.daysCover-b.daysCover
+   || a.firstOwed-b.firstOwed
+   || b.still-a.still);
+  return {weeks, rows, first, last};
+}
+
+/* Days of cover — on hand divided by how fast it actually sells. The velocity
+   comes from sales_momentum, the SAME table the Packs Production Request reads,
+   so "fast moving" means one thing everywhere in the app rather than two. No
+   sales history leaves cover unknown; that is shown as such and sorted after
+   the items we can actually judge, never silently treated as "plenty". */
+async function _wdtVelocity(rows){
+  let perDay={};
+  try{
+    const win=Math.max(1,+((typeof PQ!=='undefined'&&PQ.win)||60));
+    const mom=await momLoad().catch(()=>[]);
+    (mom||[]).forEach(r=>{
+      const u = win<=30?(+r.u30||0) : win<=60?(+r.u60||0) : win<=90?(+r.u90||0) : (+r.u120||0);
+      if(r.sku) perDay[r.sku]=u/win;
+    });
+  }catch(e){}
+  rows.forEach(r=>{
+    const v=+perDay[r.sku]||0;
+    r.perDay=v;
+    r.daysCover = v>0 ? (r.oh/v) : (r.oh>0 ? 9998 : 9997);
+    r.velKnown = v>0;
+  });
+}
+
+/* Can the outstanding packs actually be made today? Ingredient stock is
+   consumed in priority order — oldest debt first — because ten products
+   sharing one box of beef cannot each claim it. */
+async function _wdtBlockers(rows){
+  try{
+    const boms=await db.list('bom_lines',{});
+    const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+    const oh={};
+    if(isLive()) (await db.list('stock_balance',{})).forEach(b=>{ if(b.kind==='ingredient') oh[b.ref_sku]=(oh[b.ref_sku]||0)+(+b.on_hand||0); });
+    else (DEMO.inventory_movements||[]).forEach(m=>{ if(m.kind==='ingredient') oh[m.ref_sku]=(oh[m.ref_sku]||0)+(+m.qty||0); });
+    const byProd={}; (boms||[]).forEach(b=>{ if(!b.product_sku) return;
+      (byProd[b.product_sku]=byProd[b.product_sku]||[]).push(b); });
+    const left={...oh};
+    rows.forEach(r=>{
+      r.ready=null; r.shortSku=''; r.shortName=''; r.needG=0; r.haveG=0;
+      if(!r.still) return;
+      const lines=byProd[r.sku]||[];
+      if(!lines.length){ r.ready=null; return; }      // no recipe — cannot say
+      let worst=null;
+      lines.forEach(b=>{
+        const need=(+b.usable_g||0)*r.still; if(!(need>0)) return;
+        const have=+left[b.ingredient_sku]||0;
+        const gap=need-have;
+        if(gap>0 && (!worst||gap>worst.gap)) worst={sku:b.ingredient_sku, gap, need, have};
+        left[b.ingredient_sku]=have-Math.min(have,need);   // consume what it can
+      });
+      if(worst){ r.ready=false; r.shortSku=worst.sku;
+        r.shortName=(im[worst.sku]&&im[worst.sku].name)||worst.sku;
+        r.needG=worst.need; r.haveG=worst.have; }
+      else r.ready=true;
+    });
+  }catch(e){}
+}
+
 async function wdtLoad(){
   // every saved plot, newest first — this is the list the picker offers
   const plots=(await mrpPlans().catch(()=>[])||[]).slice()
@@ -4634,12 +4884,26 @@ async function wdtLoad(){
     (rows||[]).forEach(r=>{ const q=+r.qty||0; if(q>0 && !(dem[r.sku]>=q)){ dem[r.sku]=Math.max(dem[r.sku]||0,q); src[r.sku]=(src[r.sku]||[]).concat(['demand table']); } });
   }catch(e){}
   const co=await coOpenDemand().catch(()=>({}));
-  Object.keys(co).forEach(sku=>{ if(!dem[sku]){ dem[sku]=co[sku].packs; src[sku]=(src[sku]||[]).concat(['custom order']); } });
+  /* An open custom order is owed until it is made — it does not belong to a
+     week. Mixing it into a weekly target meant one row of the number obeyed
+     different rules than the rest, with nothing on screen saying so. In WEEK
+     mode it is carried in its own section instead; in RUN mode, where every
+     figure is cumulative anyway, it belongs in the main list. */
+  const carry={};
+  Object.keys(co).forEach(sku=>{
+    if(dem[sku]) return;
+    if(_wdtMode==='week'){ carry[sku]=+co[sku].packs||0; return; }
+    dem[sku]=co[sku].packs; src[sku]=(src[sku]||[]).concat(['custom order']);
+  });
   // produced so far this week comes off the target
   /* One window, both sides. FROM defaults to the plot's week, TO to the as-of
      date (or open). Anything made inside it counts — including products nobody
      planned, which used to vanish from the week entirely. */
-  const from=_wdtFrom||date, to=_wdtTo||asOf||'';
+  /* WEEK mode closes the window at the plot week's last day unless someone
+     typed a date. RUN mode leaves it open, which is what it always did. */
+  const from=_wdtFrom||date;
+  const weekEnd=_wdtWeekEnd(from);
+  const to = _wdtTo || asOf || (_wdtMode==='week' ? weekEnd : '');
   const made={}; try{ let rows;
     if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,production_date,kind&status=eq.confirmed&production_date=gte.'+encodeURIComponent(from));
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed'&&String(b.production_date||'')>=String(from));
@@ -4664,6 +4928,14 @@ async function wdtLoad(){
             unplanned:!(+dem[sku]>0) && done>0,
             isCustom:/^CUST-/.test(sku), src:(src[sku]||[]).join(', ')};
   }).sort((a,b)=> (a.unplanned?1:0)-(b.unplanned?1:0) || a.cover-b.cover || b.remaining-a.remaining);
+  /* The carry-over block: still owed, from an earlier week, netted against
+     production exactly as coOpenDemand already does. Nothing is hidden — it is
+     simply not counted as this week's target. */
+  _wdtCarry=Object.keys(carry).filter(sku=>carry[sku]>0).map(sku=>{
+    const p=pBy[sku]||{sku,name:sku};
+    return {sku, name:prodLabel(p,{noSku:true}), packs:carry[sku], oh:+stock[sku]||0,
+            needed:(co[sku]&&co[sku].needed)||''};
+  }).sort((a,b)=>String(a.needed||'9999').localeCompare(String(b.needed||'9999'))||b.packs-a.packs);
   _wdtCo=[];
   const coAll=co; Object.keys(coAll).forEach(sku=>{ (coAll[sku].orders||[]).forEach(o=>{
     _wdtCo.push({sku, product:(pBy[sku]&&prodLabel(pBy[sku],{noSku:true}))||sku, ref:o.ref, customer:o.customer||'—',
@@ -4691,7 +4963,10 @@ async function wdtLoad(){
               rawSku:p?p.sku:'', rawName:p?p.name:'', ohRawG:p?(+ohI[p.sku]||0):0, yieldPct:Math.round(y*1000)/10};
     }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat)||b.procG-a.procG);
   }catch(e){}
-  _wdtSrc={plot:plot?(plot.data&&plot.data.ref||plot.ref||''):'', date, asOf, histor, from, to};
+  _wdtSrc={plot:plot?(plot.data&&plot.data.ref||plot.ref||''):'', date, asOf, histor, from, to,
+           mode:_wdtMode, weekEnd, bounded:!!to};
+  _wdtMatrix=null;
+  if(_wdtMode==='matrix'){ try{ _wdtMatrix=await wdtMatrixLoad(plots, pBy, stock); }catch(e){ _wdtMatrix={weeks:[],rows:[],err:String(e&&e.message||e)}; } }
 }
 function _wdtCover(r){
   if(!r.remaining) return '<span class="badge b-received">done</span>';
@@ -5563,10 +5838,16 @@ async function renderWDT(){
       </select>
       <span class="mini" style="color:var(--muted)">week of</span>
       <input type="date" value="${esc(_wdtSrc.date)}" onchange="_wdtPlotRef='';_wdtDate=this.value;renderWDT()" title="Or pick the week directly — the plot saved for that date is used if there is one">
+      <span class="chipbar" style="display:inline-flex;gap:4px">
+        <button class="btn ${_wdtSrc.mode!=='run'?'':'sec'} sm" onclick="wdtSetMode('week')" title="Target and production both measured over the plot's Mon–Sun. The only comparison where 'Still to make' means what it says.">This week</button>
+        <button class="btn ${_wdtSrc.mode==='run'?'':'sec'} sm" onclick="wdtSetMode('run')" title="Both sides cumulative from the plot's date — how much of the backlog has been cleared since this plot was locked.">Running total</button>
+        <button class="btn ${_wdtSrc.mode==='matrix'?'':'sec'} sm" onclick="wdtSetMode('matrix')" title="Every week side by side, so you can see WHICH week is starving — and whether the ingredients to clear it are on the shelf.">By week</button>
+      </span>
       <span class="mini" style="color:var(--muted)">counting production</span>
       <input type="date" value="${esc(_wdtSrc.from||'')}" onchange="_wdtFrom=this.value;renderWDT()" title="First day of production counted against this week. Blank = the plot's own date.">
       <span class="mini" style="color:var(--muted)">to</span>
-      <input type="date" value="${esc(_wdtSrc.to||'')}" onchange="_wdtTo=this.value;renderWDT()" title="Last day counted. Blank = up to today.">
+      <input type="date" value="${esc(_wdtSrc.to||'')}" onchange="_wdtTo=this.value;renderWDT()" title="Last day counted. In 'This week' this defaults to the plot week's last day; in 'Running total', blank means no ceiling at all — including batches dated in the future.">
+      <span class="tagf" style="background:${_wdtSrc.bounded?'#eaf3e5':'#fff3d6'};color:${_wdtSrc.bounded?'#3d6130':'#7a5a10'}">${_wdtSrc.bounded?('counting '+esc(_wdtSrc.from||'')+' → '+esc(_wdtSrc.to||'')):('counting '+esc(_wdtSrc.from||'')+' → open — later weeks pay off this one')}</span>
       ${(_wdtFrom||_wdtTo)?`<button class="btn sec sm" onclick="_wdtFrom='';_wdtTo='';renderWDT()">↺ the plot's week</button>`:''}
       <span class="mini" style="color:var(--muted)">as of</span>
       <input type="date" value="${esc(_wdtSrc.asOf||'')}" onchange="_wdtAsOf=this.value;renderWDT()" title="Leave blank for live. Set it to read the week as it stood on that day — stock moved after it is ignored.">
@@ -5577,9 +5858,11 @@ async function renderWDT(){
       <div class="stile"><div class="v">${tot}</div><div class="l">Packs demanded</div></div>
       <div class="stile"><div class="v" style="color:${rem?'var(--berry)':'#4e7a3e'}">${rem}</div><div class="l">Still to make</div></div>
       <div class="stile"><div class="v" style="color:${none?'var(--danger)':'#4e7a3e'}">${none}</div><div class="l">With nothing on hand</div></div>
-      <div class="stile"><div class="v">${cust}</div><div class="l">Custom SKUs</div></div></div>
+      <div class="stile"><div class="v">${cust}</div><div class="l">Custom SKUs</div></div>
+      ${_wdtCarry.length?`<div class="stile"><div class="v" style="color:var(--earth,#b5762a)">${_wdtCarry.reduce((s,r)=>s+r.packs,0)}</div><div class="l">Carried over</div></div>`:''}</div>
+    ${_wdtSrc.mode==='matrix' ? _wdtMatrixHtml() : `
     <div class="hint" style="margin:0 0 8px"><b>Priority is by cover, not by size.</b> A product with none in the freezer against an outstanding order leads the list, whatever the quantity — that is the one that stops a delivery. Sorted least-covered first.</div>
-    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr><th>#</th><th>Product</th><th class="num">Target</th><th class="num">Made</th><th class="num">Still to make</th><th class="num" title="Finished packs at BOTH sites added together — Bulacan and Pasig. It is what the business holds, not what the shop can sell.">On hand<div class="mini" style="font-weight:400;opacity:.75">both sites</div></th><th>Cover</th><th>Where it came from</th></tr></thead><tbody>
+    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr><th>#</th><th>Product</th><th class="num">Target</th><th class="num" title="${_wdtSrc.mode==='run'?'Every confirmed batch since the plot date — cumulative.':'Confirmed batches inside this week only.'}">Made${_wdtSrc.mode==='run'?' <span class="mini" style="font-weight:400;opacity:.75">(cumulative)</span>':' <span class="mini" style="font-weight:400;opacity:.75">this week</span>'}</th><th class="num">Still to make</th><th class="num" title="Finished packs at BOTH sites added together — Bulacan and Pasig. It is what the business holds, not what the shop can sell.">On hand<div class="mini" style="font-weight:400;opacity:.75">both sites</div></th><th>Cover</th><th>Where it came from</th></tr></thead><tbody>
     ${_wdtRows.map((r,i)=>`<tr${r.unplanned?' style="background:#f6f8f4"':(r.remaining>0&&r.oh<=0?' style="background:#fdf3f0"':'')}>
       <td class="mini" style="color:var(--muted)">${i+1}</td>
       <td><b>${esc(r.name)}</b>${r.isCustom?' <span class="tagf" style="background:#f3e8f7;color:#6b3f7a">CUSTOM</span>':''}${r.unplanned?' <span class="tagf" style="background:#eef1ea;color:#4e7a3e">MADE, NOT PLANNED</span>':''}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code> · ${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div></td>
@@ -5588,7 +5871,23 @@ async function renderWDT(){
       <td class="num">${r.oh}</td><td>${_wdtCover(r)}</td>
       <td class="mini" style="color:var(--muted)">${esc(r.src)}</td></tr>`).join('')
       ||'<tr><td colspan="8" class="empty">No demand for this week yet — build and save a plot in Demand/MRP, or lock a custom order.</td></tr>'}
-    </tbody></table></div><div class="pager">${_wdtRows.length} product(s)</div></div>`;
+    </tbody></table></div><div class="pager">${_wdtRows.length} product(s)</div>`}</div>`;
+  /* Owed from an earlier week. Kept out of the weekly target on purpose — a
+     "Weekly Demand Target" that silently includes a three-week-old order is not
+     a weekly number — but shown right underneath it, because the packs are real
+     and somebody still has to make them. */
+  if(_wdtCarry.length){
+    h+=`<div class="repcard" style="margin-top:14px;border-left:4px solid var(--earth,#b5762a)"><div class="repbar">
+        <span>↪ Carried over from earlier weeks</span>
+        <span style="color:var(--muted);font-size:12px">Open custom orders still owed. NOT counted in this week's target above — an order does not belong to a week, it is owed until it is made. Switch to <b>Running total</b> to fold them in.</span></div>
+      <div style="overflow-x:auto"><table><thead><tr><th>Needed</th><th>Product</th><th class="num">Still owed</th><th class="num">On hand</th><th>Status</th></tr></thead><tbody>
+      ${_wdtCarry.map(r=>{ const late=r.needed&&r.needed<todayISO();
+        return `<tr><td class="mini" style="white-space:nowrap;${late?'color:var(--danger);font-weight:700':''}">${esc(r.needed||'—')}${late?' · overdue':''}</td>
+        <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code></div></td>
+        <td class="num"><b>${r.packs}</b></td><td class="num">${r.oh}</td>
+        <td>${r.oh>=r.packs?'<span class="badge b-received">ready</span>':'<span class="badge b-open">to make</span>'}</td></tr>`; }).join('')}
+      </tbody></table></div><div class="pager">${_wdtCarry.length} product(s) · ${_wdtCarry.reduce((s,r)=>s+r.packs,0)} pack(s) owed</div></div>`;
+  }
   h+=`<div class="repcard" style="margin-top:14px;border-left:4px solid var(--berry)"><div class="repbar"><span>🧑‍🍳 Custom orders in this week</span>
       <span style="color:var(--muted);font-size:12px">Named customers with a date to hit — they cannot be swapped for another product.</span></div>
     <div style="overflow-x:auto"><table><thead><tr><th>Needed</th><th>Customer</th><th>Order</th><th>Product</th><th class="num">Packs</th><th class="num">On hand</th><th>Status</th></tr></thead><tbody>
@@ -7911,6 +8210,91 @@ function coStatBadge(s){ const f=coStatDef(s); return `<span class="badge b-${f.
 // Locked = past Draft and not cancelled. These are the orders that owe production.
 const CO_OPEN=['for_production','in_demand','in_production','partial'];
 function coIsOpen(s){ return CO_OPEN.includes(coStat(s)); }
+/* ---- DELIVERY IS NOT THE SAME DAY AS PRODUCTION -----------------------
+   custom_orders had one date, needed_date, doing two jobs: what the customer
+   was promised, and the week production has to make it. A gently cooked mix
+   has to be made, cooled, packed and frozen before it can go out, so those are
+   never the same day — and with one field, production first heard about an
+   order on the day it was already due.
+
+   delivery_date is the promise. lead_days is how long before it the kitchen
+   needs. needed_date stays the PRODUCTION deadline, which is what demand, MRP
+   and the weekly target already read — it is simply derived now, and still
+   editable when one order genuinely needs moving. */
+let CO_LEAD_DEF=3;
+try{ const v=localStorage.getItem('wr_co_lead'); if(v!=null && v!=='') CO_LEAD_DEF=Math.max(0,Math.min(60,+v||0)); }catch(e){}
+function coLeadDefault(){ return CO_LEAD_DEF; }
+function coSetLeadDefault(n){
+  CO_LEAD_DEF=Math.max(0,Math.min(60,+n||0));
+  try{ localStorage.setItem('wr_co_lead',String(CO_LEAD_DEF)); }catch(e){}
+  toast('Default lead time is now '+CO_LEAD_DEF+' day(s) — it applies to new orders, not existing ones.');
+}
+function coMinusDays(iso, days){
+  const t=new Date(String(iso||'')+'T00:00:00');
+  if(isNaN(t.getTime())) return '';
+  t.setDate(t.getDate()-(+days||0));
+  return t.toISOString().slice(0,10);
+}
+/* The production deadline for an order. Explicitly stored needed_date wins so
+   a deliberate override is never silently undone; otherwise it is derived. */
+function coProduceBy(o){
+  o=o||{};
+  const del=String(o.delivery_date||'').slice(0,10);
+  if(!del) return String(o.needed_date||'').slice(0,10);
+  const lead=(o.lead_days==null||o.lead_days==='')?coLeadDefault():(+o.lead_days||0);
+  return coMinusDays(del, lead) || String(o.needed_date||'').slice(0,10);
+}
+/* ---- AND THE ORDER-BY DATE, WHICH NOBODY SHOULD HAVE TO WORK OUT ------
+   Knowing the kitchen must finish by Thursday is only half of it. The meat has
+   to be ON SITE by then, and some of it takes over a week to arrive — the
+   ingredient master already carries lead_time_days, the same figure the MRP
+   reorder uses. So the chain runs backwards from the promise:
+
+     delivery_date  −  lead_days        →  make by   (the demand week)
+     make by        −  longest supplier lead  →  order by  (raise the PO)
+
+   The binding constraint is the SLOWEST ingredient in the order, not the
+   average — an order waiting on one 10-day item is a 10-day order. Worked out
+   automatically, because a person doing this by hand will do it once and then
+   stop. */
+let _coSchedKey='', _coSched=null;
+function coSchedNow(){ return _coSched; }
+async function coSched(){
+  if(!coRec) return null;
+  const key=[coRec.order_ref||'', coRec.needed_date||'', coRec.delivery_date||'', coRec.lead_days||'',
+             (coLines||[]).map(l=>(l.product_sku||'')+':'+(l.packs||0)).join(',')].join('|');
+  if(key===_coSchedKey) return _coSched;
+  _coSchedKey=key;
+  let out={orderBy:'', ing:'', days:0, unknown:0};
+  try{
+    const mk=coProduceBy(coRec);
+    const skus=[...new Set((coLines||[]).map(l=>l.product_sku).filter(Boolean))];
+    if(mk && skus.length){
+      const boms=await db.list('bom_lines',{});
+      const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+      let worst=0, worstSku='', unknown=0;
+      (boms||[]).forEach(b=>{
+        if(!skus.includes(b.product_sku)) return;
+        const it=im[b.ingredient_sku];
+        if(!it){ unknown++; return; }
+        const d=+it.lead_time_days||0;
+        if(!d) unknown++;
+        if(d>worst){ worst=d; worstSku=b.ingredient_sku; }
+      });
+      out={orderBy:coMinusDays(mk, worst), ing:(im[worstSku]&&im[worstSku].name)||worstSku||'',
+           days:worst, unknown};
+    }
+  }catch(e){}
+  _coSched=out;
+  try{ drawCOForm(); }catch(e){}   // one redraw; the key now matches, so no loop
+  return out;
+}
+/* Recompute needed_date from the promise. Called when either half changes. */
+function coSyncNeeded(){
+  if(!coRec) return;
+  const d=coProduceBy(coRec);
+  if(d) coRec.needed_date=d;
+}
 function coIsLocked(s){ const k=coStat(s); return k!=='draft'; }
 function _coHash(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))|0; } return (h>>>0).toString(36); }
 function _coRecipeKey(recipe, packG){ const norm=(recipe||[]).filter(r=>r.ingredient_sku&&+r.grams>0).map(r=>r.ingredient_sku+':'+(+r.grams)).sort().join('|'); return _coHash(norm+'@'+(+packG||0)); }
@@ -8216,7 +8600,8 @@ async function renderCustomOrders(){
      was derived FROM. "In Production" with nothing produced is a fair question;
      the answer — which draft run put it there — belongs on the row, not in my head. */
   const _why=window._coWhy||{};
-  let rows=orders.map(o=>`<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.needed_date||'—')}</td><td>${coStatBadge(o.status)}${fbadge(o)}${_why[o.order_ref]?`<div class="mini" style="color:var(--muted)">${esc(_why[o.order_ref])}</div>`:''}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td></tr>`).join('');
+  let rows=orders.map(o=>{ const mk=coProduceBy(o), late=mk&&mk<todayISO()&&coIsOpen(o.status);
+    return `<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.delivery_date||'—')}</td><td${late?' style="color:var(--danger);font-weight:700"':''}>${esc(mk||'—')}${late?'<div class="mini">make-by passed</div>':''}</td><td>${coStatBadge(o.status)}${fbadge(o)}${_why[o.order_ref]?`<div class="mini" style="color:var(--muted)">${esc(_why[o.order_ref])}</div>`:''}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td></tr>`; }).join('');
   // Board counts, in flow order — the answer to "where is everything right now".
   const tally={}; orders.forEach(o=>{ const k=coStat(o.status); tally[k]=(tally[k]||0)+1; });
   const flowStrip=CO_FLOW.filter(f=>tally[f.k]).map(f=>`<span class="badge b-${f.b}" title="${esc(f.d)}" style="margin-right:6px">${esc(f.l)} · ${tally[f.k]}</span>`).join('');
@@ -8224,12 +8609,20 @@ async function renderCustomOrders(){
   const _mig = (isLive() && window._coTblErr) ? `<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ The <code>custom_orders</code> tables aren't reachable, so orders can't be saved across devices. Run <b>wr_migration_custom_orders.sql</b> in Supabase (SQL editor), then reload. <span class="mini">(${esc(window._coTblErr)})</span></div>`:'';
   $('content').innerHTML=`<div class="repcard"><div style="display:flex;justify-content:flex-end">${_liveTag}</div>${_mig}<div class="hint" style="margin:0 0 8px">Create a quote, add standard products and/or custom recipes, edit freely. <b>Lock</b> moves it to <b>For Production</b> — each custom recipe becomes its own sellable SKU + BOM, and the packs enter <b>Demand/MRP</b> <b>whatever week they are scheduled for</b>. Everything after Lock moves by itself: counted in a demand plan → <b>Added in Demand</b>, put on a production plan → <b>In Production</b>, packs confirmed → <b>Partially Fulfilled</b> → <b>Completed</b>.</div>
     ${flowStrip?`<div style="margin:0 0 10px">${flowStrip}</div>`:''}
-    <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th>Needed</th><th>Status</th><th class="num">Lines</th><th class="num">Total</th></tr></thead>
-    <tbody>${rows||'<tr><td colspan="6" class="empty">No custom orders yet — click ＋ New quote.</td></tr>'}</tbody></table></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th title="What the customer was promised">Delivery</th><th title="The production deadline — delivery minus the lead time. This is the demand week.">Make by</th><th>Status</th><th class="num">Lines</th><th class="num">Total</th></tr></thead>
+    <tbody>${rows||'<tr><td colspan="7" class="empty">No custom orders yet — click ＋ New quote.</td></tr>'}</tbody></table></div>
+    <div class="mini" style="color:var(--muted);margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+      <span>Default lead time for new orders</span>
+      <input type="number" min="0" max="60" step="1" value="${coLeadDefault()}" style="width:70px" onchange="coSetLeadDefault(this.value)">
+      <span>day(s) — how far ahead of the promised delivery the kitchen has to finish. Existing orders keep the lead they were saved with.</span>
+    </div>
     <div class="pager">${orders.length} order(s)</div></div>`;
 }
 function _coOrderTotal(o){ return o&&o._total!=null?o._total:0; }
-function coNew(){ coRec={order_ref:'', customer_name:'', contact:'', order_date:todayISO(), needed_date:todayISO(), status:'draft', notes:'', discount:0, delivery_fee:0, created_by:CURRENT_USER}; coLines=[]; _coView='form'; drawCOForm(); }
+function coNew(){ coRec={order_ref:'', customer_name:'', contact:'', order_date:todayISO(),
+    delivery_date:'', lead_days:coLeadDefault(), needed_date:todayISO(),
+    status:'draft', notes:'', discount:0, delivery_fee:0, created_by:CURRENT_USER};
+  coLines=[]; _coView='form'; drawCOForm(); }
 async function coOpen(refEnc){ const ref=decodeURIComponent(refEnc);
   try{ const rows=await db.list('custom_orders',{}); coRec={...(rows.find(r=>r.order_ref===ref)||{})}; }catch(e){ coRec={}; }
   try{ coLines=(await db.children({model:'custom_order_lines',fk:'order_ref'}, ref)).map(l=>({...l, recipe:(typeof l.recipe==='string'?_coParse(l.recipe):(l.recipe||[]))})); }catch(e){ coLines=[]; }
@@ -8456,7 +8849,8 @@ async function coKitchenBatch(){
   <div class="grid">
     <div><div class="lbl">Customer name</div><div class="big">${H(coRec.customer_name||'—')}</div>
       <div class="sub">${rows.length>1?'Multi-line batch':'Single batch'} · ${H(coRec.order_ref||'')}</div></div>
-    <div><div class="lbl">Needed</div><div class="big" style="font-size:17px">${H(coRec.needed_date||'—')}</div></div>
+    <div><div class="lbl">Make by</div><div class="big" style="font-size:17px">${H(coRec.needed_date||'—')}</div>
+      ${coRec.delivery_date?`<div class="sub">delivers ${H(coRec.delivery_date)}</div>`:''}</div>
     <div class="date">printed ${H(todayISO())}</div>
   </div><hr>
   <table><thead><tr><th>Line</th><th>Pack size</th><th>Packs</th>
@@ -8522,7 +8916,31 @@ function drawCOForm(){
         <div class="fld"><label>Personalised name label</label><div class="val"><select ${dis} onchange="coRec.personalized_sticker=this.value==='true'">
           <option value="false" ${coRec.personalized_sticker?'':'selected'}>No — uses the shared Custom Name Sticker</option>
           <option value="true" ${coRec.personalized_sticker?'selected':''}>Yes — printed with the customer's name</option></select></div></div>
-        <div class="fld"><label>Needed (demand week)</label><div class="val"><input type="date" ${dis} value="${esc(coRec.needed_date||'')}" oninput="coRec.needed_date=this.value"></div></div></div>
+        <div class="fld"><label>Expected delivery <span class="mini" style="color:var(--muted)">what the customer was promised</span></label>
+          <div class="val"><input type="date" ${dis} value="${esc(coRec.delivery_date||'')}" oninput="coRec.delivery_date=this.value;coSyncNeeded();drawCOForm()"></div></div>
+        <div class="fld"><label>Lead time (days) <span class="mini" style="color:var(--muted)">how long before delivery it must be made</span></label>
+          <div class="val"><input type="number" min="0" max="60" step="1" ${dis} value="${esc(coRec.lead_days==null||coRec.lead_days===''?coLeadDefault():coRec.lead_days)}" oninput="coRec.lead_days=this.value;coSyncNeeded();drawCOForm()"></div></div>
+        <div class="fld"><label>Make by <span class="mini" style="color:var(--muted)">the production deadline — this is the demand week</span></label>
+          <div class="val"><input type="date" ${dis} value="${esc(coRec.needed_date||'')}" oninput="coRec.needed_date=this.value"></div></div></div>
+      ${(()=>{ const mk=String(coRec.needed_date||''), del=String(coRec.delivery_date||'');
+        if(!del) return '<div class="mini" style="color:var(--muted);margin-top:4px">Set an expected delivery date and production gets a deadline ahead of it, instead of hearing about the order on the day it is due.</div>';
+        if(mk && mk<todayISO()) return `<div class="hint" style="margin-top:6px;border-left:3px solid var(--danger)"><b>Already past the make-by date.</b> Delivery is ${esc(del)} and the kitchen needed ${esc(mk)} — that was ${esc(todayISO())>esc(mk)?'before today':'today'}. Either it goes out late, or the lead time has to come down and somebody has to know.</div>`;
+        if(mk===del) return '<div class="mini" style="color:var(--earth,#b5762a);margin-top:4px">Lead time is 0 — production is due the same day it ships. That works only if the packs are already in the freezer.</div>';
+        return `<div class="mini" style="color:var(--muted);margin-top:4px">Promised <b>${esc(del)}</b> · kitchen has until <b>${esc(mk)}</b>. Demand and the weekly target use the make-by date.</div>`;
+      })()}
+      ${(()=>{ const S=coSchedNow(); coSched();
+        if(!coRec.needed_date || !(coLines||[]).length) return '';
+        if(!S) return '<div class="mini" style="color:var(--muted);margin-top:4px">Working out when the ingredients have to be ordered…</div>';
+        if(!S.orderBy) return '';
+        const late=S.orderBy<todayISO();
+        return `<div class="hint" style="margin-top:6px;${late?'border-left:3px solid var(--danger)':''}">
+          <b>Order the ingredients by ${esc(S.orderBy)}.</b>
+          ${S.days?`The slowest item in this order is <b>${esc(S.ing)}</b> at ${S.days} day(s) — that is what sets the date, not the average.`
+                  :'No ingredient on this order has a lead time recorded, so this is the make-by date itself.'}
+          ${late?' <b style="color:var(--danger)">That date has passed</b> — the PO needed raising already, so either the delivery moves or somebody chases the supplier today.':''}
+          ${S.unknown?`<div class="mini" style="color:var(--earth,#b5762a);margin-top:3px">${S.unknown} ingredient(s) have no lead time on file and were treated as same-day. Set <b>Lead time (d)</b> on those in Ingredients and this date gets sharper.</div>`:''}
+        </div>`;
+      })()}
     </div>
     <div class="notebook"><div class="nbtabs"><button class="on">Order lines (${coLines.length})</button></div>
       <div class="lines"><table><thead><tr><th>Type</th><th>Item / recipe</th><th class="num">Pack g</th><th class="num">Packs</th><th class="num">₱/pack</th><th class="num">Line ₱</th><th></th></tr></thead>
@@ -8719,7 +9137,10 @@ async function coSave(){
   if(!coLines.length){ toast('Add at least one line',true); return; }
   if(!coRec.order_ref){ try{ coRec.order_ref=(await genRef('CO',{date:coRec.order_date})).ref; }catch(e){ coRec.order_ref='CO-'+_mmddyyyy(coRec.order_date)+'-'+String(Date.now()).slice(-4); } }
   try{
-    const hdr={order_ref:coRec.order_ref, customer_name:coRec.customer_name||'', contact:coRec.contact||'', order_date:coRec.order_date||todayISO(), needed_date:coRec.needed_date||coRec.order_date||todayISO(), status:coRec.status||'draft', notes:coRec.notes||'', discount:+coRec.discount||0, delivery_fee:+coRec.delivery_fee||0, personalized_sticker:!!coRec.personalized_sticker, created_by:coRec.created_by||CURRENT_USER};
+    const hdr={order_ref:coRec.order_ref, customer_name:coRec.customer_name||'', contact:coRec.contact||'', order_date:coRec.order_date||todayISO(),
+      delivery_date:coRec.delivery_date||null,
+      lead_days:(coRec.lead_days==null||coRec.lead_days==='')?coLeadDefault():(+coRec.lead_days||0),
+      needed_date:coProduceBy(coRec)||coRec.needed_date||coRec.order_date||todayISO(), status:coRec.status||'draft', notes:coRec.notes||'', discount:+coRec.discount||0, delivery_fee:+coRec.delivery_fee||0, personalized_sticker:!!coRec.personalized_sticker, created_by:coRec.created_by||CURRENT_USER};
     const exists=(await db.list('custom_orders',{})).some(o=>o.order_ref===coRec.order_ref);
     if(exists) await db.update('custom_orders','order_ref',coRec.order_ref,hdr); else await db.create('custom_orders',hdr);
     await _coSaveLines();
@@ -12468,7 +12889,9 @@ function _countProcMaps(ings,bs,bn){ const bases=new Set(), catByBase={};
 // Classify one ingredient for the weekly count: supplies (incl. stickers/labels) → Kitchen Supplies;
 // food ingredients grouped by base material with raw + processed shown underneath.
 function _countIngClass(i, ctx){
-  if(isSupplyItem(i)){ return {isSup:true, g1:'Kitchen Supplies', g2:(i.category||'Supplies'), name:i.name, grank:800000, uom:(i.uom||'pcs'), scale:1, form:'supply'}; }
+  if(isSupplyItem(i)){ return {isSup:true, g1:'Kitchen Supplies', g2:(i.category||'Supplies'), name:i.name,
+      lsG1:'🧴 Kitchen Supplies', lsG2:(i.category||'Supplies'), lsRank:800,
+      grank:800000, uom:(i.uom||'pcs'), scale:1, form:'supply'}; }
   const isProc=!!i.is_intermediate; const p=isProc?_procParent(i,ctx.bs,ctx.bn):null;
   const base=(_matBase(p?p.name:i.name)||(p?p.name:i.name)); const bk=base.toLowerCase(); const hasPair=ctx.procBases.has(bk);
   // Raw items inherit the processed sibling's category so both land under the same group.
@@ -12477,7 +12900,20 @@ function _countIngClass(i, ctx){
   let nm=i.name;
   if(isProc) nm = /processed/i.test(i.name)? i.name : (i.name+' — Processed');
   else if(hasPair) nm = /\braw\b/i.test(i.name)? i.name : (i.name+' — Raw');
-  return {isSup:false, g1:cat, g2:base, name:nm, grank:400000+_grank(cat)*1000+_so(i), uom:'kg', scale:1000, form:isProc?'processed':'raw'};
+  /* GROUPED THE WAY THE FREEZER IS. The count used to head its groups with the
+     masterlist category — "Muscle Meat", "Raw Material" — which scatters one
+     animal across four headings and puts the counter on a walk. Live Stock long
+     ago settled this: animal first, then vegetables and fruit, then the rest,
+     with the base material underneath so raw and processed of the same thing
+     are counted together. Same functions, so the two screens can never drift
+     into two different orders.
+     g1/g2 stay as they were, because Live Stock and the weekly target read
+     them; the count reads the ls* fields instead. */
+  const an=_lsAnimalOf(i, i.sku);
+  const ai=LS_ANIMALS.findIndex(([l])=>l===an);
+  return {isSup:false, g1:cat, g2:base, name:nm,
+          lsG1:an, lsG2:base, lsRank:(ai<0?90:ai),
+          grank:400000+((ai<0?90:ai)*1000)+_so(i), uom:'kg', scale:1000, form:isProc?'processed':'raw'};
 }
 async function renderCountForm(idEnc){
   const m=MODELS.count_sessions; formIsNew=!idEnc;
@@ -12493,7 +12929,7 @@ async function renderCountForm(idEnc){
         if(String(l.ref_sku).startsWith('STK-')){ const h=im[String(l.ref_sku).slice(4)]; l.cat=((h&&h.fam)||'Other')+' — Stickers'; l.g1=((h&&h.g1)||'Products')+' — Stickers'; l.g2=(h&&h.g2)||'Other'; l.grank=600000+((h&&h.so)||0); l.name=l.name||l.ref_sku; l.uom='pcs'; l.scale=1; }
         else { const h=im[l.ref_sku];
           if(h&&h.kind==='product'){ l.cat=h.fam||'Other'; l.g1=h.g1; l.g2=h.g2; l.grank=h.so||0; l.name=l.name||h.n; l.uom='packs'; l.scale=1; l.isProduct=true; l.box=h.box||1; }
-          else if(h&&h.cl){ const cl=h.cl; l.cat=cl.g2; l.g1=cl.g1; l.g2=cl.g2; l.grank=cl.grank; l.uom=cl.uom; l.scale=cl.scale; l.form=cl.form; l.name=cl.name; }
+          else if(h&&h.cl){ const cl=h.cl; l.cat=cl.g2; l.g1=cl.g1; l.g2=cl.g2; l.lsG1=cl.lsG1; l.lsG2=cl.lsG2; l.lsRank=cl.lsRank; l.grank=cl.grank; l.uom=cl.uom; l.scale=cl.scale; l.form=cl.form; l.name=cl.name; }
           else { l.cat=l.cat||'Uncategorized'; l.g1=l.cat||'Uncategorized'; l.g2='Other'; l.grank=500000; l.uom='kg'; l.scale=1000; } } });
     }catch(e){} }
   else { countRec={count_ref:'',location_code:'bulacan',count_date:todayISO(),status:'draft',scope:['All']}; countLines=[]; }
@@ -12526,11 +12962,17 @@ function drawCountForm(){
     const cntD=(l.counted_qty==null||l.counted_qty==='')?'':(Math.round((+l.counted_qty/s)*1e6)/1e6);
     return `<tr>${noCell}<td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td>${varCell}</tr>`; };
   const _idx=countLines.map((l,i)=>i).sort((a,b)=>_lr(a)-_lr(b)||String(countLines[a].name||'').localeCompare(countLines[b].name||''));
-  const _bg1={}; _idx.forEach(i=>{ const k=countLines[i].g1||countLines[i].cat||'Other'; (_bg1[k]=_bg1[k]||[]).push(i); });
+  /* Head the groups the way Live Stock does — by animal, then vegetables and
+     fruit, then the rest — so somebody walking the freezer counts one animal at
+     a time instead of criss-crossing it by masterlist category. Products,
+     stickers and anything without an animal keep their own heading. */
+  const _bg1={}; _idx.forEach(i=>{ const L=countLines[i];
+    const k=L.lsG1||L.g1||L.cat||'Other'; (_bg1[k]=_bg1[k]||[]).push(i); });
   const _gmin=arr=>Math.min(...arr.map(_lr));
   let lineRows='', _no=0; Object.keys(_bg1).sort((a,b)=>_gmin(_bg1[a])-_gmin(_bg1[b])).forEach(g1=>{
     lineRows+=`<tr><td colspan="7" style="background:#e7f0e9;font-weight:700;color:#2f5d33;padding:6px 8px">${esc(g1)} <span style="opacity:.55;font-weight:400">(${_bg1[g1].length})</span></td></tr>`;
-    const _bg2={}; _bg1[g1].forEach(i=>{ const k=countLines[i].g2||'Other'; (_bg2[k]=_bg2[k]||[]).push(i); });
+    const _bg2={}; _bg1[g1].forEach(i=>{ const L=countLines[i];
+      const k=L.lsG2||L.g2||'Other'; (_bg2[k]=_bg2[k]||[]).push(i); });
     const _frank=i=>((countLines[i].form==='processed')?1:0);   // raw ingredient first, then processed derivatives
     Object.keys(_bg2).sort((a,b)=>_gmin(_bg2[a])-_gmin(_bg2[b])).forEach(g2=>{
       const order=_bg2[g2].slice().sort((a,b)=>_frank(a)-_frank(b)||_lr(a)-_lr(b)||String(countLines[a].name||'').localeCompare(countLines[b].name||''));
@@ -12682,9 +13124,9 @@ async function countLoad(){
   const _bs={}, _bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
   const _pm=_countProcMaps(ings,_bs,_bn); const ctx={bs:_bs,bn:_bn,procBases:_pm.bases,procCat:_pm.catByBase};
   ings.slice().sort(cmpItems).forEach(i=>{ const cl=_countIngClass(i,ctx);
-    if(cl.isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:cl.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:cl.g2,catrank:_grank('Supplies'),g1:cl.g1,g2:cl.g2,grank:cl.grank,uom:cl.uom,scale:cl.scale,form:cl.form,sort_order:i.sort_order}); return; }
+    if(cl.isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:cl.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:cl.g2,catrank:_grank('Supplies'),g1:cl.g1,g2:cl.g2,lsG1:cl.lsG1,lsG2:cl.lsG2,lsRank:cl.lsRank,grank:cl.grank,uom:cl.uom,scale:cl.scale,form:cl.form,sort_order:i.sort_order}); return; }
     if(!wantIng) return;
-    lines.push({ref_sku:i.sku, name:cl.name, book_qty:stock[i.sku]||0, counted_qty:'', cat:cl.g2, catrank:_grank(i.category), g1:cl.g1, g2:cl.g2, grank:cl.grank, uom:cl.uom, scale:cl.scale, form:cl.form, sort_order:i.sort_order}); });
+    lines.push({ref_sku:i.sku, name:cl.name, book_qty:stock[i.sku]||0, counted_qty:'', cat:cl.g2, catrank:_grank(i.category), g1:cl.g1, g2:cl.g2, lsG1:cl.lsG1, lsG2:cl.lsG2, lsRank:cl.lsRank, grank:cl.grank, uom:cl.uom, scale:cl.scale, form:cl.form, sort_order:i.sort_order}); });
   if(wantProd) prods.slice().sort(cmpItems).forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order}));
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
   if(wantStk) prods.slice().sort(cmpItems).forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
