@@ -709,7 +709,7 @@ const MODELS = {
     full:['notes'] },
 
   products:{ label:'Products', icon:'📦', name:'name', pk:'sku', archivable:true,
-    searchOn:['name','sku','group_1','group_2','family','variant','product_line','feeding_style','animal'],
+    searchOn:['name','sku','barcode','group_1','group_2','family','variant','product_line','feeding_style','animal'],
     status:{f:'status',stages:['No SKU Yet','No Recipe Yet','Active - Scaled','Active']},
     fields:[
       {n:'sku',l:'SKU',t:'text'},{n:'group_1',l:'Group',t:'text'},{n:'group_2',l:'Subgroup',t:'text'},{n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant / Product name',t:'text'},{n:'sort_order',l:'Sort #',t:'number'},
@@ -776,7 +776,7 @@ const MODELS = {
     list:['created_at','movement_type','_item','location_code','qty'], groups:[[],[]] },
 
   stock_balance:{ label:'Live Stock', icon:'📈', name:'ref_sku', pk:'ref_sku', readonly:true, special:'livestock',
-    searchOn:['ref_sku','location_code','kind'],
+    searchOn:['_item','ref_sku','location_code','kind'],
     fields:[{n:'kind',l:'Kind',t:'text'},{n:'ref_sku',l:'Item',t:'text'},{n:'location_code',l:'Location',t:'text'},
       {n:'on_hand',l:'On hand',t:'number'},{n:'stock_value',l:'Value',t:'currency'}],
     list:['ref_sku','location_code','on_hand','stock_value'], groups:[[],[]] },
@@ -786,7 +786,7 @@ const MODELS = {
      ingredient — which used to post its movements and leave no record at all.
      They share the run reference, so a day reads as one job. */
   production_batches:{ label:'Production', icon:'🏭', name:'batch_ref', pk:'batch_ref',
-    searchOn:['batch_ref','product_sku','status','output_lot','operator','run_ref','kind'],
+    searchOn:['_item','batch_ref','product_sku','status','output_lot','operator','run_ref','kind','production_date'],
     status:{f:'status',stages:['draft','confirmed','cancelled']}, cancelable:true,
     fields:[{n:'batch_ref',l:'Batch Ref',t:'text'},{n:'kind',l:'Kind',t:'select',o:['product','output'],ro:true},
       // the picker only knows products; an OUTPUT batch points at an ingredient,
@@ -919,6 +919,10 @@ async function _maskedWrite(T){ return MASKED_TABLES.includes(T) && await useSec
    customer's name never found their custom order. Declare the columns per model
    and both paths widen at once. */
 function searchCols(model){ const m=MODELS[model]||{}; return (m.searchOn&&m.searchOn.length)?m.searchOn:(m.name?[m.name]:[]); }
+/* Columns that exist in the DATABASE. A name starting with "_" is computed in
+   the browser (_item is a product name resolved from another table); sending it
+   to PostgREST returns a 400 and the whole search silently degrades. */
+function dbSearchCols(model){ return searchCols(model).filter(c=>c.charAt(0)!=='_'); }
 // PostgREST's or=() is comma/paren-delimited, so strip those from the term.
 function _sanitizeTerm(s){ return String(s==null?'':s).replace(/[(),"']/g,' ').replace(/\s+/g,' ').trim(); }
 /* Every word must appear somewhere in the row — so "beef kidney" finds the one
@@ -932,7 +936,7 @@ const db = {
   async list(model, {search,groupBy,page,per}={}){
     const m=MODELS[model]||{};   // child models (bom_lines, po_lines) have no top-level entry
     const T=m.srcTable||model;   // a model may read/write a shared physical table (e.g. supplies → ingredients)
-    const cols=searchCols(model), term=_sanitizeTerm(search);
+    const cols=dbSearchCols(model), term=_sanitizeTerm(search);
     if(isLive()){
       const lim='&limit='+(per||1000);
       let filt='';
@@ -1347,13 +1351,23 @@ function onSearch(v){
    Product Name + Variant + [CODE] is what a person recognises, and it is what
    they type when they search. Built once, cached, and used by Inventory Moves,
    Live Stock and Demand alike, so the same item never reads three ways. */
+/* A custom-order pseudo-product carries its size in the NAME ("… · 1000g") and
+   repeats the base name in the VARIANT, so a naive name+variant printed the
+   thing twice on one line. Only append the variant when the name does not
+   already say it. */
+function varAppend(name, variant){
+  const nm=String(name==null?'':name).trim(), v=String(variant==null?'':variant).trim();
+  if(!v) return nm;
+  if(!nm) return v;
+  return (nm.toLowerCase().indexOf(v.toLowerCase())>=0) ? nm : (nm+' '+v);
+}
 let _itemMapCache=null;
 async function _itemNameMap(force){
   if(_itemMapCache && !force) return _itemMapCache;
   const prod={}, ing={};
   try{ (await db.list('products',{})).forEach(p=>{
         const nm=String(p.name||p.sku).trim(), v=String(p.variant||'').trim();
-        prod[p.sku]=nm+((v && nm.toLowerCase().indexOf(v.toLowerCase())<0)?(' '+v):'');
+        prod[p.sku]=varAppend(nm,v);
       }); }catch(e){}
   try{ (await listIngredients()).forEach(i=>{ ing[i.sku]=String(i.name||i.sku).trim(); }); }catch(e){}
   _itemMapCache={prod,ing};
@@ -1393,14 +1407,24 @@ function _wkLabel(d){ if(!d) return '(no date)';
   const f=x=>x.toLocaleDateString(undefined,{month:'short',day:'numeric'});
   return f(t)+' – '+f(b);
 }
+/* WHAT PEOPLE ACTUALLY TYPE is a SKU, a name, or a variant. This used to be
+   three hardcoded branches — one for products, one for production, and an
+   "everything else" branch that read r.name / r.sku / r.category. Inventory
+   Moves fell into that last branch and has NONE of those columns (its code
+   lives in ref_sku), so every term was matched against an empty string and the
+   search returned nothing at all, no matter what searchOn declared.
+
+   It is model-driven now: whatever a model declares in searchOn is searched,
+   plus the identity columns every list is searched by in practice. Fixing a
+   model's search is a one-line change to its searchOn, in one place, and both
+   the list box and ⌘K widen together. */
+const _SEARCH_ALWAYS=['_item','name','sku','variant','ref_sku','product_sku','ingredient_sku'];
 function _searchText(model,r){
-  /* Production is searched on the RESOLVED item name, not the SKU column — a
-     batch's name lives in another table, so a server-side column search could
-     never find "Meatballs Ostrich". */
-  const parts = model==='products'  ? [r.name,r.sku,r.group_1,r.group_2,r.feeding_style,r.variant,r.barcode]
-              : model==='production_batches' ? [r._item,r.batch_ref,r.run_ref,r.product_sku,r.status,r.kind,r.operator,r.output_lot,r.production_date]
-              : [r.name,r.sku,r.category,r.ingredient_group,r.raw_input,r.supplier,r.supplier1,r.supplier2];
-  return parts.filter(Boolean).join(' ').toLowerCase();
+  const keys=searchCols(model).concat(_SEARCH_ALWAYS);
+  const seen={}, parts=[];
+  for(const k of keys){ if(seen[k]) continue; seen[k]=1;
+    const v=r[k]; if(v!=null&&v!=='') parts.push(v); }
+  return parts.join(' ').toLowerCase();
 }
 function applyAdvFilter(model,rows){
   const terms=(state.search||'').toLowerCase().split(/\s+/).filter(Boolean);
@@ -2487,7 +2511,9 @@ function _lsMatch(r){
   if(LS_FLAG==='ok'    && (r.neg||r.below)) return false;
   const q=String(LS_Q||'').trim().toLowerCase();
   if(!q) return true;
-  const hay=[r.name, r.sku, r.g1, r.g2, r.unit, r.kind].join(' ').toLowerCase();
+  /* SKU, name and variant are what people type. The variant was missing, so
+     searching "45g" on Live Stock found nothing. */
+  const hay=[r.name, r.variant, r.sku, r.g1, r.g2, r.unit, r.kind].join(' ').toLowerCase();
   return q.split(/\s+/).filter(Boolean).every(t=>hay.includes(t));
 }
 /* Live Stock held four different kinds of thing in one list — meat, packs,
@@ -3306,7 +3332,7 @@ async function renderLiveStock(){
         : ((it.name||a.sku)+((!isSup&&it.is_intermediate)?' — processed':'')));
     const par=isProd?(+it.par_packs||0):(+it.reorder_g||+it.par_g||0);
     const below=par>0 && end<par, neg=end< -0.0001;
-    return {sku:a.sku, name, g1, g2, grank, unit, div, kind, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf,
+    return {sku:a.sku, name, variant:(it.variant||''), g1, g2, grank, unit, div, kind, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf,
             sold:a.sold, back:a.back, adj:a.adj, end, value:a.val, par, below, neg, sort_order:it.sort_order};
   }).filter(r=> r.begin||r.recv||r.prod||r.cons||r.tf||r.sold||r.back||r.adj);
   if(LS_CAT!=='all') rows=rows.filter(r=>r.kind===LS_CAT);
@@ -4043,7 +4069,7 @@ function recordPrintHtml(m, r, children){
     const _nm=l=>{
       if((l.kind||'product')!=='product'){ const g=IG[l.product_sku]||{}; return {n:(g.name||ingName(l.product_sku)||l.product_sku), v:'', g1:(g.g1||'Ingredients'), g2:(g.g2||'')}; }
       const p=P[l.product_sku]||{};
-      const nm=p.name||l.product_sku, v=(p.variant&&String(p.variant)!==String(nm))?String(p.variant):'';
+      const nm=p.name||l.product_sku, v=(varAppend(nm,p.variant)===String(nm))?'':String(p.variant||'');
       return {n:nm, v, g1:(p.group_1||'Products'), g2:(p.group_2||p.family||'Other'), so:p.sort_order};
     };
     const rows=kids.map(l=>{ const x=_nm(l);
@@ -7786,9 +7812,36 @@ async function cmdSearch(q){
   if(!ql||'dashboard'.includes(ql)) mods.push({icon:'🏠',label:'Dashboard',tag:'Go to',act:()=>openModel('home')});
   Object.keys(MODELS).forEach(k=>{ if(!ql||MODELS[k].label.toLowerCase().includes(ql)) mods.push({icon:MODELS[k].icon,label:MODELS[k].label,tag:'Go to',act:()=>openModel(k)}); });
   if(ql.length>=2){
+    /* A ledger row and a production batch carry a CODE, not a name — so
+       searching "meatballs buffalo" here used to find neither, however well the
+       lists themselves searched. Resolve the term to matching SKUs first, then
+       look those up. Costs one cached lookup and makes ⌘K agree with the lists. */
+    let _skuHits=null;
+    try{
+      const M=await _itemNameMap();
+      const hit=[];
+      const want=ql.split(/\s+/).filter(Boolean);
+      [M.prod, M.ing].forEach(src=>Object.keys(src||{}).forEach(k=>{
+        const t=(String(src[k]||'')+' '+k).toLowerCase();
+        if(want.every(w=>t.includes(w))) hit.push(k);
+      }));
+      _skuHits=hit.slice(0,40);
+    }catch(e){}
     const found=await Promise.all(CMD_MODELS.map(async mdl=>{
       const m=MODELS[mdl]; if(!m) return null;
-      try{ return {mdl, rows:await db.list(mdl,{search:raw})}; }
+      try{
+        let rows=await db.list(mdl,{search:raw});
+        if((mdl==='inventory_movements'||mdl==='production_batches') && _skuHits && _skuHits.length){
+          const col=(mdl==='inventory_movements')?'ref_sku':'product_sku';
+          const seen={}; (rows||[]).forEach(r=>{ seen[String(r[m.pk])]=1; });
+          for(const sku of _skuHits.slice(0,12)){
+            try{ (await db.list(mdl,{search:sku})||[]).forEach(r=>{
+              if(!seen[String(r[m.pk])] && String(r[col]||'')===sku){ seen[String(r[m.pk])]=1; rows.push(r); }
+            }); }catch(e){}
+          }
+        }
+        return {mdl, rows};
+      }
       catch(e){ return {mdl, rows:[], err:(e&&e.message)||String(e)}; }
     }));
     if(seq!==_cmdSeq) return;                       // a newer keystroke overtook this one
@@ -14311,7 +14364,7 @@ function drawStickerReorder(){
           : '<span style="color:var(--danger)" title="no minimum pack known for this size">—</span>';
         const bare=String(r.sku).replace(/^PERSONAL:/,'');
         h+=`<tr><td>${n}</td>
-          <td><b>${esc(r.name||bare)}</b>${r.variant&&String(r.variant)!==String(r.name)?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}${r.note?`<div class="mini" style="color:var(--berry)">${esc(r.note)}</div>`:''}</td>
+          <td><b>${esc(r.name||bare)}</b>${(r.variant&&varAppend(r.name||bare,r.variant)!==String(r.name||bare))?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}${r.note?`<div class="mini" style="color:var(--berry)">${esc(r.note)}</div>`:''}</td>
           <td class="mini">${esc(r.net||'')||'—'}</td>
           <td><code>${esc(bare)}</code></td>
           <td>${r.link&&safeUrl(r.link)!=='#'?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener noreferrer">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>
