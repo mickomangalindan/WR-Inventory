@@ -74,6 +74,24 @@
   table.sticky thead th{position:sticky;top:0;z-index:3}
   .stickyhead{max-height:70vh;overflow:auto}
   .stickyhead thead th{position:sticky;top:0;z-index:3}
+  /* ---- THE PRODUCTION TARGET SHEET IS WIDE ON PURPOSE --------------------
+     Three column groups is a lot of columns, and two things went wrong at that
+     width. A long ingredient name in "Can make?" wrapped down six lines and
+     dragged the whole row with it, so a row that says one number was 200px
+     tall. And scrolling right to read the plot columns took the product name
+     off the screen, leaving a wall of figures belonging to nobody knows what.
+     So: every cell is one line, the shortage truncates with the full text on
+     hover, and the SKU and product columns are pinned to the left. */
+  .wdtsheet td,.wdtsheet th{white-space:nowrap;vertical-align:top}
+  .wdtsheet .mk{display:block;max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .wdtsheet .stk1,.wdtsheet .stk2{position:sticky;z-index:2;background:inherit}
+  .wdtsheet .stk1{left:0;min-width:104px;max-width:104px}
+  .wdtsheet .stk2{left:104px;min-width:230px;max-width:230px}
+  .wdtsheet .stk2 b{display:block;overflow:hidden;text-overflow:ellipsis}
+  .wdtsheet thead .stk1,.wdtsheet thead .stk2{z-index:6}
+  .wdtsheet thead tr{background:var(--card,#fff)}
+  .wdtsheet .stk2::after{content:'';position:absolute;top:0;right:-1px;bottom:0;
+    width:6px;pointer-events:none;background:linear-gradient(90deg,rgba(0,0,0,.07),transparent)}
   /* The heading has to carry its own background or the rows scroll THROUGH it. */
   .stickyhead thead th{background:var(--pale,#f2f2ec)}
   /* the header must be opaque or rows show through it while scrolling */
@@ -4810,16 +4828,16 @@ function _wdtSheetHtml(){
     </div>
     <div class="hint" style="margin:0 0 8px"><b>Target is what is still owed — not the two plot columns added together.</b> A demand plot is Par + safety <i>minus what is on the shelf</i>, so the newest plot for a product already contains what the older ones asked for. The plot columns on the right show the demand repeating; the Target column refuses to count it twice. Only production <i>after</i> the newest plot reduces it, because the plot was worked out against the shelf as it stood that day.<br>
       <b>Priority is by cover</b> — what is on hand divided by how fast it sells, so low stock and fast moving are one question. Rows are in that order.</div>
-    <div style="overflow-x:auto" class="stickyhead"><table style="min-width:${900+wk.length*150}px"><thead>
+    <div style="overflow-x:auto" class="stickyhead wdtsheet"><table style="min-width:${900+wk.length*150}px"><thead>
       <tr>
-        <th colspan="2" style="border-bottom:2px solid var(--line,#e3e3e3)"></th>
+        <th colspan="2" class="stk1" style="border-bottom:2px solid var(--line,#e3e3e3)"></th>
         <th colspan="5" style="text-align:center;color:#2f5d33;background:#eef3ec">Running total</th>
         <th colspan="${3+wk.length}" style="text-align:center;color:#2f5d33;background:#f6f8f4">Movement</th>
         <th colspan="${wk.length}" style="text-align:center;color:#2f5d33;background:#eef3ec">Demand plot</th>
         <th></th>
       </tr>
       <tr>
-        <th>SKU</th><th>Product name › variant</th>
+        <th class="stk1">SKU</th><th class="stk2">Product name › variant</th>
         <th class="num" title="What is still owed. The newest plot for this product, plus any committed custom order — NOT the plot columns added up.">Target</th>
         <th class="num" title="Everything produced inside the window. Shown for the record; it is not the figure subtracted from Target.">Made this period</th>
         <th class="num" title="Target minus what was made AFTER the newest plot.">Still to make</th>
@@ -4835,10 +4853,10 @@ function _wdtSheetHtml(){
 
   h+= rows.map(r=>{
     let lastI=-1; for(let i=r.plots.length-1;i>=0;i--){ if(r.plots[i]>0){ lastI=i; break; } }
-    return `<tr${r.ready===false?' style="background:#fdf3f0"':''}>
-      <td class="mini"><code>${esc(r.sku)}</code></td>
-      <td><b>${esc(r.name)}</b>${r.isCustom?' <span class="tagf" style="background:#f3e8f7;color:#6b3f7a">CUSTOM</span>':''}
-        <div class="mini" style="color:var(--muted)">${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div></td>
+    return `<tr style="background:${r.ready===false?'#fdf3f0':'var(--card,#fff)'}">
+      <td class="mini stk1"><code>${esc(r.sku)}</code></td>
+      <td class="stk2" title="${esc(r.name)}"><b>${esc(r.name)}</b>${r.isCustom?' <span class="tagf" style="background:#f3e8f7;color:#6b3f7a">CUSTOM</span>':''}
+        <div class="mini" style="color:var(--muted);overflow:hidden;text-overflow:ellipsis">${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div></td>
       <td class="num"><b>${r.target||'—'}</b>${r.custom?`<div class="mini" style="color:#6b3f7a">${r.custom} committed</div>`:''}</td>
       <td class="num mini" style="color:var(--muted)">${r.madeAll||'—'}</td>
       <td class="num"><b style="color:${r.still?'var(--berry)':'#4e7a3e'}">${r.still}</b></td>
@@ -4856,8 +4874,8 @@ function _wdtSheetHtml(){
       <td>${r.still===0?'<span class="mini" style="color:var(--muted)">—</span>'
           : r.ready===true?'<span class="badge b-received">ready</span>'
           : r.ready===false?`<span class="badge b-open" style="background:#fbe3dd;color:#8a3520">short</span>
-              <div class="mini" style="color:var(--danger)">${esc(r.shortName)} · need ${num(Math.round(r.needG/100)/10)}kg, have ${num(Math.round(r.haveG/100)/10)}kg</div>`
-          : '<span class="mini" style="color:var(--muted)">no recipe</span>'}</td></tr>`; }).join('')
+              <span class="mk mini" style="color:var(--danger)" title="${esc(r.shortName)} — need ${num(Math.round(r.needG/100)/10)}kg, have ${num(Math.round(r.haveG/100)/10)}kg">${esc(r.shortName)} · ${num(Math.round(r.needG/100)/10)}/${num(Math.round(r.haveG/100)/10)}kg</span>`
+          : '<span class="badge" style="background:#eef1ea;color:#5c5c5c">no recipe</span>'}</td></tr>`; }).join('')
     || `<tr><td colspan="${10+wk.length*2}" class="empty">${_wdtOnlyOwed?'Nothing outstanding in this window — every target has been made.':'No demand or production in this window.'}</td></tr>`;
 
   h+=`</tbody></table></div>
@@ -6152,64 +6170,179 @@ async function renderWDT(){
     </tbody></table></div><div class="pager">${_wdtRaw.length} ingredient(s)</div></div>`;
   $('content').innerHTML=h;
 }
-function wdtPrint(which){
-  const w=window.open('','_wdt','width=900,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; }
-  /* The layout used to fall apart on paper: the browser strips table and row
-     backgrounds unless print-color-adjust says otherwise, so the green headers,
-     the category bands and the red urgency rows all printed white — and a row
-     background set on <tr> is dropped by most print engines even then. Colours
-     are forced, backgrounds moved onto the cells, and the columns pinned so a
-     long product name can no longer squeeze the numbers into two lines. */
-  const css=`@page{size:A4;margin:12mm} *{box-sizing:border-box}
+/* ---- PRINTING THE SHEET ------------------------------------------------
+   Chrome does not implement the @page margin boxes, so `content: counter(page)`
+   — the CSS way to number pages — silently prints nothing. The only way to put
+   a true "Page 2 of 5" on paper is to decide where the pages break ourselves:
+   chunk the rows, emit one <section> per page, and repeat the masthead and the
+   footer on each. That also guarantees the column headings reappear after a
+   break, which a single long table only does when the print engine feels like
+   it.
+
+   Every page carries who printed it and when, in Manila time, because a
+   production sheet that has been carried round the kitchen for three days
+   should say how old it is. */
+function _wdtStamp(){
+  let when;
+  try{ when=new Date().toLocaleString('en-PH',{timeZone:'Asia/Manila',
+        year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
+  catch(e){ when=todayISO(); }
+  return {when, by:(CURRENT_USER||'—')};
+}
+function _wdtPrintCss(landscape){
+  return `@page{size:A4 ${landscape?'landscape':'portrait'};margin:9mm}
+    *{box-sizing:border-box}
     html,body{-webkit-print-color-adjust:exact;print-color-adjust:exact;color-adjust:exact}
-    body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:12px}
-    h1{color:#4e7a3e;margin:0 0 2px;font-size:20px}
-    .sub{color:#666;margin:0 0 14px;font-size:11.5px;line-height:1.5}
-    table{width:100%;border-collapse:collapse;margin-bottom:14px;table-layout:fixed}
-    th{background:#4e7a3e !important;color:#fff !important;text-align:left;padding:6px 8px;font-size:10.5px;
-       letter-spacing:.02em;vertical-align:bottom}
-    td{padding:5px 8px;border-bottom:1px solid #eee;vertical-align:top;
-       overflow-wrap:anywhere;word-break:break-word}
-    td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-    tr.grp td{color:#fff !important;font-weight:800;padding:5px 8px;border-bottom:none}
+    body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:10px}
+    .pg{page-break-after:always;break-after:page;display:flex;flex-direction:column;min-height:${landscape?'186mm':'276mm'}}
+    .pg:last-child{page-break-after:auto;break-after:auto}
+    .mast{border-bottom:2px solid #4e7a3e;padding-bottom:5px;margin-bottom:7px}
+    .mast h1{color:#4e7a3e;margin:0;font-size:16px;letter-spacing:.01em}
+    .mast .meta{color:#555;font-size:9.5px;margin-top:2px;line-height:1.45}
+    .grow{flex:1}
+    .foot{border-top:1px solid #ccc;margin-top:6px;padding-top:4px;color:#666;font-size:9px;
+          display:flex;justify-content:space-between;gap:10px}
+    table{width:100%;border-collapse:collapse;table-layout:fixed}
+    th{background:#4e7a3e !important;color:#fff !important;text-align:left;padding:4px 5px;font-size:9px;vertical-align:bottom}
+    th.gh{background:#3d6130 !important;text-align:center;font-size:9px}
+    td{padding:3px 5px;border-bottom:1px solid #eee;vertical-align:top;font-size:9.5px;
+       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+    td.wrap{white-space:normal;overflow-wrap:anywhere}
     tr.urgent td{background:#fdf3f0 !important}
     tr.tot td{font-weight:700;border-top:2px solid #4e7a3e;background:#f2f5ef !important}
-    col.w-n{width:8%} col.w-nn{width:11%} col.w-s{width:6%} col.w-d{width:12%}
-    thead{display:table-header-group} tfoot{display:table-footer-group} tr{break-inside:avoid}
-    @media print{ a{text-decoration:none;color:inherit} }`;
-  const hd=(t,s)=>`<h1>${esc(t)}</h1><div class="sub">Wholesome Rabbit · week of ${esc(_wdtSrc.date)}${_wdtSrc.plot?(' · plot '+esc(_wdtSrc.plot)):''}`
-    +`${_wdtSrc.histor?(' · <b>as at '+esc(_wdtSrc.asOf)+'</b>, not today'):''} · printed ${esc(todayISO())}</div>`;
-  let body='';
+    tr.grp td{color:#fff !important;font-weight:800}
+    .old{color:#888;text-decoration:line-through}
+    tr{break-inside:avoid}`;
+}
+/* One <section> per page, so the page numbers are real — and numbered across
+   the WHOLE document, not per section. A blockers page that says "Page 1 of 1"
+   after four pages of targets is worse than no number at all: it reads as a
+   separate handout and gets separated from the sheet it belongs to. */
+function _wdtRender(sections, foot){
+  const total=sections.reduce((a,s)=>a+Math.max(1,Math.ceil(s.rows.length/s.perPage)),0);
+  let page=0, out='';
+  sections.forEach(sec=>{
+    const n=Math.max(1,Math.ceil(sec.rows.length/sec.perPage));
+    for(let i=0;i<n;i++){
+      page++;
+      const slice=sec.rows.slice(i*sec.perPage,(i+1)*sec.perPage);
+      const last=(i===n-1);
+      out+=`<section class="pg"><div class="mast"><h1>${esc(sec.title)}</h1><div class="meta">${sec.sub}</div></div>
+        <div class="grow"><table>${sec.head}<tbody>${slice.join('')}${(last&&sec.totalRow)?sec.totalRow:''}</tbody></table></div>
+        ${foot(page,total)}</section>`;
+    }
+  });
+  return out;
+}
+function wdtPrint(which){
+  const w=window.open('','_wdt','width=1100,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  const st=_wdtStamp();
+  const S=_wdtSheet||{weeks:[],rows:[],start:'',asOf:''};
+  const periodLabel=(_wdtPeriod==='month')?'the last month':((_wdtPeriod==='4w')?'the last 4 weeks':'the last 2 weeks');
+  const foot=(i,n)=>`<div class="foot">
+      <span>Printed ${esc(st.when)} · by <b>${esc(st.by)}</b></span>
+      <span>Wholesome Rabbit ERP · both sites (Bulacan + Pasig)</span>
+      <span>Page ${i} of ${n}</span></div>`;
+  let sections=[], landscape=false;
+
   if(which==='products'){
-    body=hd('Product target — by priority')+
-      `<table><colgroup><col class="w-s"><col style="width:28%"><col style="width:17%"><col class="w-n"><col class="w-n"><col class="w-nn"><col class="w-n"><col class="w-d"></colgroup>
-       <thead><tr><th>#</th><th>Product</th><th>SKU</th><th class="n">Target</th><th class="n">Made</th><th class="n">Still to make</th><th class="n">On hand</th><th>Priority</th></tr></thead><tbody>`+
-      _wdtRows.map((r,i)=>`<tr class="${r.remaining>0&&r.oh<=0?'urgent':''}"><td>${i+1}</td><td>${esc(r.name)}${r.isCustom?' (custom)':''}</td><td>${esc(r.sku)}</td>
-        <td class="n">${r.target}</td><td class="n">${r.done||''}</td><td class="n"><b>${r.remaining}</b></td><td class="n">${r.oh}</td>
-        <td>${r.remaining<=0?'done':(r.oh<=0?'NOTHING ON HAND':(r.cover<1?Math.round(r.cover*100)+'% covered':'covered'))}</td></tr>`).join('')+
-      `<tr class="tot"><td colspan="3">Total · ${_wdtRows.length} product(s)</td><td class="n">${_wdtRows.reduce((s,r)=>s+r.target,0)}</td><td class="n">${_wdtRows.reduce((s,r)=>s+r.done,0)}</td><td class="n">${_wdtRows.reduce((s,r)=>s+r.remaining,0)}</td><td class="n">${_wdtRows.reduce((s,r)=>s+r.oh,0)}</td><td></td></tr>`+
-      `</tbody></table><div class="sub">Sorted least-covered first: a product with none on hand against an outstanding order is what stops a delivery, whatever the quantity.</div>`;
+    landscape=true;
+    const wk=S.weeks||[];
+    const all=(S.rows||[]).filter(r=>_wdtOnlyOwed?r.still>0:true);
+    const owed=all.reduce((a,r)=>a+r.still,0);
+    const sub=`Production target for ${esc(periodLabel)} · as of <b>${esc(S.asOf||todayISO())}</b> · window ${esc(S.start||'')} → ${esc(S.asOf||'')}`
+      +`<br>${all.length} product(s) · <b>${owed}</b> pack(s) still to make · ordered by days of cover — the top of the list is what runs out first`
+      +`<br><i>Target is what is still owed. A plot is Par + safety minus what is on the shelf, so the newest plot already contains what the older ones asked for — the struck-through figures are shown, never added.</i>`;
+    /* The shortage detail does NOT go in the cell. Widening the column to fit
+       "Rabbit deboned meat (ground meat, with organs) · need 60.8kg, have 0kg"
+       wrapped it nine lines deep and dropped the page from 22 rows to six —
+       the very problem that was just fixed on screen. The column carries the
+       verdict only; the detail goes to a blockers page at the end, grouped by
+       ingredient, which is the form purchasing can actually act on. */
+    const nCols=12+wk.length*2;
+    const numW=Math.max(3.6,(100-5-16-7)/(nCols-3));
+    const head=`<colgroup><col style="width:5%"><col style="width:16%">`
+      +Array.from({length:nCols-3},()=>`<col style="width:${numW.toFixed(2)}%">`).join('')
+      +`<col style="width:7%"></colgroup><thead>
+      <tr><th class="gh" colspan="2"></th><th class="gh" colspan="5">Running total</th>
+          <th class="gh" colspan="${3+wk.length}">Movement</th><th class="gh" colspan="${wk.length}">Demand plot</th><th class="gh"></th></tr>
+      <tr><th>SKU</th><th>Product</th>
+        <th class="n">Target</th><th class="n">Made</th><th class="n">Still</th><th class="n">On hand</th><th class="n">Cover</th>
+        <th class="n">Beg</th>${wk.map((x,i)=>`<th class="n">Made Wk-${wk.length-i}</th>`).join('')}
+        <th class="n">Sold</th><th class="n">Ending</th>
+        ${wk.map((x,i)=>`<th class="n">Plot Wk-${wk.length-i}</th>`).join('')}
+        <th>Can make?</th></tr></thead>`;
+    const n2=v=>v?num(Math.round(v*100)/100):'';
+    const trs=all.map(r=>{
+      let li=-1; for(let i=r.plots.length-1;i>=0;i--){ if(r.plots[i]>0){ li=i; break; } }
+      return `<tr class="${r.ready===false?'urgent':''}">
+        <td>${esc(r.sku)}</td><td class="wrap">${esc(r.name)}${r.isCustom?' (custom)':''}</td>
+        <td class="n"><b>${r.target||''}</b></td><td class="n">${r.madeAll||''}</td>
+        <td class="n"><b>${r.still}</b></td><td class="n">${n2(r.oh)}</td>
+        <td class="n">${r.velKnown?(Math.round(r.coverDays*10)/10)+'d':'—'}</td>
+        <td class="n">${n2(r.beg)}</td>${r.made.map(v=>`<td class="n">${v||''}</td>`).join('')}
+        <td class="n">${r.sold?n2(-r.sold):''}</td><td class="n">${n2(r.end)}</td>
+        ${r.plots.map((q,i)=>`<td class="n">${q?(i<li?`<span class="old">${q}</span>`:`<b>${q}</b>`):''}</td>`).join('')}
+        <td>${r.still===0?'':(r.ready===true?'ready':(r.ready===false?'<b>SHORT</b>':'no recipe'))}</td></tr>`;
+    });
+    const tot=`<tr class="tot"><td colspan="2">Total · ${all.length} product(s)</td>
+      <td class="n">${all.reduce((a,r)=>a+r.target,0)}</td><td class="n">${all.reduce((a,r)=>a+r.madeAll,0)}</td>
+      <td class="n">${owed}</td><td class="n">${num(Math.round(all.reduce((a,r)=>a+r.oh,0)*100)/100)}</td>
+      <td colspan="${6+wk.length*2}"></td></tr>`;
+    sections.push({title:'Production target', sub, head, rows:trs, perPage:22, totalRow:tot});
+    /* Grouped by ingredient, because one shortage usually blocks several
+       products and the person buying it needs one line per thing to buy. */
+    const blocked=all.filter(r=>r.still>0&&r.ready===false);
+    if(blocked.length){
+      const byIng={};
+      blocked.forEach(r=>{ const k=r.shortSku||r.shortName;
+        (byIng[k]=byIng[k]||{name:r.shortName, have:r.haveG, need:0, prods:[]});
+        byIng[k].need+=r.needG; byIng[k].have=Math.min(byIng[k].have, r.haveG);
+        byIng[k].prods.push(r.name+' ('+r.still+')'); });
+      const bh=`<colgroup><col style="width:22%"><col style="width:10%"><col style="width:10%"><col style="width:10%"><col style="width:48%"></colgroup>
+        <thead><tr><th>Ingredient</th><th class="n">Need kg</th><th class="n">Have kg</th><th class="n">Short by kg</th><th>Products waiting on it</th></tr></thead>`;
+      const brs=Object.keys(byIng).sort((x,y)=>(byIng[y].need-byIng[y].have)-(byIng[x].need-byIng[x].have)).map(k=>{
+        const g=byIng[k]; const shortKg=Math.max(0,(g.need-g.have))/1000;
+        return `<tr class="urgent"><td class="wrap"><b>${esc(g.name)}</b></td>
+          <td class="n">${num(Math.round(g.need/100)/10)}</td><td class="n">${num(Math.round(g.have/100)/10)}</td>
+          <td class="n"><b>${num(Math.round(shortKg*10)/10)}</b></td>
+          <td class="wrap">${esc(g.prods.join(' · '))}</td></tr>`; });
+      const bsub=`${blocked.length} product(s) cannot be made from what is on the shelf. Grouped by the ingredient that is short — one line per thing to buy.`
+        +`<br>Stock is allocated in priority order, so an ingredient shared by several products is not counted twice.`;
+      sections.push({title:'What is blocking production', sub:bsub, head:bh, rows:brs, perPage:24, totalRow:null});
+    }
+
   } else if(which==='custom'){
-    body=hd('Custom orders — this week')+
-      `<table><colgroup><col class="w-d"><col style="width:20%"><col style="width:18%"><col style="width:26%"><col class="w-n"><col class="w-n"><col class="w-d"></colgroup>
-       <thead><tr><th>Needed</th><th>Customer</th><th>Order</th><th>Product</th><th class="n">Packs</th><th class="n">On hand</th><th>Status</th></tr></thead><tbody>`+
-      (_wdtCo.map(c=>`<tr class="${c.needed&&c.needed<todayISO()?'urgent':''}"><td>${esc(c.needed||'—')}</td><td>${esc(c.customer)}</td><td>${esc(c.ref)}</td>
-        <td>${esc(c.product)}</td><td class="n">${c.packs}</td><td class="n">${c.oh}</td><td>${c.oh>=c.packs?'ready':'to make'}</td></tr>`).join('')
-        ||'<tr><td colspan="7">No custom orders owing packs.</td></tr>')+
-      `</tbody></table><div class="sub">A named customer with a date. These cannot be substituted for another product.</div>`;
+    const sub=`Named customers with a date to hit — these cannot be swapped for another product.<br>As of ${esc(S.asOf||todayISO())}`;
+    const head=`<thead><tr><th>Needed</th><th>Customer</th><th>Order</th><th>Product</th><th class="n">Packs</th><th class="n">On hand</th><th>Status</th></tr></thead>`;
+    const trs=(_wdtCo||[]).map(c=>`<tr class="${c.needed&&c.needed<todayISO()?'urgent':''}">
+      <td>${esc(c.needed||'—')}</td><td class="wrap">${esc(c.customer)}</td><td>${esc(c.ref)}</td>
+      <td class="wrap">${esc(c.product)}</td><td class="n">${c.packs}</td><td class="n">${c.oh}</td>
+      <td>${c.oh>=c.packs?'ready':'to make'}</td></tr>`);
+    if(!trs.length) trs.push('<tr><td colspan="7">No custom orders owing packs.</td></tr>');
+    sections.push({title:'Custom orders', sub, head, rows:trs, perPage:30, totalRow:null});
+
   } else {
-    body=hd('Raw ingredients — behind the outstanding target');
-    let rows='',last='';
-    _wdtRaw.forEach(r=>{ if(r.cat!==last){ last=r.cat; const c=KSHEET_CATS.find(z=>z.k===r.cat)||{l:r.cat,c:'#5C5C5C'};
-        rows+=`<tr class="grp"><td colspan="5" style="background:${c.c} !important">${esc(c.l)}</td></tr>`; }
-      rows+=`<tr><td>${esc(r.name)}${r.rawName?' — from '+esc(r.rawName):''}</td><td class="n">${_kgs(r.procG)}</td><td class="n">${r.ohProcG>0?_kgs(r.ohProcG):'—'}</td><td class="n">${_kgs(r.rawG)}</td><td class="n">${r.rawSku?_kgs(r.ohRawG):'—'}</td></tr>`; });
-    body+=`<table><colgroup><col style="width:36%"><col style="width:16%"><col style="width:16%"><col style="width:16%"><col style="width:16%"></colgroup>
-      <thead><tr><th>Ingredient</th><th class="n">Processed needed</th><th class="n">Processed on hand</th><th class="n">As-purchased raw</th><th class="n">Raw on hand</th></tr></thead><tbody>${rows||'<tr><td colspan="5">Nothing outstanding.</td></tr>'}
-      <tr class="tot"><td>Total</td><td class="n">${_kgs(_wdtRaw.reduce((s,r)=>s+r.procG,0))}</td><td class="n"></td><td class="n">${_kgs(_wdtRaw.reduce((s,r)=>s+r.rawG,0))}</td><td class="n"></td></tr></tbody></table>
-      <div class="sub">Processed = what the kitchen weighs out of the bin. As-purchased raw = the same quantity before yield — that is the buying figure.</div>`;
+    const sub=`Only what is still to make. Processed = what the kitchen weighs out of the bin; as-purchased raw = the same quantity before yield, which is the buying figure.<br>As of ${esc(S.asOf||todayISO())}`;
+    const head=`<thead><tr><th>Ingredient</th><th class="n">Processed needed</th><th class="n">Processed on hand</th><th class="n">As-purchased raw</th><th class="n">Raw on hand</th></tr></thead>`;
+    const trs=[]; let last='';
+    (_wdtRaw||[]).forEach(r=>{ if(r.cat!==last){ last=r.cat; const c=KSHEET_CATS.find(z=>z.k===r.cat)||{l:r.cat,c:'#5C5C5C'};
+        trs.push(`<tr class="grp"><td colspan="5" style="background:${c.c} !important">${esc(c.l)}</td></tr>`); }
+      trs.push(`<tr><td class="wrap">${esc(r.name)}${r.rawName?' — from '+esc(r.rawName):''}</td><td class="n">${_kgs(r.procG)}</td>
+        <td class="n">${r.ohProcG>0?_kgs(r.ohProcG):'—'}</td><td class="n">${_kgs(r.rawG)}</td>
+        <td class="n">${r.rawSku?_kgs(r.ohRawG):'—'}</td></tr>`); });
+    if(!trs.length) trs.push('<tr><td colspan="5">Nothing outstanding.</td></tr>');
+    const tot=`<tr class="tot"><td>Total</td><td class="n">${_kgs((_wdtRaw||[]).reduce((s,r)=>s+r.procG,0))}</td><td class="n"></td>
+      <td class="n">${_kgs((_wdtRaw||[]).reduce((s,r)=>s+r.rawG,0))}</td><td class="n"></td></tr>`;
+    sections.push({title:'Raw ingredients behind the target', sub, head, rows:trs, perPage:32, totalRow:tot});
   }
-  w.document.open(); w.document.write(`<html><head><meta charset="utf-8"><title>WR — Weekly Demand Target</title><style>${css}</style></head><body>${body}</body></html>`); w.document.close();
-  w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},250);
+
+  w.document.open();
+  w.document.write(`<html><head><meta charset="utf-8"><title>WR — Weekly Demand Target</title>
+    <style>${_wdtPrintCss(landscape)}</style></head><body>${_wdtRender(sections, foot)}</body></html>`);
+  w.document.close();
+  w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},300);
 }
 async function renderMRP(){
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
