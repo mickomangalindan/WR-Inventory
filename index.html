@@ -13051,8 +13051,12 @@ async function prodActualsApply(){
        counts PACKS is disturbed. */
     let outRecs=[]; const _outFail=[];
     try{
-      // re-confirming a run must not duplicate the prep rows
-      if(isLive()){ try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef)+'&kind=eq.output',{method:'DELETE',prefer:'return=minimal'}); }catch(e){} }
+      /* Re-confirming a run must not duplicate the prep rows. The delete can
+         be refused — a user without DELETE rights on production_batches is the
+         likeliest reason a confirm has ever hit a duplicate key — so it is
+         noted rather than swallowed, and the write below converges either way. */
+      let _outDelOk=true;
+      if(isLive()){ try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef)+'&kind=eq.output',{method:'DELETE',prefer:'return=minimal'}); }catch(e){ _outDelOk=false; } }
       else DEMO.production_batches=(DEMO.production_batches||[]).filter(b=>!(b.run_ref===prodRunRef&&b.kind==='output'));
       let _pi=0;
       for(const x of acts){
@@ -13083,6 +13087,7 @@ async function prodActualsApply(){
         try{ await _pbWrite(rec); outRecs.push(rec); }
         catch(e){ _outFail.push(rec.batch_ref); console.warn('output batch failed',rec.batch_ref,String(e&&e.message||e)); }
       }
+      if(!_outDelOk) sysLog('production_batches',prodRunRef,'⚠ Could not clear the previous prep rows — each was written in place instead. If a prep line was removed from the plan, check it is gone.');
     }catch(e){ console.warn('output batches failed',String(e&&e.message||e)); }
 
     // 2) per batch: finished output + mix draw-down + batch issues (actuals allocated by share)
