@@ -7336,7 +7336,7 @@ async function postReceipt(po){ try{
  }catch(e){ toast('Receive posting failed: '+e.message,true); } }
 // Confirming a transfer moves finished stock Bulacan → Pasig and flags any shortfall (Check 4).
 async function postTransfer(t){ try{
-  if(await movementExists('Transfer '+t.transfer_ref)){ toast('This transfer was already received — not posted again.',true); return; }
+  if(await movementExists('Transfer '+t.transfer_ref)){ toast('This transfer was already received — not posted again.',true); return {n:0, flags:0, already:true}; }
   const lines=await db.children(MODELS.transfers.o2m, t.transfer_ref); const cm=await prodCostMap();
   // Soft best-before warning — flag products that have finished stock already past best-before.
   try{ const _today=todayISO(); const _bad={}; dropCancelled(await db.list('production_batches',{})).forEach(b=>{ const bb=b.best_before?String(b.best_before).slice(0,10):''; if(bb && bb<_today && (!_bad[b.product_sku]||bb<_bad[b.product_sku])) _bad[b.product_sku]=bb; });
@@ -7379,7 +7379,8 @@ async function postTransfer(t){ try{
     const gap=sent-recv; if(Math.abs(gap)>0.0001){ flags++; try{ await db.create('variance_log',{check_type:'4 · Transfer',source_ref:t.transfer_ref,expected:sent,actual:recv,gap_qty:-gap,gap_value:Math.round(uc*mult*gap*100)/100,location:'in-transit',responsible_user:CURRENT_USER,status:'open',note:l.product_sku+' sent '+sent+' vs received '+recv}); }catch(e){} }
     n++; }
   sysLog('transfers',t.transfer_ref,'🚚 Received — '+n+' line(s) posted; '+flags+' shortfall(s) flagged by '+CURRENT_USER); toast('Transfer posted · '+flags+' shortfall(s)');
- }catch(e){ toast('Transfer posting failed: '+e.message,true); } }
+  return {n, flags, already:false};
+ }catch(e){ toast('Transfer posting failed: '+e.message,true); return {n:0, flags:0, already:false, err:String((e&&e.message)||e)}; } }
 
 /* ---- Guided PO confirmation: review qty, confirm price, log adjustments ---- */
 // STEP 1 — send a Request for Quotation to the vendor (open → rfq).
@@ -8035,11 +8036,34 @@ async function _transferReceiveApply(){
     if(rr<(+l.sent_packs||0)-0.0001) short++;
     return {transfer_ref:formRec.transfer_ref, kind:l.kind||'product', product_sku:l.product_sku, sent_packs:l.sent_packs, received_packs:rr}; });
   try{
+    /* ---- STOCK FIRST, STATUS SECOND -----------------------------------
+       This used to mark the transfer RECEIVED and only then try to move the
+       stock. postTransfer can decline — it refuses to post twice, and any
+       failure inside it was caught and turned into a toast — so a transfer
+       could end up reading "received" while not one gram had left the site it
+       came from. That is exactly what happened to the 15 Aug run: 418 packs
+       marked received at Pasig with no transfer_in anywhere in the ledger.
+
+       Now the ledger is written first and the status only follows if stock
+       actually moved. If nothing posted, the transfer stays SENT and says
+       why, because a transfer that lies about being received is worse than
+       one that is still open. */
     await db.replaceChildren(MODELS.transfers.o2m, formRec.transfer_ref, updated);
-    formChildren=updated; formRec.status='received';
+    formChildren=updated;
+    const _res=await postTransfer(formRec);
+    const _wanted=updated.filter(l=>(+l.sent_packs||0)>0||(+l.received_packs||0)>0).length;
+    if(_wanted && (!_res || (!_res.n && !_res.already))){
+      toast('NOTHING moved to '+(formRec.to_code||'the other site')+' — '
+        +((_res&&_res.err)||'the ledger refused every line')
+        +'. The transfer is still marked sent; fix the cause and receive again.', true);
+      sysLog('transfers',formRec.transfer_ref,'⛔ Receive FAILED by '+CURRENT_USER+' — 0 of '+_wanted+' line(s) reached stock · '+((_res&&_res.err)||'unknown'));
+      return;
+    }
+    formRec.status='received';
     await formUpdate('transfers','transfer_ref',formRec.transfer_ref,{status:'received'});
-    sysLog('transfers',formRec.transfer_ref, '📥 Received by '+CURRENT_USER+(short?(' — '+short+' line(s) short'):' — all lines complete'));
-    await postTransfer(formRec);
+    sysLog('transfers',formRec.transfer_ref, '📥 Received by '+CURRENT_USER
+      +(_res&&_res.already?' — stock had already been posted':'')
+      +(short?(' — '+short+' line(s) short'):' — all lines complete'));
     notifyRecordDone('transfers', formRec.transfer_ref);   // PDF → Drive → notify
     closeModal(); renderForm();
   }catch(e){ toast(e.message,true); }
