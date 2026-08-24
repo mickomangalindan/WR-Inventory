@@ -8001,15 +8001,24 @@ async function openTransferReceive(){
   if(!lines.length){ toast('No products to receive',true); return; }
   const creator=formRec.created_by||'—';
   let prodMap={}; try{ (await db.list('products',{})).forEach(p=>prodMap[p.sku]={name:p.name,box:(+p.box_size||1)}); }catch(e){}
+  /* A transfer can carry ingredients now, and an ingredient is WEIGHED. The
+     dialog said "packs actually received" over a line holding 9.8 kg of
+     ostrich, and the row showed a bare SKU because ingredients are not in the
+     product map. Both are named properly here. */
+  try{ (await listIngredients()).forEach(i=>{ if(!prodMap[i.sku]) prodMap[i.sku]={name:i.name,box:1,ing:true}; }); }catch(e){}
+  const _isIng=l=>((l.kind||'product')!=='product')||!!(prodMap[l.product_sku]||{}).ing;
+  const _anyIng=lines.some(_isIng);
   window._trBox=lines.map(l=>(prodMap[l.product_sku]||{}).box||1);
   $('modal').innerHTML=`<h3>Receive transfer — ${esc(formRec.transfer_ref)}</h3>
-    <p>Sent by <b>${esc(creator)}</b> from <b>${esc(formRec.from_code||'bulacan')}</b>. Enter the <b>packs actually received</b> at <b>${esc(formRec.to_code||'pasig')}</b> — case-packed products take boxes + loose. Sent qty is locked. Any shortfall is flagged as a Check 4 variance.</p>
-    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Product</th><th class="num">Sent</th><th class="num">Received</th></tr></thead><tbody>
+    <p>Sent by <b>${esc(creator)}</b> from <b>${esc(formRec.from_code||'bulacan')}</b>. Enter what <b>actually arrived</b> at <b>${esc(formRec.to_code||'pasig')}</b> — ${_anyIng?'products in <b>packs</b>, ingredients in <b>kg</b>':'in <b>packs</b>'}; case-packed products take boxes + loose. Sent qty is locked. Any shortfall is flagged as a Check 4 variance.</p>
+    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Item</th><th class="num">Sent</th><th class="num">Received</th></tr></thead><tbody>
     ${lines.map((l,i)=>{ const box=(prodMap[l.product_sku]||{}).box||1; const nm=(prodMap[l.product_sku]||{}).name||l.product_sku; const sent=+l.sent_packs||0;
       const cell = box>1
         ? `<td class="num" style="white-space:nowrap"><input id="tr_bx${i}" type="number" step="1" value="${Math.floor(sent/box)}" style="width:44px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"> box ×${box} + <input id="tr_lo${i}" type="number" step="1" value="${sent-Math.floor(sent/box)*box}" style="width:44px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"> loose</td>`
         : `<td><input id="tr_r${i}" type="number" step="any" value="${sent}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>`;
-      return `<tr><td>${esc(nm)}${box>1?'<div class="mini">'+box+'/box</div>':''}</td><td class="num" style="color:var(--muted)">${sent}</td>${cell}</tr>`; }).join('')}
+      const u=_isIng(l)?'kg':'packs';
+      return `<tr><td>${esc(nm)}<div class="mini" style="color:var(--muted)"><code>${esc(l.product_sku)}</code>${box>1?' · '+box+'/box':''}</div></td>
+        <td class="num" style="color:var(--muted);white-space:nowrap">${sent} <span class="mini">${u}</span></td>${cell}</tr>`; }).join('')}
     </tbody></table></div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="transferReceiveApply()">📥 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
   $('overlay').classList.add('on');
@@ -12068,6 +12077,43 @@ function prodDelLine(i){ prodPlanLines.splice(i,1); drawProdPlan(); prodPackTouc
    output ingredients are being made. Refusing to save that run was the bug: the
    removals never reached the database, the old plan document kept the deleted
    lines, and reopening the plan brought every one of them back. */
+/* ---- CONFIRMING A RUN TWICE MUST NOT BLOW UP ---------------------------
+   "Confirm & post" cleared the run's rows and wrote them again, with both
+   deletes wrapped in `catch(e){}`. When a delete failed — a dropped
+   connection, RLS, anything — the code carried straight on to the insert and
+   Postgres answered
+
+     409 · 23505 · duplicate key value violates unique constraint
+     "production_batches_batch_ref_key"
+
+   which told the kitchen nothing and left the run half-posted.
+
+   Two changes. The write is now keyed on batch_ref: if the row is already
+   there it is UPDATED to match, so a retry converges instead of colliding.
+   And a batch that already posted its stock is never posted again — the
+   ledger is checked first, because the one thing worse than a failed confirm
+   is a confirm that silently doubles the day's output. */
+async function _pbWrite(rec){
+  try{ await db.create('production_batches',rec); return 'created'; }
+  catch(e){
+    const m=String((e&&e.message)||e);
+    if(!/duplicate key|23505/i.test(m)) throw e;
+    await db.update('production_batches','batch_ref',rec.batch_ref,rec);
+    return 'updated';
+  }
+}
+/* Which batches of this run have ALREADY moved stock. Movements are stamped
+   `Production <batch_ref>`; that note is the only marker older rows carry. */
+async function _pbPosted(runRef){
+  const set={};
+  try{
+    let rows;
+    if(isLive()) rows=await sb('inventory_movements?select=note&movement_type=eq.batch_output&note=like.'+encodeURIComponent('Production '+runRef+'%'));
+    else rows=(DEMO.inventory_movements||[]).filter(m=>m.movement_type==='batch_output'&&String(m.note||'').indexOf('Production '+runRef)===0);
+    (rows||[]).forEach(r=>{ const ref=String(r.note||'').replace(/^Production\s+/,'').trim(); if(ref) set[ref]=1; });
+  }catch(e){}
+  return set;
+}
 async function prodPersist(status, allowEmpty){
   const active=prodPlanLines.filter(l=>(+l.planned_packs||0)>0||(+l.good_packs||0)>0);
   if(!active.length && !allowEmpty){ toast('Nothing to save — load demand or enter packs',true); return null; }
@@ -12078,9 +12124,25 @@ async function prodPersist(status, allowEmpty){
        it has to run even when nothing is going back in. It deliberately spares
        kind='output' rows: those are confirmed prep records, not draft product
        lines, and a later draft save must not quietly destroy them. */
-    try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef)+'&kind=is.null',{method:'DELETE',prefer:'return=minimal'}); }catch(e){}
-    try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef)+'&kind=neq.output',{method:'DELETE',prefer:'return=minimal'}); }catch(e){}
-    if(recs.length){ try{ await sb('production_batches',{method:'POST',prefer:'return=minimal',body:JSON.stringify(recs)}); }catch(e){ toast(e.message,true); return null; } }
+    /* A swallowed delete is what produced the duplicate-key 409: the rows
+       stayed, the insert ran anyway, and Postgres refused it with a message
+       nobody in the kitchen could act on. The delete may still fail — that is
+       life on a phone in a chiller — but the insert no longer assumes it
+       worked. Each line is written by batch_ref, so an existing row is updated
+       rather than fought with. */
+    let _delOk=true;
+    try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef)+'&kind=is.null',{method:'DELETE',prefer:'return=minimal'}); }catch(e){ _delOk=false; }
+    try{ await sb('production_batches?run_ref=eq.'+encodeURIComponent(prodRunRef)+'&kind=neq.output',{method:'DELETE',prefer:'return=minimal'}); }catch(e){ _delOk=false; }
+    if(recs.length){
+      const _bad=[];
+      for(const rec of recs){ try{ await _pbWrite(rec); }catch(e){ _bad.push(rec.batch_ref+' — '+String((e&&e.message)||e).slice(0,90)); } }
+      if(_bad.length){
+        toast(_bad.length+' of '+recs.length+' line(s) would not save: '+_bad[0]+(_bad.length>1?(' (+'+(_bad.length-1)+' more)'):''),true);
+        sysLog('production_batches',prodRunRef,'⛔ '+_bad.length+' line(s) failed to save by '+CURRENT_USER+' — '+_bad.join(' · ').slice(0,400));
+        return null;
+      }
+      if(!_delOk) sysLog('production_batches',prodRunRef,'⚠ Could not clear the old lines before saving — each line was written in place instead. Check the run has no leftovers.');
+    }
   } else { DEMO.production_batches=(DEMO.production_batches||[]).filter(b=>!(b.run_ref===prodRunRef && b.kind!=='output')).concat(recs); }
   return recs;
 }
@@ -12994,7 +13056,7 @@ async function prodActualsApply(){
           excess_kg:Math.round(_c.excess*1000)/1000,
           std_yield_pct:_c.stdYield,
           yield_pct:(rawKg>0?Math.round((madeKg/rawKg)*1000)/10:null) };
-        try{ await db.create('production_batches',rec); outRecs.push(rec); }
+        try{ await _pbWrite(rec); outRecs.push(rec); }
         catch(e){ _outFail.push(rec.batch_ref); console.warn('output batch failed',rec.batch_ref,String(e&&e.message||e)); }
       }
     }catch(e){ console.warn('output batches failed',String(e&&e.message||e)); }
