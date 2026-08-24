@@ -12496,6 +12496,11 @@ function _paCalc(x){
   const thaw=(x.type==='A')?Math.max(0,Math.round((frozen-proc)*1000)/1000):0;
   const drawn=Math.round((proc+thaw)*1000)/1000;
   const shortfall=Math.round(Math.max(0,needed-proc)*1000)/1000;
+  /* Over 100% means the ingredient takes up water rather than losing it —
+     mushrooms, rice, pulses. The arithmetic already handles it (raw = need /
+     yield gives LESS raw for more output); it is the wording that has to know,
+     so a pan absorbing water is not reported as the kitchen beating standard. */
+  x.gains = (+x.yield||1) > 1.0005;
   const stdYield=Math.round((x.yield||1)*1000)/10;
   const yieldPct=raw>0?Math.round((made/raw)*1000)/10:0;
   const thawPct=drawn>0?Math.round((thaw/drawn)*1000)/10:0;
@@ -12557,9 +12562,16 @@ function _paRecap(x){
        the other two kilos go?" from being a conversation. */
     const acct=[];
     if(c.dripNormal>0.0005) acct.push(`${_pa2(c.dripNormal)} normal drip`);
+    /* NOT EVERY INGREDIENT LOSES WEIGHT. Mushrooms, rice, pulses — anything
+       that takes up water in the pot — come out HEAVIER than they went in.
+       Their yield is over 100%, which makes the standard trimming figure
+       negative, and the sheet then congratulated the kitchen for doing
+       "better than standard" when all that happened was the pan absorbed
+       water. It is a gain, and it is expected, so it is named as one. */
     if(c.trimNormal>0.0005) acct.push(`${_pa2(c.trimNormal)} normal trimming`);
+    else if(c.trimNormal<-0.0005) acct.push(`<span style="color:#4e7a3e">${_pa2(-c.trimNormal)} expected gain (takes up water)</span>`);
     const over=c.over>0.0005?`<b style="color:var(--danger)">${_pa2(c.over)} kg unaccounted for</b>`
-             :(c.over<-0.0005?`<b style="color:#4e7a3e">${_pa2(-c.over)} kg better than standard</b>`:'nothing unexplained');
+             :(c.over<-0.0005?`<b style="color:#4e7a3e">${_pa2(-c.over)} kg ${x.gains?'more gain than expected':'better than standard'}</b>`:'nothing unexplained');
     bits.push(`loss <b style="color:var(--earth,#b5762a)">${_pa2(c.loss)}</b> kg${c.lossPct?` (${c.lossPct}%)</b>`:''} = ${acct.length?acct.join(' + ')+' + ':''}${over}`
       +(c.lossCertain?'':` <span style="color:var(--muted)">· split modelled, only the total is weighed</span>`));
   }
@@ -15894,6 +15906,35 @@ async function renderSelfTest(){
   T('Command palette search', async()=>{ await cmdSearch('beef'); return [cmdItems.length>0, cmdItems.length+' results']; });
   T('Variances center has records', async()=>{ const r=await db.list('variance_log',{}); return [r.length>=0, r.length+' logged']; });
   T('Audit log write (localStorage)', async()=>{ try{ localStorage.setItem('wr_selftest','1'); const ok=localStorage.getItem('wr_selftest')==='1'; localStorage.removeItem('wr_selftest'); return [ok,'read/write OK']; }catch(e){ return [false,e.message]; } });
+  /* ---- A LIVE ANIMAL IS DRESSED FIRST -----------------------------------
+     Live → whole dressed → the cuts. Hanging a cut straight off the live
+     weight folds dressing loss and butchering loss into one number, so a bad
+     dressing week and a bad butchering week look identical and neither can be
+     fixed. Every rabbit and goat cut was pointed at the live animal; the
+     dressed carcass had no parent at all. The data was corrected by
+     sql/wr_live_animal_chain.sql — this check is what stops it drifting back
+     the next time somebody adds a cut. */
+  T('Live animal → whole dressed → cuts', async()=>{
+    const ings=await listIngredients();
+    const byName={}; ings.forEach(i=>{ const n=String(i.name||'').trim().toLowerCase(); if(n) byName[n]=i; });
+    const live=ings.filter(i=>/^live\s/i.test(String(i.name||''))||i.is_live_animal);
+    if(!live.length) return [true,'no live animals in the masterlist'];
+    const bad=[];
+    live.forEach(L=>{
+      const ln=String(L.name||'').trim();
+      const dressedName=ln.replace(/^live\s+/i,'').toLowerCase()+' whole dressed';
+      const dressed=byName[dressedName];
+      const kids=ings.filter(i=>i.sku!==L.sku &&
+        String(i.raw_input||'').trim().toLowerCase()===ln.toLowerCase());
+      if(!dressed){ bad.push(ln+' has no "whole dressed" form'); return; }
+      if(String(dressed.raw_input||'').trim().toLowerCase()!==ln.toLowerCase())
+        bad.push(dressed.name+' does not come from '+ln);
+      kids.filter(k=>k.sku!==dressed.sku).forEach(k=>
+        bad.push(k.name+' hangs off '+ln+' instead of '+dressed.name));
+    });
+    return [bad.length===0, bad.length?(bad.length+' broken: '+bad.slice(0,3).join(' · ')):
+      live.length+' live animal(s), each dressed before it is broken down'];
+  });
   T('Access control (Finance ⇏ Studio)', async()=>{ return [roleCan('Finance','studio')===false, 'gated correctly']; });
   T('All modules registered', async()=>{ const need=['ingredients','products','purchase_orders','production_batches','transfers','count_sessions','variance_log','mrp','reporting','users','automations']; const miss=need.filter(k=>!MODELS[k]); return [miss.length===0, miss.length?('missing '+miss.join(',')):need.length+' modules']; });
   /* ---- Data integrity. These four all fire on the same underlying accident:
