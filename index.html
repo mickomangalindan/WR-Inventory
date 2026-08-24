@@ -15919,16 +15919,22 @@ async function renderSelfTest(){
     const byName={}; ings.forEach(i=>{ const n=String(i.name||'').trim().toLowerCase(); if(n) byName[n]=i; });
     const live=ings.filter(i=>/^live\s/i.test(String(i.name||''))||i.is_live_animal);
     if(!live.length) return [true,'no live animals in the masterlist'];
+    /* Resolve the parent the way the APP does — source_sku first, raw_input
+       only as a fallback. Checking raw_input alone was how the first version
+       of this passed while every cut still pointed at the live animal through
+       source_sku, and the picker went on showing "Live rabbit". */
+    const bySku={}; ings.forEach(i=>{ bySku[i.sku]=i; });
+    const parentOf=i=>_procParent(i,bySku,byName);
     const bad=[];
     live.forEach(L=>{
       const ln=String(L.name||'').trim();
       const dressedName=ln.replace(/^live\s+/i,'').toLowerCase()+' whole dressed';
       const dressed=byName[dressedName];
-      const kids=ings.filter(i=>i.sku!==L.sku &&
-        String(i.raw_input||'').trim().toLowerCase()===ln.toLowerCase());
+      const kids=ings.filter(i=>{ if(i.sku===L.sku) return false;
+        const p=parentOf(i); return !!p && p.sku===L.sku; });
       if(!dressed){ bad.push(ln+' has no "whole dressed" form'); return; }
-      if(String(dressed.raw_input||'').trim().toLowerCase()!==ln.toLowerCase())
-        bad.push(dressed.name+' does not come from '+ln);
+      const dp=parentOf(dressed);
+      if(!dp || dp.sku!==L.sku) bad.push(dressed.name+' does not come from '+ln);
       kids.filter(k=>k.sku!==dressed.sku).forEach(k=>
         bad.push(k.name+' hangs off '+ln+' instead of '+dressed.name));
     });
