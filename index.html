@@ -10468,6 +10468,12 @@ async function prodNeedRows(){
     const R=_procRoot(it,bySku,byName);
     const parent=R.root||step;                      // what purchasing actually buys
     const chainY=R.root?R.yield:y;
+    /* A cut's own yield_pct is stated against the ROOT (live -> this output),
+       so it cannot be compared with the carcass stock directly. Divide it by the
+       dressing yield to get the one hop the kitchen is actually making:
+         28% of live / 50% dressing = 56% of the carcass. */
+    const stepY=(step && (+step.yield_pct||0)>0 && step.sku!==((parent||{}).sku))
+                  ? (y/((+step.yield_pct)/100)) : y;
     return {
       sku, name:_outName(it,cl)||it.name||sku,
       cat:cat.k, catLabel:cat.l, color:cat.c,
@@ -10482,11 +10488,17 @@ async function prodNeedRows(){
       rawSku:parent?parent.sku:'',
       rawName:parent?parent.name:'',
       ohRawG:parent?(+oh[parent.sku]||0):0,
+      /* One carcass feeds every cut taken off it, so no single cut can be told
+         it is short by looking at that pool alone — six cuts would each report
+         the same 12.050 kg missing, which is how the sheet came to show four
+         shortages for a day that was covered. The Live Animals block adds the
+         pool up ONCE; this flag tells the shopping list to defer to it. */
+      livePool: !!(parent && (/^live\s/i.test(String(parent.name||'')) || parent.is_live_animal)),
       /* the road from the raw material to this ingredient, e.g.
          Live rabbit → Rabbit whole dressed → Rabbit deboned meat */
       viaSku:(step&&parent&&step.sku!==parent.sku)?step.sku:'',
       viaName:(step&&parent&&step.sku!==parent.sku)?step.name:'',
-      viaPct:(step&&parent&&step.sku!==parent.sku)?Math.round(y*1000)/10:0,
+      viaPct:(step&&parent&&step.sku!==parent.sku)?Math.round(stepY*1000)/10:0,
       ohViaG:(step&&parent&&step.sku!==parent.sku)?(+oh[step.sku]||0):0,
       forProducts:agg[sku].forProducts,
       /* the per-product split, scaled if the needed qty was overridden — so an
@@ -11287,6 +11299,17 @@ const KSHEET_CSS=`  :root{
   .combined-section table.cmb col.c2{width:20%;}
   .combined-section table.cmb col.c3{width:20%;}
   .combined-section table.cmb col.c4{width:20%;}
+  /* The live-animal table has FIVE columns and was using the four-column
+     colgroup above. With table-layout:fixed the widths must add to the whole
+     table, so the fifth column was allotted nothing: "Raw to Pull Out" printed
+     one letter per line, the header grew to a third of the page, and the number
+     itself was clipped to "0.0". Five columns need their own five widths. */
+  .combined-section table.cmb5 col.c1{width:36%;}
+  .combined-section table.cmb5 col.c2{width:16%;}
+  .combined-section table.cmb5 col.c3{width:12%;}
+  .combined-section table.cmb5 col.c4{width:16%;}
+  .combined-section table.cmb5 col.c5{width:20%;}
+  .combined-section table.cmb5 th{white-space:normal;word-break:normal;overflow-wrap:break-word;}
   .combined-section table.cmb th,
   .combined-section table.cmb td{vertical-align:middle;}
   .combined-section table.cmb th.num,
@@ -11943,9 +11966,9 @@ async function prodKitchenSheet(){
       const dy=a.dressYieldPct;
       return `<div class="cat-group">
       <div class="cat-group-header" style="background:#7a5a10">${esc2(a.live.name)}</div>
-      <table class="ingred cmb"><colgroup><col class="c1"><col class="c2"><col class="c3"><col class="c4"></colgroup>
+      <table class="ingred cmb cmb5"><colgroup><col class="c1"><col class="c2"><col class="c3"><col class="c4"><col class="c5"></colgroup>
       <thead><tr><th>Output ingredient</th><th class="num">Needed Qty</th>
-        <th class="num">Whole Dressed<span class="sub">Stock</span></th>
+        <th class="num">Whole Dressed<span class="sub">isang pool</span></th>
         <th class="num">Remaining<span class="sub">to produce</span></th>
         <th class="num">Raw to Pull Out<span class="sub">live → dressed → output</span></th></tr></thead>
       <tbody>
@@ -11953,7 +11976,7 @@ async function prodKitchenSheet(){
         <td><span class="ingred-name">${esc2(l.name)}</span>
           <div class="ingred-note">${l.yieldPct}% ng buhay na timbang</div></td>
         <td class="num"><b>${_ksKg(l.needG)}</b>${l.readyG>0?`<div class="ingred-note">meron nang ${_ksKg(l.readyG)}</div>`:''}</td>
-        <td class="num" style="color:#9a9a93">—</td>
+        <td class="num" style="color:#cfcdc4">·</td>
         <td class="num">${_ksKg(l.makeG)}</td>
         <td class="num">${_ksKg(l.liveNeedG)}<div class="ingred-note">buhay</div></td></tr>`).join('')}
       <tr style="font-weight:700;background:#faf9f4">
@@ -11987,11 +12010,21 @@ async function prodKitchenSheet(){
       <thead><tr><th>Ingredient</th><th class="num">Needed Qty</th><th class="num">Stock on Hand<span class="sub">Processed</span></th><th class="num">Stock on Hand<span class="sub">Raw</span></th></tr></thead>
       <tbody>${entries.map(([name,v])=>{ const n=_needBySku[v.sku]||{};
         const need=(n.needG!=null)?n.needG:v.grams;
-        const shortRaw=n.rawSku && n.ohRawG < (need-Math.min(n.ohProcG||0,need))/(((n.yieldPct||100)/100)||1);
+        /* WHAT THE KITCHEN PULLS IS THE CARCASS, NOT THE PEN.
+           This column showed the ROOT raw material, so every rabbit cut printed
+           198.192 kg — the live rabbits — when what someone takes out of the
+           chiller is the 12.050 kg of whole dressed. The live weight is a
+           purchasing figure and it has its own block on the page before this
+           one. Where there is an intermediate form, show that, and name it, so
+           the number can never be read against the wrong thing again. */
+        const pull=n.viaSku?{name:n.viaName, oh:+n.ohViaG||0, pct:n.viaPct}
+                  :(n.rawSku?{name:n.rawName, oh:+n.ohRawG||0, pct:n.yieldPct}:null);
+        const remainG=Math.max(0, need-Math.min(n.ohProcG||0, need));
+        const shortRaw=!!pull && !n.livePool && pull.oh < remainG/(((pull.pct||100)/100)||1);
         return `<tr><td><span class="ingred-name">${esc2(name)}${v.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span>${n.overridden?'<div class="ingred-note">binago mula sa recipe: '+_ksKg(n.recipeG)+'</div>':''}</td>
         <td class="num"><b>${_ksKg(need)}</b></td>
         <td class="num" style="color:${(n.ohProcG||0)>0?'#1D9E75':'#9a9a93'}">${(n.ohProcG||0)>0?_ksKg(n.ohProcG):'—'}</td>
-        <td class="num" style="color:${shortRaw?'#b23b2e':((n.ohRawG||0)>0?'#7a6432':'#9a9a93')}">${n.rawSku?_ksKg(n.ohRawG):'—'}${shortRaw?' ⚠':''}</td></tr>`; }).join('')}</tbody></table>
+        <td class="num" style="color:${shortRaw?'#b23b2e':(pull&&pull.oh>0?'#7a6432':'#9a9a93')}">${pull?_ksKg(pull.oh):'—'}${shortRaw?' ⚠':''}${pull?`<div class="ingred-note" style="font-weight:400">${esc2(pull.name)}${n.livePool?' · isang pool, nasa Live Animals':''}</div>`:''}</td></tr>`; }).join('')}</tbody></table>
     </div>`;
   }).join('');
   const grand=[...combined.values()].reduce((s,v)=>{ const n=_needBySku[v.sku]; return s+((n&&n.needG!=null)?n.needG:v.grams); },0);
@@ -12458,14 +12491,31 @@ async function _prodLiveAnimals(){
     const live=_procParent(dressed,bySku,byName); if(!live) return;
     if(!(/^live\s/i.test(String(live.name||'')) || live.is_live_animal)) return;
     const y=((+it.yield_pct||100)/100)||1;             // live → this output
-    const needG=(+r.neededKg||0)*1000;
-    const readyG=Math.max(0,+r.ohKg||0)*1000;
+    /* prodNeedRows() returns GRAMS on needG / ohProcG. This read neededKg and
+       ohKg — names that exist nowhere in that row — so every figure in the
+       block came out 0.000 kg while the shopping list two pages later printed
+       the real 20.040 / 12.000 / 36.000. The b63 test built its own rows by
+       hand in the invented shape, so it passed the whole time: the test proved
+       the arithmetic and never proved the field names. */
+    const needG=Math.max(0,+r.needG||0);
+    const readyG=Math.max(0,+r.ohProcG||0);
     const makeG=Math.max(0,needG-readyG);
     const a=out[live.sku]=out[live.sku]||{live, dressed, dressStockG:Math.max(0,oh[dressed.sku]||0),
       liveStockG:Math.max(0,oh[live.sku]||0), lines:[], needG:0, readyG:0, makeG:0, liveNeedG:0};
     const lNeed=makeG/y;
     a.lines.push({name:it.name||r.sku, needG, readyG, makeG, yieldPct:Math.round(y*1000)/10, liveNeedG:lNeed});
     a.needG+=needG; a.readyG+=readyG; a.makeG+=makeG; a.liveNeedG+=lNeed;
+  });
+  /* NOTHING NEEDED IS NOT A ROW OF ZEROS.
+     Every cut that resolves to a live animal was listed whether or not the plan
+     asked for any of it, so a day with no rabbit demand still printed a full
+     block: six lines of 0.000 kg, a total of 0.000 kg, and "0.000 kg whole
+     dressed ang kailangan". A sheet that prints work nobody has to do teaches
+     the kitchen to skim past it. A cut that IS needed and already made stays —
+     0 to produce is a real answer to a real question. */
+  Object.keys(out).forEach(k=>{ const a=out[k];
+    a.lines=a.lines.filter(l=>(+l.needG||0)>0.5);
+    if(!a.lines.length) delete out[k];
   });
   return Object.values(out).map(a=>{
     const dy=(+a.dressed.yield_pct||0)/100;            // live → whole dressed
@@ -13530,12 +13580,26 @@ function _procChain(it,bySku,byName,max){
   }
   return out;
 }
-/* The root raw material, and the compound yield from it down to this item. */
+/* The root raw material, and the yield from it down to this item.
+   DO NOT COMPOUND A MULTI-HOP CHAIN. In this master a cut's yield_pct is stated
+   against the ROOT, not against its immediate parent: rabbit ground-whole is
+   43.37% of the LIVE rabbit, goat deboned meat 22.74% of the LIVE goat. That was
+   true before the chain was re-pointed through "whole dressed" and the numbers
+   were never restated — PART C of wr_live_animal_chain.sql exists precisely
+   because restating them needs a weighing nobody has done.
+
+   Multiplying them by the dressing yield therefore counts the dressing twice:
+   32% x 50% = 16%, and the sheet printed "yield 16%" and asked for 225 kg of
+   live rabbit where the standard says 112.5. On a single-hop chain — whole
+   dressed duck to duck deboned meat — the parent IS the root and there is
+   nothing to compound, so this changes nothing there. */
 function _procRoot(it,bySku,byName){
   const ch=_procChain(it,bySku,byName);
   if(!ch.length) return {root:null, chain:[], yield:((+((it||{}).yield_pct)||100)||100)/100};
-  let y=1; ch.forEach(h=>{ y*= (h.yieldPct/100)||1; });
-  return {root:ch[ch.length-1].to, chain:ch, yield:y||1};
+  const leaf=((+((it||{}).yield_pct)||100)||100)/100;
+  let compound=1; ch.forEach(h=>{ compound*= (h.yieldPct/100)||1; });
+  const y=(ch.length>1) ? leaf : (compound||1);
+  return {root:ch[ch.length-1].to, chain:ch, yield:y||1, compounded:compound||1, hops:ch.length};
 }
 function drawProcessing(){
   const outs=_procIngs.filter(isProcessedItem);
