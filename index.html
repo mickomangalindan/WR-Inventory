@@ -11813,6 +11813,52 @@ async function prodKitchenSheet(){
      Both are printed now, each beside the stock that actually exists for it, so
      the shopper and the prep team read the same page and neither has to convert
      anything in their head. */
+  /* ---- LIVE ANIMALS · one block, added up once -------------------------
+     Needed → carcass on hand → what is left to produce → what to pull, spelled
+     out as live → whole dressed → the cut. The kitchen reads it top to bottom
+     and knows what to take out of the pen. */
+  const _liveRows=await _prodLiveAnimals().catch(()=>[]);
+  const liveBlock=!_liveRows.length?'':`<div class="card combined-section">
+    <h2>Live Animals — Raw to Pull Out</h2>
+    <p class="hint">Ang nasa kulungan ay binibilang nang MINSAN lang para sa buong araw.
+      Gamitin muna ang whole dressed na mayroon; ang kulang lang ang kukunin sa buhay.</p>
+    ${_liveRows.map(a=>{
+      const dy=a.dressYieldPct;
+      return `<div class="cat-group">
+      <div class="cat-group-header" style="background:#7a5a10">${esc2(a.live.name)}</div>
+      <table class="ingred cmb"><colgroup><col class="c1"><col class="c2"><col class="c3"><col class="c4"></colgroup>
+      <thead><tr><th>Output ingredient</th><th class="num">Needed Qty</th>
+        <th class="num">Whole Dressed<span class="sub">Stock</span></th>
+        <th class="num">Remaining<span class="sub">to produce</span></th>
+        <th class="num">Raw to Pull Out<span class="sub">live → dressed → output</span></th></tr></thead>
+      <tbody>
+      ${a.lines.map(l=>`<tr>
+        <td><span class="ingred-name">${esc2(l.name)}</span>
+          <div class="ingred-note">${l.yieldPct}% ng buhay na timbang</div></td>
+        <td class="num"><b>${_ksKg(l.needG)}</b>${l.readyG>0?`<div class="ingred-note">meron nang ${_ksKg(l.readyG)}</div>`:''}</td>
+        <td class="num" style="color:#9a9a93">—</td>
+        <td class="num">${_ksKg(l.makeG)}</td>
+        <td class="num">${_ksKg(l.liveNeedG)}<div class="ingred-note">buhay</div></td></tr>`).join('')}
+      <tr style="font-weight:700;background:#faf9f4">
+        <td>KABUUAN — ${esc2(a.live.name)}</td>
+        <td class="num">${_ksKg(a.needG)}</td>
+        <td class="num" style="color:${a.dressStockG>0?'#1D9E75':'#9a9a93'}">${a.dressStockG>0?_ksKg(a.dressStockG):'0.000 kg'}</td>
+        <td class="num">${_ksKg(a.makeG)}</td>
+        <td class="num">${_ksKg(a.livePullG)}<div class="ingred-note" style="font-weight:400">buhay na kukunin</div></td></tr>
+      </tbody></table>
+      <div class="hint" style="margin:6px 0 0;padding:8px 10px;background:#faf9f4;border-radius:6px">
+        ${dy?`<b>${_ksKg(a.dressNeedG)}</b> whole dressed ang kailangan
+             ${a.fromStockG>0?`· <b>${_ksKg(a.fromStockG)}</b> galing sa stock`:''}
+             · <b>${_ksKg(a.stillDressG)}</b> pa ang gagawin
+             <span style="color:#7a5a10">(${dy}% dressing)</span><br>`
+            :`<span style="color:#b23b2e">Walang nakatalang dressing yield para sa ${esc2(a.dressed.name)} —
+              hindi masasabi ang whole dressed. Ang buhay na kailangan ay tama pa rin.</span><br>`}
+        Buhay na mayroon: <b>${_ksKg(a.liveStockG)}</b> ·
+        ${a.spareG>=0?`<span style="color:#1D9E75"><b>${_ksKg(a.spareG)}</b> ang sobra — walang bibilhin</span>`
+                     :`<span style="color:#b23b2e"><b>${_ksKg(-a.spareG)}</b> ang KULANG — kailangan bumili</span>`}
+      </div></div>`; }).join('')}
+    </div>`;
+
   const _needBySku={}; (window._prodNeedRows||[]).forEach(r=>_needBySku[r.sku]=r);
   const combinedHtml=KSHEET_ORDER.map(k=>{
     const entries=[...combined.entries()].filter(([,v])=>v.cat===k).sort((a,b)=>b[1].grams-a[1].grams);
@@ -11882,6 +11928,7 @@ async function prodKitchenSheet(){
     ${cover}
     <div id="perMix">${mixBlocks}${outBlock}</div>
     ${subNote}
+    ${liveBlock}
     <div class="card combined-section">
       <h2>Combined Shopping / Prep List</h2>
       <p class="hint">Lahat ng sangkap sa araw na ito, pinagsama at nakagrupo ayon sa kategorya.</p>
@@ -12265,6 +12312,62 @@ async function prodLoadRun(refEnc,date){
   if(prodRunRef!==ref){ prodRunRef=ref; await prodLoadDraft(); drawProdPlan(); }
   toast('Opened '+ref);
 }
+/* ---- WHAT A LIVE ANIMAL OWES THIS RUN ---------------------------------
+   Four rabbit cuts each showed the SAME 198 kg of live rabbit as their raw
+   stock — one pen, counted four times — and the sheet then reported four
+   frightening shortages for a day that was comfortably covered.
+
+   The chain is live → whole dressed → the cut, and it is spent in that order:
+   whatever carcass is already hanging gets used first, and only the remainder
+   falls through to live animals. Adding it up ONCE per animal is the whole
+   point; a rabbit cannot be promised to two cuts.
+
+   The dressing yield lives where the model already says it should — on the
+   whole-dressed ingredient's own yield_pct, because a yield is always
+   "output ÷ parent" and the carcass's parent is the live animal. Rabbit is
+   50% (2 kg live → 1 kg dressed). Where it has not been measured the carcass
+   column says so rather than inventing a number; the live figure is still
+   exact, because the cut's own yield is stated against live weight. */
+async function _prodLiveAnimals(){
+  const ings=await listIngredients();
+  const bySku={}, byName={};
+  ings.forEach(i=>{ bySku[i.sku]=i; const n=String(i.name||'').trim().toLowerCase(); if(n) byName[n]=i; });
+  const oh=await _ingOhBulacanG();
+  const rows=(window._prodNeedRows||[]);
+  const out={};
+  rows.forEach(r=>{
+    const it=bySku[r.sku]; if(!it) return;
+    const dressed=_procParent(it,bySku,byName); if(!dressed) return;
+    const live=_procParent(dressed,bySku,byName); if(!live) return;
+    if(!(/^live\s/i.test(String(live.name||'')) || live.is_live_animal)) return;
+    const y=((+it.yield_pct||100)/100)||1;             // live → this output
+    const needG=(+r.neededKg||0)*1000;
+    const readyG=Math.max(0,+r.ohKg||0)*1000;
+    const makeG=Math.max(0,needG-readyG);
+    const a=out[live.sku]=out[live.sku]||{live, dressed, dressStockG:Math.max(0,oh[dressed.sku]||0),
+      liveStockG:Math.max(0,oh[live.sku]||0), lines:[], needG:0, readyG:0, makeG:0, liveNeedG:0};
+    const lNeed=makeG/y;
+    a.lines.push({name:it.name||r.sku, needG, readyG, makeG, yieldPct:Math.round(y*1000)/10, liveNeedG:lNeed});
+    a.needG+=needG; a.readyG+=readyG; a.makeG+=makeG; a.liveNeedG+=lNeed;
+  });
+  return Object.values(out).map(a=>{
+    const dy=(+a.dressed.yield_pct||0)/100;            // live → whole dressed
+    /* Carcass required for the whole run. Without a measured dressing yield
+       this cannot be stated, and a guess here would be read as a weighing. */
+    const dressNeedG = dy>0 ? a.liveNeedG*dy : null;
+    const fromStockG = (dressNeedG==null) ? null : Math.min(a.dressStockG, dressNeedG);
+    const stillDressG= (dressNeedG==null) ? null : Math.max(0, dressNeedG-fromStockG);
+    /* Carcass already hanging is spent first, so only the remainder is pulled
+       from live. With no dressing yield the carcass step is skipped and the
+       full live figure stands, which is still correct — just less informative. */
+    const livePullG  = (dressNeedG==null) ? a.liveNeedG
+                      : (dy>0 ? stillDressG/dy : a.liveNeedG);
+    return {...a, dressYieldPct:dy>0?Math.round(dy*1000)/10:null,
+            dressNeedG, fromStockG, stillDressG, livePullG,
+            spareG:a.liveStockG-livePullG};
+  }).sort((x,y)=>y.livePullG-x.livePullG);
+}
+
 // Check the plan's ingredient needs against stock using PROCESSED-FIRST-THEN-RAW coverage.
 // Honours any substitutions already set (prodBOMMap applies them). Returns the short items.
 async function _prodShortages(){
@@ -12282,17 +12385,30 @@ async function _prodShortages(){
     const neededG=need[sku]; const ohProc=Math.max(0,oh[sku]||0); const ohRaw=p?Math.max(0,oh[p.sku]||0):0;
     const canMakeG=ohProc + ohRaw*y;                       // processed first, then raw → processed at yield
     const shortG=neededG-canMakeG;
-    if(shortG>1) out.push({sku, name:it.name||sku, neededKg:Math.round(neededG/10)/100, procKg:Math.round(ohProc/10)/100, rawKg:Math.round(ohRaw/10)/100, canMakeKg:Math.round(canMakeG/10)/100, shortKg:Math.round(shortG/10)/100, parent:(p&&p.name)||'', hasParent:!!p, yieldPct:Math.round(y*100)});
+    /* PLAIN WORDS. "need 36, can make 19.51, short 16.49" made three numbers
+       out of one sentence and nobody could say which was which. What the
+       kitchen actually wants to know is: how much the day needs, how much is
+       already made, and how much is still to be made. Those are the three, and
+       they are named as such. */
+    if(shortG>1) out.push({sku, name:it.name||sku,
+      needKg:Math.round(neededG/10)/100,
+      readyKg:Math.round(ohProc/10)/100,
+      makeKg:Math.round(Math.max(0,neededG-ohProc)/10)/100,
+      neededKg:Math.round(neededG/10)/100, procKg:Math.round(ohProc/10)/100, rawKg:Math.round(ohRaw/10)/100,
+      canMakeKg:Math.round(canMakeG/10)/100, shortKg:Math.round(shortG/10)/100,
+      parent:(p&&p.name)||'', hasParent:!!p, yieldPct:Math.round(y*100)});
   });
   return out.sort((a,b)=>b.shortKg-a.shortKg);
 }
 function _prodShortWarn(sh, headline){
   const rows=sh.map(s=>`<tr><td>${esc(s.name)}<div class="mini"><code>${esc(s.sku)}</code></div></td>
-    <td class="num">${s.neededKg}</td><td class="num">${s.canMakeKg}</td><td class="num" style="color:var(--danger)"><b>${s.shortKg}</b></td>
-    <td class="mini">${s.hasParent?('processed '+s.procKg+' + raw '+s.rawKg+' @'+s.yieldPct+'%'):'<span style="color:var(--danger)">no raw parent set</span>'}</td></tr>`).join('');
+    <td class="num">${s.needKg}</td><td class="num" style="color:${s.readyKg>0?'#4e7a3e':'var(--muted)'}">${s.readyKg||'—'}</td>
+    <td class="num"><b>${s.makeKg}</b></td>
+    <td class="num" style="color:var(--danger)"><b>${s.shortKg}</b></td>
+    <td class="mini">${s.hasParent?(esc(s.parent)+' '+s.rawKg+' kg @'+s.yieldPct+'%'):'<span style="color:var(--danger)">no raw parent set</span>'}</td></tr>`).join('');
   $('modal').innerHTML=`<div><h3>⚠ Ingredient shortages — replacements needed</h3>
     <p class="mini">${esc(headline)}. Using <b>processed stock first, then raw</b>, these ingredient(s) can't fully cover this run. Set a <b>replacement</b> (Substitute) for them, or receive / prep more before you confirm. The finished products are unchanged.</p>
-    <div style="max-height:300px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num">Needed kg</th><th class="num">Can make kg</th><th class="num">Short kg</th><th>Available now</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="max-height:300px;overflow:auto"><table><thead><tr><th>Ingredient</th><th class="num" title="What the whole run needs.">Need</th><th class="num" title="Already processed and sitting at Bulacan.">Already made</th><th class="num" title="Need minus what is already made — the kitchen's job today.">To make</th><th class="num" title="The part of 'to make' that raw stock will not cover.">Not covered</th><th>Raw it comes from</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="closeModal();prodSubstitute()">🔁 Set replacements</button><button class="btn sec" onclick="closeModal()">OK — I'll handle it</button></div></div>`;
   $('overlay').classList.add('on');
 }
@@ -12313,7 +12429,7 @@ async function drawPreConfirmSub(){
   const rows=sh.map(s=>{ const it=im[s.sku]||{}; const alt=(it.approved_alt||'').trim(); const chosen=window._prodSub[s.sku]||'';
     const opts=_procIngOptions(ings,{selected:chosen, exclude:s.sku, placeholder:null,
       star:o=>alt&&String(o.name||'').trim().toLowerCase()===alt.toLowerCase()});
-    return `<tr><td>${esc(s.name)}<div class="mini"><span style="color:var(--danger)">short ${s.shortKg} kg</span> · need ${s.neededKg}, can make ${s.canMakeKg}${alt?' · approved alt: <b>'+esc(alt)+'</b>':''}</div></td>
+    return `<tr><td>${esc(s.name)}<div class="mini">need <b>${s.needKg}</b> · already made ${s.readyKg||0} · <b>to make ${s.makeKg}</b> · <span style="color:var(--danger)">not covered ${s.shortKg} kg</span>${alt?' · approved alt: <b>'+esc(alt)+'</b>':''}</div></td>
       <td><select onchange="prodPreSetSub('${esc(s.sku)}',this.value)" style="width:280px"><option value="" ${!chosen?'selected':''}>— keep &amp; make what we can —</option>${opts}</select></td></tr>`; }).join('');
   const nSub=Object.keys(window._prodSub).length;
   $('modal').innerHTML=`<div><h3>⚠ Before confirming — ${sh.length} ingredient(s) short</h3>
