@@ -7275,7 +7275,12 @@ async function wfAction(to){ const m=MODELS[state.model]; const from=formRec[m.s
 async function prodCostMap(){
   if(await useSecure()){ try{ const rows=await sb('rpc/wr_product_costs',{method:'POST',body:'{}'}); const m={}; (rows||[]).forEach(r=>m[r.product_sku]=+r.cost_per_pack||0); return m; }catch(e){} }  // server-side cost (masking-safe)
   const boms=await db.list('bom_lines',{}), ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
-  const m={}; boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; const y=(+it.yield_pct||100)/100; m[b.product_sku]=(m[b.product_sku]||0)+((+b.usable_g||0)/(y||1))/1000*(+it.moving_avg_cost_kg||+it.list_price_kg||0); }); return m; }
+  /* This is the number stamped on every batch (cost_per_pack) and on the
+     batch_output ledger row, so it is what "what did this run cost" means
+     afterwards. It must agree with the margin report or the two answer the same
+     question differently — same function, same ledger. */
+  let led={}; try{ led=await ingCostLedger(); }catch(e){}
+  const m={}; boms.forEach(b=>{ const it=im[b.ingredient_sku]||{}; m[b.product_sku]=(m[b.product_sku]||0)+(+b.usable_g||0)*ingCostG(it,led).g; }); return m; }
 /* ---- Idempotency: never post the same document to the ledger twice ---- */
 let _postLock=false;                                  // blocks overlapping double-clicks (single user)
 /* Has this source already posted? (re-entry / 2-user guard)
@@ -8133,7 +8138,8 @@ async function renderDashboard(){
   const rawItems=new Set(stockRows.filter(s=>s.kind==='ingredient'&&(+s.on_hand||0)!==0).map(s=>s.ref_sku)).size;
   const supItems=ing.filter(active).filter(i=>(''+(i.category||'')).toLowerCase()==='supplies').length;
   await loadCostModel();
-  const withMargin=marginRowsFor(prod.filter(active),boms,ing).map(r=>({name:r.p.name,cost:r.total,sell:r.sell,margin:r.sell?r.gp*100:null}));
+  let _dled={}; try{ _dled=await ingCostLedger(); }catch(e){}
+  const withMargin=marginRowsFor(prod.filter(active),boms,ing,_dled).map(r=>({name:r.p.name,cost:r.total,sell:r.sell,margin:r.sell?r.gp*100:null}));
   const topMargin=withMargin.filter(x=>x.margin!=null&&x.cost>0).sort((a,b)=>b.margin-a.margin).slice(0,8);
   const thinMargin=withMargin.filter(x=>x.margin!=null&&x.cost>0).sort((a,b)=>a.margin-b.margin).slice(0,8);
   const openVars=vars.filter(v=>v.status==='open');
@@ -8174,7 +8180,7 @@ async function renderDashboard(){
   });
   paySched.sort((a,b)=> String(a.due||'9999').localeCompare(String(b.due||'9999')) || b.amt-a.amt);
   // Glimpse metrics for the quick-analysis cards.
-  const _mr=marginRowsFor(prod.filter(active),boms,ing).filter(r=>r.sell>0);
+  const _mr=marginRowsFor(prod.filter(active),boms,ing,_dled).filter(r=>r.sell>0);
   const _tgm=+COST_MODEL.target_gm||0.3;
   const mgBelow=_mr.filter(r=>r.gp<_tgm).length; const mgAvg=_mr.length?_mr.reduce((s,r)=>s+r.gp,0)/_mr.length:0;
   let _mom=[]; try{_mom=await momLoad()}catch(e){}
@@ -9005,7 +9011,7 @@ async function renderCustomOrders(){
      the answer — which draft run put it there — belongs on the row, not in my head. */
   const _why=window._coWhy||{};
   let rows=orders.map(o=>{ const mk=coProduceBy(o), late=mk&&mk<todayISO()&&coIsOpen(o.status);
-    return `<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.delivery_date||'—')}</td><td${late?' style="color:var(--danger);font-weight:700"':''}>${esc(mk||'—')}${late?'<div class="mini">make-by passed</div>':''}</td><td>${coStatBadge(o.status)}${fbadge(o)}${_why[o.order_ref]?`<div class="mini" style="color:var(--muted)">${esc(_why[o.order_ref])}</div>`:''}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td></tr>`; }).join('');
+    return `<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.delivery_date||'—')}</td><td${late?' style="color:var(--danger);font-weight:700"':''}>${esc(mk||'—')}${late?'<div class="mini">make-by passed</div>':''}</td><td>${coStatBadge(o.status)}${fbadge(o)}${_why[o.order_ref]?`<div class="mini" style="color:var(--muted)">${esc(_why[o.order_ref])}</div>`:''}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td><td class="num"><button class="btn sm sec" title="Copy to a new quote — lines and recipes come with it" onclick="event.stopPropagation();coDuplicate('${encodeURIComponent(o.order_ref)}')">⧉</button></td></tr>`; }).join('');
   // Board counts, in flow order — the answer to "where is everything right now".
   const tally={}; orders.forEach(o=>{ const k=coStat(o.status); tally[k]=(tally[k]||0)+1; });
   const flowStrip=CO_FLOW.filter(f=>tally[f.k]).map(f=>`<span class="badge b-${f.b}" title="${esc(f.d)}" style="margin-right:6px">${esc(f.l)} · ${tally[f.k]}</span>`).join('');
@@ -9013,8 +9019,8 @@ async function renderCustomOrders(){
   const _mig = (isLive() && window._coTblErr) ? `<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ The <code>custom_orders</code> tables aren't reachable, so orders can't be saved across devices. Run <b>wr_migration_custom_orders.sql</b> in Supabase (SQL editor), then reload. <span class="mini">(${esc(window._coTblErr)})</span></div>`:'';
   $('content').innerHTML=`<div class="repcard"><div style="display:flex;justify-content:flex-end">${_liveTag}</div>${_mig}<div class="hint" style="margin:0 0 8px">Create a quote, add standard products and/or custom recipes, edit freely. <b>Lock</b> moves it to <b>For Production</b> — each custom recipe becomes its own sellable SKU + BOM, and the packs enter <b>Demand/MRP</b> <b>whatever week they are scheduled for</b>. Everything after Lock moves by itself: counted in a demand plan → <b>Added in Demand</b>, put on a production plan → <b>In Production</b>, packs confirmed → <b>Partially Fulfilled</b> → <b>Completed</b>.</div>
     ${flowStrip?`<div style="margin:0 0 10px">${flowStrip}</div>`:''}
-    <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th title="What the customer was promised">Delivery</th><th title="The production deadline — delivery minus the lead time. This is the demand week.">Make by</th><th>Status</th><th class="num">Lines</th><th class="num">Total</th></tr></thead>
-    <tbody>${rows||'<tr><td colspan="7" class="empty">No custom orders yet — click ＋ New quote.</td></tr>'}</tbody></table></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th title="What the customer was promised">Delivery</th><th title="The production deadline — delivery minus the lead time. This is the demand week.">Make by</th><th>Status</th><th class="num">Lines</th><th class="num">Total</th><th></th></tr></thead>
+    <tbody>${rows||'<tr><td colspan="8" class="empty">No custom orders yet — click ＋ New quote.</td></tr>'}</tbody></table></div>
     <div class="mini" style="color:var(--muted);margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
       <span>Default lead time for new orders</span>
       <input type="number" min="0" max="60" step="1" value="${coLeadDefault()}" style="width:70px" onchange="coSetLeadDefault(this.value)">
@@ -9199,13 +9205,27 @@ async function coKitchenBatch(){
   // per line, grams by category (per pack) and the line's own total
   const rows=lines.map(l=>{
     const by={}; CATS.forEach(c=>by[c.k]=0);
+    const det=[];
     (l.recipe||[]).forEach(r=>{ if(!r.ingredient_sku||!(+r.grams>0)) return;
       const it=(_coIng||[]).find(x=>x.sku===r.ingredient_sku);
-      by[it?_coCatOf(it):'other']=(by[it?_coCatOf(it):'other']||0)+(+r.grams||0); });
+      const k=it?_coCatOf(it):'other';
+      by[k]=(by[k]||0)+(+r.grams||0);
+      det.push({sku:r.ingredient_sku, name:iname[r.ingredient_sku]||r.src_name||r.ingredient_sku,
+                cat:k, grams:+r.grams||0}); });
+    det.sort((a,b)=>b.grams-a.grams);
     const packs=+l.packs||0, size=+l.pack_size_g||0;
-    return {name:(l.description||l.product_sku||'—'), size, packs, by,
+    return {name:(l.description||l.product_sku||'—'), size, packs, by, det,
       total:(size>0?size:Object.values(by).reduce((a,b)=>a+b,0))*packs};
   });
+  /* The matrix above is mixes against CATEGORIES, and the card below is the
+     combined ingredient list for the whole order. Between them they answer
+     "what do I pull" but not "what goes in THIS pack" — the moment two lines
+     use different ingredients, "Muscle Meat 220 g" stops identifying anything
+     and the combined list cannot be split back apart. When the recipes differ,
+     print each line's own recipe; when they are the same, don't — a page of
+     identical tables is just something else to check. */
+  const _sig=r=>r.det.map(d=>d.sku+':'+(Math.round(d.grams*100)/100)).sort().join('|')+'@'+Math.round(+r.size||0);
+  const _mixedRecipes = new Set(rows.map(_sig)).size > 1;
   const used=CATS.filter(c=>rows.some(r=>(r.by[c.k]||0)>0));
   const catTot={}; used.forEach(c=>catTot[c.k]=rows.reduce((s,r)=>s+(r.by[c.k]||0)*r.packs,0));
 
@@ -9267,6 +9287,17 @@ async function coKitchenBatch(){
       <td class="acc">${kg(grand)}</td></tr>
   </tbody></table>
 
+  ${_mixedRecipes?`<div class="card"><h2>🧾 Magkaibang recipe ang mga linya · these lines are NOT the same</h2>
+    <div class="sub" style="margin:-4px 0 10px">Timbangin ang bawat linya nang hiwalay — huwag hatiin ang combined batch. Weigh each line on its own; the combined list below is only for pulling stock.</div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start">
+    ${rows.map(r=>`<div style="flex:1 1 300px;min-width:270px;break-inside:avoid;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:9px 11px">
+      <div><b>${H(r.name)}</b> <span class="sub">· ${r.packs} × ${g1(r.size)}g</span></div>
+      <table><thead><tr><th>Ingredient</th><th>Per pack</th><th>Total</th></tr></thead><tbody>
+      ${r.det.map(d=>`<tr><td>${H(d.name)}</td><td>${g1(d.grams)}g</td><td class="acc">${kg(d.grams*r.packs)}</td></tr>`).join('')
+        ||'<tr><td colspan="3">no recipe on this line</td></tr>'}
+      </tbody></table></div>`).join('')}
+    </div></div>`:''}
+
   <div class="card"><h2>📦 Combined Total Batch — all lines</h2>
     <table><thead><tr><th>Ingredient</th><th>Total g</th><th>Total kg</th></tr></thead><tbody>
     ${CATS.filter(c=>Object.values(comb).some(x=>x.cat===c.k)).map(c=>
@@ -9289,6 +9320,7 @@ function drawCOForm(){
     ${coIsOpen(coRec.status)?`<button class="btn sec" onclick="coFulfil()">✓ Mark completed</button>`:''}
     ${!locked&&coRec.order_ref?`<button class="btn sec" onclick="coCancel()">✕ Cancel</button>`:''}
     <button class="btn sec" onclick="coKitchenBatch()" title="the Fresh Food Calculator's Kitchen Batch sheet, from this order">🍳 Kitchen Batch</button>
+    ${coRec.order_ref?`<button class="btn sec" onclick="coDuplicate()" title="start a new quote holding this order's lines and recipes">⧉ Duplicate</button>`:''}
     ${!locked?`<button class="btn sec" onclick="coImportSheet()" title="a Production Request CSV — one mix per line">📥 Import sheet</button>`:''}
     <button class="btn sec" onclick="coBackToList()">← Orders</button>
     <div class="sp"></div>${coStatBadge(coRec.status)} <span style="color:var(--muted)">${esc(coStatDef(coRec.status).d)}</span>`;
@@ -9537,6 +9569,51 @@ function coSaveRecipe(){ const clean=_coEditRows.filter(r=>r.ingredient_sku&&+r.
   const toLearn=_coEditRows.filter(r=>r.src_name&&r.ingredient_sku);
   if(toLearn.length){ (async()=>{ for(const r of toLearn){ await ffLearnAlias(r.src_name, r.ingredient_sku); } })(); }
   closeModal(); drawCOForm(); toast('Recipe saved · '+clean.length+' ingredient(s)'+(toLearn.length?' · '+toLearn.length+' mapping(s) remembered':'')); }
+/* ---- Duplicate an order --------------------------------------------------
+   Sales repeat a recipe with a tweak far more often than they invent one, and
+   copying by hand means retyping every gram. A mistyped gram is a different
+   SKU at Lock, so the retyping is where the errors come from.
+
+   Everything the customer agreed to comes across — header, lines, recipes.
+   Only the three things that must be earned again are dropped: the reference,
+   the promised delivery date, and the minted custom SKU.
+
+   The SKU is the subtle one. A custom line's product_sku is a hash of its
+   recipe, minted at Lock. Carry it over, change one gram, and the copy ships
+   under a SKU whose BOM says something else — the ORIGINAL order's BOM, now
+   overwritten. Clearing it costs nothing (Lock mints it again) and cannot lie.
+   The delivery date goes for a duller reason: inherited, it is already in the
+   past, and the list would open the copy flagged "make-by passed". */
+async function coDuplicate(refEnc){
+  const ref = refEnc ? decodeURIComponent(refEnc) : ((coRec&&coRec.order_ref)||'');
+  if(!ref){ toast('Save this quote first, then duplicate it',true); return; }
+  let src=null, lines=[];
+  try{ src=(await db.list('custom_orders',{})).find(o=>o.order_ref===ref)||null; }
+  catch(e){ toast(_coErr(e),true); return; }
+  if(!src){ toast('Order '+ref+' not found',true); return; }
+  try{ lines=await db.children({model:'custom_order_lines',fk:'order_ref'}, ref); }catch(e){ lines=[]; }
+  if(!lines.length){ toast(ref+' has no saved lines to copy',true); return; }
+  coRec={ order_ref:'', customer_name:src.customer_name||'', contact:src.contact||'',
+    order_date:todayISO(), delivery_date:'',
+    lead_days:(src.lead_days==null||src.lead_days==='')?coLeadDefault():(+src.lead_days||0),
+    needed_date:todayISO(), status:'draft',
+    notes:src.notes||'', discount:+src.discount||0, delivery_fee:+src.delivery_fee||0,
+    personalized_sticker:!!src.personalized_sticker, created_by:CURRENT_USER, _copied_from:ref };
+  coLines=lines.map(l=>{
+    const isCustom=(l.line_type==='custom');
+    const rec=(typeof l.recipe==='string'?_coParse(l.recipe):(l.recipe||[]));
+    return { line_type:l.line_type||'product',
+      product_sku: isCustom ? '' : (l.product_sku||''),
+      description: l.description||'',
+      recipe: isCustom ? (rec||[]).map(r=>({...r})) : [],
+      pack_size_g:+l.pack_size_g||0, packs:+l.packs||0, unit_price:+l.unit_price||0 };
+  });
+  try{ await _coLoadStock(); }catch(e){}
+  _coView='form'; state.model='custom_orders'; state.view='special'; renderSide(); drawCOForm();
+  const nCustom=coLines.filter(l=>l.line_type==='custom').length;
+  toast('Copied '+ref+' — '+coLines.length+' line(s)'+(nCustom?(', '+nCustom+' recipe(s)'):'')
+       +'. Set the delivery date, edit what changed, then Save.');
+}
 async function coSave(){
   if(!coLines.length){ toast('Add at least one line',true); return; }
   if(!coRec.order_ref){ try{ coRec.order_ref=(await genRef('CO',{date:coRec.order_date})).ref; }catch(e){ coRec.order_ref='CO-'+_mmddyyyy(coRec.order_date)+'-'+String(Date.now()).slice(-4); } }
@@ -9549,6 +9626,7 @@ async function coSave(){
     if(exists) await db.update('custom_orders','order_ref',coRec.order_ref,hdr); else await db.create('custom_orders',hdr);
     await _coSaveLines();
     sysLog('custom_orders',coRec.order_ref,'📝 Quote saved ('+coLines.length+' line(s)) by '+CURRENT_USER);
+    if(coRec._copied_from){ sysLog('custom_orders',coRec.order_ref,'⧉ Copied from '+coRec._copied_from+' by '+CURRENT_USER); coRec._copied_from=null; }
     toast('Quote saved · '+coRec.order_ref+(isLive()?' · Supabase':' · local only')); drawCOForm();
   }catch(e){ toast(_coErr(e),true); }
 }
@@ -11634,15 +11712,38 @@ async function prodKitchenSheet(){
   const _isCust=x=>!!(x.customer) || /^CUST-/i.test(String(x.sku||''));
   const custItems=items.filter(_isCust);
   const plainItems=items.filter(x=>!_isCust(x));
+  /* ONE BLOCK PER ORDER, NOT PER CUSTOMER NAME.
+     Keyed on the customer's name, two separate orders from the same regular
+     collapsed into a single block — with one ref badge, the first one's, printed
+     over both. The kitchen then had a sheet whose header named an order that
+     only half the mixes belonged to. An order is the unit the kitchen packs and
+     the unit CS chases; make it the unit that prints. */
   const byCustomer={};
-  custItems.forEach(x=>{ const k=x.customer||'Custom orders'; (byCustomer[k]=byCustomer[k]||[]).push(x); });
+  custItems.forEach(x=>{ const k=(x.orderRef||'')+'\u0000'+(x.customer||'Custom orders');
+    (byCustomer[k]=byCustomer[k]||[]).push(x); });
+  /* DO THE MIXES IN THIS BATCH SHARE ONE RECIPE?
+     The block prints mixes against CATEGORIES, then one combined ingredient
+     list. That is complete only while every mix is the same recipe — then
+     "Muscle Meat 220 g" on a row can only mean one thing. The moment two mixes
+     use different ingredients the sheet says how many grams of muscle meat each
+     mix takes but never WHICH muscle meat, and the combined list cannot be
+     split back apart. The kitchen weighs one batch and divides it, which is the
+     wrong food in the wrong pack. So when the recipes differ, each mix gets its
+     own recipe printed underneath. */
+  const _recipeSig=x=>(x.ings||[]).filter(i=>(+i.grams||0)>0)
+      .map(i=>i.sku+':'+(Math.round((+i.grams||0)*100)/100)).sort().join('|')
+      +'@'+Math.round(+x.packG||0);
 
   const _mergeRow=(x)=>{ x.ings.forEach(i=>{ const key=i.name;
       if(!combined.has(key)) combined.set(key,{cat:i.cat, grams:0, bones:i.bones, sku:i.sku});
       combined.get(key).grams+=i.grams*x.packs; }); };
 
-  const custBlocks=Object.keys(byCustomer).sort().map(cust=>{
-    const list=byCustomer[cust].slice().sort((a,b)=>(a.seq-b.seq)||String(a.name).localeCompare(String(b.name)));
+  const custBlocks=Object.keys(byCustomer).sort((a,b)=>
+      String(a.split('\u0000')[1]).localeCompare(String(b.split('\u0000')[1]))
+      || String(a).localeCompare(String(b))
+    ).map(_key=>{
+    const cust=_key.split('\u0000')[1]||'Custom orders';
+    const list=byCustomer[_key].slice().sort((a,b)=>(a.seq-b.seq)||String(a.name).localeCompare(String(b.name)));
     list.forEach(_mergeRow);
     // which categories this customer's batch actually touches — no empty columns
     const cats=KSHEET_ORDER.filter(k=>list.some(x=>x.ings.some(i=>i.cat===k)));
@@ -11693,6 +11794,22 @@ async function prodKitchenSheet(){
           ${cats.map(k=>`<td class="num">${_ksKg(list.reduce((s,x)=>s+catCol(x,k)*x.packs,0))}</td>`).join('')}
           <td class="num"><b>${_ksKg(totKg)}</b></td></tr></tfoot>
       </table>
+      ${(()=>{
+        const sigs=new Set(list.map(_recipeSig));
+        if(sigs.size<2) return '';
+        return `<div style="margin-top:12px;break-inside:avoid">
+          <h3 style="margin:0 0 2px">🧾 Magkaibang recipe ang mga mix na ito · these mixes are NOT the same</h3>
+          <div class="ingred-note" style="margin:0 0 6px">Timbangin ang bawat mix nang hiwalay — huwag hatiin ang combined batch. Weigh each mix on its own; the combined list below is only for pulling stock.</div>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start">`
+        + list.map(x=>`<div style="flex:1 1 320px;min-width:290px;break-inside:avoid;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:8px 10px">
+            <div><b>${esc2(x.name)}</b> <span class="ingred-note">· ${x.packs} × ${Math.round(x.packG)}g</span></div>
+            <table class="ingred"><thead><tr><th>Ingredient</th><th class="num">Per pack</th><th class="num">Total</th></tr></thead>
+              <tbody>${x.ings.map(i=>`<tr><td><span class="ingred-name">${_ksDot(i.cat)}${esc2(i.name)}${i.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span></td>
+                <td class="num">${Math.round(i.grams)}g</td><td class="num">${_ksKg(i.grams*x.packs)}</td></tr>`).join('')}</tbody>
+              <tfoot><tr class="totals-row"><td>Total</td><td class="num">${Math.round(x.perPack)}g</td><td class="num"><b>${_ksKg(x.perPack*x.packs)}</b></td></tr></tfoot>
+            </table></div>`).join('')
+        + `</div></div>`;
+      })()}
       <div class="mix-content" style="margin-top:12px">
         <div class="ingred-col">
           <h3 style="margin:0 0 4px">📦 Combined Total Batch — all mixes</h3>
@@ -13304,11 +13421,18 @@ async function prodActualsApply(){
 // grams of that output. The RAW was already depleted earlier, at the Processing step.
 async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=await listIngredients();
   const im={}; ings.forEach(i=>im[i.sku]=i); const m={}; const sub=window._prodSub||{};
+  /* Same cost function as the margin report, on the same ledger. The two used
+     different precedence — this one read price_kg_processed first, the report
+     read moving_avg_cost_kg first — so one pack could be charged two different
+     raw costs depending on which screen you were looking at. And where
+     price_kg_processed was blank, this fell back to a RAW price against
+     PROCESSED grams and dropped the yield entirely. */
+  let led={}; try{ led=await ingCostLedger(); }catch(e){}
   boms.forEach(b=>{ let ingSku=b.ingredient_sku;
     if(sub[ingSku]&&im[sub[ingSku]]) ingSku=sub[ingSku];        // run substitution: consume the replacement instead (#3)
     const it=im[ingSku]||{}; const y=(+it.yield_pct||100)/100||1;
     const procG=(+b.usable_g||0), rawG=procG/y;                 // recipe grams unchanged; yield/cost from the (sub) ingredient
-    const costG=((+it.price_kg_processed||+it.moving_avg_cost_kg||+it.list_price_kg||0))/1000;   // processed cost per g
+    const costG=ingCostG(it,led).g;                             // processed cost per g
     (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:ingSku, processed_g:procG, raw_g:rawG, unit_cost_g:costG}); });
   return m; }
 
@@ -14175,14 +14299,73 @@ function _supplyCosts(ings){
            thermal:pick(/thermal/i,pk.thermal), sticker:pick(/sticker|label/i,pk.sticker),
            src:{ vacuum:find(/vacuum/i)!=null, ecobag:find(/eco\s*-?\s*bag|ecobag/i)!=null, thermal:find(/thermal/i)!=null, sticker:find(/sticker|label/i)!=null } };
 }
+/* ---- WHAT ONE USABLE GRAM OF AN INGREDIENT COSTS -------------------------
+   This report was reading raw cost as
+
+       usable_g  x  moving_avg_cost_kg / 1000
+
+   and both halves of that are wrong together, which is why it looked right.
+
+   `usable_g` on a BOM line is PROCESSED grams — what reaches the pack.
+   `moving_avg_cost_kg` is a RAW price: postReceipt rolls it from the PO's
+   price per kg, what we paid the supplier for the live goat. Multiplying
+   processed grams by a raw price silently drops the yield. Goat deboned meat
+   yields 22.74% of the live animal, so its usable kilo costs 4.4x the live
+   kilo — and this report was charging 1x. Every product came out cheaper than
+   it is, and the thinner the yield the bigger the flattery.
+
+   The precedence was inconsistent as well. prodBOMMap — what production
+   actually charges the batch — reads price_kg_processed FIRST; this report read
+   moving_avg_cost_kg first. An ingredient carrying both was costed one way by
+   the ledger and another way by the margin report, for the same pack.
+
+   So one function, used by both, in this order:
+     1. the LEDGER — the unit_cost on the newest processing_in for this
+        ingredient. That is a real batch: raw cost / that run's actual yield.
+        It is the only figure that moves when production moves.
+     2. price_kg_processed, if somebody has kept it current
+     3. a raw price / yield_pct — correct arithmetic, standard yield
+   Every row carries where its number came from and how old it is, because a
+   cost that has stopped moving is the thing worth seeing. */
+async function ingCostLedger(){
+  const m={};
+  let mov=[];
+  try{ if(isLive()) mov=await sb('inventory_movements?select=ref_sku,unit_cost,created_at,movement_type&kind=eq.ingredient&movement_type=eq.processing_in&order=created_at.desc&limit=4000');
+       else mov=((window.__DEMO__&&__DEMO__.inventory_movements)||[]).filter(x=>x.movement_type==='processing_in'&&x.kind==='ingredient')
+              .slice().sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||''))); }catch(e){ return m; }
+  (mov||[]).forEach(x=>{ const sku=x.ref_sku, c=+x.unit_cost||0;
+    if(!sku || !(c>0) || m[sku]) return;                 // newest wins; the list is already newest-first
+    m[sku]={costG:c, at:String(x.created_at||'').slice(0,10)}; });
+  return m;
+}
+// Processed cost per gram for one ingredient, plus where it came from.
+function ingCostG(it, ledger){
+  it=it||{};
+  const L=(ledger||{})[it.sku];
+  if(L && L.costG>0) return {g:L.costG, src:'production', at:L.at};
+  const pp=+it.price_kg_processed||0;
+  if(pp>0) return {g:pp/1000, src:'processed price', at:''};
+  const rawKg=(+it.moving_avg_cost_kg||+it.list_price_kg||0);
+  if(rawKg>0){ const y=((+it.yield_pct||100)/100)||1;
+    return {g:(rawKg/1000)/y, src:(+it.moving_avg_cost_kg?'moving avg / yield':'list price / yield'), at:''}; }
+  return {g:0, src:'no cost', at:''};
+}
 // Full per-product gross-margin rows. Shared by the Gross Margin view, the dashboard, and reports.
-function marginRowsFor(prods,boms,ings){
+function marginRowsFor(prods,boms,ings,ledger){
   const im={}; (ings||[]).forEach(i=>im[i.sku]=i);
   const pg=COST_MODEL.perGram||{}, lab=COST_MODEL.labor||{}, pct=COST_MODEL.pct||{}, tgm=+COST_MODEL.target_gm||0;
   const sc=_supplyCosts(ings); const feesPct=(+pct.transaction||0)+(+pct.marketing||0);
-  const rawCost=p=>{ let c=0; (boms||[]).filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=im[b.ingredient_sku]||{}; const cg=((+it.moving_avg_cost_kg||+it.price_kg_processed||+it.list_price_kg||0))/1000; c+=(+b.usable_g||0)*cg; }); return c; };
+  const rawCost=p=>{ let c=0; const srcs={}; let newest='', anyMissing=false;
+    (boms||[]).filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=im[b.ingredient_sku]||{};
+      const q=ingCostG(it,ledger);
+      if(q.g<=0) anyMissing=true;
+      srcs[q.src]=(srcs[q.src]||0)+(+b.usable_g||0);
+      if(q.at && q.at>newest) newest=q.at;
+      c+=(+b.usable_g||0)*q.g; });
+    const src=Object.keys(srcs).sort((a,b)=>srcs[b]-srcs[a])[0]||'no recipe';
+    return {c, src, at:newest, missing:anyMissing}; };
   return (prods||[]).filter(p=>p.active!==false).map(p=>{
-    const g=+p.pack_g||0, sell=+p.sell_price||0, raw=rawCost(p);
+    const g=+p.pack_g||0, sell=+p.sell_price||0, _rc=rawCost(p), raw=_rc.c;
     const elec=(+pg.electricity||0)*g, water=(+pg.water||0)*g, transport=(+pg.transport||0)*g;
     const labor=(p.cost_debone?(+lab.debone||0):(+lab.plain||0))*g;
     const butcher=p.cost_butcher?((+lab.butcher||0)*g):0;
@@ -14191,7 +14374,7 @@ function marginRowsFor(prods,boms,ings){
     const process=elec+water+transport+labor+butcher+sousvide, pack=vacuum+sticker+ecobag+thermal;
     const fixedCost=raw+process+pack, fees=feesPct*sell, total=fixedCost+fees;
     const gp=sell>0?(sell-total)/sell:0; const denom=1-tgm-feesPct; const suggested=denom>0?fixedCost/denom:0;
-    return {p,g,raw,elec,water,transport,labor,butcher,sousvide,vacuum,sticker,ecobag,thermal,process,pack,fees,fixedCost,total,sell,gp,suggested,feesPct,tgm};
+    return {p,g,raw,rawSrc:_rc.src,rawAt:_rc.at,rawMissing:_rc.missing,elec,water,transport,labor,butcher,sousvide,vacuum,sticker,ecobag,thermal,process,pack,fees,fixedCost,total,sell,gp,suggested,feesPct,tgm};
   });
 }
 async function renderMargin(){
@@ -14199,13 +14382,14 @@ async function renderMargin(){
   $('cp').innerHTML=`<div class="title">Gross Margin <span onclick="openKB()" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div><button class="btn" onclick="renderMargin()">↻ Recompute</button><div class="sp"></div><span style="color:var(--muted)">BOM raw + variable process/packaging → GP% → suggested price</span>`;
   if(typeof moneyHidden==='function' && moneyHidden()){ $('content').innerHTML='<div class="repcard"><div class="hint">Cost &amp; margin are hidden for your role.</div></div>'; return; }
   let prods=[],boms=[],ings=[]; try{ prods=await db.list('products',{}); boms=await db.list('bom_lines',{}); ings=await listIngredients(); }catch(e){}
+  let _led={}; try{ _led=await ingCostLedger(); }catch(e){}
   const pg=COST_MODEL.perGram||{}, lab=COST_MODEL.labor||{}, pct=COST_MODEL.pct||{}, tgm=+COST_MODEL.target_gm||0;
   const sc=_supplyCosts(ings); const src=sc.src||{};
   const pgIn=(k,l)=>`<label style="font-size:12px">${l} ₱/g<br><input type="number" step="any" value="${+(pg[k]||0).toFixed(5)}" style="width:96px" onchange="cmSetPG('${k}',this.value)"></label>`;
   const labIn=(k,l)=>`<label style="font-size:12px">${l} ₱/g<br><input type="number" step="any" value="${+(lab[k]||0).toFixed(5)}" style="width:96px" onchange="cmSetLab('${k}',this.value)"></label>`;
   const packIn=(k,l)=>{ const s=src[k]; return `<label style="font-size:12px">${l} ₱/pack${s?' <span class="mini" style="color:var(--ok)">·Supplies</span>':''}<br><input type="number" step="any" value="${+(sc[k]||0).toFixed(2)}" style="width:96px" ${s?'disabled title="from Kitchen Supplies — edit there"':`onchange="cmSetPack('${k}',this.value)"`}></label>`; };
   let h=`<div class="repcard"><h3 style="margin:0 0 6px">Cost model</h3>
-    <div class="hint" style="margin-bottom:8px">Rates below are global; each product's <b>Cost profile</b> tab decides which variable costs apply (deboning, butcher charge, sous-vide, ecobag, thermal). Packaging &amp; sticker costs come from <b>Kitchen Supplies</b> when a matching item exists (shown ·Supplies), otherwise the fallback rate here. Raw cost is the <b>BOM</b> at moving-average (else processed) cost.</div>
+    <div class="hint" style="margin-bottom:8px">Rates below are global; each product's <b>Cost profile</b> tab decides which variable costs apply (deboning, butcher charge, sous-vide, ecobag, thermal). Packaging &amp; sticker costs come from <b>Kitchen Supplies</b> when a matching item exists (shown ·Supplies), otherwise the fallback rate here. Raw cost is the <b>BOM</b> priced per <i>usable</i> gram: the cost per gram the last production run actually recorded for that ingredient, else its processed price, else its raw price divided by its yield. Each row shows which of the three it used and how old it is.</div>
     <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;margin:4px 0">Per-gram (× pack grams)</div>
     <div style="display:flex;flex-wrap:wrap;gap:12px">${pgIn('electricity','Electricity')}${pgIn('water','Water')}${pgIn('transport','Transport')}</div>
     <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;margin:10px 0 4px">Labor (× pack grams)</div>
@@ -14219,13 +14403,13 @@ async function renderMargin(){
       <label style="font-size:12px"><b>Target GM</b> %<br><input type="number" step="any" value="${+(tgm*100).toFixed(3)}" style="width:80px" onchange="cmSetTarget(this.value)"></label></div>
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="saveCostModel()">💾 Save cost model</button><button class="btn sec" onclick="cmReset()">↺ Reset to file defaults</button></div></div>`;
 
-  const rows=marginRowsFor(prods,boms,ings);
+  const rows=marginRowsFor(prods,boms,ings,_led);
   rows.forEach(r=>{ r.group_1=r.p.group_1||'Products'; r.group_2=r.p.group_2||r.p.family||'Other'; r.sort_order=r.p.sort_order; r.name=r.p.name; r.variant=r.p.variant; });
   const flagsOf=p=>[p.cost_debone?'<span title="with deboning" style="color:var(--earth,#b5762a)">D</span>':'',p.cost_butcher?'<span title="butcher charge" style="color:var(--earth,#b5762a)">B</span>':'',p.cost_sousvide?'<span title="sous-vide" style="color:var(--berry)">S</span>':'',p.cost_ecobag?'<span title="ecobag">E</span>':'',p.cost_thermal?'<span title="thermal pouch">T</span>':''].filter(Boolean).join(' ')||'<span class="mini">—</span>';
   const mRow=r=>{ const below=r.gp<tgm; const col=r.gp<0?'var(--danger)':(below?'var(--earth,#b5762a)':'var(--ok)');
     return `<tr style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.p.sku)).replace(/'/g,'&#39;')}')" title="Open product">
       <td>${esc(r.p.name)}</td><td class="mini">${flagsOf(r.p)}</td><td class="num">${r.g||'—'}</td>
-      <td class="num">${fmt(r.raw)}</td><td class="num">${fmt(r.process)}</td><td class="num">${fmt(r.pack)}</td><td class="num">${fmt(r.fees)}</td>
+      <td class="num">${fmt(r.raw)}<div class="mini" style="color:${r.rawMissing?'var(--danger)':'var(--muted)'}">${esc(r.rawSrc||'')}${r.rawAt?' · '+esc(r.rawAt):''}</div></td><td class="num">${fmt(r.process)}</td><td class="num">${fmt(r.pack)}</td><td class="num">${fmt(r.fees)}</td>
       <td class="num"><b>${fmt(r.total)}</b></td><td class="num">${fmt(r.sell)}</td>
       <td class="num" style="color:${col}"><b>${r.sell?(r.gp*100).toFixed(1)+'%':'—'}</b></td>
       <td class="num">${r.sell?fmt(r.suggested):'—'}</td>
@@ -14241,8 +14425,71 @@ async function renderMargin(){
     });
   });
   if(!rows.length) h+='<tr><td colspan="12" class="empty">No products with recipes yet.</td></tr>';
-  h+=`</tbody></table></div><div class="hint" style="margin-top:8px">Total = Raw (BOM) + Process (electricity + water + transport + labor ± butcher ± sous-vide) + Packaging (vacuum + sticker ± ecobag ± thermal) + Fees (${((( +pct.transaction||0)+(+pct.marketing||0))*100).toFixed(0)}% of price). GP% = (Sell − Total) ÷ Sell. Suggested price hits ${(tgm*100).toFixed(0)}% GM at current costs.</div></div>`;
+  h+=`</tbody></table></div><div class="hint" style="margin-top:8px">Total = Raw (BOM, per usable gram) + Process (electricity + water + transport + labor ± butcher ± sous-vide) + Packaging (vacuum + sticker ± ecobag ± thermal) + Fees (${((( +pct.transaction||0)+(+pct.marketing||0))*100).toFixed(0)}% of price). GP% = (Sell − Total) ÷ Sell. Suggested price hits ${(tgm*100).toFixed(0)}% GM at current costs.</div></div>`;
   $('content').innerHTML=h; window._marginRows=rows;
+  try{ const runs=await marginRecentRuns(rows); window._marginRuns=runs;
+       $('content').insertAdjacentHTML('beforeend', marginRunsHtml(runs,tgm)); }catch(e){}
+}
+/* ---- IS THE RAW COST ACTUALLY MOVING? ------------------------------------
+   The table above is a MODEL: today's costs against today's recipe. It will
+   happily show a healthy GP forever, because nothing in it knows whether a pack
+   has been made since the last price rise.
+
+   The ledger does know. Every batch_output row carries the cost per pack that
+   production stamped on that run, at that run's costs. Comparing it with the
+   model answers the question the model cannot: was the last batch of this
+   product still inside the target, and has its raw cost drifted since?
+
+   A run with unit_cost 0 is not a cheap run — it is a run whose cost was never
+   captured, and it is called out as such rather than being scored as 100% GP. */
+async function marginRecentRuns(rows){
+  let mov=[];
+  try{
+    if(isLive()) mov=await sb('inventory_movements?select=ref_sku,qty,unit_cost,created_at,note&kind=eq.product&movement_type=eq.batch_output&order=created_at.desc&limit=2000');
+    else mov=((window.__DEMO__&&window.__DEMO__.inventory_movements)||[])
+      .filter(m=>m.movement_type==='batch_output'&&m.kind==='product')
+      .slice().sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||'')));
+  }catch(e){ return []; }
+  const byRow={}; (rows||[]).forEach(r=>byRow[r.p.sku]=r);
+  const seen={}, out=[];
+  (mov||[]).forEach(m=>{ const sku=m.ref_sku; if(!sku||seen[sku]) return;
+    const r=byRow[sku]; if(!r) return; seen[sku]=1;
+    const rawThen=+m.unit_cost||0;
+    const totalThen=rawThen+r.process+r.pack+r.fees;
+    const gpThen=(r.sell>0&&rawThen>0)?((r.sell-totalThen)/r.sell):null;
+    out.push({r, sku, at:String(m.created_at||'').slice(0,10), packs:+m.qty||0,
+      note:String(m.note||''), rawThen, gpThen, drift:rawThen>0?(r.raw-rawThen):0});
+  });
+  return out.sort((a,b)=>String(b.at).localeCompare(String(a.at)));
+}
+function marginRunsHtml(runs,tgm){
+  if(!runs.length) return `<div class="repcard" style="margin-top:12px"><h3 style="margin:0 0 6px">Newly produced — actual cost per run</h3>
+    <div class="hint">No <code>batch_output</code> rows in the ledger yet, so there is nothing produced to compare the model against. Confirm a production run and this fills in.</div></div>`;
+  const nocost=runs.filter(r=>!(r.rawThen>0));
+  const scored=runs.filter(r=>r.gpThen!=null);
+  const below=scored.filter(r=>r.gpThen<tgm);
+  const row=x=>{ const r=x.r;
+    const col=x.gpThen==null?'var(--muted)':(x.gpThen<0?'var(--danger)':(x.gpThen<tgm?'var(--earth,#b5762a)':'var(--ok)'));
+    const dpc=x.rawThen>0?(x.drift/x.rawThen*100):0;
+    const dtxt=!(x.rawThen>0)?'—':(Math.abs(dpc)<0.5?'flat':((dpc>0?'+':'')+dpc.toFixed(1)+'%'));
+    return `<tr style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.p.sku)).replace(/'/g,'&#39;')}')">
+      <td>${esc(r.p.name)}<div class="mini">${esc(x.note||x.sku)}</div></td>
+      <td class="mini">${esc(x.at||'—')}</td><td class="num">${x.packs||'—'}</td>
+      <td class="num">${x.rawThen>0?fmt(x.rawThen):'<span style="color:var(--danger)">no cost</span>'}</td>
+      <td class="num">${fmt(r.raw)}</td>
+      <td class="num" style="color:${Math.abs(dpc)<0.5?'var(--muted)':(dpc>0?'var(--earth,#b5762a)':'var(--ok)')}">${dtxt}</td>
+      <td class="num">${fmt(r.sell)}</td>
+      <td class="num" style="color:${col}"><b>${x.gpThen==null?'—':(x.gpThen*100).toFixed(1)+'%'}</b></td>
+      <td>${x.gpThen==null?'<span class="mini">not costed</span>':(x.gpThen<tgm?'<span style="color:var(--earth,#b5762a)">BELOW TARGET</span>':'<span style="color:var(--ok)">ON TARGET</span>')}</td></tr>`; };
+  return `<div class="repcard" style="margin-top:12px"><h3 style="margin:0 0 6px">Newly produced — what the last run of each product actually cost</h3>
+    <div class="hint" style="margin:0 0 8px">One row per product, from its most recent <b>confirmed production run</b>. <b>Raw at run</b> is the cost per pack the ledger stamped on that batch; <b>Raw now</b> is what the model says today. <b>Drift</b> is how far today's cost has moved since that run — positive means the next batch costs more than the last one did. <b>GP at run</b> re-prices that batch with today's process, packaging and fees.</div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px">
+      <div><b style="font-size:19px;color:${below.length?'var(--earth,#b5762a)':'var(--ok)'}">${below.length}</b> <span class="mini">of ${scored.length} costed run(s) below the ${(tgm*100).toFixed(0)}% target</span></div>
+      ${nocost.length?`<div><b style="font-size:19px;color:var(--danger)">${nocost.length}</b> <span class="mini">run(s) posted with no cost — these cannot be scored</span></div>`:''}
+    </div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>Last run</th><th class="num">Packs</th><th class="num">Raw at run</th><th class="num">Raw now</th><th class="num">Drift</th><th class="num">Sell</th><th class="num">GP at run</th><th>Status</th></tr></thead>
+    <tbody>${runs.slice(0,60).map(row).join('')}</tbody></table></div>
+    ${runs.length>60?`<div class="mini" style="margin-top:6px;color:var(--muted)">Showing the 60 most recent of ${runs.length} products with a run.</div>`:''}</div>`;
 }
 async function marginWriteCogs(){ const rows=window._marginRows||[]; if(!rows.length){ toast('Nothing to write',true); return; }
   if(!confirm('Write the computed Total Cost to each product’s COGS ref field ('+rows.length+' products)?')) return;
