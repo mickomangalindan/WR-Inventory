@@ -10477,7 +10477,7 @@ async function prodNeedRows(){
     return {
       sku, name:_outName(it,cl)||it.name||sku,
       cat:cat.k, catLabel:cat.l, color:cat.c,
-      bones:/bone/i.test(String(cl.g1||it.category||''))||/bone/i.test(String(it.name||'')),
+      bones:_hasBones(it, cl.g1||it.category, window._boneYMap),
       recipeG:base,                       // what the recipes add up to
       needG:need,                         // what we will actually pull (override wins)
       overridden:over!=null,
@@ -11640,7 +11640,7 @@ async function prodKitchenSheet(){
   const ingRow=(sku,gramsPerPack)=>{ const it=im[sku]||{}; const cl=_countIngClass(it,ctx)||{};
     const cat=_ksCat(cl.g1||it.category||'');
     return {sku, name:_outName(it,cl)||it.name||sku, cat:cat.k, catLabel:cat.l, color:cat.c,
-            bones:/bone/i.test(String(cl.g1||it.category||''))||/bone/i.test(String(it.name||'')),
+            bones:_hasBones(it, cl.g1||it.category, window._boneYMap),
             grams:+gramsPerPack||0, note:(it.processing_method||'').trim()};
   };
   const esc2=esc;
@@ -13469,7 +13469,45 @@ async function prodActualsApply(){
 }
 // Two-bin: production consumes the PROCESSED (output) bin — each recipe line uses its usable
 // grams of that output. The RAW was already depleted earlier, at the Processing step.
+/* ---- DOES THIS INGREDIENT CARRY BONE? -----------------------------------
+   The test was /bone/i against the name. "deboned" contains "bone", so every
+   deboned cut in the master printed a BONE flag: rabbit deboned meat (both
+   variants), goat deboned meat, duck deboned meat, sardine (deboned) and
+   mackerel (deboned) — six ingredients, all pure muscle meat, all telling the
+   kitchen to allow for bone that is not in the bag. That is a real cost: the
+   bone-meat ratio gets balanced against a bone fraction that does not exist,
+   so the mix carries meat it did not need to.
+
+   No single source is right on its own. The BOM's has_bones is the ONLY thing
+   that knows rabbit ears, feet, mask and hide carry bone — nothing in those
+   names or categories says so. But the BOM also marks "Rabbit with bones
+   (ground whole, with organs)" and every ground-whole fish as N, which is
+   plainly wrong. So an explicit statement in the NAME outranks everything,
+   a deliberate Y outranks a category, and N — which is the default on 368 of
+   533 lines — is the weakest evidence there is.
+
+     1  name says deboned / boneless / no bones   -> NO
+     2  name says with bones / raw meaty bones    -> YES
+     3  the BOM marked this ingredient Y          -> YES
+     4  category is Raw Meaty Bone                -> YES
+     5  otherwise                                 -> NO                      */
+const _BONE_NO =/de-?bon|bone-?less|no bones?|without bones?|walang buto/i;
+const _BONE_YES=/\bwith bones?\b|\bbone-?in\b|raw meaty bones?|\bmay buto\b/i;
+function _hasBones(it, cat, bomY){
+  const nm=String((it&&it.name)||'');
+  if(_BONE_NO.test(nm)) return false;
+  if(_BONE_YES.test(nm)) return true;
+  if(bomY && bomY[(it&&it.sku)||'']) return true;
+  return /raw meaty bone/i.test(String(cat||(it&&it.category)||''));
+}
+/* Which ingredients some BOM line has deliberately marked as carrying bone.
+   Y wins across lines: one recipe knowing it is enough. */
+function _bomBoneY(boms){
+  const m={}; (boms||[]).forEach(b=>{ if(b.has_bones==='Y'||b.has_bones===true) m[b.ingredient_sku]=true; });
+  return m;
+}
 async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=await listIngredients();
+  window._boneYMap=_bomBoneY(boms);
   const im={}; ings.forEach(i=>im[i.sku]=i); const m={}; const sub=window._prodSub||{};
   /* Same cost function as the margin report, on the same ledger. The two used
      different precedence — this one read price_kg_processed first, the report
@@ -16341,6 +16379,26 @@ async function renderSelfTest(){
      dressed carcass had no parent at all. The data was corrected by
      sql/wr_live_animal_chain.sql — this check is what stops it drifting back
      the next time somebody adds a cut. */
+  T('Bone flags — the sheet vs the BOM', async()=>{
+    const ings=await listIngredients();
+    let boms=[]; try{ boms=await db.list('bom_lines',{}); }catch(e){ return [true,'no BOM lines to check']; }
+    const im={}; ings.forEach(i=>im[i.sku]=i);
+    const bomY=_bomBoneY(boms);
+    const bad=[];
+    boms.forEach(b=>{
+      if(b.has_bones!=='Y' && b.has_bones!=='N') return;      // blank is not a claim
+      const it=im[b.ingredient_sku]; if(!it) return;
+      const sheet=_hasBones(it, it.category, bomY);
+      if((b.has_bones==='Y')!==sheet)
+        bad.push((it.name||b.ingredient_sku)+' — BOM says '+b.has_bones+', sheet prints '+(sheet?'BONE':'no bone'));
+    });
+    const uniq=[...new Set(bad)];
+    if(!uniq.length) return [true, boms.length+' BOM line(s) agree with the printed bone flags'];
+    /* Not an error — the sheet is deliberately overriding a BOM flag it can
+       prove wrong from the name, and recovering one the name cannot know. This
+       is the list to go and correct in the BOM so the two stop disagreeing. */
+    return [true, uniq.length+' ingredient(s) where the BOM and the sheet disagree — the sheet wins, fix the BOM: '+uniq.slice(0,8).join(' · ')+(uniq.length>8?' …':'')];
+  });
   T('Live animal → whole dressed → cuts', async()=>{
     const ings=await listIngredients();
     const byName={}; ings.forEach(i=>{ const n=String(i.name||'').trim().toLowerCase(); if(n) byName[n]=i; });
