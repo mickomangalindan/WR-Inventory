@@ -1737,7 +1737,8 @@ async function openForm(idEnc){
     /* A transfer with no sites picked cannot say what is on hand anywhere, so
        its item pickers open empty and read as broken. Stock is made at one site
        and sold at the other; that is the transfer, so it is the default. */
-    if(state.model==='transfers'){ formRec.from_code=formRec.from_code||planProduceLoc(); formRec.to_code=formRec.to_code||_otherLoc(formRec.from_code); }
+    if(state.model==='transfers'){ formRec.from_code=formRec.from_code||planProduceLoc();
+      formRec.to_code=formRec.to_code||((formRec.from_code===planSellLoc())?planProduceLoc():planSellLoc()); }
     // NOTE: document reference numbers are now assigned at SAVE (see saveForm), not here —
     // opening then discarding a new document no longer burns a sequence number.
   }
@@ -2755,7 +2756,7 @@ async function pqSnapSave(snap){
   }catch(e){ toast('Saved on this browser only — '+saveErrMsg(e),true); }
 }
 async function pqSnapClear(){
-  if(!confirm('Drop the Shopify count and go back to the ledger at '+(_otherLoc(planProduceLoc())||'pasig')+'?')) return;
+  if(!confirm('Drop the Shopify count and go back to the ledger at '+(planSellLoc())+'?')) return;
   try{ localStorage.removeItem('wr_shop_inv'); }catch(e){}
   try{
     if(isLive()) await sb('app_settings?key=eq.shopify_inventory',{method:'DELETE',prefer:'return=minimal'});
@@ -2772,7 +2773,7 @@ function pqShopImport(){
         In Shopify: <b>Products → Inventory → Export</b>. Open the CSV and paste it here, or choose the file.
         The columns it needs are a <b>SKU</b> and an <b>Available</b> quantity — it will find them by name,
         and if your export has one column per location it will use the one whose heading mentions
-        <b>${esc(_otherLoc(planProduceLoc())||'pasig')}</b>, or the first Available column it finds.
+        <b>${esc(planSellLoc())}</b>, or the first Available column it finds.
         <br><br><b>This is a snapshot, not a feed.</b> It does not move stock, it does not post anything,
         and it goes stale the moment the shop sells something. The screen will say how old it is.
       </div>
@@ -2808,7 +2809,7 @@ function pqShopParse(){
   const sep=(lines[0].split('\t').length>lines[0].split(',').length)?'\t':',';
   const hdr=_pqSplit(lines[0],sep).map(h=>h.toLowerCase());
   const si=hdr.findIndex(h=>/(^|[^a-z])sku([^a-z]|$)|variant sku/.test(h));
-  const loc=String(_otherLoc(planProduceLoc())||'pasig').toLowerCase();
+  const loc=String(planSellLoc()).toLowerCase();
   let qi=hdr.findIndex(h=>/available/.test(h) && h.includes(loc));
   if(qi<0) qi=hdr.findIndex(h=>/available/.test(h));
   if(qi<0) qi=hdr.findIndex(h=>/^(qty|quantity|on hand|stock)/.test(h));
@@ -2890,7 +2891,7 @@ function _pqDrift(rows){
   const s=window._pqSnap||{};
   const age=s.at?Math.round((Date.now()-new Date(s.at).getTime())/36e5):null;
   return `The count is the <b>water line</b>${(age!=null)?` — taken <b>${age<1?'under an hour':age+' hour(s)'}</b> ago`:''}.
-    Everything the ledger recorded at ${esc(_otherLoc(planProduceLoc())||'pasig')} <i>after</i> it — the transfers you posted, the packs the shop sold — is added on top,
+    Everything the ledger recorded at ${esc(planSellLoc())} <i>after</i> it — the transfers you posted, the packs the shop sold — is added on top,
     so it does not matter whether the transfer was posted before or after the Shopify upload. Nothing here moves stock or posts anything.
     ${d.length?`<b style="color:var(--earth,#b5762a)">${d.length} product(s) disagree with what our ledger held at that same moment</b> — shown per row. That is a real gap: an adjustment made on one side only.`
               :`Compared against our ledger as it stood at that same moment, every product agrees.`}`;
@@ -2931,7 +2932,7 @@ async function pqBuildRows(){
   try{ prods=await db.list('products',{}); }catch(e){}
   try{ mom=await momLoad(); }catch(e){}
   try{ movs=await db.list('inventory_movements',{}); }catch(e){}
-  const sellLoc=_otherLoc(planProduceLoc())||'pasig', makeLoc=planProduceLoc()||'bulacan';
+  const sellLoc=planSellLoc(), makeLoc=planProduceLoc()||'bulacan';
   const snap=await pqSnapLoad();
   const shopBy={}; let shopSrc='the ledger at '+sellLoc; let waterLine=null;
   const snapOn=(snap&&snap.onhand)||null;
@@ -3038,7 +3039,7 @@ function pqDraw(){
       "Shopify + this week's production", except both halves here are read rather than typed.
       <br><b>Sellable now is read from ${esc(window._pqSrc||'the ledger')}.</b>
       ${/^the ledger/.test(String(window._pqSrc||''))
-        ? `No Shopify count is loaded, so this is <b>our own ledger</b> at <b>${esc(_otherLoc(planProduceLoc())||'pasig')}</b>,
+        ? `No Shopify count is loaded, so this is <b>our own ledger</b> at <b>${esc(planSellLoc())}</b>,
            kept current by the sales the sync posts. To use the shop's own figure, either run
            <b>wr-shopify-inventory.gs</b> — a read-only hourly pull, it holds no write scope and cannot change anything
            in Shopify — or load a one-off count with <b>📥 Shopify count</b>.`
@@ -3081,8 +3082,8 @@ function pqDraw(){
       h+=`<tr>
         <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${c.alert?' · <b style="color:var(--danger)">reorder needed</b>':''}</div></td>
         <td class="num">${k0(r.shop)}${(r.drift!=null&&Math.abs(r.drift)>=1)
-          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="At the moment the count was taken, Shopify's physical count said ${k0(r.physAtCount)} and our ledger at ${esc(_otherLoc(planProduceLoc())||'pasig')} said ${k0(r.physAtCount-r.drift)}. Movements since then are already added above.">${r.drift>0?'+':''}${k0(r.drift)} vs ledger at the count</div>`:''}${(r.postG||0)!==0
-          ? `<div class="mini" style="color:var(--muted)" title="net movement at ${esc(_otherLoc(planProduceLoc())||'pasig')} since the count — transfers in, sales out">${r.postG>0?'+':''}${k0(r.postG)} since</div>`:''}</td>
+          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="At the moment the count was taken, Shopify's physical count said ${k0(r.physAtCount)} and our ledger at ${esc(planSellLoc())} said ${k0(r.physAtCount-r.drift)}. Movements since then are already added above.">${r.drift>0?'+':''}${k0(r.drift)} vs ledger at the count</div>`:''}${(r.postG||0)!==0
+          ? `<div class="mini" style="color:var(--muted)" title="net movement at ${esc(planSellLoc())} since the count — transfers in, sales out">${r.postG>0?'+':''}${k0(r.postG)} since</div>`:''}</td>
         <td class="num${r.other?'':' mini'}" style="${r.other?'color:var(--earth,#b5762a)':'color:var(--muted)'}">${r.other?k0(r.other):'—'}</td>
         <td class="num"><b>${k0(c.cur)}</b></td>
         <td class="num">${c.cover==null?'<span class="mini" style="color:var(--muted)">—</span>'
@@ -3837,18 +3838,31 @@ async function savePlanCfg(){
 function planSupplyLocs(){ const a=(PLAN_CFG&&PLAN_CFG.supply)||[]; return a.length?a.map(String):['bulacan']; }
 function planProduceLoc(){ return String((PLAN_CFG&&PLAN_CFG.produce)||'bulacan'); }
 function planCountsLoc(loc){ return planSupplyLocs().includes(String(loc||'')); }
+/* WHICH SITE SELLS. This used to be inferred — "the location that is not the
+   one the kitchen draws from" — which is only ever right while there are
+   exactly two. Add a third (a breeder colony, a consignee, a second hub) and
+   whichever happened to sort first could quietly become the shop, taking the
+   Shopify readings, the Regular Packs shelf and the weekly count's book qty
+   with it. It is a setting now, so a new site cannot silently become the shop. */
+function planSellLoc(){
+  const s=String((PLAN_CFG&&PLAN_CFG.sell)||'').trim();
+  if(s) return s;
+  const p=planProduceLoc();
+  return (p==='pasig') ? 'bulacan' : 'pasig';   // the historical default, stated out loud
+}
 function planLocLabel(){ const a=planSupplyLocs(); return a.length===1?a[0]:(a.length+' locations: '+a.join(', ')); }
 async function openPlanLocs(){
   let locs=[]; try{ locs=await db.list('locations',{}); }catch(e){}
   if(!locs.length) locs=[{code:'bulacan',name:'Bulacan'},{code:'pasig',name:'Pasig'}];
-  const sup=planSupplyLocs(), prod=planProduceLoc();
+  const sup=planSupplyLocs(), prod=planProduceLoc(), sell=planSellLoc();
   $('modal').innerHTML=`<div><h3>⚙ Planning locations</h3>
-    <p class="mini">Two different questions, so two settings. <b>Counts as supply</b> decides whose stock offsets what you buy — tick a warehouse you can actually pull from. Stock parked with a <b>consignee</b> normally should not count: you cannot cook with it, and counting it makes the MRP under-order. <b>Kitchen draws from</b> is the single site production consumes and posts to.</p>
-    <div style="overflow-x:auto"><table><thead><tr><th>Location</th><th class="num">Counts as supply</th><th class="num">Kitchen draws from</th></tr></thead><tbody>
+    <p class="mini">Three different questions, so three settings. <b>Counts as supply</b> decides whose stock offsets what you buy — tick a warehouse you can actually pull from. Stock parked with a <b>consignee</b>, or animals held as <b>breeders</b>, normally should not count: you cannot cook with it, and counting it makes the MRP under-order. <b>Kitchen draws from</b> is the single site production consumes and posts to. <b>Sells from</b> is the shop — the site whose shelf the Shopify readings, Regular Packs and the weekly count's book quantity all describe.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>Location</th><th class="num">Counts as supply</th><th class="num">Kitchen draws from</th><th class="num">Sells from</th></tr></thead><tbody>
     ${locs.map(l=>{ const c=String(l.code||l.name||'');
       return `<tr><td>${esc(l.name||c)}<div class="mini"><code>${esc(c)}</code></div></td>
         <td class="num"><input type="checkbox" ${sup.includes(c)?'checked':''} onchange="planTickSupply('${esc(c)}',this.checked)"></td>
-        <td class="num"><input type="radio" name="planprod" ${prod===c?'checked':''} onchange="PLAN_CFG.produce='${esc(c)}'"></td></tr>`; }).join('')}
+        <td class="num"><input type="radio" name="planprod" ${prod===c?'checked':''} onchange="PLAN_CFG.produce='${esc(c)}'"></td>
+        <td class="num"><input type="radio" name="plansell" ${sell===c?'checked':''} onchange="PLAN_CFG.sell='${esc(c)}'"></td></tr>`; }).join('')}
     </tbody></table></div>
     <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12.5px">
       Applies to: Demand/MRP on-hand &amp; reorder, the production shortage check, the raw-stock guard, and the weekly count's book quantity.</div>
@@ -3856,9 +3870,13 @@ async function openPlanLocs(){
   $('overlay').classList.add('on'); }
 function planTickSupply(code,on){ const a=new Set(planSupplyLocs()); if(on) a.add(code); else a.delete(code);
   PLAN_CFG.supply=[...a]; if(!PLAN_CFG.supply.length){ PLAN_CFG.supply=[code]; toast('At least one location has to count as supply',true); } }
-async function planLocsApply(){ if(!planSupplyLocs().includes(planProduceLoc())){
+async function planLocsApply(){
+  if(planSellLoc()===planProduceLoc()){
+    if(!confirm('The shop and the kitchen are set to the same site ("'+planSellLoc()+'").\n\n'
+      +'That is legitimate for a single-site operation, but nothing will ever look like a transfer. Save anyway?')) return; }
+  if(!planSupplyLocs().includes(planProduceLoc())){
     if(!confirm('The kitchen draws from "'+planProduceLoc()+'", but that location is not ticked as supply.\n\nThe MRP will plan against stock the kitchen cannot use. Save anyway?')) return; }
-  const ok=await savePlanCfg(); closeModal(); if(ok) toast('Planning locations saved · supply = '+planSupplyLocs().join(', ')+' · kitchen = '+planProduceLoc());
+  const ok=await savePlanCfg(); closeModal(); if(ok) toast('Planning locations saved · supply = '+planSupplyLocs().join(', ')+' · kitchen = '+planProduceLoc()+' · shop = '+planSellLoc());
   if(state.model==='mrp') renderMRP(); }
 async function loadNotif(){ if(isLive()&&SUPA&&SUPA.token){ try{ const r=await sb("app_config?select=value&key=eq.notif_templates"); if(r&&r[0]&&r[0].value){ NOTIF=r[0].value; localStorage.setItem('wr_notif',JSON.stringify(NOTIF)); } }catch(e){} } }
 async function saveNotif(){ localStorage.setItem('wr_notif',JSON.stringify(NOTIF)); if(isLive()&&SUPA&&SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'notif_templates',value:NOTIF})}); }catch(e){ toast('Saved locally; DB sync failed: '+e.message,true); return; } } }
