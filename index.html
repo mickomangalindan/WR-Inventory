@@ -3579,7 +3579,7 @@ function openSettings(){
 async function signIn(){ const email=($('s_email').value||'').trim(), pw=$('s_pw').value; if(!email||!pw){ toast('Enter email & password',true); return; }
   try{ const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    await loadFieldAcl(); await loadAutos(); await loadProfiles(); await loadPlanCfg(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
+    await loadFieldAcl(); await loadAutos(); await loadProfiles(); await loadLocs(); await loadPlanCfg(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
   }catch(e){ toast(e.message,true); } }
 function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.email; delete SUPA.role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); }
   // purge cached record data on sign-out so nothing sensitive is left on a shared machine
@@ -3635,7 +3635,7 @@ function saveSettings(){
   const url=$('s_url').value.trim(), key=$('s_key').value.trim();
   if(!url||!key){ toast('Enter URL and key',true); return; }
   SUPA={url,key}; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); relCache={};
-  updateMode(); closeModal(); toast('Connected — loading live data'); loadAutos(); loadProfiles(); openModel(state.model);
+  updateMode(); closeModal(); toast('Connected — loading live data'); loadAutos(); loadProfiles(); loadLocs(); openModel(state.model);
 }
 function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={}; updateMode(); closeModal(); toast('Back to demo mode'); openModel(state.model); }
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';} }
@@ -3827,6 +3827,53 @@ let NOTIF = JSON.parse(localStorage.getItem('wr_notif')||'null') || Object.fromE
    the production side always assumed.                                          */
 const PLAN_CFG_DEFAULT={supply:['bulacan'], produce:'bulacan'};
 let PLAN_CFG = JSON.parse(localStorage.getItem('wr_plancfg')||'null') || {...PLAN_CFG_DEFAULT};
+/* ---- THE SITE LIST, READ FROM THE DATABASE --------------------------------
+   Six screens hard-coded ['bulacan','pasig'] and a LOCS variable existed that
+   nothing ever assigned. So a location added to public.locations appeared in
+   the table and NOWHERE in the app — you could create a breeder colony and
+   still have no way to transfer anything into it.
+
+   Everything now reads this one list. The hard-coded pair survives only as the
+   fallback for when the table cannot be read, because a transfer screen with an
+   empty dropdown is worse than one with two entries — but that case is flagged
+   rather than silently pretending, since "we only have two sites" and "we could
+   not read the site list" look identical on screen otherwise.
+
+   Reading public.locations needs SELECT for anon: sql/wr_locations_read.sql. */
+let LOCS=[]; window._locsErr='';
+function locCodes(){ return (LOCS&&LOCS.length) ? LOCS.map(l=>String(l.code||l)) : ['bulacan','pasig']; }
+function locName(code){ const c=String(code||'');
+  const hit=(LOCS||[]).find(l=>String(l.code||l)===c);
+  return (hit&&hit.name)||c.charAt(0).toUpperCase()+c.slice(1); }
+function locOptions(cur, useNames){
+  return locCodes().map(c=>`<option value="${esc(c)}" ${String(cur)===c?'selected':''}>${esc(useNames?locName(c):c)}</option>`).join('');
+}
+async function loadLocs(){
+  try{
+    const rows=await db.list('locations',{});
+    if(rows && rows.length){
+      LOCS=rows.slice().sort((a,b)=>String(a.code||'').localeCompare(String(b.code||'')));
+      window._locsErr='';
+    } else { window._locsErr='public.locations is empty'; }
+  }catch(e){ window._locsErr=String((e&&e.message)||e); }
+  /* Say it once, and only where it means something. Silently falling back to
+     two sites is how a location added last week goes unnoticed for a month. */
+  if(window._locsErr && isLive() && !window._locsWarned){
+    window._locsWarned=1;
+    const perm=/permission denied|42501|401/i.test(window._locsErr);
+    setTimeout(()=>toast(perm
+      ? 'Cannot read the site list — every screen is falling back to bulacan/pasig only. Run sql/wr_locations_read.sql in Supabase.'
+      : ('Could not read public.locations ('+window._locsErr+') — falling back to bulacan/pasig.'), true), 1200);
+  }
+  /* The transfers model declares its From/To options as a plain array in the
+     model definition, which is read at render time — so patching it in place is
+     all that is needed for the dropdowns to follow the table. */
+  try{
+    const codes=locCodes();
+    (MODELS.transfers.fields||[]).forEach(f=>{ if(f.n==='from_code'||f.n==='to_code') f.o=codes.slice(); });
+  }catch(e){}
+  return LOCS;
+}
 async function loadPlanCfg(){
   if(isLive()&&SUPA&&SUPA.token){ try{ const r=await sb("app_config?select=value&key=eq.planning_locations");
     if(r&&r[0]&&r[0].value){ PLAN_CFG={...PLAN_CFG_DEFAULT,...r[0].value}; localStorage.setItem('wr_plancfg',JSON.stringify(PLAN_CFG)); } }catch(e){} } }
@@ -3852,8 +3899,8 @@ function planSellLoc(){
 }
 function planLocLabel(){ const a=planSupplyLocs(); return a.length===1?a[0]:(a.length+' locations: '+a.join(', ')); }
 async function openPlanLocs(){
-  let locs=[]; try{ locs=await db.list('locations',{}); }catch(e){}
-  if(!locs.length) locs=[{code:'bulacan',name:'Bulacan'},{code:'pasig',name:'Pasig'}];
+  await loadLocs();
+  let locs=(LOCS&&LOCS.length)?LOCS:[{code:'bulacan',name:'Bulacan'},{code:'pasig',name:'Pasig'}];
   const sup=planSupplyLocs(), prod=planProduceLoc(), sell=planSellLoc();
   $('modal').innerHTML=`<div><h3>⚙ Planning locations</h3>
     <p class="mini">Three different questions, so three settings. <b>Counts as supply</b> decides whose stock offsets what you buy — tick a warehouse you can actually pull from. Stock parked with a <b>consignee</b>, or animals held as <b>breeders</b>, normally should not count: you cannot cook with it, and counting it makes the MRP under-order. <b>Kitchen draws from</b> is the single site production consumes and posts to. <b>Sells from</b> is the shop — the site whose shelf the Shopify readings, Regular Packs and the weekly count's book quantity all describe.</p>
@@ -3864,8 +3911,10 @@ async function openPlanLocs(){
         <td class="num"><input type="radio" name="planprod" ${prod===c?'checked':''} onchange="PLAN_CFG.produce='${esc(c)}'"></td>
         <td class="num"><input type="radio" name="plansell" ${sell===c?'checked':''} onchange="PLAN_CFG.sell='${esc(c)}'"></td></tr>`; }).join('')}
     </tbody></table></div>
+    ${window._locsErr?`<div style="margin-top:10px;padding:9px 11px;border:1px solid var(--danger);background:#fdf0ed;border-radius:6px;font-size:12.5px">
+      <b>This is not the real site list.</b> public.locations could not be read (${esc(window._locsErr)}), so every screen — including the Internal Transfer dropdowns — is falling back to <code>bulacan</code> and <code>pasig</code>. A site you added will not appear anywhere until this is fixed: run <code>sql/wr_locations_read.sql</code> in Supabase.</div>`:''}
     <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12.5px">
-      Applies to: Demand/MRP on-hand &amp; reorder, the production shortage check, the raw-stock guard, and the weekly count's book quantity.</div>
+      Applies to: Demand/MRP on-hand &amp; reorder, the production shortage check, the raw-stock guard, the Internal Transfer dropdowns, and the weekly count's book quantity.</div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="planLocsApply()">✅ Save</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   $('overlay').classList.add('on'); }
 function planTickSupply(code,on){ const a=new Set(planSupplyLocs()); if(on) a.add(code); else a.delete(code);
@@ -3990,7 +4039,7 @@ async function gateSignIn(){
   try{
     const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    await loadFieldAcl(); await loadAutos(); await loadProfiles(); await loadPlanCfg(); hideGate(); updateMode(); renderUserSel(); renderSide(); bootRoute();
+    await loadFieldAcl(); await loadAutos(); await loadProfiles(); await loadLocs(); await loadPlanCfg(); hideGate(); updateMode(); renderUserSel(); renderSide(); bootRoute();
   }catch(e){ $('g_err').textContent=e.message; }
 }
 
@@ -7917,7 +7966,7 @@ async function openPOReceive(){
   const defLoc=_isSup?'':'bulacan';   // supplies/stickers may go to Pasig — don't presume
   window._rcN=lines.length;
   const anyPrior=lines.some(l=>(+l.received_kg||0)>0);
-  const _locSel=(cur)=>['bulacan','pasig'].map(x=>`<option value="${x}" ${cur===x?'selected':''}>${x.charAt(0).toUpperCase()+x.slice(1)}</option>`).join('');
+  const _locSel=(cur)=>locOptions(cur,true);
   $('modal').innerHTML=`<h3>Receive order — ${esc(formRec.po_ref)}</h3>
     <p>Deliveries can arrive in <b>batches</b>. Choose the <b>receiving warehouse</b>, then enter the qty <b>received now</b> per line; it adds to what's already received. Only what you enter posts to that warehouse's stock. Tick <b>Final delivery</b> to close the PO (any shortfall is then flagged as a variance).${anyPrior?' <b>This PO was already partly received.</b>':''}</p>
     <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin:0 0 10px;padding:8px 10px;background:#f6f8f4;border-radius:8px">
@@ -13981,7 +14030,7 @@ function drawCountForm(){
     <div class="statusbar">${MODELS.count_sessions.status.stages.map(s=>`<div class="stg ${countRec.status===s?'on':''}">${s}</div>`).join('')}</div>
     <div class="hd"><input class="ttl" value="${esc(countRec.count_ref||'')}" ${approved?'disabled':''} oninput="countRec.count_ref=this.value"><div class="sub">Physical count · book qty is auto-generated &amp; locked</div></div>
     <div class="groups">
-      <div><div class="fld"><label>Location</label><div class="val"><select ${approved?'disabled':''} onchange="countRec.location_code=this.value">${['bulacan','pasig'].map(l=>`<option ${countRec.location_code===l?'selected':''}>${l}</option>`).join('')}</select></div></div>
+      <div><div class="fld"><label>Location</label><div class="val"><select ${approved?'disabled':''} onchange="countRec.location_code=this.value">${locOptions(countRec.location_code)}</select></div></div>
         <div class="fld"><label>Date</label><div class="val"><input type="date" value="${esc(countRec.count_date||'')}" ${approved?'disabled':''} oninput="countRec.count_date=this.value"></div></div></div>
       <div><div class="fld" style="align-items:flex-start"><label>Scope</label><div class="val" style="display:flex;flex-wrap:wrap;gap:12px">${scopeHtml}</div></div>
         ${_cntWantsProd?`<div class="fld" style="align-items:flex-start;margin-top:6px"><label title="Only affects PRODUCT lines. Ingredients, supplies and labels always come from our own ledger — Shopify does not know they exist.">Book qty for products</label>
@@ -15375,7 +15424,7 @@ let _opRows=null, _opReport=null, _opLoc='bulacan';
 function openOpeningImport(){ _opRows=null; _opReport=null;
   $('modal').innerHTML=`<div><h3>📥 Upload opening inventory balances</h3>
     <p class="mini">Pick the <b>location</b> you're uploading for, then: 1) Download the <b>styled 4-tab Excel</b> (Ingredients, Products, Kitchen Supplies, Stickers) or the <b>4 PDFs</b> (one per section, fixed header + page numbers + item #), grouped like the Weekly Count sheet: category → base material, each item's <b>raw + processed</b> together. 2) Enter the <b>qty</b> per row — ingredients in <b>kg</b>, supplies in their <b>unit</b>, products/stickers in <b>pieces</b>. 3) Upload &amp; Test, then Import. Everything posts to the location you chose here. Re-uploading replaces the previous opening upload <i>for that location</i>.</p>
-    <div class="fld" style="margin:10px 0"><label>Location</label><div class="val"><select id="opLocSel" onchange="_opLoc=this.value;obProofLoad()">${['bulacan','pasig'].map(l=>`<option value="${l}" ${_opLoc===l?'selected':''}>${l}</option>`).join('')}</select></div></div>
+    <div class="fld" style="margin:10px 0"><label>Location</label><div class="val"><select id="opLocSel" onchange="_opLoc=this.value;obProofLoad()">${locOptions(_opLoc)}</select></div></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
       <button class="btn sec" onclick="openingDownloadTemplate()">⬇ Excel template (4 tabs)</button>
       <button class="btn sec" onclick="openingTemplatePrint()">🖨 PDF template (4 files)</button>
@@ -15836,7 +15885,7 @@ async function rcvOpen(ref){
 async function renderStickerReorder(){
   $('cp').innerHTML=`<div class="title">Sticker Reorder <span onclick="openKB('sticker_reorder')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <select onchange="_stkRoLoc=this.value;_stkRoQty={};renderStickerReorder()">
-      ${['bulacan','pasig'].map(l=>`<option value="${l}" ${_stkRoLoc===l?'selected':''}>${l}</option>`).join('')}</select>
+      ${locOptions(_stkRoLoc)}</select>
     <button class="btn sec" onclick="_stkRoFill('need')">↺ Reset to suggested</button>
     <button class="btn sec" onclick="_stkRoFill('zero')">✕ Clear all</button>
     <button class="wfbtn" onclick="generateStickerPO()">🧾 Generate Sticker PO</button>
@@ -16487,8 +16536,7 @@ const TR_KINDS={
   product   :{l:'Products',    unit:'packs', icon:'📦', ledger:'product',    mult:1},
 };
 function _otherLoc(from){
-  const locs=(typeof LOCS!=='undefined'&&LOCS.length)?LOCS.map(l=>l.code||l):['bulacan','pasig'];
-  return locs.find(c=>String(c)!==String(from))||'pasig';
+  return locCodes().find(c=>String(c)!==String(from))||'pasig';
 }
 function _trIsSticker(i){ return /sticker|label/i.test(String(i.category||'')); }
 async function _trOnHand(kind, loc){
@@ -17092,7 +17140,7 @@ if(!DEMO.variance_log.length) DEMO.variance_log=[
   {id:1,check_type:'4 · Transfer',source_ref:'WR-TR-DEMO',expected:6,actual:5,gap_qty:-1,gap_value:130,location:'in-transit',responsible_user:'Warehouse',status:'open',note:''},
   {id:2,check_type:'1 · 3-way match',source_ref:'WR-PO-0012',expected:5,actual:4.2,gap_qty:-0.8,gap_value:224,location:'bulacan',responsible_user:'Purchasing',status:'open',note:''}];
 applyStudio(); updateMode(); renderUserSel(); renderSide(); _watchSticky();
-if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadAutos(); loadProfiles(); loadPlanCfg(); }
+if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadAutos(); loadProfiles(); loadLocs(); loadPlanCfg(); }
 window.addEventListener('hashchange', onHashRoute);
 if(needAuth()) showGate(); else bootRoute();
 </script>
