@@ -1768,6 +1768,7 @@ async function renderForm(){
   // hand off, instead of drawing the generic record sheet over the top of them.
   if(m.customForm==='count'){
     formRec=countRec;
+    window._countShopMeta=null;      // a banner from the last count must not follow this one
     formNotes = formIsNew ? [] : await notesForRecord(state.model, countRec[m.pk]);
     formAtts  = formIsNew ? [] : await attsForRecord(state.model, countRec[m.pk]);
     return drawCountForm();
@@ -2659,7 +2660,32 @@ function pqCalc(r){
   const cur    = (+r.shop||0)+(+r.other||0);
   const need   = newPar + safety - cur;
   const produce= Math.max(0, _pqCeil(Math.max(0,need), PQ.cs));
+  /* PRIORITY AND QUANTITY ARE DIFFERENT QUESTIONS.
+     Warehouse asked for Shopify as the basis of what to make first. First is a
+     RANKING, and the honest ranking is days of cover on the SELLABLE shelf —
+     packs sitting at Bulacan do not stop Pasig running out on Thursday. Cover
+     barely moves on a slightly stale count, so it is safe to rank on. How MANY
+     is a different sum and still uses everything we own.
+
+     And a shelf that is short while the other site is full does not need a
+     production run, it needs a van. Splitting the answer into MOVE and MAKE is
+     the difference between a transfer and a day of butchery. */
+  const shelf  = +r.shop||0;
+  const cover  = perDay>0 ? shelf/perDay : (shelf>0?999:null);
+  /* MOVE IS NOT A SLICE OF PRODUCE. That was the trap: `produce` is already
+     New Par + safety MINUS everything we own, pipeline included, so by the time
+     it is positive the Bulacan stock has been spent on paper and min(produce,
+     pipeline) is always zero. The two answer different questions and are
+     computed from different stock:
+       what is the SHELF missing   -> newPar + safety - sellable   -> a transfer
+       what do we not OWN at all   -> newPar + safety - everything -> a run
+     A shelf 296 short with 500 packs at Bulacan needs a van and no butchery;
+     the old sum said "nothing to do" and the packs sat there. */
+  const shelfShort = Math.max(0, newPar + safety - shelf);
+  const toMove = Math.min(Math.round(shelfShort), Math.max(0, Math.round(+r.other||0)));
+  const toMake = produce;
   return {perDay, lead, move, ltd, safety, rop, par, newPar, cur, produce,
+          cover, toMove, toMake,
           alert:(cur<rop), pct:(newPar>0?cur/newPar:null)};
 }
 
@@ -2679,7 +2705,37 @@ function pqCalc(r){
    It is a SNAPSHOT, not a feed. The screen says how old it is, and the drift
    against our own ledger is worth more than either number alone — a gap means
    somebody adjusted stock on one side and not the other. */
+/* ---- WHERE THE SELLABLE NUMBER COMES FROM --------------------------------
+   Three sources, best first:
+     1. shopify_inventory — the scheduled read-only pull. read_inventory scope,
+        no write anywhere in it, so it cannot touch a price, a product or an
+        order.
+     2. app_settings.shopify_inventory — a CSV export somebody pasted in.
+     3. nothing, and the screen falls back to our own ledger at the sell site.
+
+   AVAILABLE AND ON_HAND ARE BOTH KEPT, AND THEY ANSWER DIFFERENT QUESTIONS.
+   `available` is what a customer can still buy — Shopify has already taken out
+   the packs committed to unfulfilled orders. That is the right basis for "do we
+   need to make more", because a committed pack is spoken for.
+   `on_hand` is the physical count on the shelf, which is what OUR ledger tracks
+   — the ledger knows nothing about commitments. So the drift check compares
+   on_hand with the ledger, and the demand maths uses available. Comparing
+   available with the ledger would show a permanent gap the size of the order
+   book and teach everyone to ignore the warning. */
 async function pqSnapLoad(){
+  try{
+    if(isLive()){
+      const inv=await sb('shopify_inventory?select=sku,available,on_hand,fetched_at&limit=3000');
+      if(inv && inv.length){
+        const qty={}, onh={}; let at='';
+        inv.forEach(r=>{ if(!r.sku) return;
+          if(r.available!=null) qty[r.sku]=Math.max(0,+r.available||0);
+          if(r.on_hand!=null)   onh[r.sku]=Math.max(0,+r.on_hand||0);
+          const f=String(r.fetched_at||''); if(f>at) at=f; });
+        if(Object.keys(qty).length) return {qty, onhand:onh, at:at||null, src:'shopify-api'};
+      }
+    }
+  }catch(e){}
   try{
     if(isLive()){ const r=await sb('app_settings?select=value&key=eq.shopify_inventory');
       const v=r&&r[0]&&r[0].value; if(v&&v.qty) return v; }
@@ -2833,13 +2889,43 @@ function _pqDrift(rows){
   const d=(rows||[]).filter(r=>r.drift!=null && Math.abs(r.drift)>=1);
   const s=window._pqSnap||{};
   const age=s.at?Math.round((Date.now()-new Date(s.at).getTime())/36e5):null;
-  return `A count is only true at the moment it was taken${(age!=null)?` — this one is <b>${age<1?'under an hour':age+' hour(s)'}</b> old`:''},
-    and it does not move stock or post anything.
-    ${d.length?`<b style="color:var(--earth,#b5762a)">${d.length} product(s) disagree with our ledger at ${esc(_otherLoc(planProduceLoc())||'pasig')}</b> — shown per row.`
-              :`It agrees with our ledger on every product.`}`;
+  return `The count is the <b>water line</b>${(age!=null)?` — taken <b>${age<1?'under an hour':age+' hour(s)'}</b> ago`:''}.
+    Everything the ledger recorded at ${esc(_otherLoc(planProduceLoc())||'pasig')} <i>after</i> it — the transfers you posted, the packs the shop sold — is added on top,
+    so it does not matter whether the transfer was posted before or after the Shopify upload. Nothing here moves stock or posts anything.
+    ${d.length?`<b style="color:var(--earth,#b5762a)">${d.length} product(s) disagree with what our ledger held at that same moment</b> — shown per row. That is a real gap: an adjustment made on one side only.`
+              :`Compared against our ledger as it stood at that same moment, every product agrees.`}`;
 }
 /* The request, worked out once. Both the screen and Demand/MRP ask for it, and
    a figure that differs between the two would be worse than no figure at all. */
+/* ---- THE WATER LINE -------------------------------------------------------
+   A Shopify count is true at the instant it was taken and at no other instant.
+   The old arithmetic ignored that: it read the snapshot, then worked out the
+   pipeline as `everything in the ledger MINUS the snapshot`, clamped at zero.
+   That shape survives the upload boundary — a pack sits in one term whether the
+   transfer is posted before the Shopify upload or after — but it cannot survive
+   the clock. Sell 30 packs after a count of 100 and the ledger at Pasig drops to
+   70, so `max(0, 70 - 100)` is 0 and the screen still says 100 sellable. Thirty
+   packs of understated demand, silently, and it grows the longer the count sits.
+
+   So: the snapshot is a WATER LINE, and every ledger movement is read relative
+   to it.
+
+     sellable   = snapshot  +  net movement at Pasig AFTER the count was taken
+     pipeline   = ledger at every OTHER location, as of now
+     current    = sellable + pipeline
+
+   Each term now comes from its own source instead of one estimating the other,
+   and a pack belongs to exactly one of them at any moment. Produced at Bulacan,
+   it is pipeline. Transferred and posted, it leaves pipeline and arrives as a
+   post-snapshot movement. Uploaded to Shopify, the next count absorbs it and
+   the movement falls below the water line. The total never changes, so it no
+   longer matters whether warehouse posts the transfer or uploads to Shopify
+   first — which was the whole problem.
+
+   DRIFT IS ALSO FIXED. It used to compare the snapshot with the ledger NOW,
+   which disagrees the moment anything happens and so cried wolf every day. It
+   now compares the snapshot with the ledger AS IT STOOD AT THE COUNT — like for
+   like. A gap there is a real adjustment somebody made on one side only. */
 async function pqBuildRows(){
   let prods=[], mom=[], movs=[];
   try{ prods=await db.list('products',{}); }catch(e){}
@@ -2847,30 +2933,51 @@ async function pqBuildRows(){
   try{ movs=await db.list('inventory_movements',{}); }catch(e){}
   const sellLoc=_otherLoc(planProduceLoc())||'pasig', makeLoc=planProduceLoc()||'bulacan';
   const snap=await pqSnapLoad();
-  const shopBy={}; let shopSrc='the ledger at '+sellLoc;
+  const shopBy={}; let shopSrc='the ledger at '+sellLoc; let waterLine=null;
+  const snapOn=(snap&&snap.onhand)||null;
   if(snap && snap.qty && Object.keys(snap.qty).length){
-    shopSrc='a Shopify count taken '+(snap.at?new Date(snap.at).toLocaleString():'(undated)');
+    shopSrc=(snap.src==='shopify-api'?'the Shopify inventory feed, ':'a Shopify count taken ')
+           +(snap.at?new Date(snap.at).toLocaleString():'(undated)');
     Object.keys(snap.qty).forEach(k=>{ shopBy[k]=Math.max(0,+snap.qty[k]||0); });
+    const t=snap.at?new Date(snap.at).getTime():NaN;
+    if(!isNaN(t)) waterLine=t;
   }
+  /* Three buckets per SKU: the sell site split at the water line, and
+     everywhere else as one pipeline figure. */
   const ohBy={};
   (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
-    const L=String(v.location_code||''); const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{};
-    o[L]=(o[L]||0)+(+v.qty||0); });
+    const L=String(v.location_code||''); const q=+v.qty||0;
+    const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{sellAt:0, sellAfter:0, other:0, all:0};
+    o.all+=q;
+    if(L===sellLoc){
+      const t=v.created_at?new Date(v.created_at).getTime():NaN;
+      /* No timestamp, or no water line, means it cannot be placed — count it as
+         already inside the snapshot rather than adding it on top. Adding an
+         unplaceable movement would overstate the shelf, and overstating the
+         shelf is what stops the kitchen producing. */
+      if(waterLine!=null && !isNaN(t) && t>waterLine) o.sellAfter+=q; else o.sellAt+=q;
+    } else o.other+=q;
+  });
   const soldBy={}; (mom||[]).forEach(r=>{ const w=+PQ.win||60;
     soldBy[r.sku] = (w<=30?(+r.u30||0):(w<=60?(+r.u60||0):(w<=90?(+r.u90||0):(+r.u120||0)))); });
   const rows=(prods||[]).filter(p=>!p.archived && !/sticker/i.test(String(p.group_1||'')))
     .map(p=>{
-      const oh=ohBy[p.sku]||{};
-      const led=Object.keys(oh).reduce((a,k)=>a+oh[k],0);
-      const ledSell=Math.max(0,+oh[sellLoc]||0);
-      const shopQ=(shopBy[p.sku]!=null)?shopBy[p.sku]:ledSell;
-      const other=Math.max(0, led-shopQ);
+      const oh=ohBy[p.sku]||{sellAt:0, sellAfter:0, other:0, all:0};
+      const ledAtCount=oh.sellAt;                       // ledger at the sell site when the count was taken
+      const ledSell=oh.sellAt+oh.sellAfter;             // ledger at the sell site right now
+      const hasSnap=(shopBy[p.sku]!=null);
+      const shop=hasSnap ? Math.max(0, shopBy[p.sku]+oh.sellAfter) : Math.max(0,ledSell);
+      const other=Math.max(0, oh.other);
+      /* Physical against physical. Where the feed gives on_hand, drift uses it;
+         a CSV paste has only the one column, so it uses that. */
+      const physAtCount=(snapOn && snapOn[p.sku]!=null) ? +snapOn[p.sku] : (hasSnap?shopBy[p.sku]:null);
       return {sku:p.sku, name:prodLabel({...p},{noSku:true}), group_1:(p.group_1||'Products'),
         group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order, box:(+p.box_size||0),
-        shop:shopQ, ledSell, drift:(shopBy[p.sku]!=null)?(shopQ-ledSell):null,
-        other, bul:Math.max(0,+oh[makeLoc]||0), sold:(+soldBy[p.sku]||0)};
+        shop, snapQ:hasSnap?shopBy[p.sku]:null, postG:hasSnap?oh.sellAfter:0,
+        ledSell, drift:(physAtCount!=null)?(physAtCount-ledAtCount):null, physAtCount,
+        other, bul:Math.max(0,+oh.other||0), sold:(+soldBy[p.sku]||0)};
     });
-  return {rows, src:shopSrc, snap};
+  return {rows, src:shopSrc, snap, waterLine};
 }
 async function renderPackReq(){
   $('crumb').innerHTML='<b>Regular Packs</b>';
@@ -2895,7 +3002,7 @@ function pqDraw(){
   if(q) rows=rows.filter(r=>(r.name+' '+r.sku+' '+r.group_1+' '+r.group_2).toLowerCase().includes(q));
   const calc={}; rows.forEach(r=>calc[r.sku]=pqCalc(r));
   let show=rows;
-  if(PQ_ONLY) show=rows.filter(r=>calc[r.sku].produce>0);
+  if(PQ_ONLY) show=rows.filter(r=>calc[r.sku].produce>0 || calc[r.sku].toMove>0);
   const nAlert=rows.filter(r=>calc[r.sku].alert).length;
   const totProduce=rows.reduce((a,r)=>a+calc[r.sku].produce,0);
   const noSales=rows.filter(r=>!(r.sold>0)).length;
@@ -2909,6 +3016,8 @@ function pqDraw(){
     ${kpi('Below reorder point', nAlert, nAlert?'current stock under ROP':'every product above ROP', nAlert?'var(--danger)':'#4e7a3e')}
     ${kpi('Sellable now', Math.round(rows.reduce((a,r)=>a+r.shop,0)), 'from '+esc(window._pqSrc||'the ledger'))}
     ${kpi('Made, not yet sellable', Math.round(rows.reduce((a,r)=>a+r.other,0)), 'waiting on a transfer', 'var(--earth,#b5762a)')}
+    ${(()=>{ const mv=rows.reduce((a,r)=>a+pqCalc(r).toMove,0);
+       return kpi('Of that, a transfer not a run', Math.round(mv), mv?'move these before making anything':'nothing to move', mv?'var(--earth,#b5762a)':'#4e7a3e'); })()}
   </div>
   <div class="repcard" style="margin-top:12px">
     <div class="repbar" style="flex-wrap:wrap;gap:10px">
@@ -2929,9 +3038,10 @@ function pqDraw(){
       "Shopify + this week's production", except both halves here are read rather than typed.
       <br><b>Sellable now is read from ${esc(window._pqSrc||'the ledger')}.</b>
       ${/^the ledger/.test(String(window._pqSrc||''))
-        ? `The Shopify sync is <b>one way and orders only</b> — there is no inventory feed, so this is our own balance at
-           <b>${esc(_otherLoc(planProduceLoc())||'pasig')}</b>, kept current by the sales the sync posts. If you want the shop's
-           own number instead, load a count with <b>📥 Shopify count</b>.`
+        ? `No Shopify count is loaded, so this is <b>our own ledger</b> at <b>${esc(_otherLoc(planProduceLoc())||'pasig')}</b>,
+           kept current by the sales the sync posts. To use the shop's own figure, either run
+           <b>wr-shopify-inventory.gs</b> — a read-only hourly pull, it holds no write scope and cannot change anything
+           in Shopify — or load a one-off count with <b>📥 Shopify count</b>.`
         : `${_pqDrift(rows)}`}
       ${noSales?`<br><b style="color:var(--earth,#b5762a)">${noSales} product(s) have no sales in the window</b> — their average is zero, so they ask for nothing. Import sales on the Sales Momentum screen to include them.`:''}
     </div>
@@ -2940,6 +3050,7 @@ function pqDraw(){
       <th class="num" title="what the shop can sell right now — ${esc(window._pqSrc||'the ledger')}">Sellable</th>
       <th class="num" title="made but still at ${esc(planProduceLoc()||'bulacan')} or otherwise off-shelf — one transfer away">Not yet<br>sellable</th>
       <th class="num" title="sellable + not yet sellable">Current<br>stock</th>
+      <th class="num" title="how many days the SELLABLE shelf lasts at the current rate — this is the priority order, and it ignores stock sitting at the other site because that stock does not stop this shelf running out">Days<br>cover</th>
       <th class="num" title="units sold in the sales window">Sold<br>${PQ.win}d</th>
       <th class="num" title="units sold ÷ window days">Ave.<br>/day</th>
       <th class="num" title="average daily sale × lead time">LT<br>demand</th>
@@ -2949,24 +3060,34 @@ function pqDraw(){
       <th class="num" title="average daily sale × cycle days">PAR</th>
       <th class="num" title="PAR rounded up to a whole case">New<br>Par</th>
       <th class="num" title="current stock as a share of New Par">% of<br>par</th>
-      <th class="num" title="New Par + safety stock − current stock, rounded up to a case">To<br>produce</th></tr></thead><tbody>`;
+      <th class="num" title="New Par + safety stock − current stock, rounded up to a case">To<br>produce</th>
+      <th title="of the packs owed, how many are a transfer rather than a production run">Move or<br>make</th></tr></thead><tbody>`;
   const k0=v=>Math.round(v).toLocaleString('en-PH');
   const k1=v=>(Math.round(v*10)/10).toLocaleString('en-PH',{minimumFractionDigits:1,maximumFractionDigits:1});
   const groups={};
   show.forEach(r=>{ const g=(PQ_GROUP==='hier')?r.group_1:'All products'; (groups[g]=groups[g]||[]).push(r); });
-  const span=14;
+  const span=16;
   Object.keys(groups).sort().forEach(g=>{
     const gr=groups[g];
     h+=`<tr class="grp"><td colspan="${span}" style="background:#e7f0e9;color:#2f5d33"><b>${esc(g)}</b>
       <span style="opacity:.55;font-weight:400">· ${gr.length} · to produce ${k0(gr.reduce((a,r)=>a+calc[r.sku].produce,0))}</span></td></tr>`;
-    gr.sort((a,b)=>calc[b.sku].produce-calc[a.sku].produce||String(a.name).localeCompare(String(b.name))).forEach(r=>{
+    /* Priority order, which is what warehouse actually asked for: the shelf
+       that runs out soonest, first. A product with no sales has no cover and
+       cannot be ranked, so it sorts to the bottom rather than to the top. */
+    gr.sort((a,b)=>{ const A=calc[a.sku], B=calc[b.sku];
+      const ca=(A.cover==null||A.cover>=900)?1e9:A.cover, cb=(B.cover==null||B.cover>=900)?1e9:B.cover;
+      return ca-cb || B.produce-A.produce || String(a.name).localeCompare(String(b.name)); }).forEach(r=>{
       const c=calc[r.sku];
       h+=`<tr>
         <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${c.alert?' · <b style="color:var(--danger)">reorder needed</b>':''}</div></td>
         <td class="num">${k0(r.shop)}${(r.drift!=null&&Math.abs(r.drift)>=1)
-          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="the Shopify count and our ledger at ${esc(_otherLoc(planProduceLoc())||'pasig')} disagree">${r.drift>0?'+':''}${k0(r.drift)} vs ledger</div>`:''}</td>
+          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="At the moment the count was taken, Shopify's physical count said ${k0(r.physAtCount)} and our ledger at ${esc(_otherLoc(planProduceLoc())||'pasig')} said ${k0(r.physAtCount-r.drift)}. Movements since then are already added above.">${r.drift>0?'+':''}${k0(r.drift)} vs ledger at the count</div>`:''}${(r.postG||0)!==0
+          ? `<div class="mini" style="color:var(--muted)" title="net movement at ${esc(_otherLoc(planProduceLoc())||'pasig')} since the count — transfers in, sales out">${r.postG>0?'+':''}${k0(r.postG)} since</div>`:''}</td>
         <td class="num${r.other?'':' mini'}" style="${r.other?'color:var(--earth,#b5762a)':'color:var(--muted)'}">${r.other?k0(r.other):'—'}</td>
         <td class="num"><b>${k0(c.cur)}</b></td>
+        <td class="num">${c.cover==null?'<span class="mini" style="color:var(--muted)">—</span>'
+          :(c.cover>=900?'<span class="mini" style="color:var(--muted)">no sales</span>'
+          :`<b style="color:${c.cover<c.lead?'var(--danger)':(c.cover<c.lead*2?'var(--earth,#b5762a)':'#4e7a3e')}">${k1(c.cover)}</b><div class="mini" style="color:var(--muted)">days</div>`)}</td>
         <td class="num mini" style="color:var(--muted)">${r.sold?k0(r.sold):'—'}</td>
         <td class="num mini" style="color:var(--muted)">${k1(c.perDay)}</td>
         <td class="num mini" style="color:var(--muted)">${k0(c.ltd)}</td>
@@ -2979,7 +3100,9 @@ function pqDraw(){
         <td class="num">${k0(c.newPar)}</td>
         <td class="num">${c.pct==null?'<span class="mini" style="color:var(--muted)">—</span>'
           :`<b style="color:${c.pct<0.5?'var(--danger)':(c.pct<1?'var(--earth,#b5762a)':'#4e7a3e')}">${Math.round(c.pct*100)}%</b>`}</td>
-        <td class="num">${c.produce?`<b style="color:var(--berry)">${k0(c.produce)}</b>`:'<span class="mini" style="color:var(--muted)">—</span>'}</td></tr>`;
+        <td class="num">${c.produce?`<b style="color:var(--berry)">${k0(c.produce)}</b>`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
+        <td class="mini">${(!c.toMove&&!c.toMake)?'<span style="color:var(--muted)">—</span>'
+          :`${c.toMove>0?`<b style="color:var(--earth,#b5762a)">MOVE ${k0(c.toMove)}</b>`:''}${(c.toMove>0&&c.toMake>0)?'<br>':''}${c.toMake>0?`<b style="color:var(--berry)">MAKE ${k0(c.toMake)}</b>`:''}${(c.toMove>0&&!c.toMake)?'<div style="color:var(--muted)">already made — just transfer it</div>':''}`}</td></tr>`;
     });
   });
   if(!show.length) h+=`<tr><td colspan="${span}" class="empty">${PQ_ONLY?'Nothing needs producing at these settings — untick “only what needs producing” to see every product.':'No products match that search.'}</td></tr>`;
@@ -3010,14 +3133,24 @@ async function pqToPlan(){
 
 function _pqTable(){
   const rows=(window._pqRows||[]).map(r=>({r,c:pqCalc(r)}));
-  return PQ_ONLY?rows.filter(x=>x.c.produce>0):rows;
+  const out=PQ_ONLY?rows.filter(x=>x.c.produce>0 || x.c.toMove>0):rows;
+  /* Same priority order as the screen — the shelf that runs out soonest first.
+     A printed sheet in a different order from the screen is a sheet somebody
+     has to re-check line by line. */
+  return out.sort((a,b)=>{
+    const ca=(a.c.cover==null||a.c.cover>=900)?1e9:a.c.cover;
+    const cb=(b.c.cover==null||b.c.cover>=900)?1e9:b.c.cover;
+    return ca-cb || b.c.produce-a.c.produce || String(a.r.name).localeCompare(String(b.r.name));
+  });
 }
 function pqCsv(){
-  const H=['Product','SKU','Sellable','Not yet sellable','Current stock','Sold '+PQ.win+'d','Ave/day','Lead time','LT demand','Movement','Safety stock','ROP','PAR','New Par','Alert','To produce'];
+  const H=['Product','SKU','Sellable','Not yet sellable','Current stock','Days cover','Sold '+PQ.win+'d','Ave/day','Lead time','LT demand','Movement','Safety stock','ROP','PAR','New Par','Alert','To produce','Move','Make'];
   const q=v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
-  const body=_pqTable().map(({r,c})=>[r.name,r.sku,Math.round(r.shop),Math.round(r.other),Math.round(c.cur),Math.round(r.sold),
+  const body=_pqTable().map(({r,c})=>[r.name,r.sku,Math.round(r.shop),Math.round(r.other),Math.round(c.cur),
+    (c.cover==null||c.cover>=900)?'':Math.round(c.cover*10)/10, Math.round(r.sold),
     Math.round(c.perDay*100)/100,c.lead,Math.round(c.ltd),c.move,Math.round(c.safety),Math.round(c.rop),
-    Math.round(c.par),Math.round(c.newPar),(c.alert?'Reorder Needed':'OK'),Math.round(c.produce)].map(q).join(','));
+    Math.round(c.par),Math.round(c.newPar),(c.alert?'Reorder Needed':'OK'),Math.round(c.produce),
+    Math.round(c.toMove),Math.round(c.toMake)].map(q).join(','));
   const blob=new Blob([[H.map(q).join(',')].concat(body).join('\n')],{type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download='wr-packs-production-request-'+todayISO()+'.csv'; document.body.appendChild(a); a.click(); a.remove();
@@ -3028,9 +3161,13 @@ function pqPrint(){
   const k=v=>Math.round(v).toLocaleString('en-PH');
   const w=window.open('','_pq','width=1100,height=900'); if(!w){ toast('Allow pop-ups to print',true); return; }
   const body=rows.map(({r,c},i)=>`<tr><td>${i+1}</td><td>${esc(r.name)}<span class="s">${esc(r.sku)}</span></td>
-    <td class="n">${k(r.shop)}</td><td class="n">${r.other?k(r.other):'—'}</td><td class="n"><b>${k(c.cur)}</b></td>
+    <td class="n">${k(r.shop)}</td><td class="n">${r.other?k(r.other):'—'}</td>
+    <td class="n">${(c.cover==null||c.cover>=900)?'—':(Math.round(c.cover*10)/10)}</td>
+    <td class="n"><b>${k(c.cur)}</b></td>
     <td class="n">${k(c.rop)}</td><td class="n">${k(c.newPar)}</td>
-    <td class="n"><b>${c.produce?k(c.produce):'—'}</b></td><td class="wr"></td><td class="wr"></td></tr>`).join('');
+    <td class="n"><b>${c.produce?k(c.produce):'—'}</b></td>
+    <td>${(!c.toMove&&!c.toMake)?'—':[c.toMove>0?('MOVE '+k(c.toMove)):'',c.toMake>0?('MAKE '+k(c.toMake)):''].filter(Boolean).join(' · ')}</td>
+    <td class="wr"></td><td class="wr"></td></tr>`).join('');
   w.document.write(`<html><head><meta charset="utf-8"><title>Packs Production Request</title><style>
     @page{margin:14mm;size:A4}
     *{box-sizing:border-box} body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:12px}
@@ -3046,10 +3183,12 @@ function pqPrint(){
   </style></head><body>
     <div class="hd"><h1>🐇 Wholesome Rabbit</h1><div style="text-align:right"><div style="font-size:12px;color:#666">Packs Production Request</div><div style="font-size:15px;font-weight:700">${esc(todayISO())}</div></div></div>
     <div class="lv">Lead time ${PQ.lead} day(s) · movement ${PQ.move}× · cycle ${PQ.cycle} day(s) · sales window ${PQ.win} day(s) · case ${PQ.cs} pack(s)
-      · sellable figures from ${esc(window._pqSrc||'the ledger')}</div>
-    <table><colgroup><col style="width:4%"><col style="width:30%"><col style="width:8%"><col style="width:8%"><col style="width:8%"><col style="width:7%"><col style="width:7%"><col style="width:8%"><col style="width:10%"><col style="width:10%"></colgroup>
-      <thead><tr><th>#</th><th>Product</th><th class="n">Sellable</th><th class="n">Not yet</th><th class="n">Current</th>
-      <th class="n">ROP</th><th class="n">New Par</th><th class="n">To produce</th><th>Made</th><th>Remarks</th></tr></thead>
+      · sellable figures from ${esc(window._pqSrc||'the ledger')}
+      · listed by <b>days of cover</b> — the shelf that runs out soonest is first
+      · <b>MOVE</b> means the packs already exist at ${esc(planProduceLoc()||'bulacan')} and need a transfer, not a run</div>
+    <table><colgroup><col style="width:3%"><col style="width:23%"><col style="width:7%"><col style="width:7%"><col style="width:6%"><col style="width:7%"><col style="width:6%"><col style="width:6%"><col style="width:7%"><col style="width:10%"><col style="width:9%"><col style="width:9%"></colgroup>
+      <thead><tr><th>#</th><th>Product</th><th class="n">Sellable</th><th class="n">Not yet</th><th class="n">Days cover</th><th class="n">Current</th>
+      <th class="n">ROP</th><th class="n">New Par</th><th class="n">To produce</th><th>Move or make</th><th>Made</th><th>Remarks</th></tr></thead>
       <tbody>${body}</tbody></table>
     <p class="ft">Generated ${new Date().toLocaleString()} · ${esc(CURRENT_USER)}</p></body></html>`);
   w.document.close(); w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},250);
@@ -13759,6 +13898,25 @@ async function renderCountForm(idEnc){
 }
 function drawCountForm(){
   const approved=countRec.status==='approved';
+  const _cntSc=countRec.scope||['All'];
+  const _cntWantsProd=_cntSc.includes('All')||_cntSc.includes('Sellable Products');
+  const _cntSrc=countRec.book_source||COUNT_BOOK_SRC;
+  /* Say which number the sheet is being counted against, and how old it is.
+     A count sheet that does not name its own source is a sheet nobody can
+     argue with afterwards. */
+  const _sm=window._countShopMeta;
+  const _cntBanner=(!_sm||!_sm.matched)?'' : (()=>{
+    const age=_sm.at?Math.round((Date.now()-new Date(_sm.at).getTime())/36e5):null;
+    const stale=(age!=null&&age>12);
+    return `<div style="margin:0 22px 10px;padding:9px 11px;border-radius:6px;font-size:12.5px;border:1px solid ${stale?'#e0b400':'#cfe0c8'};background:${stale?'#fff8e1':'#f2f7ef'}">
+      <b>Book qty for products is Shopify&rsquo;s ${esc(_sm.field==='on_hand'?'on-hand':'available')} count</b>
+      ${_sm.at?`, taken ${esc(String(_sm.at).replace('T',' ').slice(0,16))}${age!=null?` (${age<1?'under an hour':age+' hour(s)'} ago)`:''}`:''}
+      — ${_sm.matched} product(s)${_sm.fellBack?`, and <b>${_sm.fellBack}</b> Shopify does not carry, which fell back to our ledger`:''}.
+      ${_sm.since?`Anything the ledger recorded at this site since then is already added on top, so packs sold this morning do not show up as a variance.`:''}
+      ${_sm.field==='available'?`<br><b style="color:var(--earth,#b5762a)">This reading is <i>available</i>, not on hand</b> — it excludes packs committed to unfulfilled orders, which are still in the freezer. Expect a variance the size of the order book until the hourly feed is running.`:''}
+      ${stale?`<br><b style="color:var(--earth,#b5762a)">The reading is over 12 hours old.</b> Refresh it before counting, or expect variances that are really just a day of trading.`:''}
+      <br><span class="mini" style="color:var(--muted)">Our own ledger figure is shown beside each line, so you can see where the two disagree.</span></div>`;
+  })();
   $('crumb').innerHTML=`<b>Weekly Inventory</b> / ${esc(countRec.count_ref||'New')}`;
   $('cp').innerHTML=`<div class="title">Weekly Inventory</div><div class="sp"></div><span style="color:var(--muted)">book qty auto · needs approval</span>`;
   const scopes=['All','Ingredients','Supplies','Stickers','Sellable Products']; const sc=countRec.scope||['All'];
@@ -13768,15 +13926,21 @@ function drawCountForm(){
   const rowFor=(i,n)=>{ const l=countLines[i]; const s=+l.scale||1;
     const noCell=`<td class="num" style="color:var(--muted)">${n}</td>`;
     const bookD=l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):'—';
+    /* When the book came from Shopify, our own ledger goes underneath rather
+       than being thrown away — that gap is the thing worth watching while the
+       two systems are still learning to agree. */
+    const bookSub=(l.bookSrc==='shopify')
+      ? `<div class="mini" style="color:${Math.abs((+l.erpQty||0)-(+l.book_qty||0))>0.5?'var(--earth,#b5762a)':'var(--muted)'}" title="what our own ledger holds at this site${l.shopSince?(' · Shopify read '+l.shopRaw+', '+(l.shopSince>0?'+':'')+l.shopSince+' since'):''}">ledger ${num(+l.erpQty||0)}</div>`
+      : (l.bookSrc==='erp-fallback' ? '<div class="mini" style="color:var(--muted)" title="Shopify carries no reading for this SKU">ledger — no Shopify reading</div>' : '');
     const varc=(l.counted_qty!==''&&l.counted_qty!=null)?(((+l.counted_qty)-(+l.book_qty||0))/s):null;
     const varCell=`<td class="num" id="cv${i}" style="color:${varc&&Math.abs(varc)>0.001?'var(--danger)':'var(--muted)'}">${varc==null?'':num(Math.round(varc*100)/100)}</td>`;
     // Products with a case pack: enter boxes + loose packs → total packs.
     if(l.isProduct && (+l.box||1)>1){ const box=+l.box||1; const tot=(l.counted_qty===''||l.counted_qty==null)?null:+l.counted_qty;
       const bx=(l._boxes!=null&&l._boxes!=='')?l._boxes:(tot!=null?Math.floor(tot/box):''); const lo=(l._loose!=null&&l._loose!=='')?l._loose:(tot!=null?(tot-Math.floor(tot/box)*box):'');
-      return `<tr>${noCell}<td>${esc(l.name||l.ref_sku)}<div class="mini">${box}/box</div></td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td>
+      return `<tr>${noCell}<td>${esc(l.name||l.ref_sku)}<div class="mini">${box}/box</div></td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}${bookSub}</td>
         <td class="num" style="white-space:nowrap"><input type="number" step="1" value="${bx}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},this.value,null)" style="width:46px;text-align:right" title="boxes"> box ×${box} + <input type="number" step="1" value="${lo}" ${approved?'disabled':''} oninput="countSetBoxLoose(${i},null,this.value)" style="width:46px;text-align:right" title="loose packs"> loose</td>${varCell}</tr>`; }
     const cntD=(l.counted_qty==null||l.counted_qty==='')?'':(Math.round((+l.counted_qty/s)*1e6)/1e6);
-    return `<tr>${noCell}<td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td>${varCell}</tr>`; };
+    return `<tr>${noCell}<td>${esc(l.name||l.ref_sku)}</td><td><code>${esc(l.ref_sku)}</code></td><td><input value="${esc(binOf(l.ref_sku,countRec.location_code))}" ${approved?'disabled':''} onchange="countSetBin('${esc(l.ref_sku)}','${esc(countRec.location_code||'bulacan')}',this.value)" style="width:74px" placeholder="bin"></td><td class="num">${bookD}${l.uom?` <span class="mini">${esc(l.uom)}</span>`:''}${bookSub}</td><td class="num"><input type="number" step="any" value="${cntD}" ${approved?'disabled':''} oninput="countSetCnt(${i},this.value)"></td>${varCell}</tr>`; };
   const _idx=countLines.map((l,i)=>i).sort((a,b)=>_lr(a)-_lr(b)||String(countLines[a].name||'').localeCompare(countLines[b].name||''));
   /* Head the groups the way Live Stock does — by animal, then vegetables and
      fruit, then the rest — so somebody walking the freezer counts one animal at
@@ -13802,8 +13966,17 @@ function drawCountForm(){
       <div><div class="fld"><label>Location</label><div class="val"><select ${approved?'disabled':''} onchange="countRec.location_code=this.value">${['bulacan','pasig'].map(l=>`<option ${countRec.location_code===l?'selected':''}>${l}</option>`).join('')}</select></div></div>
         <div class="fld"><label>Date</label><div class="val"><input type="date" value="${esc(countRec.count_date||'')}" ${approved?'disabled':''} oninput="countRec.count_date=this.value"></div></div></div>
       <div><div class="fld" style="align-items:flex-start"><label>Scope</label><div class="val" style="display:flex;flex-wrap:wrap;gap:12px">${scopeHtml}</div></div>
+        ${_cntWantsProd?`<div class="fld" style="align-items:flex-start;margin-top:6px"><label title="Only affects PRODUCT lines. Ingredients, supplies and labels always come from our own ledger — Shopify does not know they exist.">Book qty for products</label>
+          <div class="val" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+            ${[['erp','Our ledger'],['shopify','Shopify count']].map(([k,l])=>
+              `<button class="btn sm ${_cntSrc===k?'':'sec'}" ${approved?'disabled':''} onclick="countSetBookSrc('${k}')">${l}</button>`).join('')}
+            <span class="mini" style="color:var(--muted)">${_cntSrc==='shopify'
+              ? 'Shopify&rsquo;s <b>physical</b> count (on hand), plus anything the ledger recorded since — a counter counts committed packs too.'
+              : 'Our own ledger at this site.'}</span>
+          </div></div>`:''}
         ${!approved?`<div style="margin-top:10px"><button class="btn sec" onclick="countLoad()">⬇ Load items</button></div>`:''}</div>
     </div>
+    ${_cntBanner}
     <div class="notebook"><div class="nbtabs"><button class="on">Count Lines (${countLines.length})</button></div>
       <div class="lines"><table><thead><tr><th class="num">#</th><th>Item</th><th>SKU</th><th>Bin</th><th class="num">Book qty</th><th class="num">Counted</th><th class="num">Variance</th></tr></thead>
       <tbody>${lineRows||'<tr><td colspan="7" class="empty">Pick a scope and Load items.</td></tr>'}</tbody></table></div></div>
@@ -13926,6 +14099,38 @@ function countFillBook(){ if(countRec.status==='approved')return; if(!countLines
 function countScope(s,on){ let sc=countRec.scope||[]; if(s==='All'){ sc=on?['All']:[]; } else { sc=sc.filter(x=>x!=='All'); if(on)sc.push(s); else sc=sc.filter(x=>x!==s); } countRec.scope=sc; drawCountForm(); }
 // Unit of measure + display scale per count category. Ingredients are stored in
 // grams but weighed in kg (scale 1000); products in packs, stickers/supplies in pcs.
+/* ---- WHOSE NUMBER IS THE BOOK QTY? ---------------------------------------
+   A weekly count compares what is on the shelf with what the system believes.
+   At Pasig, while the ERP is still bedding in, the number the team actually
+   trusts is Shopify's — so it can be the book figure, and the ERP ledger sits
+   alongside as a second opinion. When the two agree week after week, switch
+   this back to the ledger and the training wheels come off.
+
+   IT USES on_hand, NOT available — THE OPPOSITE OF THE PRODUCTION SCREEN.
+   A counter counts every pack in the freezer, including the ones already
+   committed to unfulfilled orders; those packs are still physically there until
+   they ship. Regular Packs wants `available` because a committed pack cannot be
+   sold twice. Same feed, two questions, two columns.
+
+   And it only applies to PRODUCTS. Shopify knows nothing about live rabbit,
+   goat carcass, vacuum bags or labels — those lines always come from our ledger,
+   whatever this is set to.
+
+   The reading is a water line like everywhere else: Shopify's count at the pull,
+   plus whatever the ledger recorded at that site afterwards. Skip that and a
+   count taken four hours after the pull posts a variance for every pack sold in
+   between — noise that would get the whole exercise distrusted. */
+let COUNT_BOOK_SRC='erp';
+try{ COUNT_BOOK_SRC=localStorage.getItem('wr_count_book_src')||'erp'; }catch(e){}
+function countSetBookSrc(v){
+  COUNT_BOOK_SRC=(v==='shopify')?'shopify':'erp';
+  try{ localStorage.setItem('wr_count_book_src',COUNT_BOOK_SRC); }catch(e){}
+  countRec.book_source=COUNT_BOOK_SRC;
+  drawCountForm();
+  toast(COUNT_BOOK_SRC==='shopify'
+    ? 'Book qty for products will come from Shopify — press ⬇ Load items to re-read'
+    : 'Book qty back to our own ledger — press ⬇ Load items to re-read');
+}
 function countUnitFor(cat){ if(cat==='Sellable Products') return {uom:'packs',scale:1}; if(cat==='Stickers') return {uom:'pcs',scale:1}; if(cat==='Supplies') return {uom:'pcs',scale:1}; return {uom:'kg',scale:1000}; }
 async function countLoad(){
   const sc=countRec.scope||['All'], all=sc.includes('All');
@@ -13934,7 +14139,10 @@ async function countLoad(){
   const loc=(countRec.location_code||'bulacan');
   // Book qty must be THIS location's stock. Summing every location made a Bulacan
   // count sheet open with Pasig's stock in the book column, so every line varied.
-  let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(String(s.location_code||'')!==loc) return; stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
+  /* DEMO was skipped here, so every book qty in demo mode read 0 and the module
+     could not be shown or tested without a live database. db.list falls back to
+     the demo store cleanly, so the guard bought nothing. */
+  let stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(String(s.location_code||'')!==loc) return; stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){}
   let lines=[];
   // Two-bin: count RAW and PROCESSED, grouped together under each raw material (matches the sheet).
   const _bs={}, _bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
@@ -13943,13 +14151,64 @@ async function countLoad(){
     if(cl.isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:cl.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:cl.g2,catrank:_grank('Supplies'),g1:cl.g1,g2:cl.g2,lsG1:cl.lsG1,lsG2:cl.lsG2,lsRank:cl.lsRank,grank:cl.grank,uom:cl.uom,scale:cl.scale,form:cl.form,sort_order:i.sort_order}); return; }
     if(!wantIng) return;
     lines.push({ref_sku:i.sku, name:cl.name, book_qty:stock[i.sku]||0, counted_qty:'', cat:cl.g2, catrank:_grank(i.category), g1:cl.g1, g2:cl.g2, lsG1:cl.lsG1, lsG2:cl.lsG2, lsRank:cl.lsRank, grank:cl.grank, uom:cl.uom, scale:cl.scale, form:cl.form, sort_order:i.sort_order}); });
-  if(wantProd) prods.slice().sort(cmpItems).forEach(p=>lines.push({ref_sku:p.sku,name:p.name,book_qty:stock[p.sku]||0,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order}));
+  /* Products only, and only when asked: read the book figure from Shopify's
+     physical count instead of ours. Anything Shopify does not carry falls back
+     to the ledger and is counted in the banner — a SKU with no reading is not a
+     SKU with a reading of zero. */
+  const _useShop=(wantProd && (countRec.book_source||COUNT_BOOK_SRC)==='shopify');
+  let _shopBook=null, _shopMeta={at:null, src:'', matched:0, fellBack:0, field:'on_hand', since:0};
+  if(_useShop){
+    try{
+      const snap=await pqSnapLoad();
+      const phys=(snap&&snap.onhand&&Object.keys(snap.onhand).length)?snap.onhand:(snap&&snap.qty)||null;
+      if(phys && Object.keys(phys).length){
+        _shopMeta.at=snap.at||null;
+        _shopMeta.src=snap.src||'count';
+        _shopMeta.field=(snap&&snap.onhand&&Object.keys(snap.onhand).length)?'on_hand':'available';
+        const wl=snap.at?new Date(snap.at).getTime():NaN;
+        const after={};
+        try{ (await db.list('inventory_movements',{})).forEach(v=>{
+          if((v.kind||'')!=='product') return;
+          if(String(v.location_code||'')!==loc) return;
+          const t=v.created_at?new Date(v.created_at).getTime():NaN;
+          if(isNaN(wl)||isNaN(t)||t<=wl) return;
+          after[v.ref_sku]=(after[v.ref_sku]||0)+(+v.qty||0); }); }catch(e){}
+        _shopBook={phys, after};
+        _shopMeta.since=Object.keys(after).reduce((a,k)=>a+Math.abs(after[k]),0);
+      }
+    }catch(e){}
+  }
+  if(wantProd) prods.slice().sort(cmpItems).forEach(p=>{
+    const erpQ=stock[p.sku]||0;
+    let bq=erpQ, srcTag='';
+    if(_shopBook){
+      if(_shopBook.phys[p.sku]!=null){
+        bq=Math.max(0,(+_shopBook.phys[p.sku]||0)+(_shopBook.after[p.sku]||0));
+        _shopMeta.matched++; srcTag='shopify';
+      } else { _shopMeta.fellBack++; srcTag='erp-fallback'; }
+    }
+    lines.push({ref_sku:p.sku,name:p.name,book_qty:bq,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order,
+      bookSrc:srcTag, erpQty:erpQ,
+      shopRaw:(_shopBook&&_shopBook.phys[p.sku]!=null)?(+_shopBook.phys[p.sku]||0):null,
+      shopSince:(_shopBook&&_shopBook.after[p.sku])||0});
+  });
+  window._countShopMeta=_useShop?_shopMeta:null;
+  if(_useShop && !_shopBook){
+    toast('No Shopify reading is available — book qty came from our ledger instead',true);
+  }
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
   if(wantStk) prods.slice().sort(cmpItems).forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
     lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',catrank:_grank(p.family)+0.5,g1:(p.group_1||'Products')+' — Stickers',g2:(p.group_2||p.family||'Other'),grank:600000+_so(p),uom:'pcs',scale:1,sort_order:p.sort_order}); });
   countLines=lines;
   await loadBins();
-  toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')); drawCountForm();
+  const _sm=window._countShopMeta;
+  if(_sm && _sm.matched){
+    sysLog('count_sessions',countRec.count_ref||'(new)','📥 Book qty for products read from Shopify '+_sm.field
+      +' ('+_sm.matched+' SKU(s)'+(_sm.fellBack?(', '+_sm.fellBack+' fell back to the ledger'):'')
+      +(_sm.at?(', reading of '+String(_sm.at).replace('T',' ').slice(0,16)):'')+') by '+CURRENT_USER);
+  }
+  toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')
+    +(_sm&&_sm.matched?(' · '+_sm.matched+' product(s) from Shopify'):'')); drawCountForm();
 }
 // Weekly-inventory reference: WI-MMDDYYYY [SCOPE].VXX. Scope tag from the selected scope.
 function _wiScopeTag(scope){ const s=scope||['All']; if(s.includes('All')||!s.length) return 'ALL';
@@ -14682,7 +14941,7 @@ async function renderMomentum(){
   const nUnmatched = rows.filter(r=>!r.matched).length;
 
   if(!rows.length){ $('content').innerHTML=`<div class="repcard"><h3 style="margin:0 0 6px">No sales data yet 🚀</h3>
-    <div class="hint">This view reads the <b>sales_momentum</b> table (30/60/90/120-day units per SKU) and crosses it with your live stock. Populate it with the hourly sheet sync, or click <b>📥 Import / paste sales</b> and paste columns <b>SKU · Product · 30d · 60d · 90d · 120d</b> from your rolling-sales sheet.</div></div>`; return; }
+    <div class="hint">This view reads the <b>sales_momentum</b> table (30/60/90/120-day units per SKU) and crosses it with your live stock. Populate it with <b>wr-shopify-sales-report.gs</b>, which now writes this table directly — no spreadsheet in the middle — or click <b>📥 Import / paste sales</b> and paste columns <b>SKU · Product · 30d · 60d · 90d · 120d</b> by hand.</div></div>`; return; }
 
   const kpi=(l,v,s,col)=>`<div class="kpi"><div class="l">${l}</div><div class="v"${col?` style="color:${col}"`:''}>${v}</div><div class="s">${s||''}</div></div>`;
   let h=`<div class="kpirow">
@@ -15475,7 +15734,7 @@ async function generateSuppliesPO(){
    Rounded up to whole sheets when the product says how many print per sheet —
    printers charge by the sheet, so ordering 61 of a 10-up label costs the same
    as ordering 70.                                                              */
-let _stkRoLoc='bulacan', _stkRoQty={}, _stkRoRows=[], _stkRoView='all';
+let _stkRoLoc='bulacan', _stkRoQty={}, _stkRoRows=[], _stkRoView='order';
 /* ============ Receiving — goods in, without the money =====================
    The warehouse has to book a delivery in. Until now the only way to do that
    was to open the purchase order, which is a commercial document: unit prices,
@@ -15589,6 +15848,37 @@ async function renderStickerReorder(){
       planned[d.sku]=Math.max(+planned[d.sku]||0, +d.qty||0);
     });
   }catch(e){}
+  /* ---- LABELS ALREADY ON ORDER --------------------------------------------
+     This screen subtracted only what is ON HAND. So the week after a sticker
+     PO went out — and printers take days — every one of those labels asked to
+     be bought all over again, because the reorder maths could not see the
+     shipment coming. That is not theoretical: across the 15 and 19 Aug sticker
+     POs, four labels are on TWO open orders each.
+
+     Same rule the raw-materials reorder already uses: a PO counts from the
+     moment it is `confirmed` and stops counting the moment it is received,
+     because receiving is what raises the stock this screen reads. A PARTIALLY
+     received order still counts for the part that has not landed.
+
+     Sticker lines carry PIECES in ordered_kg and are keyed by the product SKU,
+     which is what generateStickerPO writes — so no conversion here. */
+  const onOrder={}, onOrderRefs={};
+  try{
+    const openRefs={};
+    (await db.list('purchase_orders',{})).forEach(o=>{
+      const st=String(o.status||'').toLowerCase();
+      if(st==='confirmed'||st==='partial') openRefs[o.po_ref]=1; });
+    if(Object.keys(openRefs).length){
+      (await db.list('po_lines',{})).forEach(l=>{
+        if(!(l.po_ref in openRefs)) return;
+        const left=Math.max(0,(+l.ordered_kg||0)-(+l.received_kg||0));   // pieces, not kg
+        if(!(left>0)) return;
+        onOrder[l.ingredient_sku]=(onOrder[l.ingredient_sku]||0)+left;
+        (onOrderRefs[l.ingredient_sku]=onOrderRefs[l.ingredient_sku]||[]).push(l.po_ref);
+      });
+    }
+  }catch(e){}
+  window._stkRoOnOrder=onOrder; window._stkRoOnOrderRefs=onOrderRefs;
   // production labels are pulled at the site that makes them
   const madeHere=(_stkRoLoc===planProduceLoc());
 
@@ -15617,9 +15907,10 @@ async function renderStickerReorder(){
     const packs=madeHere?(+planned[p.sku]||0):0;
     const ref=custOrderOf[p.sku];
     if(ref && personal[ref]){
+      const pinc=+onOrder[p.sku]||0;
       if(packs>0) personalRows.push(_mk({sku:'PERSONAL:'+p.sku, name:(p.name||p.sku), variant:'Personalised — '+personal[ref],
         group_1:'Custom Orders', group_2:'Personalised name', sort_order:p.sort_order, oh:0, par:0,
-        packs, forProd:packs, forPar:0, perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0,
+        packs, inc:pinc, incRefs:(onOrderRefs[p.sku]||[]), forProd:Math.max(0,packs-pinc), forPar:0, perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0,
         supplier:(p.sticker_supplier||'').trim(), link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'',
         net:p.sticker_net||'', kind:'personal', note:ref+' · printed name, no stock held'}));
     } else sharedPacks+=packs;
@@ -15628,8 +15919,10 @@ async function renderStickerReorder(){
     const oh=+p['sticker_'+_stkRoLoc+'_on_hand']||0;
     const par=+p['sticker_'+_stkRoLoc+'_par']||0;
     const packs=madeHere?(+planned[p.sku]||0):0;
+    const inc=+onOrder[p.sku]||0;                 // already coming, do not buy twice
     return _mk({sku:p.sku, name:p.name||p.sku, variant:p.variant||'', group_1:p.group_1||'Other', group_2:p.group_2||p.family||'Other',
-      sort_order:p.sort_order, oh, par, packs, forProd:Math.max(0,packs-oh), forPar:Math.max(0,par-oh),
+      sort_order:p.sort_order, oh, par, packs, inc, incRefs:(onOrderRefs[p.sku]||[]),
+      forProd:Math.max(0,packs-oh-inc), forPar:Math.max(0,par-oh-inc),
       perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0, supplier:(p.sticker_supplier||'').trim(),
       link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'', net:p.sticker_net||'', kind:'product', note:''});
   });
@@ -15642,8 +15935,10 @@ async function renderStickerReorder(){
     sups.forEach(i=>{
       const on=+oh[i.sku]||0, par=+i.par_g||0;
       const packs=(i.sku===CUSTOM_STICKER_SKU)?sharedPacks:0;
+      const inc=+onOrder[i.sku]||0;    // the shared label is ordered on the same POs
       _stkRoRows.push(_mk({sku:i.sku, name:i.name, variant:'', group_1:'Custom Orders', group_2:'Shared labels',
-        sort_order:9e8, oh:on, par, packs, forProd:Math.max(0,packs-on), forPar:Math.max(0,par-on),
+        sort_order:9e8, oh:on, par, packs, inc, incRefs:(onOrderRefs[i.sku]||[]),
+        forProd:Math.max(0,packs-on-inc), forPar:Math.max(0,par-on-inc),
         perSheet:0, price:+i.list_price_kg||0, supplier:(i.supplier||'').trim(), link:_firstUrl(i.sticker_art_url||i.notes||i.source||''),
         dim:'', net:i.uom||'pcs', kind:'shared',
         note:(i.sku===CUSTOM_STICKER_SKU?'used by every custom order':'')}));
@@ -15651,10 +15946,14 @@ async function renderStickerReorder(){
   }catch(e){}
   _stkRoRows=_stkRoRows.concat(personalRows);
   if(!Object.keys(_stkRoQty).length) _stkRoRows.forEach(r=>{ if(r.order>0) _stkRoQty[r.sku]=r.order; });
-  // Open on the full stock list. This screen is a monitor first and a reorder
-  // form second — landing on "to order" hid every label that was fine, which
-  // read as "the app only knows about one sticker".
-  if(!window._stkRoViewTouched) _stkRoView='all';
+  /* Open on the answer, not the catalogue: what actually needs ordering. On a
+     quiet week that list is empty, and an empty screen reads like a broken one
+     — so fall back to the full list rather than showing nothing. Once somebody
+     picks a view by hand, their choice stands.
+     (This screen used to open on the full list precisely so that a quiet week
+     did not look empty; the fallback keeps that, without making everyone scroll
+     past 140 healthy labels to find the four that need buying.) */
+  if(!window._stkRoViewTouched) _stkRoView=_stkRoRows.some(r=>r.order>0) ? 'order' : 'all';
   drawStickerReorder();
 }
 function _stkRoFill(mode){ _stkRoQty={};
@@ -15710,6 +16009,7 @@ function drawStickerReorder(){
       ${tile(tracked,'Labels tracked')}
       ${tile(onHandTot.toLocaleString('en-PH'),'Pieces on hand')}
       ${tile(belowPar,'Below PAR', belowPar?'var(--berry)':'#4e7a3e')}
+      ${tile(rows.reduce((s,r)=>s+(+r.inc||0),0).toLocaleString('en-PH'),'On order','var(--earth,#b5762a)')}
       ${tile(toOrder,'To order', toOrder?'var(--berry)':'#4e7a3e')}
       ${tile(noPar,'No PAR set', noPar?'var(--earth,#b5762a)':'#4e7a3e')}
     </div>
@@ -15720,12 +16020,17 @@ function drawStickerReorder(){
       ${[['all','All labels'],['below','Below PAR'],['order','To order']].map(([k,l])=>
         `<button class="btn sm ${_stkRoView===k?'':'sec'}" onclick="_stkRoView='${k}';window._stkRoViewTouched=1;drawStickerReorder()">${l}</button>`).join('')}
     </div>
+    ${(()=>{ const dup=rows.filter(r=>(r.incRefs||[]).length>1);
+       if(!dup.length) return '';
+       return `<div style="margin:0 0 10px;padding:9px 11px;border:1px solid var(--danger);background:#fdf0ed;border-radius:6px;font-size:12.5px">
+         <b>${dup.length} label(s) are on more than one open sticker PO.</b> ${esc(dup.slice(0,5).map(r=>r.name).join(' · '))}${dup.length>5?' …':''}
+         — the same labels look to have been ordered twice. Both orders are counted as coming, so if one of them is a duplicate this screen is <b>under</b>-ordering. Open the POs and cancel whichever is the duplicate.</div>`; })()}
     ${(noPrice||noSup||noArt)?`<div style="margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
       Before sending: ${[noPrice?`<b>${noPrice}</b> with no price per piece`:'',noSup?`<b>${noSup}</b> with no label supplier`:'',noArt?`<b>${noArt}</b> with no artwork link`:''].filter(Boolean).join(' · ')}.
       Set them on the product's <b>🏷️ Stickers</b> tab — a PO with no price still generates, it just cannot be valued.</div>`:''}
     <div style="overflow-x:auto" class="stickyhead"><table><thead><tr>
       <th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th>
-      <th class="num">PAR</th><th class="num">On hand</th><th class="num">Packs</th><th class="num">PAR top-up</th>
+      <th class="num">PAR</th><th class="num">On hand</th><th class="num" title="pieces on a confirmed sticker PO that have not been received yet — subtracted so a label already coming is not bought twice">On order</th><th class="num">Packs</th><th class="num">PAR top-up</th>
       <th class="num">Need</th><th class="num">Order</th><th class="num" title="the printer's minimum pack for this size">Packs</th><th class="num">₱/pc</th><th>Supplier</th>
     </tr></thead><tbody>`;
   const shown=rows.filter(r=>{
@@ -15752,6 +16057,7 @@ function drawStickerReorder(){
           <td class="mini">${esc(r.dim||'')||'—'}</td>
           <td class="num"><b>${r.par||'—'}</b></td>
           <td class="num mini" style="color:var(--muted)">${r.oh||'—'}</td>
+          <td class="num mini" style="${r.inc>0?'color:var(--earth,#b5762a);font-weight:600':'color:var(--muted)'}"${r.inc>0?` title="on ${esc((r.incRefs||[]).join(', '))}"`:''}>${r.inc||'—'}${(r.incRefs&&r.incRefs.length>1)?'<div class="mini" style="color:var(--danger)" title="this label is on more than one open sticker PO">on '+r.incRefs.length+' POs</div>':''}</td>
           <td class="num mini" style="${r.forProd>0?'color:var(--berry);font-weight:600':'color:var(--muted)'}">${r.packs||'—'}</td>
           <td class="num mini" style="color:var(--muted)">${r.forPar||'—'}</td>
           <td class="num"><b>${r.need||'—'}</b></td>
@@ -15766,14 +16072,14 @@ function drawStickerReorder(){
     });
   });
   if(!shown.length)
-    h+=`<tr><td colspan="15" class="empty">${_stkRoView==='all'?'No labels in the master yet.':'Nothing in this view — switch to <b>All labels</b> to see the full stock list.'}</td></tr>`;
-  h+=`</tbody><tfoot><tr><th colspan="10" class="num">Totals</th><th class="num">${totNeed.toLocaleString('en-PH')}</th><th class="num">${totOrder.toLocaleString('en-PH')}</th><th colspan="3" class="num">est. ₱${(Math.round(totVal*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2})}</th></tr></tfoot></table></div>
+    h+=`<tr><td colspan="16" class="empty">${_stkRoView==='all'?'No labels in the master yet.':'Nothing in this view — switch to <b>All labels</b> to see the full stock list.'}</td></tr>`;
+  h+=`</tbody><tfoot><tr><th colspan="11" class="num">Totals</th><th class="num">${totNeed.toLocaleString('en-PH')}</th><th class="num">${totOrder.toLocaleString('en-PH')}</th><th colspan="3" class="num">est. ₱${(Math.round(totVal*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2})}</th></tr></tfoot></table></div>
     <div class="pager" id="stkRoTot"></div></div>`;
   /* The two explanations used to sit between the buttons and the table, pushing
      the numbers below the fold. They are reference material — read once, then in
      the way — so they live under the table, folded up. */
   h+=`<details style="margin-top:10px"><summary style="cursor:pointer;font-weight:700;font-size:12.5px;color:var(--muted)">How Need is worked out, and why to trust PAR</summary>
-    <div class="hint" style="margin:0 0 8px">One label per pack. <b>Need</b> is the larger of <b>production</b> (packs planned − on hand) and <b>PAR top-up</b> (PAR − on hand) — not the sum, because the same label serves both. Rounded up to whole <b>sheets</b> where a product says how many print per sheet. Production demand comes from ${planTag}; labels are pulled at <b>${esc(planProduceLoc())}</b>, so the other site only ever shows PAR top-up.
+    <div class="hint" style="margin:0 0 8px">One label per pack. <b>Need</b> is the larger of <b>production</b> (packs planned − on hand − on order) and <b>PAR top-up</b> (PAR − on hand − on order) — not the sum, because the same label serves both. <b>On order</b> is pieces on a confirmed sticker PO that have not been received yet, so a batch already at the printer is not bought a second time; it drops out the moment the PO is received. Rounded up to whole <b>sheets</b> where a product says how many print per sheet. Production demand comes from ${planTag}; labels are pulled at <b>${esc(planProduceLoc())}</b>, so the other site only ever shows PAR top-up.
       <b>Every custom order shares one label</b> — the Custom Name Sticker, under Custom Orders below. Only an order flagged for a printed name gets its own line.</div>
     <div style="margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);background:#f6f8f4;border-radius:6px;font-size:12.5px">
       <b>Trust PAR over On hand.</b> Label stock only moved at a count, so the figures drifted. From this build, confirming a production run deducts the labels it used (Production Plan → <b>Packaging &amp; labels used</b>), so On hand becomes reliable from the next run onward. Until then, plan against PAR — the <b>PAR top-up</b> column ignores production entirely.</div>
@@ -15796,13 +16102,22 @@ async function generateStickerPO(){
         +bumped.slice(0,8).map(l=>'• '+l.name+': '+l.typed+' → '+l.qty+' (sold by '+l.perSheet+')').join('\n')
         +(bumped.length>8?('\n… and '+(bumped.length-8)+' more'):'')):''))) return;
   const bySup={}; lines.forEach(l=>{ const s=l.supplier||'(unassigned)'; (bySup[s]=bySup[s]||[]).push(l); });
+  /* purchase_orders.supplier_name is a FOREIGN KEY to suppliers.name, and the
+     label suppliers on the products — "Supplier 1 — Cookable, Raw Feeding…" —
+     are not rows in Suppliers. Writing one straight in fails the whole create
+     with 23503 and the PO is never made. So the name is used only if it really
+     exists, and the order is still created without it otherwise: a PO with no
+     supplier is fine (all three sticker POs already in the system have none),
+     an order that silently failed to save is not. */
+  let _supOk={}; try{ (await db.list('suppliers',{})).forEach(x=>{ if(x&&x.name) _supOk[String(x.name)]=1; }); }catch(e){}
+  const _unknownSup=Object.keys(bySup).filter(x=>x!=='(unassigned)' && !_supOk[x]);
   showBusy('Creating sticker PO(s)…'); const refs=[];
   try{
     const dd=_mmddyyyy(todayISO()); let zz=0;
     for(const sup of Object.keys(bySup)){ zz++;
       // [STICKERS] in the reference is what routes it to the Sticker PO screen
       const ref='PO-'+dd+' [STICKERS] V01.'+_p2(zz);
-      const rec={po_ref:ref, supplier_name:(sup==='(unassigned)'?null:sup), order_date:todayISO(),
+      const rec={po_ref:ref, supplier_name:((sup==='(unassigned)'||!_supOk[sup])?null:sup), order_date:todayISO(),
                  status:'confirmed', created_by:CURRENT_USER};
       try{
         await db.create('purchase_orders',rec);
@@ -15820,6 +16135,11 @@ async function generateStickerPO(){
   } finally { hideBusy(); }
   if(!refs.length) return;
   _stkRoQty={};
+  if(_unknownSup.length){
+    sysLog('purchase_orders',refs[0],'⚠ label supplier(s) not in Master Data, PO left with no supplier: '+_unknownSup.join(' · '));
+    toast(_unknownSup.length+' label supplier(s) are not in Master Data — the PO(s) were created with no supplier. Add "'
+      +_unknownSup[0]+'" under Suppliers to fill it in.', true);
+  }
   toast('Created '+refs.length+' sticker PO(s) — open Sticker PO to print or send');
   window._stkPoRef=refs[0];
   openModel('sticker_po');
@@ -15827,6 +16147,8 @@ async function generateStickerPO(){
 // A sticker line points at a PRODUCT sku, which the original po_lines→ingredients
 // foreign key forbids. Say so plainly instead of showing a raw constraint error.
 function _stkPoErr(e){ const m=String((e&&e.message)||e||'');
+  if(/purchase_orders_supplier_name_fkey|supplier_name/i.test(m))
+    return 'The label supplier on these products is not in Master Data → Suppliers, and purchase_orders.supplier_name must match a supplier there. Add it under exactly that name, or clear the Label supplier on the products. ('+m+')';
   return /foreign key|violates|ingredient/i.test(m)
     ? 'Sticker PO lines reference a product SKU, which the po_lines → ingredients foreign key blocks. Run wr_sticker_reorder.sql once, then try again. ('+m+')'
     : m; }
