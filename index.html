@@ -26,6 +26,8 @@
   .topbar button:hover{background:rgba(255,255,255,.28)}
   .mode{font-size:11px;padding:2px 9px;border-radius:20px;font-weight:700}
   .mode.demo{background:#f5e9c9;color:#7a5b12} .mode.live{background:#cdeede;color:#0d6b3f}
+  .buildtag{font-size:10.5px;color:var(--muted);margin-left:6px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  @media(max-width:900px){.buildtag{display:none}}
   /* layout */
   .app{display:flex;height:calc(100% - 46px)}
   .side{width:210px;background:#fff;border-right:1px solid var(--line);overflow-y:auto;flex-shrink:0}
@@ -509,7 +511,7 @@
   <div class="crumb" id="crumb"></div>
   <div class="sp"></div>
   <span id="userBox" style="display:flex;align-items:center;gap:6px;font-size:12px"></span>
-  <span class="mode demo" id="modeTag">DEMO</span>
+  <span class="mode demo" id="modeTag">DEMO</span><span id="buildTag" class="buildtag"></span>
   <button id="mbell" class="mbell" title="Mentions" onclick="openMentions()">🔔</button>
   <button class="guidebtn" onclick="openKB()">❔ <span class="bfull">Guide</span></button>
 </div>
@@ -548,7 +550,7 @@ const MODULES = [
   {id:'ops',    label:'Operations',  items:['prodplan','prodsched','production_batches','transfers','count_sessions']},
   {id:'inv',    label:'Inventory',    items:['inventory_movements','variance_log']},
   {id:'help',   label:'Help', items:['guides']},
-  {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products']},
+  {id:'master', label:'Master Data', items:['suppliers','ingredients','supplies','products','locations']},
   {id:'admin',  label:'Administration', items:['connection','users','approvals','fieldacl','refs','automations','notif','studio','selftest','cleanser']},
 ];
 
@@ -881,6 +883,7 @@ const MODELS = {
   receiving:{ label:'Receiving', icon:'📥', special:'receiving' },
   supplies_reorder:{ label:'Supplies Reorder', icon:'🧻', special:'supplies_reorder' },
   sticker_reorder:{ label:'Sticker Reorder', icon:'🏷️', special:'sticker_reorder' },
+  locations:{ label:'Locations', icon:'🏬', special:'locations' },
   sticker_po:{ label:'Sticker PO', icon:'🏷️', special:'sticker_po' },
   approvals:{ label:'Approvals', icon:'✅', special:'approvals' },
   margin:{ label:'Gross Margin', icon:'📈', special:'margin' },
@@ -1186,6 +1189,7 @@ function route(){
     if(m.special==='guides') return renderGuides();
     if(m.special==='supplies_reorder') return renderSuppliesReorder();
     if(m.special==='sticker_reorder') return renderStickerReorder();
+    if(m.special==='locations') return renderLocations();
     if(m.special==='prodsched') return renderProdSched();
     if(m.special==='packreq')   return renderPackReq();
     if(m.special==='receiving') return renderReceiving();
@@ -3638,7 +3642,15 @@ function saveSettings(){
   updateMode(); closeModal(); toast('Connected — loading live data'); loadAutos(); loadProfiles(); loadLocs(); openModel(state.model);
 }
 function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={}; updateMode(); closeModal(); toast('Back to demo mode'); openModel(state.model); }
-function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';} }
+/* WHICH BUILD IS ACTUALLY LIVE?
+   There was no way to tell. A file can be sent, opened, and look unchanged for
+   two entirely different reasons — it was never deployed, or the browser is
+   still serving the cached one — and both look exactly like "the fix did not
+   work". Stamp it, show it, and the question is answerable at a glance. */
+const WR_BUILD='2026-08-26 14:47Z';
+function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
+  const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
+  t.title='build '+WR_BUILD; }
 
 /* ===== Data Cleanser (Administration → Data Cleanser) ===== */
 // Wipe transactional data (test / day-1 play) while KEEPING all master data.
@@ -13730,6 +13742,140 @@ async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=awai
     (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:ingSku, processed_g:procG, raw_g:rawG, unit_cost_g:costG}); });
   return m; }
 
+/* ============ Locations · the sites everything else keys off ==============
+   location_code is a plain string on inventory_movements, transfers, item_bins
+   and variance_log, with no foreign key anywhere. So a code is not a label, it
+   is a JOIN KEY held together by nothing but everyone agreeing to type the
+   same word. Change one and every historical row that used it stops resolving
+   to a site — silently, with no error at the moment it happens.
+
+   That is why this screen only OFFERS what is safe, and why the real rule
+   lives in a database trigger (sql/wr_locations_manage.sql) rather than here:
+   a confirmation box can be skipped by anyone who can reach the REST endpoint,
+   a trigger cannot. This screen is the courtesy; the trigger is the guarantee.
+
+     name          always editable, nothing keys off it
+     code          editable ONLY while nothing references it
+     delete        allowed ONLY while nothing references it
+
+   FAIL SAFE: if the usage count cannot be read, the screen assumes every site
+   is in use and offers nothing destructive. Not knowing whether history depends
+   on a row is not a reason to let someone delete it. */
+let _locRows=[], _locUsageErr='';
+async function locUsage(){
+  _locUsageErr='';
+  try{
+    const v=await db.list('wr_location_usage',{});
+    if(v && v.length) return v.map(r=>({code:r.code, name:r.name, refs:(+r.refs||0)}));
+  }catch(e){ _locUsageErr=String((e&&e.message)||e); }
+  // No view: keep the list usable, but treat every site as load-bearing.
+  await loadLocs();
+  if(!_locUsageErr) _locUsageErr='the usage view is not installed';
+  return locCodes().map(c=>({code:c, name:locName(c), refs:null}));
+}
+async function renderLocations(){
+  $('crumb').innerHTML='<b>Master Data</b> / Locations';
+  $('cp').innerHTML=`<div class="title">Locations</div>
+    <button class="btn" onclick="locAdd()">＋ New location</button>
+    <button class="btn sec sm" onclick="renderLocations()">↻ Refresh</button>
+    <div class="sp"></div><span style="color:var(--muted)">the sites every movement, transfer and count is filed against</span>`;
+  $('content').innerHTML='<div class="repcard"><div class="empty">Reading sites…</div></div>';
+  _locRows=await locUsage();
+  drawLocations();
+}
+function drawLocations(){
+  const rows=_locRows||[];
+  const warn=_locUsageErr?`<div style="margin:0 0 10px;padding:9px 11px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
+    <b>Cannot tell which sites are in use</b> (${esc(_locUsageErr)}), so every one is treated as load-bearing: codes are locked and nothing can be deleted.
+    Run <code>sql/wr_locations_manage.sql</code> in Supabase to enable the checks — and the editing they make safe.</div>`:'';
+  const body=rows.map(r=>{
+    const free=(r.refs===0);
+    return `<tr>
+      <td><code>${esc(r.code)}</code>${free?'':'<div class="mini" style="color:var(--muted)">code locked</div>'}</td>
+      <td><input value="${esc(r.name||'')}" onchange="locRename('${esc(r.code)}',this.value)" style="width:100%;max-width:280px;padding:4px 6px;border:1px solid var(--line);border-radius:5px"></td>
+      <td class="num">${r.refs==null?'<span class="mini" style="color:var(--earth,#b5762a)">unknown</span>'
+        :(r.refs?`<b>${r.refs.toLocaleString('en-PH')}</b>`:'<span class="mini" style="color:var(--muted)">none</span>')}</td>
+      <td>${free
+        ? `<button class="btn sm sec" onclick="locRecode('${esc(r.code)}')">Change code</button>
+           <button class="btn sm sec" style="color:var(--danger)" onclick="locDelete('${esc(r.code)}')">Delete</button>`
+        : `<span class="mini" style="color:var(--muted)">history depends on this site — only the name can change</span>`}</td></tr>`;
+  }).join('');
+  $('content').innerHTML=`<div class="repcard">${warn}
+    <div class="hint" style="margin:0 0 8px">A location's <b>code</b> is what every movement, transfer, bin and variance is filed under, and nothing in the database enforces the link. So a code can only be changed while <b>nothing references it</b>; after that only the name may change. Adding a site is always safe. After adding one, set what it is for in <b>Production Plan → ⚙ Planning locations</b> — a site that should not be planned against (a breeder colony, a consignee) must be left <b>unticked</b> for "Counts as supply".</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Code</th><th>Name</th><th class="num">Used by</th><th>Actions</th></tr></thead>
+    <tbody>${body||'<tr><td colspan="4" class="empty">No sites.</td></tr>'}</tbody></table></div>
+    <div class="pager">${rows.length} site(s)</div></div>`;
+}
+function _locSlug(v){ return String(v||'').trim().toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/^-+|-+$/g,''); }
+async function locAdd(){
+  const raw=prompt('Code for the new site.\n\nLowercase letters, digits and hyphens only — it is a key, not a label, and it can never be changed once anything is filed against it.\n\ne.g. breeders');
+  if(raw==null) return;
+  const code=_locSlug(raw);
+  if(!code){ toast('That is not a usable code',true); return; }
+  if(locCodes().includes(code)){ toast('"'+code+'" already exists',true); return; }
+  const name=prompt('Name for "'+code+'" — this one is only a label and can be changed later.\n\ne.g. Bulacan - Breeder Colony', code);
+  if(name==null) return;
+  if(!confirm('Add the site "'+code+'" ('+(name||code)+')?\n\nThe code cannot be changed once anything is filed against it.')) return;
+  try{
+    await db.create('locations',{code, name:(name||code)});
+    sysLog('locations',code,'🏬 Site added — '+(name||code)+' by '+CURRENT_USER);
+    await loadLocs(); await renderLocations();
+    toast('Added "'+code+'" · set what it is for in Production Plan → ⚙ Planning locations');
+  }catch(e){ toast(_locErr(e),true); }
+}
+async function locRename(code,name){
+  const row=(_locRows||[]).find(r=>r.code===code); if(!row) return;
+  const nm=String(name||'').trim();
+  if(!nm || nm===row.name){ drawLocations(); return; }
+  try{
+    await db.update('locations','code',code,{name:nm});
+    row.name=nm; sysLog('locations',code,'✎ Renamed to "'+nm+'" by '+CURRENT_USER);
+    await loadLocs(); drawLocations(); toast('Renamed');
+  }catch(e){ toast(_locErr(e),true); drawLocations(); }
+}
+async function locRecode(code){
+  const row=(_locRows||[]).find(r=>r.code===code);
+  if(!row || row.refs!==0){ toast('This code is locked — something already points at it',true); return; }
+  const raw=prompt('New code for "'+code+'".\n\nOnly possible because nothing references it yet.', code);
+  if(raw==null) return;
+  const next=_locSlug(raw);
+  if(!next || next===code) return;
+  if(locCodes().includes(next)){ toast('"'+next+'" already exists',true); return; }
+  if(!confirm('Change the code "'+code+'" to "'+next+'"?')) return;
+  /* The second confirmation is not theatre. The check that says "nothing
+     references this" was true when the page loaded; somebody may have posted a
+     movement since. Type it out and you have looked at it twice. */
+  const typed=prompt('This is a key, not a label.\n\nType the NEW code to confirm:');
+  if(_locSlug(typed||'')!==next){ toast('Not changed — that did not match',true); return; }
+  try{
+    await db.update('locations','code',code,{code:next});
+    sysLog('locations',next,'🔑 Code changed from "'+code+'" by '+CURRENT_USER);
+    await loadLocs(); await renderLocations(); toast('Code is now "'+next+'"');
+  }catch(e){ toast(_locErr(e),true); }
+}
+async function locDelete(code){
+  const row=(_locRows||[]).find(r=>r.code===code);
+  if(!row || row.refs!==0){ toast('Cannot delete — history is filed against this site',true); return; }
+  if(code===planProduceLoc()||code===planSellLoc()){
+    toast('"'+code+'" is set as the kitchen or the shop in Planning locations — change that first',true); return; }
+  if(!confirm('Delete the site "'+code+'"?\n\nNothing references it today, so nothing is lost.')) return;
+  const typed=prompt('Type the code to confirm deletion:');
+  if(_locSlug(typed||'')!==code){ toast('Not deleted — that did not match',true); return; }
+  try{
+    await db.del('locations','code',code);
+    sysLog('locations',code,'🗑 Site deleted by '+CURRENT_USER);
+    await loadLocs(); await renderLocations(); toast('Deleted "'+code+'"');
+  }catch(e){ toast(_locErr(e),true); }
+}
+/* The trigger's message is the useful one — it names the code and the number of
+   records that depend on it. Pass it through instead of burying it. */
+function _locErr(e){ const m=String((e&&e.message)||e||'');
+  if(/Cannot change the code|Cannot delete/i.test(m)) return m.replace(/^.*?(Cannot )/,'$1');
+  if(/locations_code_slug/i.test(m)) return 'A code must be lowercase letters, digits and hyphens only.';
+  if(/permission denied|42501|401/i.test(m)) return 'Signed-in users need write access to locations — run sql/wr_locations_manage.sql in Supabase. ('+m+')';
+  if(/duplicate key|23505/i.test(m)) return 'That code already exists.';
+  return m; }
+
 /* ============ Processing / Prep (raw → processed, the two-bin conversion) ============ */
 let _procIngs=[];
 async function openProcessing(){
@@ -17140,6 +17286,7 @@ if(!DEMO.variance_log.length) DEMO.variance_log=[
   {id:1,check_type:'4 · Transfer',source_ref:'WR-TR-DEMO',expected:6,actual:5,gap_qty:-1,gap_value:130,location:'in-transit',responsible_user:'Warehouse',status:'open',note:''},
   {id:2,check_type:'1 · 3-way match',source_ref:'WR-PO-0012',expected:5,actual:4.2,gap_qty:-0.8,gap_value:224,location:'bulacan',responsible_user:'Purchasing',status:'open',note:''}];
 applyStudio(); updateMode(); renderUserSel(); renderSide(); _watchSticky();
+try{ console.log('%cWR ERP build '+WR_BUILD,'font-weight:700'); }catch(e){}
 if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadAutos(); loadProfiles(); loadLocs(); loadPlanCfg(); }
 window.addEventListener('hashchange', onHashRoute);
 if(needAuth()) showGate(); else bootRoute();
