@@ -1083,6 +1083,17 @@ const GROUP_ORDER=['Wholesome Mix','BARF Mix','PMR Mix','Meatballs — Wholesome
 function _grank(n){ const i=GROUP_ORDER.indexOf(String(n||'').replace(/^[^0-9A-Za-z]+/,'').trim()); return i<0?900:i; }
 function cmpGroupKeys(a,b){ return _grank(a)-_grank(b) || String(a).localeCompare(String(b)); }
 function _so(r){ const v=+(r&&r.sort_order); return (isFinite(v)&&v>0)?v:999999; }
+/* ONE grouping for finished products, so a pack sits in the same place on Live
+   Stock, in the production picker and on the count sheet. They had drifted:
+   Live Stock headed its product groups "📦 Raw Feeding" and the pickers headed
+   the same group "Raw Feeding", which reads as two different lists to anyone
+   moving between the screens. */
+function prodGroup(p){
+  p=p||{};
+  return {g1:'📦 '+(p.group_1||'Products'),
+          g2:(p.group_2||p.family||'Other'),
+          rank:_so(p)};
+}
 function cmpItems(a,b){ return _so(a)-_so(b) || String(a.name||a.variant||a.sku||a.ref_sku||'').localeCompare(String(b.name||b.variant||b.sku||b.ref_sku||'')); }
 // 3-level hierarchy: Group (group_1) → Subgroup (group_2) → Item (sort_order). Groups ordered by their first item.
 const HIER={ products:{g1:'group_1', g2:'group_2'}, ingredients:{g1:'ingredient_group'} };
@@ -1513,7 +1524,7 @@ async function renderList(){
   }
   catch(e){ $('content').innerHTML=`<div class="empty">⚠ ${esc(e.message)}<br><br>Check your Supabase connection / RLS.</div>`; return; }
   let archivedCount=0;
-  if(m.archivable && !state.showArchived){ archivedCount=rows.filter(r=>r.active===false).length; rows=rows.filter(r=>r.active!==false); }
+  if(m.archivable && !state.showArchived){ archivedCount=rows.filter(r=>isArchivedProd(r)).length; rows=rows.filter(r=>!isArchivedProd(r)); }
   /* Purchase Orders open on LIVE business only. A cancelled order is dead and a
      fully received one is history — keeping both in the default view buried the
      handful of orders that still need doing. One click brings them back. */
@@ -1692,7 +1703,11 @@ let formRec={}, formChildren=[], formIsNew=false, relCache={}, formTab=0;
 async function relOptions(model){
   if(relCache[model]) return relCache[model];
   const m=MODELS[model]; let rows=await db.list(model,{});
-  if(m.archivable) rows=rows.filter(r=>r.active!==false);   // don't offer archived records in pickers
+  /* An archived record is not offered on a NEW record — that is what archiving
+     is for. isArchivedProd also honours what Shopify says, so a product the
+     shop has archived stops being offered here the moment the status pull sees
+     it, without waiting for somebody to press the Archive button. */
+  if(m.archivable) rows=rows.filter(r=>!isArchivedProd(r));   // don't offer archived records in pickers
   // `t` keeps the "Name (SKU)" form for places that show one line; `n` is the plain
   // name, for line tables that already print the SKU underneath — showing the code
   // twice on the same row is noise, not information.
@@ -2636,7 +2651,17 @@ function _psDays(){
      Alert        = Current stock < ROP
    The variables — lead time, movement, cycle, window, case size — are the
    levers, so they are on the toolbar rather than buried in a formula.        */
-const PQ_DEF={lead:8, move:1, cycle:21, win:60, cs:12, minPacks:0};
+/* CASE ROUNDING IS NOW A SWITCH, AND IT HAS A FLOOR.
+   minOn 1  round every ask up to a whole case of `cs`, and never ask for fewer
+            than `minPacks` once there is anything to ask for. That is what the
+            kitchen wants: a run of seven packs costs the same setup as a run of
+            twenty-four.
+   minOn 0  ask for exactly what the sum says, to the pack.
+   The switch exists because rounding is NOT free. It already contributes a
+   large share of the total ask, and on a slow mover a 24-pack floor can buy
+   months of cover. So the screen prints the cover the rounding buys beside the
+   number — the cost of the convenience is shown, not assumed. */
+const PQ_DEF={lead:8, move:1, cycle:21, win:60, cs:12, minPacks:24, minOn:1};
 let PQ=Object.assign({},PQ_DEF);
 try{ PQ=Object.assign({},PQ_DEF,JSON.parse(localStorage.getItem('wr_packreq')||'{}')); }catch(e){}
 let PQ_MOVE={};   // per-SKU movement override — the one variable that is genuinely per product
@@ -2650,6 +2675,8 @@ function pqReset(){ PQ=Object.assign({},PQ_DEF); PQ_MOVE={};
 function pqMove(sku,v){ const n=parseFloat(v);
   if(!(n>=0) || n===PQ.move) delete PQ_MOVE[sku]; else PQ_MOVE[sku]=n;
   try{ localStorage.setItem('wr_packreq_move',JSON.stringify(PQ_MOVE)); }catch(e){} pqDraw(); }
+function pqToggle(k){ PQ[k]=PQ[k]?0:1;
+  try{ localStorage.setItem('wr_packreq',JSON.stringify(PQ)); }catch(e){} stockPicInvalidate(); pqDraw(); }
 const _pqCeil=(v,step)=>{ const s=+step||0; if(!(s>0)) return Math.ceil(v); return Math.ceil(v/s)*s; };
 
 function pqCalc(r){
@@ -2661,10 +2688,31 @@ function pqCalc(r){
   const safety = ltd*move;
   const rop    = ltd+safety;
   const par    = perDay*Math.max(0,+PQ.cycle||0);
-  const newPar = _pqCeil(par, PQ.cs);
+  const minOn  = !!(+PQ.minOn);
+  const cs     = minOn ? Math.max(0,+PQ.cs||0) : 0;
+  const minPk  = minOn ? Math.max(0,+PQ.minPacks||0) : 0;
+  const newPar = cs>0 ? _pqCeil(par, cs) : Math.ceil(par);
   const cur    = (+r.shop||0)+(+r.other||0);
   const need   = newPar + safety - cur;
-  const produce= Math.max(0, _pqCeil(Math.max(0,need), PQ.cs));
+  /* THE FLOOR APPLIES TO A RUN, NOT TO A PRODUCT.
+     A product that needs nothing is asked for nothing — a minimum must never
+     conjure a run out of a zero, or every dead SKU in the catalogue would ask
+     for two dozen packs on the first Monday it was switched on. Once there IS
+     a run it is rounded up to a whole case, then lifted to the floor, then put
+     back on the case grid so a floor of 24 against a case of 10 asks for 30
+     rather than an unpackable 24. */
+  let produce = Math.max(0, need);
+  if(produce>0){
+    produce = cs>0 ? _pqCeil(produce, cs) : Math.ceil(produce);
+    if(minPk>0 && produce<minPk) produce = cs>0 ? _pqCeil(minPk, cs) : minPk;
+  }
+  /* WHAT THE ROUNDING COST. `rawNeed` is the honest shortfall; everything above
+     it is convenience, and on a slow mover convenience is measured in months.
+     coverAfter is the days of cover the run leaves behind, so the person
+     setting the floor can see 206 days before they agree to it. */
+  const rawNeed    = Math.max(0, Math.ceil(need));
+  const padded     = Math.max(0, produce - rawNeed);
+  const coverAfter = perDay>0 ? (cur+produce)/perDay : null;
   /* PRIORITY AND QUANTITY ARE DIFFERENT QUESTIONS.
      Warehouse asked for Shopify as the basis of what to make first. First is a
      RANKING, and the honest ranking is days of cover on the SELLABLE shelf —
@@ -2689,8 +2737,17 @@ function pqCalc(r){
   const shelfShort = Math.max(0, newPar + safety - shelf);
   const toMove = Math.min(Math.round(shelfShort), Math.max(0, Math.round(+r.other||0)));
   const toMake = produce;
+  /* TWO COVERAGE FIGURES, BECAUSE THEY ANSWER DIFFERENT QUESTIONS.
+       target   New Par + safety — what a full shelf looks like.
+       covPct   everything we own, against that target. "Are we stocked?"
+       shelfPct only what Pasig can sell, against the same target. "Can we sell
+                today?"  A row can be 140% stocked and 0% sellable; that gap IS
+                the transfer, and it is the number the warehouse asked to see. */
+  const target = newPar + safety;
   return {perDay, lead, move, ltd, safety, rop, par, newPar, cur, produce,
-          cover, toMove, toMake,
+          cover, toMove, toMake, target, minOn, rawNeed, padded, coverAfter,
+          covPct:(target>0?cur/target:null),
+          shelfPct:(target>0?shelf/target:null),
           alert:(cur<rop), pct:(newPar>0?cur/newPar:null)};
 }
 
@@ -2722,22 +2779,41 @@ function pqCalc(r){
    `available` is what a customer can still buy — Shopify has already taken out
    the packs committed to unfulfilled orders. That is the right basis for "do we
    need to make more", because a committed pack is spoken for.
-   `on_hand` is the physical count on the shelf, which is what OUR ledger tracks
-   — the ledger knows nothing about commitments. So the drift check compares
-   on_hand with the ledger, and the demand maths uses available. Comparing
-   available with the ledger would show a permanent gap the size of the order
-   book and teach everyone to ignore the warning. */
+   `on_hand` is the physical count on the shelf. A person counting the freezer
+   counts committed packs too — they are still in the building — so on_hand is
+   the right book quantity for the WEEKLY COUNT, and that is where it is used.
+
+   THE DRIFT CHECK USED TO COMPARE on_hand WITH OUR LEDGER, AND THAT WAS WRONG.
+   The reasoning written here said the ledger "knows nothing about commitments",
+   so on_hand was the like-for-like figure. But look at when our ledger actually
+   moves: wr-shopify-pull.gs raises a `sale` from the ORDER (processed_at), not
+   from the fulfilment. Shopify does the same thing to `available` at that
+   moment — the unit leaves available and joins committed — while `on_hand` does
+   not drop until the parcel is fulfilled.
+
+   So our ledger tracks `available`, not `on_hand`, and comparing it with
+   on_hand produced a permanent gap the size of the order book: exactly the
+   failure this comment claimed to be avoiding, with the two figures the wrong
+   way round. Every product with unfulfilled orders drifted, every day, for a
+   reason that was not a fault — which is how a warning gets ignored.
+
+   Drift now compares `available` with the ledger, because both of them move
+   when the order is placed. `committed` is carried alongside so the screen can
+   say out loud why on_hand and available differ. */
 async function pqSnapLoad(){
   try{
     if(isLive()){
-      const inv=await sb('shopify_inventory?select=sku,available,on_hand,fetched_at&limit=3000');
+      const inv=await sb('shopify_inventory?select=sku,available,on_hand,committed,fetched_at&limit=3000');
       if(inv && inv.length){
-        const qty={}, onh={}; let at='';
+        const qty={}, onh={}, cmt={}; let at='';
         inv.forEach(r=>{ if(!r.sku) return;
           if(r.available!=null) qty[r.sku]=Math.max(0,+r.available||0);
           if(r.on_hand!=null)   onh[r.sku]=Math.max(0,+r.on_hand||0);
+          /* Committed is never coerced to zero when absent — an absence and a
+             zero order book are different facts, and the screen says which. */
+          if(r.committed!=null) cmt[r.sku]=Math.max(0,+r.committed||0);
           const f=String(r.fetched_at||''); if(f>at) at=f; });
-        if(Object.keys(qty).length) return {qty, onhand:onh, at:at||null, src:'shopify-api'};
+        if(Object.keys(qty).length) return {qty, onhand:onh, committed:cmt, at:at||null, src:'shopify-api'};
       }
     }
   }catch(e){}
@@ -2898,7 +2974,13 @@ function _pqDrift(rows){
     Everything the ledger recorded at ${esc(planSellLoc())} <i>after</i> it — the transfers you posted, the packs the shop sold — is added on top,
     so it does not matter whether the transfer was posted before or after the Shopify upload. Nothing here moves stock or posts anything.
     ${d.length?`<b style="color:var(--earth,#b5762a)">${d.length} product(s) disagree with what our ledger held at that same moment</b> — shown per row. That is a real gap: an adjustment made on one side only.`
-              :`Compared against our ledger as it stood at that same moment, every product agrees.`}`;
+              :`Compared against our ledger as it stood at that same moment, every product agrees.`}
+    ${(()=>{ const c=(rows||[]).reduce((a,r)=>a+(r.committed>0?+r.committed:0),0);
+       if(!(c>0)) return '';
+       return `<br><b>${num(Math.round(c))} pack(s) are committed to unfulfilled orders</b> and are in none of the figures above.
+         Sellable is Shopify's <b>available</b>, which has already taken them out — a committed pack is spoken for, so it must not
+         hold back a production run. They are still physically in the freezer, which is why the weekly count's book quantity uses
+         <b>on hand</b> instead: a counter counts them. Same two facts, two different questions.`; })()}`;
 }
 /* The request, worked out once. Both the screen and Demand/MRP ask for it, and
    a figure that differs between the two would be worse than no figure at all. */
@@ -2940,6 +3022,7 @@ async function pqBuildRows(){
   const snap=await pqSnapLoad();
   const shopBy={}; let shopSrc='the ledger at '+sellLoc; let waterLine=null;
   const snapOn=(snap&&snap.onhand)||null;
+  const snapCm=(snap&&snap.committed)||null;
   if(snap && snap.qty && Object.keys(snap.qty).length){
     shopSrc=(snap.src==='shopify-api'?'the Shopify inventory feed, ':'a Shopify count taken ')
            +(snap.at?new Date(snap.at).toLocaleString():'(undated)');
@@ -2952,7 +3035,7 @@ async function pqBuildRows(){
   const ohBy={};
   (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
     const L=String(v.location_code||''); const q=+v.qty||0;
-    const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{sellAt:0, sellAfter:0, other:0, all:0};
+    const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{sellAt:0, sellAfter:0, other:0, cons:0, all:0, sites:{}, consSites:{}};
     o.all+=q;
     if(L===sellLoc){
       const t=v.created_at?new Date(v.created_at).getTime():NaN;
@@ -2961,28 +3044,175 @@ async function pqBuildRows(){
          unplaceable movement would overstate the shelf, and overstating the
          shelf is what stops the kitchen producing. */
       if(waterLine!=null && !isNaN(t) && t>waterLine) o.sellAfter+=q; else o.sellAt+=q;
-    } else o.other+=q;
+    } else if(planCountsLoc(L)){
+      /* Ours to pull from — a van away from the shelf. */
+      o.other+=q; o.sites[L]=(o.sites[L]||0)+q;
+    } else {
+      /* NOT OURS TO PULL FROM, so not "not yet sellable" — it is not sellable at
+         all, by us. Stock parked with a consignee, and animals held as breeders,
+         behave the same way: we cannot fetch it, cook it or sell it, so counting
+         it as stock we hold makes the planner under-produce for exactly the
+         quantity it cannot have. "Counts as supply" in ⚙ Planning locations has
+         always said this; the pipeline was the one sum that ignored it.
+         It is still carried, and still shown — it is real stock and somebody
+         should be able to see it — but it is never added to Current stock. */
+      o.cons+=q; o.consSites[L]=(o.consSites[L]||0)+q;
+    }
   });
   const soldBy={}; (mom||[]).forEach(r=>{ const w=+PQ.win||60;
     soldBy[r.sku] = (w<=30?(+r.u30||0):(w<=60?(+r.u60||0):(w<=90?(+r.u90||0):(+r.u120||0)))); });
-  const rows=(prods||[]).filter(p=>!p.archived && !/sticker/i.test(String(p.group_1||'')))
+  const rows=(prods||[]).filter(p=>!isArchivedProd(p) && !/sticker/i.test(String(p.group_1||'')))
     .map(p=>{
-      const oh=ohBy[p.sku]||{sellAt:0, sellAfter:0, other:0, all:0};
+      const oh=ohBy[p.sku]||{sellAt:0, sellAfter:0, other:0, cons:0, all:0, sites:{}, consSites:{}};
       const ledAtCount=oh.sellAt;                       // ledger at the sell site when the count was taken
       const ledSell=oh.sellAt+oh.sellAfter;             // ledger at the sell site right now
       const hasSnap=(shopBy[p.sku]!=null);
       const shop=hasSnap ? Math.max(0, shopBy[p.sku]+oh.sellAfter) : Math.max(0,ledSell);
       const other=Math.max(0, oh.other);
-      /* Physical against physical. Where the feed gives on_hand, drift uses it;
-         a CSV paste has only the one column, so it uses that. */
-      const physAtCount=(snapOn && snapOn[p.sku]!=null) ? +snapOn[p.sku] : (hasSnap?shopBy[p.sku]:null);
+      /* LIKE FOR LIKE MEANS "MOVES AT THE SAME MOMENT", NOT "SOUNDS SIMILAR".
+         Our ledger raises a sale when the ORDER is placed. Shopify moves the
+         unit out of `available` at that same instant; `on_hand` does not drop
+         until the parcel is fulfilled. So the ledger's counterpart is
+         `available`, and drift is measured against it. Measuring against
+         on_hand added the whole order book to every row's drift — a warning
+         that is always on is a warning nobody reads. */
+      const physAtCount=hasSnap?shopBy[p.sku]:null;
+      const committed=(snapCm && snapCm[p.sku]!=null) ? +snapCm[p.sku] : null;
+      const onHandAt =(snapOn && snapOn[p.sku]!=null) ? +snapOn[p.sku] : null;
       return {sku:p.sku, name:prodLabel({...p},{noSku:true}), group_1:(p.group_1||'Products'),
         group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order, box:(+p.box_size||0),
         shop, snapQ:hasSnap?shopBy[p.sku]:null, postG:hasSnap?oh.sellAfter:0,
         ledSell, drift:(physAtCount!=null)?(physAtCount-ledAtCount):null, physAtCount,
+        committed, onHandAt,
+        /* WHICH sites the off-shelf packs are at, not just how many.
+           "Not yet sellable" is everywhere that is not the shop — which today
+           means Bulacan and nothing else. The moment a third site holds
+           finished packs (the breeder colony is one keystroke away) they would
+           be inside this number while the label still said Bulacan, and
+           somebody would go looking for packs that are not there. So the label
+           names the sites it is actually counting. */
+        otherSites:Object.keys(oh.sites||{}).filter(k=>(+oh.sites[k]||0)>0.0001)
+                     .sort((a,b)=>(+oh.sites[b]||0)-(+oh.sites[a]||0))
+                     .map(k=>({code:k, qty:Math.max(0,+oh.sites[k]||0)})),
+        consigned:Math.max(0,+oh.cons||0),
+        consSites:Object.keys(oh.consSites||{}).filter(k=>(+oh.consSites[k]||0)>0.0001)
+                     .sort((a,b)=>(+oh.consSites[b]||0)-(+oh.consSites[a]||0))
+                     .map(k=>({code:k, qty:Math.max(0,+oh.consSites[k]||0)})),
         other, bul:Math.max(0,+oh.other||0), sold:(+soldBy[p.sku]||0)};
     });
   return {rows, src:shopSrc, snap, waterLine};
+}
+
+/* ================= ONE STOCK PICTURE, READ THE SAME WAY EVERYWHERE =========
+   Regular Packs already answers "what can Pasig actually sell today" properly:
+   the Shopify reading, plus every ledger movement at the shop recorded AFTER
+   that reading was taken — the water line. Three other screens answered the
+   same question differently. Weekly Demand Target added both sites together
+   and called it On hand. The production plan showed no stock at all, so the
+   person deciding what to make was deciding blind. Live Stock showed a per-site
+   ledger balance. Four screens, four numbers, one question.
+
+   The sum now lives in one place and the screens read it.
+
+     Sellable          what the shop can sell right now   (Shopify + moves after)
+     Not yet sellable  what we own everywhere else        (the pipeline)
+     Current stock     the two, added
+
+   ON THE FORMULA AS IT WAS ASKED FOR. "Sellable + Not Yet Sellable + Stock on
+   hand (Shopify)" counts the shop twice — Sellable IS the Shopify figure, water
+   -line adjusted. Adding it a third time would inflate every row by the size of
+   the shop and overstate exactly the stock that stops the kitchen producing. So
+   it is two terms, and the raw Shopify reading is printed BESIDE them, where it
+   can be seen, rather than added into them where it cannot.
+
+   COVERAGE IS ALSO TWO NUMBERS.
+     days   sellable / sold per day — how long the SHELF lasts. This is the
+            priority order: packs at Bulacan do not stop Pasig running out on
+            Thursday.
+     %      current / target, where target is New Par + safety — how full we
+            are against the plan, counting everything we own.
+   A row can read 140% and still be empty at the shop. That gap is a van, not a
+   butchery day, and showing both is what makes the difference visible.        */
+let _stockPic=null, _stockPicAt=0;
+function stockPicInvalidate(){ _stockPic=null; _stockPicAt=0; }
+async function stockPicture(force){
+  const now=Date.now();
+  if(!force && _stockPic && (now-_stockPicAt)<60000) return _stockPic;
+  let built={rows:[], src:'', snap:null, waterLine:null}, err='';
+  try{ built=await pqBuildRows(); }
+  catch(e){ err=String((e&&e.message)||e); }
+  const by={};
+  (built.rows||[]).forEach(r=>{
+    const c=pqCalc(r);
+    const sellable=Math.max(0,+r.shop||0), pipeline=Math.max(0,+r.other||0);
+    by[r.sku]={ sku:r.sku, name:r.name, sellable, pipeline, current:sellable+pipeline,
+      otherSites:(r.otherSites||[]),
+      consigned:Math.max(0,+r.consigned||0), consSites:(r.consSites||[]),
+      shopQ:(r.snapQ==null?null:+r.snapQ), postG:+r.postG||0, drift:r.drift,
+      sold:+r.sold||0, perDay:c.perDay, coverDays:c.cover,
+      target:c.target, covPct:c.covPct, shelfPct:c.shelfPct,
+      toMove:c.toMove, toMake:c.toMake, produce:c.produce, rop:c.rop, alert:c.alert,
+      padded:c.padded, coverAfter:c.coverAfter };
+  });
+  _stockPic={ by, src:built.src||err, err, snap:built.snap, waterLine:built.waterLine,
+              sellLoc:planSellLoc(), makeLoc:planProduceLoc()||'bulacan',
+              at:(built.snap&&built.snap.at)||'' };
+  _stockPicAt=now;
+  return _stockPic;
+}
+function stockPicFor(sku){ return (_stockPic&&_stockPic.by&&_stockPic.by[sku])||null; }
+const _spN=v=>(v==null?'—':(Math.round((+v||0)*100)/100).toLocaleString('en-PH'));
+/* The three-line cell every screen uses, so "current stock" reads the same
+   wherever somebody meets it. */
+function spStockCell(s,opt){
+  opt=opt||{};
+  if(!s) return '<span class="mini" style="color:var(--muted)">'+(opt.blank||'—')+'</span>';
+  const shopBit=(s.shopQ!=null)
+    ? `<div class="mini" style="color:var(--muted)" title="the Shopify reading itself, before the movements posted since it was taken — it is already inside Sellable, not added to it">Shopify ${_spN(s.shopQ)}${s.postG?(s.postG>0?' +':' ')+_spN(s.postG)+' since':''}</div>` : '';
+  /* Name the sites the off-shelf packs are actually at. One site and it is
+     named outright; more than one and each is named with its share, because
+     "one transfer away" stops being true the moment there are two of them. */
+  const sites=(s.otherSites||[]);
+  const where = sites.length===1 ? locName(sites[0].code)
+              : sites.length>1   ? sites.map(x=>locName(x.code)+' '+_spN(x.qty)).join(' · ')
+              : '';
+  const pipeTitle = sites.length>1
+    ? 'off-shelf at MORE THAN ONE site — '+where+'. That is more than one transfer, so treat it as more than one job.'
+    : (sites.length===1 ? 'made, and sitting at '+where+' — one transfer away from being sellable'
+                        : 'made but off-shelf');
+  /* Shown, never added. A consignee's shelf and a breeder colony are stock that
+     exists and is not ours to plan with. */
+  const cons=(s.consSites||[]);
+  const consBit=(s.consigned>0)
+    ? `<div class="mini" style="color:var(--muted)" title="Not counted in Current stock, because it is not ours to pull from — the same rule ⚙ Planning locations states for a consignee or a breeder colony. Tick the site under &quot;Counts as supply&quot; if that is wrong.">not ours: ${_spN(s.consigned)}${cons.length?' at '+cons.map(x=>esc(locName(x.code))).join(', '):''}</div>` : '';
+  return `<b>${_spN(s.current)}</b>
+    <div class="mini" style="color:var(--muted)"><span style="color:#2f5d33">${_spN(s.sellable)}</span> sellable · <span style="color:var(--earth,#b5762a)" title="${esc(pipeTitle)}">${_spN(s.pipeline)}</span> not yet${
+      sites.length===1 ? ' at '+esc(where)
+      : sites.length>1 ? ` <b style="color:var(--earth,#b5762a)" title="${esc(pipeTitle)}">at ${sites.length} sites</b>` : ''}</div>${shopBit}${consBit}`;
+}
+function spCoverCell(s){
+  if(!s) return '<span class="mini" style="color:var(--muted)">—</span>';
+  const pct=(s.covPct==null)?null:Math.round(s.covPct*100);
+  const d=s.coverDays;
+  const dTxt=(d==null)?'<span class="mini" style="color:var(--muted)">—</span>'
+    :(d>=900?'<span class="mini" style="color:var(--muted)">no sales</span>'
+    :`<b style="color:${d<7?'var(--danger)':(d<14?'var(--earth,#b5762a)':'#4e7a3e')}">${Math.round(d*10)/10}d</b>`);
+  const pTxt=(pct==null)?''
+    :`<div class="mini" title="everything we own against New Par + safety stock — the shelf alone is ${s.shelfPct==null?'—':Math.round(s.shelfPct*100)+'%'}"
+        style="color:${pct<60?'var(--danger)':(pct<100?'var(--earth,#b5762a)':'#4e7a3e')};font-weight:700">${pct}%</div>`;
+  return dTxt+pTxt;
+}
+/* ARCHIVED MEANS ARCHIVED, WHEREVER IT WAS DECIDED.
+   The generic list screens archive with `active=false`; the Shopify sync marks
+   `shopify_status`; some older rows carry `archived`. One product must not be
+   live on one screen and archived on another, so every screen asks here. */
+function isArchivedProd(p){
+  if(!p) return false;
+  if(p.active===false) return true;
+  if(p.archived===true||p.archived==='Y'||p.archived==='true') return true;
+  const st=String(p.shopify_status||'').toUpperCase();
+  if(st==='ARCHIVED') return true;
+  return false;
 }
 async function renderPackReq(){
   $('crumb').innerHTML='<b>Regular Packs</b>';
@@ -3023,6 +3253,18 @@ function pqDraw(){
     ${kpi('Made, not yet sellable', Math.round(rows.reduce((a,r)=>a+r.other,0)), 'waiting on a transfer', 'var(--earth,#b5762a)')}
     ${(()=>{ const mv=rows.reduce((a,r)=>a+pqCalc(r).toMove,0);
        return kpi('Of that, a transfer not a run', Math.round(mv), mv?'move these before making anything':'nothing to move', mv?'var(--earth,#b5762a)':'#4e7a3e'); })()}
+    ${(()=>{ if(!PQ.minOn) return kpi('Rounding','off','asking for the exact shortfall','var(--muted)');
+       const pad=rows.reduce((a,r)=>a+(calc[r.sku].padded||0),0);
+       const share=totProduce>0?Math.round(pad/totProduce*100):0;
+       /* The floor is the cheapest thing on this screen to switch on and the
+          most expensive to leave on. Naming the row it hurts most turns an
+          abstract 41% into a decision somebody can actually take. */
+       let worst=null; rows.forEach(r=>{ const c=calc[r.sku];
+         if(c.produce>0 && c.coverAfter!=null && (!worst||c.coverAfter>worst.d)) worst={n:r.name,d:c.coverAfter}; });
+       return kpi('Added by rounding', Math.round(pad),
+         (pad? share+'% of the ask'+(worst?' · worst: '+esc(worst.n)+' ends on '+Math.round(worst.d)+'d cover':'')
+             : 'the ask is already on the case grid'),
+         share>=30?'var(--earth,#b5762a)':'#4e7a3e'); })()}
   </div>
   <div class="repcard" style="margin-top:12px">
     <div class="repbar" style="flex-wrap:wrap;gap:10px">
@@ -3031,7 +3273,12 @@ function pqDraw(){
       ${nm('Movement ×','move','safety-stock multiplier — raise it for a product whose sales jump about','any')}
       ${nm('Cycle (days)','cycle','how many days of cover a full par is meant to hold')}
       ${nm('Sales window','win','days of sales history the average is taken from — 30, 60, 90 or 120')}
-      ${nm('Case size','cs','New Par and To Produce are rounded up to a whole case of this many packs')}
+      <span class="mini" style="display:inline-flex;gap:6px;align-items:center;padding:2px 8px;border:1px solid var(--line);border-radius:14px;${PQ.minOn?'background:#eef3ec':''}">
+        <label style="display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Off = ask for exactly what the sum says, to the pack. On = round every run up to a whole case and never ask for fewer than the minimum.">
+          <input type="checkbox" ${PQ.minOn?'checked':''} onchange="pqToggle('minOn')"> <b>Round to a case</b></label>
+        ${PQ.minOn?nm('min','minPacks','never ask for fewer than this many packs once there is a run at all — a product that needs nothing still asks for nothing')
+                  +nm('in steps of','cs','runs are rounded up to a whole multiple of this'):''}
+      </span>
       <button class="btn sec sm" onclick="pqReset()">↺ Defaults</button>
       <span style="flex:1"></span>
       <input value="${esc(PQ_Q)}" placeholder="Search…" oninput="PQ_Q=this.value;pqDraw()"
@@ -3041,6 +3288,9 @@ function pqDraw(){
     <div class="hint" style="margin:0 0 8px">
       <b>Current stock</b> is <b>sellable now</b> + <b>made, not yet sellable</b> — the same sum the sheet does by hand as
       "Shopify + this week's production", except both halves here are read rather than typed.
+      <b>Not yet sellable counts only sites you can pull from</b> (${esc(planSupplyLocs().join(', ')||'bulacan')}).
+      A consignee's shelf and a breeder colony are shown under a row as <i>not ours</i> and never added — we cannot fetch it,
+      so counting it would under-produce by exactly the quantity we cannot have.
       <br><b>Sellable now is read from ${esc(window._pqSrc||'the ledger')}.</b>
       ${/^the ledger/.test(String(window._pqSrc||''))
         ? `No Shopify count is loaded, so this is <b>our own ledger</b> at <b>${esc(planSellLoc())}</b>,
@@ -3053,7 +3303,7 @@ function pqDraw(){
     <div style="overflow-x:auto" class="stickyhead"><table style="min-width:1180px"><thead><tr>
       <th style="min-width:200px">Product</th>
       <th class="num" title="what the shop can sell right now — ${esc(window._pqSrc||'the ledger')}">Sellable</th>
-      <th class="num" title="made but still at ${esc(planProduceLoc()||'bulacan')} or otherwise off-shelf — one transfer away">Not yet<br>sellable</th>
+      <th class="num" title="made, and sitting at a site we can pull from — ${esc(planSupplyLocs().join(', ')||'bulacan')} — so one transfer away. Stock held with a consignee or as breeders is NOT in here: we cannot fetch it, so counting it would make the planner under-produce by exactly the quantity it cannot have. Tick a site under &quot;Counts as supply&quot; in ⚙ Planning locations to change that.">Not yet<br>sellable</th>
       <th class="num" title="sellable + not yet sellable">Current<br>stock</th>
       <th class="num" title="how many days the SELLABLE shelf lasts at the current rate — this is the priority order, and it ignores stock sitting at the other site because that stock does not stop this shelf running out">Days<br>cover</th>
       <th class="num" title="units sold in the sales window">Sold<br>${PQ.win}d</th>
@@ -3064,7 +3314,7 @@ function pqDraw(){
       <th class="num" title="reorder point — lead-time demand + safety stock">ROP</th>
       <th class="num" title="average daily sale × cycle days">PAR</th>
       <th class="num" title="PAR rounded up to a whole case">New<br>Par</th>
-      <th class="num" title="current stock as a share of New Par">% of<br>par</th>
+      <th class="num" title="current stock as a share of New Par + safety stock — the same coverage % now shown on Weekly Demand Target, the Production Plan and Live Stock">Coverage<br>%</th>
       <th class="num" title="New Par + safety stock − current stock, rounded up to a case">To<br>produce</th>
       <th title="of the packs owed, how many are a transfer rather than a production run">Move or<br>make</th></tr></thead><tbody>`;
   const k0=v=>Math.round(v).toLocaleString('en-PH');
@@ -3086,7 +3336,7 @@ function pqDraw(){
       h+=`<tr>
         <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${c.alert?' · <b style="color:var(--danger)">reorder needed</b>':''}</div></td>
         <td class="num">${k0(r.shop)}${(r.drift!=null&&Math.abs(r.drift)>=1)
-          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="At the moment the count was taken, Shopify's physical count said ${k0(r.physAtCount)} and our ledger at ${esc(planSellLoc())} said ${k0(r.physAtCount-r.drift)}. Movements since then are already added above.">${r.drift>0?'+':''}${k0(r.drift)} vs ledger at the count</div>`:''}${(r.postG||0)!==0
+          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="At the moment the reading was taken, Shopify's AVAILABLE said ${k0(r.physAtCount)} and our ledger at ${esc(planSellLoc())} said ${k0(r.physAtCount-r.drift)}. Both drop when an order is placed, so this gap is a real adjustment somebody made on one side only — not the order book.${r.committed!=null?` Shopify also had ${k0(r.committed)} committed to unfulfilled orders${r.onHandAt!=null?` and ${k0(r.onHandAt)} physically on the shelf`:''}; committed packs are not in either figure above.`:''} Movements since then are already added.">${r.drift>0?'+':''}${k0(r.drift)} vs ledger at the reading</div>`:''}${(r.postG||0)!==0
           ? `<div class="mini" style="color:var(--muted)" title="net movement at ${esc(planSellLoc())} since the count — transfers in, sales out">${r.postG>0?'+':''}${k0(r.postG)} since</div>`:''}</td>
         <td class="num${r.other?'':' mini'}" style="${r.other?'color:var(--earth,#b5762a)':'color:var(--muted)'}">${r.other?k0(r.other):'—'}</td>
         <td class="num"><b>${k0(c.cur)}</b></td>
@@ -3103,9 +3353,12 @@ function pqDraw(){
         <td class="num mini" style="color:var(--muted)">${k0(c.rop)}</td>
         <td class="num mini" style="color:var(--muted)">${k0(c.par)}</td>
         <td class="num">${k0(c.newPar)}</td>
-        <td class="num">${c.pct==null?'<span class="mini" style="color:var(--muted)">—</span>'
-          :`<b style="color:${c.pct<0.5?'var(--danger)':(c.pct<1?'var(--earth,#b5762a)':'#4e7a3e')}">${Math.round(c.pct*100)}%</b>`}</td>
-        <td class="num">${c.produce?`<b style="color:var(--berry)">${k0(c.produce)}</b>`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
+        <td class="num">${c.covPct==null?'<span class="mini" style="color:var(--muted)">—</span>'
+          :`<b style="color:${c.covPct<0.6?'var(--danger)':(c.covPct<1?'var(--earth,#b5762a)':'#4e7a3e')}">${Math.round(c.covPct*100)}%</b>
+             <div class="mini" style="color:var(--muted)" title="the SHELF alone against the same target — the gap between this and the figure above is a transfer, not a production run">${c.shelfPct==null?'':Math.round(c.shelfPct*100)+'% on shelf'}</div>`}</td>
+        <td class="num">${c.produce?`<b style="color:var(--berry)">${k0(c.produce)}</b>${c.padded>0
+          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="the sum asked for ${k0(c.rawNeed)}; the case rule and the ${PQ.minPacks}-pack floor lifted it to ${k0(c.produce)}${c.coverAfter!=null&&c.coverAfter<900?', which leaves '+Math.round(c.coverAfter)+' days of cover':''}">+${k0(c.padded)} rounding${(c.coverAfter!=null&&c.coverAfter<900&&c.coverAfter>90)?` · ${Math.round(c.coverAfter)}d cover`:''}</div>`
+          : ''}`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
         <td class="mini">${(!c.toMove&&!c.toMake)?'<span style="color:var(--muted)">—</span>'
           :`${c.toMove>0?`<b style="color:var(--earth,#b5762a)">MOVE ${k0(c.toMove)}</b>`:''}${(c.toMove>0&&c.toMake>0)?'<br>':''}${c.toMake>0?`<b style="color:var(--berry)">MAKE ${k0(c.toMake)}</b>`:''}${(c.toMove>0&&!c.toMake)?'<div style="color:var(--muted)">already made — just transfer it</div>':''}`}</td></tr>`;
     });
@@ -3299,12 +3552,12 @@ async function renderProdSched(){
     const remaining=Math.max(0, tgt-a.made);
     const cover=remaining>0?(end/remaining):null;
     let g1;
-    if(isProd) g1='📦 '+(it.group_1||'Products');
+    if(isProd) g1=prodGroup(it).g1;
     else if(isStk) g1='🏷 Stickers & labels';
     else if(isSup) g1='🧴 Kitchen Supplies';
     else g1=_lsAnimalOf(it,a.sku);
     return {sku:a.sku, name:(isProd?prodLabel({...it,sku:a.sku},{noSku:true}):(it.name||a.sku)),
-      g1, g2:(isProd?(it.group_2||it.family||'Other'):(matOf(it)||a.sku)),
+      g1, g2:(isProd?prodGroup(it).g2:(matOf(it)||a.sku)),
       unit, div, begin:a.begin, day:a.day, det:a.det, end, made:a.made, target:tgt, remaining, cover};
   }).filter(r=> r.begin||r.end||r.target||Object.keys(r.day).length);
   drawProdSched();
@@ -3418,8 +3671,7 @@ async function renderLiveStock(){
     <button class="btn" onclick="renderLiveStock()">↻ Recompute</button>
     <span class="mini" style="margin-left:8px">Site <select onchange="LS_LOC=this.value;renderLiveStock()">
       <option value="all"${LS_LOC==='all'?' selected':''}>All</option>
-      <option value="bulacan"${LS_LOC==='bulacan'?' selected':''}>Bulacan</option>
-      <option value="pasig"${LS_LOC==='pasig'?' selected':''}>Pasig</option></select></span>
+      ${locOptions(LS_LOC,true)}</select></span>
     <label class="mini" style="margin-left:8px"><input type="checkbox" ${LS_ACT?'checked':''} onchange="LS_ACT=this.checked;renderLiveStock()"> Needs action only</label>
     <span class="mini" style="margin-left:10px">From <input type="date" value="${esc(LS_FROM)}" onchange="LS_FROM=this.value;renderLiveStock()"
       title="Everything before this date is folded into the opening column, so the ending figure stays correct. Blank = from the beginning."></span>
@@ -3477,7 +3729,7 @@ async function renderLiveStock(){
     // 3-level grouping (Group › Subgroup › Item), matching the count sheet & master data.
     let g1,g2,grank;
     const isStk=!isProd && /sticker|label/i.test(String(it.category||''));
-    if(isProd){ g1='📦 '+(it.group_1||'Products'); g2=(it.group_2||it.family||'Other'); grank=_so(it); }
+    if(isProd){ const G=prodGroup(it); g1=G.g1; g2=G.g2; grank=G.rank; }
     else if(isStk){ g1='🏷 Stickers & labels'; g2=(it.category||'Labels'); grank=900000; }
     else if(isSup){ g1='🧴 Kitchen Supplies'; g2=(it.category||'Supplies'); grank=800000; }
     else { /* animal first, then vegetables, then the rest — the freezer's own order */
@@ -3506,6 +3758,15 @@ async function renderLiveStock(){
   window._lsAll=rows;
   window._lsTotVal=Object.values(acc).reduce((s,a)=>s+a.val,0);
   window._lsProdSet=pm;
+  /* The two selling columns describe the PRODUCT across the business, not the
+     site filter above them — sellable is by definition at the shop, and the
+     pipeline is by definition not. They are the same figures Regular Packs,
+     the demand target and the production plan read, so the four screens can no
+     longer disagree about what "current stock" means. Only meaningful with the
+     clock at now: a back-dated window is a history question and today's shelf
+     is not an answer to it. */
+  window._lsPic=(!LS_TO);
+  if(window._lsPic){ try{ await stockPicture(); }catch(e){ window._lsPic=false; } }
   drawLiveStock();
 }
 function drawLiveStock(){
@@ -3526,19 +3787,20 @@ function drawLiveStock(){
 
   const qf=(v,div)=> div===1000? (Math.round(v/1000*100)/100).toLocaleString('en-PH',{maximumFractionDigits:2}) : num(Math.round(v));
   // 3-level grouping (Group › Subgroup › Item) — same order everywhere.
+  const SP=window._lsPic?2:0;
   const _lr=r=>r.grank==null?500000:r.grank;
   const _gmin=arr=>Math.min(...arr.map(_lr));
   const byG1={}; rows.forEach(r=>{ (byG1[r.g1]=byG1[r.g1]||[]).push(r); });
   h+=`<div class="repcard"><div style="overflow-x:auto"><table><thead><tr>
-    <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num" title="Sold on Shopify, less anything refunded or returned">−Sold</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
-  if(!rows.length) h+=`<tr><td colspan="${mh?11:12}" class="empty">${(LS_Q||LS_FLAG)?'Nothing matches that search.':(LS_ACT?'Nothing needs action ✅':'No stock movements yet.')}</td></tr>`;
+    <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num" title="Sold on Shopify, less anything refunded or returned">−Sold</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${SP?`<th class="num" title="Finished packs only. Current stock = what ${esc(planSellLoc())} can sell now + what is made but still off-shelf. Business-wide, whatever the Site filter above says — sellable is by definition at the shop.">Current<br>stock</th><th class="num" title="Days the sellable shelf lasts · everything we own against New Par + safety stock">Cover<br>d · %</th>`:''}${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
+  if(!rows.length) h+=`<tr><td colspan="${(mh?11:12)+SP}" class="empty">${(LS_Q||LS_FLAG)?'Nothing matches that search.':(LS_ACT?'Nothing needs action ✅':'No stock movements yet.')}</td></tr>`;
   Object.keys(byG1).sort((a,b)=>_gmin(byG1[a])-_gmin(byG1[b])||cmpGroupKeys(a,b)).forEach(g1=>{
     const g1list=byG1[g1]; const gval=g1list.reduce((s,r)=>s+r.value,0);
-    h+=`<tr style="background:#e7f0e9"><td colspan="${mh?10:10}"><b>${esc(g1)}</b> <span class="mini">· ${g1list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
+    h+=`<tr style="background:#e7f0e9"><td colspan="${10+SP}"><b>${esc(g1)}</b> <span class="mini">· ${g1list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
     const byG2={}; g1list.forEach(r=>{ (byG2[r.g2]=byG2[r.g2]||[]).push(r); });
     Object.keys(byG2).sort((a,b)=>_gmin(byG2[a])-_gmin(byG2[b])||cmpGroupKeys(a,b)).forEach(g2=>{
     const list=byG2[g2].slice().sort((a,b)=>_lr(a)-_lr(b)||cmpItems(a,b));
-    h+=`<tr style="background:#f6f8f4"><td colspan="${mh?11:12}" style="padding-left:24px">▸ <b>${esc(g2)}</b> <span class="mini">(${list.length})</span></td></tr>`;
+    h+=`<tr style="background:#f6f8f4"><td colspan="${(mh?11:12)+SP}" style="padding-left:24px">▸ <b>${esc(g2)}</b> <span class="mini">(${list.length})</span></td></tr>`;
     list.forEach(r=>{ const endCol=r.neg?'var(--danger)':(r.below?'var(--earth,#b5762a)':'var(--ink)');
       const flag=r.neg?'<span style="color:var(--danger);font-weight:700">🔴 negative</span>':(r.below?'<span style="color:var(--earth,#b5762a);font-weight:700">⚠ reorder</span>':'<span class="mini" style="color:var(--ok)">ok</span>');
       const cl=r.below||r.neg?' style="cursor:pointer"':' style="cursor:pointer"';
@@ -3549,11 +3811,14 @@ function drawLiveStock(){
         <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td>
         <td class="num"${(r.sold||r.back)?' title="sold '+qf(r.sold,r.div)+(r.back?' · back '+qf(r.back,r.div):'')+'"':''}>${(r.sold||r.back)?qf(r.sold+r.back,r.div):'—'}</td>
         <td class="num">${r.tf?qf(r.tf,r.div):'—'}</td><td class="num">${r.adj?qf(r.adj,r.div):'—'}</td>
-        <td class="num" style="color:${endCol}"><b>${qf(r.end,r.div)}</b></td>${mh?'':`<td class="num">${fmt(r.value)}</td>`}<td>${flag}</td></tr>`; });
+        <td class="num" style="color:${endCol}"><b>${qf(r.end,r.div)}</b></td>${SP?(()=>{ const pic=(r.kind==='product')?stockPicFor(r.sku):null;
+          return `<td class="num">${pic?spStockCell(pic):'<span class="mini" style="color:var(--muted)">—</span>'}</td><td class="num">${pic?spCoverCell(pic):'<span class="mini" style="color:var(--muted)">—</span>'}</td>`; })():''}${mh?'':`<td class="num">${fmt(r.value)}</td>`}<td>${flag}</td></tr>`; });
     });
   });
   h+=`</tbody></table></div>
-    <div class="hint" style="margin-top:8px"><b>Ending = Begin + In + Prod − Used ± Transfer ± Adjust</b>, straight from the ledger — so it both explains and equals current on-hand. Ingredients show in <b>kg</b>, finished goods in <b>packs</b>, supplies in their unit. Rows open the item; <b style="color:var(--earth,#b5762a)">⚠ reorder</b> = at/below reorder or PAR, <b style="color:var(--danger)">🔴 negative</b> = a ledger gap to fix. ${LS_LOC==='all'?'Showing both sites combined — switch Site to split Bulacan vs Pasig.':''}</div></div>`;
+    <div class="hint" style="margin-top:8px"><b>Ending = Begin + In + Prod − Used ± Transfer ± Adjust</b>, straight from the ledger — so it both explains and equals current on-hand. Ingredients show in <b>kg</b>, finished goods in <b>packs</b>, supplies in their unit. Rows open the item; <b style="color:var(--earth,#b5762a)">⚠ reorder</b> = at/below reorder or PAR, <b style="color:var(--danger)">🔴 negative</b> = a ledger gap to fix. ${LS_LOC==='all'?'Showing every site combined — switch Site to split them.':''}
+    ${SP?`<br><b>Current stock</b> and <b>Cover</b> are finished-goods columns and are <b>business-wide whatever the Site filter says</b> — <span style="color:#2f5d33">sellable</span> is by definition what ${esc(planSellLoc())} can sell right now, <span style="color:var(--earth,#b5762a)">not yet sellable</span> is everything we own somewhere else. They are the same numbers Regular Packs, the Weekly Demand Target and the Production Plan read, so the four screens cannot disagree about what current stock means.`
+      :'<br><b>Current stock</b> and <b>Cover</b> are hidden because the clock has been stopped at a past date — today’s shelf is not an answer to a question about last month.'}</div></div>`;
   $('content').innerHTML=h;
   if(typeof applyStickyHeads==='function') applyStickyHeads($('content'));
   _lsFocus();
@@ -3647,7 +3912,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-08-26 14:47Z';
+const WR_BUILD='2026-08-27 14:05Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -5017,12 +5282,24 @@ async function wdtSheetLoad(){
             isCustom:/^CUST-/.test(sku)};
   });
   await _wdtVelocity(rows);
+  /* The same stock picture Regular Packs reads — sellable at the shop, the
+     pipeline everywhere else, and the coverage that follows from both. ONLY
+     when the sheet is showing today: a live Shopify reading cannot describe a
+     sheet as it stood three weeks ago, and quietly pasting today's shelf into a
+     back-dated column would be a lie that looks like a fact. */
+  _wdtPicSrc='';
+  if(!_wdtAsOf){
+    try{ const PIC=await stockPicture();
+      rows.forEach(r=>{ r.pic=PIC.by[r.sku]||null; });
+      _wdtPicSrc=PIC.src||''; }catch(e){}
+  }
   rows.forEach(r=>{ r.coverDays=r.velKnown?(r.oh/r.perDay):(r.oh>0?9998:9997); });
   rows.sort((a,b)=> (b.still>0?1:0)-(a.still>0?1:0) || a.coverDays-b.coverDays || b.still-a.still);
   await _wdtBlockers(rows);
   return {weeks, rows, start, asOf};
 }
 
+let _wdtPicSrc='';
 function _wdtSheetHtml(){
   const S=_wdtSheet;
   if(!S) return '<div class="empty">Loading…</div>';
@@ -5045,7 +5322,10 @@ function _wdtSheetHtml(){
       <div class="stile"><div class="v">${all.length}</div><div class="l">Products in the window</div></div>
     </div>
     <div class="hint" style="margin:0 0 8px"><b>Target is what is still owed — not the two plot columns added together.</b> A demand plot is Par + safety <i>minus what is on the shelf</i>, so the newest plot for a product already contains what the older ones asked for. The plot columns on the right show the demand repeating; the Target column refuses to count it twice. Only production <i>after</i> the newest plot reduces it, because the plot was worked out against the shelf as it stood that day.<br>
-      <b>Priority is by cover</b> — what is on hand divided by how fast it sells, so low stock and fast moving are one question. Rows are in that order.</div>
+      <b>Priority is by cover</b> — what is on hand divided by how fast it sells, so low stock and fast moving are one question. Rows are in that order.<br>
+      <b>Current stock is two numbers, not three.</b> <b style="color:#2f5d33">Sellable</b> is what ${esc(planSellLoc())} can sell right now — the Shopify reading plus every movement posted at the shop since it was taken. <b style="color:var(--earth,#b5762a)">Not yet sellable</b> is what is made and sitting at a site we can pull from (${esc(planSupplyLocs().join(', ')||'bulacan')}) — one transfer away. Stock held with a consignee or as breeders is listed as <i>not ours</i> and never added. They add to Current stock; the Shopify figure printed under them is already <i>inside</i> Sellable and is shown so it can be checked, not so it can be added again.
+      ${_wdtPicSrc?`<br><span style="color:var(--muted)">Sellable read from ${esc(_wdtPicSrc)}.</span>`
+        :`<br><span style="color:var(--earth,#b5762a)">Showing a back-dated sheet, so the columns fall back to the ledger at both sites — a live Shopify reading cannot describe a past day.</span>`}</div>
     <div style="overflow-x:auto" class="stickyhead wdtsheet"><table style="min-width:${900+wk.length*150}px"><thead>
       <tr>
         <th colspan="2" class="stk1" style="border-bottom:2px solid var(--line,#e3e3e3)"></th>
@@ -5059,8 +5339,8 @@ function _wdtSheetHtml(){
         <th class="num" title="What is still owed. The newest plot for this product, plus any committed custom order — NOT the plot columns added up.">Target</th>
         <th class="num" title="Everything produced inside the window. Shown for the record; it is not the figure subtracted from Target.">Made this period</th>
         <th class="num" title="Target minus what was made AFTER the newest plot.">Still to make</th>
-        <th class="num" title="Finished packs at Bulacan and Pasig together, as at the as-of date. Already includes anything produced.">On hand</th>
-        <th class="num" title="On hand divided by how fast it sells, from Sales Momentum. This sets the row order.">Coverage</th>
+        <th class="num" title="Current stock = what the shop can sell now + what is made but still off-shelf. The same two numbers Regular Packs shows, read the same way. Sellable already IS the Shopify reading, water-line adjusted — it is printed underneath so you can see it, not added again.">Current<br>stock</th>
+        <th class="num" title="Days = how long the SELLABLE shelf lasts at the current rate; this sets the row order. % = everything we own against New Par + safety stock. A row can read 140% and still be empty at the shop — that gap is a transfer, not a production run.">Coverage<br>d · %</th>
         <th class="num" title="Stock at both sites the day the window opened.">Beg inventory</th>
         ${wk.map((w,i)=>`<th class="num" title="Confirmed batches ${esc(w.mon)} to ${esc(w.end)}">Produced ${lbl(i)}</th>`).join('')}
         <th class="num" title="Sales, less refunds and returns, inside the window.">Sold</th>
@@ -5078,10 +5358,12 @@ function _wdtSheetHtml(){
       <td class="num"><b>${r.target||'—'}</b>${r.custom?`<div class="mini" style="color:#6b3f7a">${r.custom} committed</div>`:''}</td>
       <td class="num mini" style="color:var(--muted)">${r.madeAll||'—'}</td>
       <td class="num"><b style="color:${r.still?'var(--berry)':'#4e7a3e'}">${r.still}</b></td>
-      <td class="num">${n2(r.oh)}</td>
-      <td class="num">${!r.velKnown?'<span class="mini" style="color:var(--muted)">no sales</span>'
+      <td class="num">${r.pic?spStockCell(r.pic)
+          :`<b>${n2(r.oh)}</b><div class="mini" style="color:var(--muted)">ledger, both sites</div>`}</td>
+      <td class="num">${r.pic?spCoverCell(r.pic)
+          :(!r.velKnown?'<span class="mini" style="color:var(--muted)">no sales</span>'
           :`<b style="color:${r.coverDays<7?'var(--danger)':(r.coverDays<14?'var(--berry)':'#4e7a3e')}">${Math.round(r.coverDays*10)/10}d</b>
-            <div class="mini" style="color:var(--muted)">${Math.round(r.perDay*10)/10}/day</div>`}</td>
+            <div class="mini" style="color:var(--muted)">${Math.round(r.perDay*10)/10}/day</div>`)}</td>
       <td class="num mini" style="color:var(--muted)">${n2(r.beg)}</td>
       ${r.made.map(v=>`<td class="num mini" style="color:${v?'#2f5d33':'var(--muted)'}">${v||'—'}</td>`).join('')}
       <td class="num mini" style="color:var(--muted)">${r.sold?n2(-r.sold):'—'}</td>
@@ -5980,6 +6262,275 @@ async function shLoad(){
       _shStock=(DEMO.products||[]).map(p=>({variant_sku:p.sku,product_name:p.name,available_pasig:Math.max(0,Math.floor(oh[p.sku]||0))}));
     }
   }catch(e){ _shStock=null; }
+  /* WHAT SHOPIFY SAYS ABOUT THE PRODUCT ITSELF, not about its stock.
+     A product archived in Shopify is one nobody can buy any more, and it must
+     not go on being offered on an order form here — or, worse, be produced
+     against a par that nothing will ever sell. The pull is a separate table
+     from shopify_inventory on purpose: an archived product usually has no
+     tracked inventory level at all, so it never appears in the inventory feed —
+     which is exactly the row we need to see. */
+  _shProdStat=null;
+  try{
+    if(isLive()) _shProdStat=await sb('shopify_products?select=sku,title,status,fetched_at&limit=5000');
+    else _shProdStat=DEMO.shopify_products||null;
+  }catch(e){ _shProdStat=null; }
+  _shQueue=null;
+  try{
+    if(isLive()) _shQueue=await sb('shopify_push_queue?select=*&order=id.desc&limit=300');
+    else _shQueue=DEMO.shopify_push_queue||null;
+  }catch(e){ _shQueue=null; }
+}
+let _shProdStat=null, _shQueue=null;
+/* ---- ARCHIVED IN SHOPIFY, STILL LIVE HERE -------------------------------
+   Three states are worth telling apart, and only one of them is a job:
+     to archive   Shopify says ARCHIVED (or DRAFT), our masterdata says active.
+                  This is the list. Archiving here hides it from every picker,
+                  every new record and the production ask, because the generic
+                  screens already refuse to offer an archived record.
+     to restore   we archived it, Shopify still sells it. Rarer, and worth
+                  seeing: somebody has tidied away a product the shop is still
+                  taking money for.
+     no variant   in our catalogue, not in Shopify at all. NOT a fault —
+                  custom-order pseudo-SKUs and ingredients live here quite
+                  legitimately — so it is counted and not alarmed about. */
+function shStatusGaps(prods){
+  const st={}; (_shProdStat||[]).forEach(r=>{ const k=String(r.sku||'').trim(); if(k) st[k]={s:String(r.status||'').toUpperCase(), t:r.title||'', at:r.fetched_at||''}; });
+  const toArchive=[], toRestore=[], noVariant=[];
+  (prods||[]).forEach(p=>{
+    if(p.is_custom||/^CUST-/i.test(String(p.sku||''))) return;
+    const hit=st[String(p.sku||'').trim()];
+    if(!hit){ noVariant.push(p); return; }
+    const dead=(hit.s==='ARCHIVED'||hit.s==='DRAFT');
+    const archHere=isArchivedProd(p);
+    if(dead && !archHere) toArchive.push({...p, shopStatus:hit.s, shopTitle:hit.t});
+    else if(!dead && archHere) toRestore.push({...p, shopStatus:hit.s, shopTitle:hit.t});
+  });
+  return {toArchive, toRestore, noVariant, known:Object.keys(st).length,
+          at:((_shProdStat||[])[0]||{}).fetched_at||''};
+}
+async function shArchiveApply(){
+  const g=window._shGaps||{}; const list=(g.toArchive||[]);
+  if(!list.length){ toast('Nothing to archive'); return; }
+  if(!confirm('Archive '+list.length+' product(s) in the ERP because Shopify has archived them?\n\n'
+    +list.slice(0,10).map(p=>'• '+p.name+'  ('+p.shopStatus+')').join('\n')
+    +(list.length>10?('\n… and '+(list.length-10)+' more'):'')
+    +'\n\nAn archived product stops being offered on new records — orders, plans, transfers, counts — '
+    +'and drops out of the production ask. Nothing already recorded against it changes, and archiving is reversible '
+    +'from the product itself.')) return;
+  showBusy('Archiving…');
+  let n=0, bad=0;
+  for(const p of list){
+    try{ await db.update('products', 'sku', p.sku, {active:false}); n++; }catch(e){ bad++; }
+  }
+  hideBusy();
+  toast(n+' product(s) archived'+(bad?(' · '+bad+' failed'):''), !!bad);
+  renderShopify();
+}
+
+/* ======================= STAGING A PUSH TO SHOPIFY ========================
+   Every Shopify script in this system so far has held read scopes only. This
+   is the first thing that would WRITE, and the difference is not a detail: a
+   wrong read shows a wrong number on a screen, a wrong write changes what a
+   customer can buy. So the write is built as three separate acts, by three
+   different things, and none of them can do the next one's job:
+
+     1. STAGE   this app writes a row into shopify_push_queue. That is all it
+                does. The browser holds no Shopify token and never will, so
+                nothing here can reach Shopify however wrong it is.
+     2. APPROVE a person reads the row and approves it. Staged rows are never
+                pushed; only approved ones are.
+     3. PUSH    wr-shopify-push.gs — the only thing that holds write_inventory —
+                drains approved rows and adjusts Shopify. It refuses any SKU
+                that is not on its own allow-list, so the first live test can
+                only ever touch the one product being tested.
+
+   IT IS A DELTA, NEVER A TOTAL. "Set Pasig to 40" and "add 12 to Pasig" look
+   equally reasonable on a form and behave completely differently when a
+   customer buys something in between: the delta lands on top of the sale, the
+   total silently sells that pack twice. Every row here is signed movement, and
+   `available` is deliberately not the target — Shopify computes `available`
+   from on_hand minus what it has committed, and pushing to it would fight the
+   order book. We adjust on_hand, which is what a transfer physically does.
+
+   AND IT CAN ONLY BE DONE ONCE. Each row carries an idem_key that the database
+   holds unique, and the script sends it to Shopify as the reference document
+   for the adjustment. A retry after a timeout finds the row already pushed and
+   the same reference already recorded — so the packs are added once even if the
+   push is attempted three times.                                             */
+const SHPUSH_ST={staged:'#fff3d6|#7a5a10|staged', approved:'#e2f0e4|#2d5c22|approved',
+                 pushed:'#e7f0e9|#2f5d33|pushed', failed:'#fbe3dd|#8a3520|failed',
+                 cancelled:'#eee|#666|cancelled'};
+function _shPushBadge(st){ const k=SHPUSH_ST[st]||SHPUSH_ST.staged; const [bg,fg,l]=k.split('|');
+  return `<span style="background:${bg};color:${fg};border-radius:20px;padding:1px 8px;font-size:11px;font-weight:700">${esc(l)}</span>`; }
+function shPushCardHtml(){
+  if(_shQueue===null){
+    return `<div class="repcard" style="margin-top:12px">
+      <div class="repbar"><span>Push to Shopify — not set up</span><span class="mini" style="color:var(--muted)">nothing writes to Shopify today</span></div>
+      <div class="hint">Run <b>sql/wr_shopify_status_and_push.sql</b> to create <code>shopify_push_queue</code>. Creating the table changes nothing on its own —
+        the queue can be filled and read for as long as you like before anybody installs the script that drains it.</div></div>`;
+  }
+  const q=_shQueue||[];
+  const n=st=>q.filter(r=>r.status===st).length;
+  const open=q.filter(r=>r.status==='staged'||r.status==='approved');
+  const done=q.filter(r=>r.status!=='staged'&&r.status!=='approved').slice(0,12);
+  return `<div class="repcard" style="margin-top:12px;border-left:4px solid var(--berry)">
+    <div class="repbar"><span>🚚 Push to Shopify — staging</span>
+      <span class="mini" style="color:var(--muted)">${n('staged')} staged · ${n('approved')} approved · ${n('pushed')} pushed${n('failed')?' · '+n('failed')+' failed':''}</span>
+      <span style="flex:1"></span>
+      <button class="btn sec sm" onclick="shPushFromTransfer()">＋ From a transfer</button>
+      <button class="btn sec sm" onclick="shPushStage()">＋ Stage one SKU</button></div>
+    <div class="hint" style="margin:0 0 8px"><b>This screen cannot reach Shopify.</b> It writes rows into a queue; <code>wr-shopify-push.gs</code> — the only
+      thing that holds <b>write_inventory</b> — drains the <b>approved</b> ones and nothing else. Staged rows sit there until a person approves them,
+      and the script refuses any SKU that is not on its own allow-list, so a first live test can only touch the one product you put on that list.<br>
+      Every row is a <b>signed adjustment to on_hand</b>, never a total. A delta lands correctly on top of a sale that happened in between; setting a total
+      would quietly sell the same pack twice. <code>available</code> is deliberately not the target — Shopify works that out itself from on_hand and what it
+      has committed, and writing to it would fight the order book.</div>
+    ${open.length?`<div style="overflow-x:auto"><table><thead><tr><th>Staged</th><th>Item</th><th>Site</th><th class="num">Adjust</th><th>Why</th><th>Status</th><th></th></tr></thead><tbody>
+      ${open.map(r=>`<tr>
+        <td class="mini">${esc(String(r.created_at||'').slice(0,16).replace('T',' '))}<div class="mini" style="color:var(--muted)">${esc(r.created_by||'')}</div></td>
+        <td>${esc(r.item_name||r.sku)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code></div></td>
+        <td class="mini">${esc(locName(r.location_code))}</td>
+        <td class="num"><b style="color:${(+r.delta||0)<0?'var(--danger)':'#2f5d33'}">${(+r.delta||0)>0?'+':''}${num(+r.delta||0)}</b></td>
+        <td class="mini">${esc(r.reason||'')}${r.source_ref?`<div class="mini" style="color:var(--muted)"><code>${esc(r.source_ref)}</code></div>`:''}</td>
+        <td>${_shPushBadge(r.status)}</td>
+        <td class="mini">${r.status==='staged'
+          ? `<button class="btn sm" onclick="shPushApprove(${+r.id})">Approve</button> <span style="cursor:pointer;color:var(--danger)" title="Cancel" onclick="shPushCancel(${+r.id})">✕</span>`
+          : `<span style="color:var(--muted)">waiting for the script</span> <span style="cursor:pointer;color:var(--danger)" title="Cancel before it is pushed" onclick="shPushCancel(${+r.id})">✕</span>`}</td></tr>`).join('')}
+      </tbody></table></div>`
+      :`<div class="empty">Nothing staged.</div>`}
+    ${done.length?`<div style="margin-top:10px"><div class="mini" style="color:var(--muted);margin-bottom:4px">Recently settled</div>
+      <div style="overflow-x:auto"><table><tbody>
+      ${done.map(r=>`<tr><td class="mini">${esc(String(r.pushed_at||r.created_at||'').slice(0,16).replace('T',' '))}</td>
+        <td class="mini">${esc(r.item_name||r.sku)}</td><td class="num mini">${(+r.delta||0)>0?'+':''}${num(+r.delta||0)}</td>
+        <td>${_shPushBadge(r.status)}</td><td class="mini" style="color:${r.status==='failed'?'var(--danger)':'var(--muted)'}">${esc(r.shopify_result||'')}</td></tr>`).join('')}
+      </tbody></table></div></div>`:''}
+  </div>`;
+}
+function _shIdem(sku,loc,delta,src){
+  /* Unique per intent, not per click. Two people staging the same transfer line
+     produce the same key and the database keeps one — which is the behaviour we
+     want, because the packs only moved once. */
+  return [String(src||'manual'), String(sku||''), String(loc||''), String(delta||0)].join('|')
+    .replace(/\s+/g,'').slice(0,180);
+}
+async function _shPushInsert(rows){
+  let n=0, dup=0, bad='';
+  for(const r of rows){
+    try{ await db.create('shopify_push_queue', r); n++; }
+    catch(e){ const m=String((e&&e.message)||e); if(/duplicate|unique/i.test(m)) dup++; else bad=m; }
+  }
+  return {n, dup, bad};
+}
+function shPushStage(){
+  const prods=(window._shGaps&&window._shGaps.noVariant)?null:null;
+  const all=(window._shProds||[]).filter(p=>!isArchivedProd(p))
+    .map(p=>({sku:p.sku, name:prodLabel({...p},{noSku:true})}));
+  $('modal').innerHTML=`<div><h3>Stage one SKU</h3>
+    <p class="mini">Writes a single row into the queue. <b>Nothing is sent to Shopify by this app</b> — it is sent by
+      <code>wr-shopify-push.gs</code>, after somebody approves the row, and only for SKUs on that script's allow-list.
+      Enter the <b>change</b>, not the new total: <b>+12</b> means twelve packs arrived, <b>−12</b> means twelve left.</p>
+    <label>Product SKU</label><input id="sp_sku" placeholder="e.g. BARF-RAB-500" list="sp_list">
+    <datalist id="sp_list">${all.slice(0,400).map(r=>`<option value="${esc(r.sku)}">${esc(r.name)}</option>`).join('')}</datalist>
+    <label>Site</label><select id="sp_loc">${locOptions(planSellLoc(),true)}</select>
+    <label>Adjust on_hand by (packs, signed)</label><input id="sp_qty" type="number" step="1" inputmode="numeric" placeholder="12">
+    <label>Why</label><input id="sp_why" value="manual adjustment" placeholder="transfer BUL→PAS, count correction…">
+    <div class="hint" style="margin-top:10px"><b>on_hand, not available.</b> A transfer changes what is physically on the shelf; Shopify works out
+      what is buyable from that, minus whatever it has already committed to unfulfilled orders. Writing to <code>available</code> would fight the order book.</div>
+    <div class="mfoot"><button class="btn" onclick="shPushStageSave()">Stage it</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+async function shPushStageSave(){
+  const sku=String(($('sp_sku')||{}).value||'').trim();
+  const loc=String(($('sp_loc')||{}).value||'').trim();
+  const d=Math.round(parseFloat(($('sp_qty')||{}).value||'0')||0);
+  const why=String(($('sp_why')||{}).value||'manual').trim();
+  if(!sku){ toast('Which product?',true); return; }
+  if(!d){ toast('An adjustment of zero would do nothing',true); return; }
+  const p=(window._shProds||[]).find(r=>r.sku===sku);
+  const src='manual-'+todayISO()+'-'+Math.abs(d);
+  const {n,dup,bad}=await _shPushInsert([{sku, item_name:(p&&(p.name||p.sku))||sku, location_code:loc, delta:d,
+    reason:why, source_table:'manual', source_ref:'', status:'staged',
+    created_by:(CURRENT_USER||''), idem_key:_shIdem(sku,loc,d,src)}]);
+  closeModal();
+  if(bad){ toast('Could not stage — '+bad, true); return; }
+  toast(n?('Staged — approve it to let the script pick it up'):(dup?'Already staged':'Nothing staged'), !n);
+  renderShopify();
+}
+async function shPushFromTransfer(){
+  showBusy('Reading transfers…');
+  let trs=[], lines=[];
+  const sell=planSellLoc();
+  try{
+    trs=(await db.list('transfers',{})).filter(t=>String(t.to_code||'')===sell && String(t.status||'')!=='cancelled');
+    trs.sort((a,b)=>String(b.transfer_date||b.transfer_ref||'').localeCompare(String(a.transfer_date||a.transfer_ref||'')));
+    trs=trs.slice(0,25);
+    lines=await db.list('transfer_lines',{});
+  }catch(e){}
+  hideBusy();
+  if(!trs.length){ toast('No transfers into '+locName(sell)+' to stage from',true); return; }
+  const byRef={}; (lines||[]).forEach(l=>{ (byRef[l.transfer_ref]=byRef[l.transfer_ref]||[]).push(l); });
+  const opt=trs.map(t=>{ const ls=(byRef[t.transfer_ref]||[]).filter(l=>String(l.kind||'')==='product');
+    return `<option value="${esc(t.transfer_ref)}">${esc(t.transfer_ref)} · ${esc(t.transfer_date||'')} · ${ls.length} product line(s) · ${esc(t.status||'')}</option>`; }).join('');
+  window._shTrLines=byRef;
+  $('modal').innerHTML=`<div><h3>Stage from a transfer</h3>
+    <p class="mini">Takes the <b>product</b> lines of one transfer into <b>${esc(locName(sell))}</b> and stages one signed adjustment per SKU.
+      Ingredients, supplies and labels are skipped — Shopify holds no count for them.<br>
+      Nothing is sent from here. Each row still has to be approved, and the push script still refuses any SKU that is not on its allow-list.</p>
+    <label>Transfer</label><select id="sp_tr" onchange="shPushTrPreview()">${opt}</select>
+    <div id="sp_prev" style="margin-top:10px"></div>
+    <div class="mfoot"><button class="btn" onclick="shPushTrSave()">Stage these</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on'); shPushTrPreview();
+}
+function _shTrRows(){
+  const ref=String(($('sp_tr')||{}).value||'');
+  const ls=((window._shTrLines||{})[ref]||[]).filter(l=>String(l.kind||'')==='product');
+  const agg={};
+  ls.forEach(l=>{ const sku=l.product_sku||l.ref_sku; if(!sku) return;
+    const q=Math.round(+l.qty||+l.qty_sent||0); if(!q) return;
+    agg[sku]=(agg[sku]||0)+q; });
+  return {ref, rows:Object.keys(agg).map(sku=>{ const p=(window._shProds||[]).find(r=>r.sku===sku);
+    return {sku, name:(p&&p.name)||sku, delta:agg[sku]}; })};
+}
+function shPushTrPreview(){
+  const {ref,rows}=_shTrRows(); const el=$('sp_prev'); if(!el) return;
+  el.innerHTML=rows.length
+    ? `<div style="overflow-x:auto;max-height:280px"><table><thead><tr><th>Item</th><th class="num">Adjust ${esc(locName(planSellLoc()))} by</th></tr></thead><tbody>
+        ${rows.map(r=>`<tr><td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code></div></td>
+          <td class="num"><b style="color:#2f5d33">+${num(r.delta)}</b></td></tr>`).join('')}</tbody></table></div>
+       <div class="hint" style="margin-top:8px">These are <b>additions to on_hand at ${esc(locName(planSellLoc()))}</b> — the packs the transfer physically put on that shelf.
+         The other site is not adjusted: Shopify holds no location for it, and inventing one would let a customer buy production stock.</div>`
+    : `<div class="empty">No product lines on ${esc(ref)}.</div>`;
+}
+async function shPushTrSave(){
+  const {ref,rows}=_shTrRows();
+  if(!rows.length){ toast('Nothing on that transfer to stage',true); return; }
+  const loc=planSellLoc();
+  const {n,dup,bad}=await _shPushInsert(rows.map(r=>({sku:r.sku, item_name:r.name, location_code:loc,
+    delta:r.delta, reason:'transfer into '+locName(loc), source_table:'transfers', source_ref:ref,
+    status:'staged', created_by:(CURRENT_USER||''), idem_key:_shIdem(r.sku,loc,r.delta,ref)})));
+  closeModal();
+  if(bad){ toast('Could not stage — '+bad, true); return; }
+  toast(n+' row(s) staged'+(dup?(' · '+dup+' already staged'):''));
+  renderShopify();
+}
+async function shPushApprove(id){
+  const r=(_shQueue||[]).find(x=>+x.id===+id); if(!r) return;
+  if(!confirm('Approve this row for pushing to Shopify?\n\n'
+    +(r.item_name||r.sku)+'\n'+locName(r.location_code)+'  '+((+r.delta||0)>0?'+':'')+r.delta+' pack(s) on_hand\n\n'
+    +'Approving does not send it. wr-shopify-push.gs picks up approved rows on its next run, and only for SKUs on its allow-list.\n'
+    +'This is the last point at which it can be stopped from here.')) return;
+  try{ await db.update('shopify_push_queue','id',r.id,{status:'approved', approved_by:(CURRENT_USER||''), approved_at:new Date().toISOString()});
+    toast('Approved'); }
+  catch(e){ toast('Could not approve — '+saveErrMsg(e), true); }
+  renderShopify();
+}
+async function shPushCancel(id){
+  const r=(_shQueue||[]).find(x=>+x.id===+id); if(!r) return;
+  if(!confirm('Cancel this staged row?\n\n'+(r.item_name||r.sku)+'  '+((+r.delta||0)>0?'+':'')+r.delta
+    +'\n\nIt stays in the list as cancelled so the history is intact, and the push script will not touch it.')) return;
+  try{ await db.update('shopify_push_queue','id',r.id,{status:'cancelled'}); toast('Cancelled'); }
+  catch(e){ toast('Could not cancel — '+saveErrMsg(e), true); }
+  renderShopify();
 }
 async function renderShopify(){
   $('crumb').innerHTML='<b>Shopify sync</b>';
@@ -6071,6 +6622,48 @@ async function renderShopify(){
         Posting them would deduct the same packs twice. If you decide otherwise, move the start date and run
         <code>select * from public.wr_shopify_repost();</code>.</div></div>`;
   }
+
+  /* ---------------- archived in Shopify, still live here ---------------- */
+  let _prodsAll=[]; try{ _prodsAll=await db.list('products',{}); }catch(e){}
+  window._shProds=_prodsAll;
+  /* The same stock picture the four planning screens read, so "what is still on
+     the shelf" is the same number here as it is there. */
+  try{ await stockPicture(); }catch(e){}
+  const G=shStatusGaps(_prodsAll); window._shGaps=G;
+  if(_shProdStat===null){
+    h+=`<div class="repcard" style="margin-top:12px;border-left:4px solid var(--earth,#b5762a)">
+      <div class="repbar"><span>Product status — not set up yet</span></div>
+      <div class="hint">The <code>shopify_products</code> table is not there, so nothing knows which products the shop has archived.
+        Run <b>sql/wr_shopify_status_and_push.sql</b> in Supabase, then <b>syncProductStatus()</b> in
+        <code>wr-shopify-inventory.gs</code>. It reads <code>product{ status }</code> and writes nothing to Shopify.</div></div>`;
+  } else {
+    const nA=G.toArchive.length, nR=G.toRestore.length;
+    h+=`<div class="repcard" style="margin-top:12px${nA?';border-left:4px solid var(--danger)':''}">
+      <div class="repbar"><span>${nA?('⚠ '+nA+' product(s) archived in Shopify but still live here'):'Product status agrees with Shopify'}</span>
+        <span class="mini" style="color:var(--muted)">${G.known} Shopify SKU(s) read${G.at?' · '+esc(String(G.at).slice(0,16).replace('T',' ')):''}</span></div>
+      ${nA?`<div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>Shopify says</th><th>Here</th><th class="num">Stock</th></tr></thead><tbody>
+        ${G.toArchive.slice(0,40).map(p=>{ const pic=stockPicFor(p.sku);
+          return `<tr><td>${esc(p.name||p.sku)}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div></td>
+          <td><span class="badge b-draft">${esc(p.shopStatus)}</span></td><td><span class="badge b-received">active</span></td>
+          <td class="num">${pic?spStockCell(pic):'<span class="mini" style="color:var(--muted)">—</span>'}</td></tr>`; }).join('')}
+        </tbody></table></div>
+        ${G.toArchive.length>40?`<div class="mini" style="color:var(--muted);margin-top:6px">+ ${G.toArchive.length-40} more — all of them are archived by the button below</div>`:''}
+        <div style="margin-top:8px"><button class="btn" onclick="shArchiveApply()">📦 Archive these ${nA} in the ERP</button></div>
+        <div class="hint" style="margin-top:8px"><b>Archiving here is what makes it stop.</b> An archived product is refused by every picker and every
+          new record, and drops out of the production ask — which is the point: a product nobody can buy must not be produced against a par.
+          <b>Stock is shown because archiving does not move it.</b> Packs still on the shelf stay on the ledger and stay countable; archiving
+          decides what may be <i>ordered and made</i>, never what exists. Work any remaining stock off first if you can — once the product is
+          archived it will not appear on a new transfer or order form.</div>`
+        :`<div class="hint">Every product Shopify has archived is archived here too. Nothing to do.</div>`}
+      ${nR?`<div class="hint" style="margin-top:8px;border-left:3px solid var(--earth,#b5762a)"><b>${nR} the other way round</b> — archived here, still on sale in Shopify:
+        ${G.toRestore.slice(0,8).map(p=>esc(p.name||p.sku)).join(' · ')}${nR>8?' … +'+(nR-8):''}.
+        The shop can still take money for these and nothing here will offer them. Un-archive the product, or archive it in Shopify.</div>`:''}
+      ${G.noVariant.length?`<div class="mini" style="color:var(--muted);margin-top:6px">${G.noVariant.length} ERP product(s) have no Shopify variant at all — custom-order SKUs and anything not sold online. Not a fault, and not touched.</div>`:''}
+    </div>`;
+  }
+
+  /* ---------------- staging a push, which is not the same as pushing ---- */
+  h+=shPushCardHtml();
   const topStock=(_shStock||[]).filter(r=>+r.available_pasig>0).slice(0,12);
   h+=`<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px">
     <div class="repcard" style="flex:1;min-width:340px">
@@ -9398,8 +9991,9 @@ async function coImpApply(){
   else toast('Imported '+lines.length+' mix(es) — set the customer and needed date, then Lock');
 }
 
-function _coProdOptions(sel){ const list=Object.values(_coProd).filter(p=>p.active!==false && !p.is_custom);
-  return hierGroups(list,{g1:'group_1',g2:'group_2'}).map(G=>G.subs.map(S=>`<optgroup label="${esc(G.g1+' › '+(S.g2||''))}">`+S.items.map(p=>`<option value="${esc(p.sku)}" ${sel===p.sku?'selected':''}>${esc(p.name||p.sku)}</option>`).join('')+`</optgroup>`).join('')).join(''); }
+function _coProdOptions(sel){ const list=Object.values(_coProd).filter(p=>!isArchivedProd(p) && !p.is_custom)
+    .map(p=>{ const G=prodGroup(p); return {...p, _g1:G.g1, _g2:G.g2}; });
+  return hierGroups(list,{g1:'_g1',g2:'_g2'}).map(G=>G.subs.map(S=>`<optgroup label="${esc(G.g1+' › '+(S.g2||''))}">`+S.items.map(p=>`<option value="${esc(p.sku)}" ${sel===p.sku?'selected':''}>${esc(p.name||p.sku)}</option>`).join('')+`</optgroup>`).join('')).join(''); }
 /* ============ Kitchen Batch, printed from the order =======================
    The Fresh Food Calculator produces this sheet before an order exists; the
    kitchen has been working from it for a year and reads it fluently. Once the
@@ -10553,7 +11147,12 @@ async function renderProdPlan(){
     <button class="btn sec" onclick="prodSaveDraft()">💾 Save draft</button>
     <button class="wfbtn" onclick="prodConfirm()">✅ Confirm production</button>
     <div class="sp"></div><span style="color:var(--muted)">plan &amp; print → come back → confirm actuals → post</span>`;
-  try{ window._prodAllProducts=(await db.list('products',{})).filter(p=>p.active!==false); }catch(e){ window._prodAllProducts=[]; }
+  try{ window._prodAllProducts=(await db.list('products',{})).filter(p=>!isArchivedProd(p)); }catch(e){ window._prodAllProducts=[]; }
+  /* What the kitchen is short of is not the same question as what the kitchen
+     should make first, and until now this screen answered neither: it showed a
+     target and a remainder and no stock at all. The same picture the demand
+     screens read now sits beside every line. */
+  try{ await stockPicture(); }catch(e){}
   try{ window._prodAllIngredients=await listIngredients(); }catch(e){ window._prodAllIngredients=[]; }
   await prodLoadTargets();
   if(!prodPlanLines.length && !prodRunRef) await prodLoadDraft();   // restore the saved plan (survives browser change)
@@ -10847,16 +11446,23 @@ function drawProdPlan(){
       ? `<span style="color:var(--muted);font-size:12px">Running target from <b>locked demand</b>${window._prodTargetRef?' · '+esc(window._prodTargetRef):''}${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''}${window._prodTargetCo?' + '+window._prodTargetCo+' custom order SKU(s)':''}. <b>Remaining</b> = target − confirmed production since that date − this run.</span>`
       : `<span style="color:var(--earth,#b5762a);font-size:12px">No locked demand for this week — <b>targets are blank on purpose</b>. Save a plan in Demand/MRP to lock it. You can still build and post this run without one.</span>`}</div>
     <div class="smart" style="margin:8px 0"><div class="stile"><div class="v">${totTarget}</div><div class="l">Target packs</div></div><div class="stile"><div class="v">${totGood}</div><div class="l">This run (good)</div></div><div class="stile"><div class="v" style="color:${totRemain>0?'var(--berry)':'#4e7a3e'}">${totRemain}</div><div class="l">Remaining to make</div></div></div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th class="num">Target</th><th class="num">Produced (wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
+    <div style="overflow-x:auto"><table style="min-width:1060px"><thead><tr><th>Product</th>
+      <th class="num" title="Current stock = what ${esc(planSellLoc())} can sell now + what is made but still off-shelf. Sellable already IS the Shopify reading, water-line adjusted.">Current<br>stock</th>
+      <th class="num" title="Days = how long the sellable shelf lasts. % = everything we own against New Par + safety. High % with low days means the packs exist but are at the wrong site — send a van, not a butchery day.">Cover<br>d · %</th>
+      <th class="num">Target</th><th class="num">Produced (wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
     ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodProducedMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
-      return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${t?'':'<div class="mini" style="color:var(--muted)">no target — made to order</div>'}</td>
+      const _pic=stockPicFor(l.product_sku);
+      return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${t?'':'<div class="mini" style="color:var(--muted)">no target — made to order</div>'}
+        ${(_pic&&_pic.toMove>0&&_pic.toMake<=0)?`<div class="mini" style="color:var(--earth,#b5762a)" title="the packs already exist at ${esc(planProduceLoc())} — this line needs a transfer, not a run">↦ ${_spN(_pic.toMove)} already made — transfer, don't produce</div>`:''}</td>
+      <td class="num">${spStockCell(_pic)}</td>
+      <td class="num">${spCoverCell(_pic)}</td>
       <td class="num">${t||'—'}</td><td class="num" style="color:var(--muted)">${p||'—'}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:74px;text-align:right" value="${l.good_packs||''}" oninput="prodPlanLines[${i}].good_packs=+this.value||0;prodRemainCell(${i})" onchange="prodPackTouch()"></td>
       <td class="num" id="prem${i}">${t?`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:60px;text-align:right" value="${l.reject_packs||''}" oninput="prodPlanLines[${i}].reject_packs=+this.value||0"></td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:70px;text-align:right" value="${l.waste_g||''}" oninput="prodPlanLines[${i}].waste_g=+this.value||0"></td>
       <td><input style="width:110px" value="${esc(l.output_lot||'')}" oninput="prodPlanLines[${i}].output_lot=this.value"></td>
-      <td><span style="cursor:pointer;color:var(--danger)" title="Remove line" onclick="prodDelLine(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="9" class="empty">Add a product below to start the run.</td></tr>'}
+      <td><span style="cursor:pointer;color:var(--danger)" title="Remove line" onclick="prodDelLine(${i})">✕</span></td></tr>`; }).join('')||'<tr><td colspan="11" class="empty">Add a product below to start the run.</td></tr>'}
     </tbody></table></div>
     <div style="margin-top:8px"><button class="btn sec sm" onclick="prodKitchenCart()">🔎 Search &amp; add products</button></div>
     <div class="pager">${prodPlanLines.length} product(s) · ${totGood} good packs this run · ${totRemain} remaining to make${(()=>{const o=prodOutLines.filter(l=>(+l.needed_kg||0)>0);return o.length?(' · plus '+o.length+' output ingredient(s), '+(Math.round(o.reduce((s,l)=>s+(+l.needed_kg||0),0)*1000)/1000)+' kg'):'';})()}</div>
@@ -11198,12 +11804,16 @@ function prodKitchenCart(){
   window._kcQ=''; window._kcG='';
   const groups=[...new Set(prods.map(p=>p.group_1||'—'))].sort();
   $('modal').innerHTML=`<div><h3>🔎 Search &amp; add products</h3>
-    <p class="mini">Search or filter, then enter <b>packs to produce</b> per product. It starts from the current plan; Apply rebuilds it. Target &amp; remaining come from the demand plot for this production week.</p>
+    <p class="mini">Search or filter, then enter <b>packs to produce</b> per product. It starts from the current plan; Apply rebuilds it. Target &amp; remaining come from the demand plot for this production week.<br>
+      <b>Current stock</b> is <span style="color:#2f5d33">sellable at ${esc(planSellLoc())}</span> + <span style="color:var(--earth,#b5762a)">made but not yet on the shelf</span>. <b>Cover</b> is days on the shelf, then the share of New Par + safety we hold everywhere. A high % beside a low day count means the packs exist and are at the wrong site.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
       <input id="kc_q" placeholder="🔎 search name / SKU / group…" oninput="window._kcQ=this.value;drawKitchenCartBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
       <select id="kc_g" onchange="window._kcG=this.value;drawKitchenCartBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All groups</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
     </div>
-    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Product</th><th class="num">Target</th><th class="num">Remaining</th><th class="num">Produce</th></tr></thead><tbody id="kcBody"></tbody></table></div>
+    <div class="mscroll" style="overflow-x:auto"><table style="min-width:640px"><thead><tr><th>Product</th>
+      <th class="num" title="what the shop can sell now + what is made but still off-shelf">Current<br>stock</th>
+      <th class="num" title="days the sellable shelf lasts · everything we own against New Par + safety">Cover<br>d · %</th>
+      <th class="num">Target</th><th class="num">Remaining</th><th class="num">Produce</th></tr></thead><tbody id="kcBody"></tbody></table></div>
     <div class="mfoot"><button class="btn" onclick="prodCartApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on'); drawKitchenCartBody();
 }
@@ -11211,13 +11821,19 @@ function drawKitchenCartBody(){
   const prods=(window._prodAllProducts||[]); const q=(window._kcQ||'').toLowerCase().split(/\s+/).filter(Boolean); const gf=window._kcG||'';
   const match=p=>{ if(gf && (p.group_1||'—')!==gf) return false; if(!q.length) return true;
     const t=[p.name,p.sku,p.group_1,p.group_2,p.variant,p.family].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
-  const shown=prods.filter(match); let body='';
-  hierGroups(shown,{g1:'group_1',g2:'group_2'}).forEach(G=>G.subs.forEach(S=>{
-    body+=`<tr style="background:#f6f8f4"><td colspan="4" style="padding-left:10px">▸ <b>${esc(G.g1+' › '+(S.g2||''))}</b></td></tr>`;
+  /* Grouped and headed exactly as Live Stock heads it — same helper, so the
+     two lists cannot disagree about which shelf a pack lives on. */
+  const shown=prods.filter(match).map(p=>{ const G=prodGroup(p); return {...p, _g1:G.g1, _g2:G.g2}; });
+  let body='';
+  hierGroups(shown,{g1:'_g1',g2:'_g2'}).forEach(G=>G.subs.forEach(S=>{
+    body+=`<tr style="background:#f6f8f4"><td colspan="6" style="padding-left:10px">▸ <b>${esc(G.g1+' › '+(S.g2||''))}</b></td></tr>`;
     S.items.forEach(p=>{ const hasT=+prodTargetMap[p.sku]>0; const rem=hasT?_prodRemain(p.sku,0):0; const v=(window._kcQty&&window._kcQty[p.sku]!=null)?window._kcQty[p.sku]:'';
-      body+=`<tr><td>${esc(p.name)}<div class="mini"><code>${esc(p.sku)}</code></div></td><td class="num mini">${prodTargetMap[p.sku]||'—'}</td><td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${hasT?(rem||'—'):'—'}</td>
+      const pic=stockPicFor(p.sku);
+      body+=`<tr><td>${esc(p.name)}<div class="mini"><code>${esc(p.sku)}</code></div></td>
+        <td class="num">${spStockCell(pic)}</td><td class="num">${spCoverCell(pic)}</td>
+        <td class="num mini">${prodTargetMap[p.sku]||'—'}</td><td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${hasT?(rem||'—'):'—'}</td>
         <td><input type="number" step="any" inputmode="decimal" value="${v}" placeholder="${rem||0}" oninput="window._kcQty['${esc(p.sku)}']=this.value===''?'':(+this.value||0)" style="width:70px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); }));
-  const el=$('kcBody'); if(el) el.innerHTML=body||'<tr><td colspan="4" class="empty">No products match.</td></tr>';
+  const el=$('kcBody'); if(el) el.innerHTML=body||'<tr><td colspan="6" class="empty">No products match.</td></tr>';
 }
 function prodCartApply(){ const q=window._kcQty||{}; let n=0;
   Object.keys(q).forEach(sku=>{ const v=q[sku]; const packs=(v===''||v==null)?0:(+v||0); const p=(window._prodAllProducts||[]).find(x=>x.sku===sku)||{name:sku};
@@ -13905,7 +14521,24 @@ function isProcessedItem(i){
 function _outIngRows(ings, list){
   const {bs,bn,ctx}=_outIngCtx(ings);
   return (list||[]).map(i=>{ const cl=_countIngClass(i,ctx); const p=_procParent(i,bs,bn);
-    return {...i, _g1:cl.g1, _g2:cl.g2, _nm:_outName(i,cl), _raw:p?p.name:'', _rawSku:p?p.sku:'', _grank:cl.grank}; });
+    /* GROUPED THE WAY THE FREEZER IS, like Live Stock and the count sheet.
+       This used to head its groups with the MASTERLIST CATEGORY — "Muscle
+       Meat", "Liver", "Fruits" — which scatters one animal across four
+       headings: rabbit liver under Liver, rabbit trimmings under Muscle Meat,
+       rabbit whole dressed somewhere else again. Live Stock settled this long
+       ago: animal first, then vegetables and fruit, then the rest, with the
+       base material underneath. Every ingredient dropdown in the app is built
+       here, so fixing it here fixes all of them at once — the substitution
+       picker, the output-ingredient picker, and the processed-form pickers.
+       The old category keys are kept as _cat1/_cat2 for anything that still
+       wants to read them, and sort_order is replaced on the COPY by the same
+       rank Live Stock orders by, so the two screens cannot drift into two
+       different orders. */
+    return {...i, _g1:(cl.lsG1||cl.g1), _g2:(cl.lsG2||cl.g2),
+            _cat1:cl.g1, _cat2:cl.g2,
+            _nm:_outName(i,cl), _raw:p?p.name:'', _rawSku:p?p.sku:'', _grank:cl.grank,
+            sort_order:cl.grank};
+  });
 }
 /* "Rabbit Ground Whole (w/ organs) — Processed" reads better here as just the item name;
    the "Processed:" / "Raw:" labels live in the two columns instead. */
@@ -14092,7 +14725,8 @@ async function renderCountForm(idEnc){
     try{ const ai=await db.list('ingredients',{}); const _bs={},_bn={}; ai.forEach(i=>{ _bs[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)_bn[nm]=i; });
       const _pm=_countProcMaps(ai,_bs,_bn); const ctx={bs:_bs,bn:_bn,procBases:_pm.bases,procCat:_pm.catByBase};
       const im={}; ai.forEach(i=>{ im[i.sku]={cl:_countIngClass(i,ctx), kind:'ingredient'}; });
-      (await db.list('products',{})).forEach(p=>im[p.sku]={n:p.name,fam:(p.family||'Other'),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),so:_so(p),kind:'product',box:(+p.box_size||1)});
+      (await db.list('products',{})).forEach(p=>{ const G=prodGroup(p);
+        im[p.sku]={n:p.name,fam:(p.family||'Other'),g1:G.g1,g2:G.g2,so:G.rank,kind:'product',box:(+p.box_size||1)}; });
       countLines.forEach(l=>{
         if(String(l.ref_sku).startsWith('STK-')){ const h=im[String(l.ref_sku).slice(4)]; l.cat=((h&&h.fam)||'Other')+' — Stickers'; l.g1=((h&&h.g1)||'Products')+' — Stickers'; l.g2=(h&&h.g2)||'Other'; l.grank=600000+((h&&h.so)||0); l.name=l.name||l.ref_sku; l.uom='pcs'; l.scale=1; }
         else { const h=im[l.ref_sku];
@@ -14217,14 +14851,19 @@ async function countPrintSheet(){
   const fname='WR_Count_'+_fileSafe(countRec.count_ref||todayISO())+'_'+_fileSafe(loc||'LOC')+'_'+todayISO()+'.pdf';
   try{ toast('Preparing PDF…'); const dd=_pdfDocDef({title:'Weekly Count Sheet', sub, lines:countLines, cols:_cntCols()}); await _downloadPdf(dd,fname); toast('PDF generated — check your downloads'); }
   catch(e){
-    let body='', k=0; _countRenderRows().forEach(r=>{
-      if(r.type==='g1'){ body+=`<tr class="grp1"><td colspan="6">${esc(r.label)} (${r.count})</td></tr>`; return; }
-      if(r.type==='g2'){ body+=`<tr class="cat"><td colspan="6">&nbsp;&nbsp;▸ ${esc(r.label)} (${r.count})</td></tr>`; return; }
-      const l=r.l, s=+l.scale||1; k++; body+=`<tr><td class="num">${k}</td><td>${esc(l.name||l.ref_sku)}</td><td>${esc(l.ref_sku)}</td><td>${esc(binOf(l.ref_sku,countRec.location_code))}</td><td class="bk">${l.book_qty!=null?num(Math.round((+l.book_qty/s)*1e4)/1e4):''}${l.uom?' '+esc(l.uom):''}</td><td class="ct"></td></tr>`; });
+    // Same column spec as the styled PDF and the Excel — one definition.
+    const cols=_cntCols(); const N=cols.length;
+    let body='';
+    _numberedRows(countLines).forEach(r=>{
+      if(r.t==='g1'){ body+=`<tr class="grp1"><td colspan="${N}">${esc(r.label)} (${r.count})</td></tr>`; return; }
+      if(r.t==='g2'){ body+=`<tr class="cat"><td colspan="${N}">&nbsp;&nbsp;▸ ${esc(r.label)} (${r.count})</td></tr>`; return; }
+      body+='<tr>'+cols.map((c,ci)=>{ const v=c.val(r.l,r.n);
+        const cls=(ci===0)?' class="num"':(c.label==='Counted'?' class="ct"':(c.align==='right'?' class="bk"':''));
+        return `<td${cls}>${esc(v==null?'':v)}</td>`; }).join('')+'</tr>'; });
     const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}thead{display:table-header-group}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}td.num{text-align:right;width:34px;color:#888}tr.grp1 td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.cat td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:120px;border-bottom:1px solid #333}</style></head><body>
       <h1>🐇 Wholesome Rabbit — Weekly Count Sheet</h1>
       <h2>${esc(countRec.count_ref||'')} · ${esc(loc)} · ${esc(countRec.count_date||'')} · counted by: ____________________</h2>
-      <table><thead><tr><th>#</th><th>Item</th><th>SKU</th><th>Bin</th><th style="text-align:right">Book qty</th><th>Counted</th></tr></thead><tbody>${body}</tbody></table>
+      <table><thead><tr>${cols.map(c=>`<th${c.align==='right'?' style="text-align:right"':''}>${esc(c.label)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>
       <p style="margin-top:20px;color:#888;font-size:11px">Printed ${new Date().toLocaleString()} · write the physical count in the right column, then enter it in the app. (Enable the browser's "Headers and footers" print option for page numbers.)</p></body></html>`;
     const w=window.open('','_pr','width=840,height=980'); if(!w){toast('Allow pop-ups to print',true);return;} w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>w.print(),200);
   }
@@ -14233,10 +14872,21 @@ async function countPrintSheet(){
 // lines {g1,g2,grank,form,name}. Shared by the weekly count AND the opening-balance sheet so their
 // printout and Excel are identical line-for-line (row N in the PDF == row N in the Excel).
 function _renderRows(lines){ const _lr2=l=>l.grank==null?500000:l.grank; const _gmin=arr=>Math.min(...arr.map(_lr2));
-  const _bg1={}; lines.slice().sort((a,b)=>_lr2(a)-_lr2(b)||String(a.name||'').localeCompare(b.name||'')).forEach(l=>{ const k=l.g1||l.cat||'Other'; (_bg1[k]=_bg1[k]||[]).push(l); });
+  /* GROUP THE WAY THE SCREEN GROUPS. The count form heads its sections the way
+     Live Stock does — by animal, then vegetables and fruit, then the rest — so
+     somebody walking the freezer counts one animal at a time. That change went
+     into the screen and stopped there: this function, which builds BOTH the
+     printed sheet and the Excel template, still grouped by the old masterlist
+     category. So the sheet in the counter's hand was in a different order from
+     the screen they typed it back into, and every line had to be hunted for.
+     lsG1/lsG2 first, the old keys as the fallback — so the opening-balance
+     sheet, which shares this function and has no animal grouping, is unchanged. */
+  const _g1of=l=>l.lsG1||l.g1||l.cat||'Other';
+  const _g2of=l=>l.lsG2||l.g2||'Other';
+  const _bg1={}; lines.slice().sort((a,b)=>_lr2(a)-_lr2(b)||String(a.name||'').localeCompare(b.name||'')).forEach(l=>{ const k=_g1of(l); (_bg1[k]=_bg1[k]||[]).push(l); });
   const out=[]; Object.keys(_bg1).sort((a,b)=>_gmin(_bg1[a])-_gmin(_bg1[b])).forEach(g1=>{
     out.push({type:'g1',label:g1,count:_bg1[g1].length});
-    const _bg2={}; _bg1[g1].forEach(l=>{ const k=l.g2||'Other'; (_bg2[k]=_bg2[k]||[]).push(l); });
+    const _bg2={}; _bg1[g1].forEach(l=>{ const k=_g2of(l); (_bg2[k]=_bg2[k]||[]).push(l); });
     const _fr=l=>((l.form==='processed')?1:0);
     Object.keys(_bg2).sort((a,b)=>_gmin(_bg2[a])-_gmin(_bg2[b])).forEach(g2=>{
       out.push({type:'g2',label:g2,count:_bg2[g2].length});
@@ -14245,25 +14895,48 @@ function _renderRows(lines){ const _lr2=l=>l.grank==null?500000:l.grank; const _
 function _countRenderRows(){ return _renderRows(countLines); }
 // Column spec for the weekly count sheet (headers 'SKU'/'Counted' keep the uploader parser working;
 // the '#' item-number column is ignored on re-upload).
-function _cntCols(){ return [
+function _cntCols(){
+  const cols=[
   {label:'#', width:6, pdfWidth:'auto', align:'right', val:(l,n)=>n},
   {label:'Item', width:44, pdfWidth:'*', val:l=>l.name||l.ref_sku},
   {label:'SKU', width:30, pdfWidth:110, fontSize:8, val:l=>l.ref_sku},
   {label:'Bin', width:12, pdfWidth:'auto', val:l=>binOf(l.ref_sku,countRec.location_code)},
-  {label:'Book qty', width:14, pdfWidth:'auto', align:'right', val:l=>{ const s=+l.scale||1; return l.book_qty!=null?(num(Math.round((+l.book_qty/s)*1e4)/1e4)+(l.uom?' '+l.uom:'')):''; }},
-  {label:'Counted', width:14, pdfWidth:60, align:'right', val:()=>''} ]; }
+  {label:'Book qty', width:14, pdfWidth:'auto', align:'right', val:l=>{ const s=+l.scale||1; return l.book_qty!=null?(num(Math.round((+l.book_qty/s)*1e4)/1e4)+(l.uom?' '+l.uom:'')):''; }}];
+  /* When the book qty came from Shopify, our own ledger goes beside it — that
+     gap is the entire reason for counting against Shopify while the two systems
+     are still learning to agree, and it was visible on screen and nowhere else.
+     Only added when it means something: a column of blanks is worse than no
+     column, and it would break the header the re-upload parser looks for. */
+  if(window._countShopMeta && window._countShopMeta.matched){
+    cols.push({label:'Ledger', width:12, pdfWidth:'auto', align:'right',
+      /* A real number, not a formatted string. Book qty carries its unit and so
+         has to be text; this one does not, and somebody will want to subtract
+         it from what they counted. */
+      numFmt:'#,##0.####',
+      val:l=>{ if(l.bookSrc!=='shopify') return ''; const s=+l.scale||1;
+        return Math.round(((+l.erpQty||0)/s)*1e4)/1e4; }});
+  }
+  cols.push({label:'Counted', width:14, pdfWidth:60, align:'right', val:()=>''});
+  return cols; }
 // Download the count sheet as a styled Excel (frozen header, item #, section fills) — same rows/order
 // as the printout, with a blank Counted column. Fill Counted, re-upload, and it fills back in the app.
 async function countExportTemplate(){
   if(!countLines.length){ toast('Load items first',true); return; }
   const base='WR_Count_'+_fileSafe(countRec.count_ref||todayISO());
   try{ await _excelStyled([['Count',countLines]], base+'.xlsx', _cntCols()); toast('Template downloaded — styled, matches the printout'); }
-  catch(e){ const HDR=['Item','SKU','Bin','Book qty','Counted']; const rows=[]; _countRenderRows().forEach(r=>{
-      if(r.type==='g1'){ rows.push([r.label+' ('+r.count+')','','','','']); return; }
-      if(r.type==='g2'){ rows.push(['▸ '+r.label+' ('+r.count+')','','','','']); return; }
-      const l=r.l, s=+l.scale||1; const bk=l.book_qty!=null?(num(Math.round((+l.book_qty/s)*1e4)/1e4)+(l.uom?' '+l.uom:'')):'';
-      rows.push([(l.name||l.ref_sku), l.ref_sku, binOf(l.ref_sku,countRec.location_code), bk, '']); });
-    if(typeof XLSX!=='undefined'){ const wb=XLSX.utils.book_new(); const ws=XLSX.utils.aoa_to_sheet([HDR,...rows]); ws['!cols']=[{wch:44},{wch:32},{wch:12},{wch:12},{wch:12}]; XLSX.utils.book_append_sheet(wb,ws,'Count'); XLSX.writeFile(wb,base+'.xlsx'); toast('Template downloaded'); }
+  catch(e){
+    /* The fallback used to declare its own five columns by hand. That is how the
+       styled export and the plain one drifted apart in the first place — two
+       lists of headings that nobody kept in step. Both are built from
+       _cntCols() now, so there is one definition of what a count sheet is. */
+    const cols=_cntCols(); const N=cols.length;
+    const HDR=cols.map(c=>c.label);
+    const blank=()=>Array(N).fill('');
+    const rows=[]; _numberedRows(countLines).forEach(r=>{
+      if(r.t==='g1'||r.t==='g2'){ const b=blank(); b[0]=(r.t==='g2'?'▸ ':'')+r.label+' ('+r.count+')'; rows.push(b); return; }
+      rows.push(cols.map(c=>{ const v=c.val(r.l,r.n); return (v==null?'':v); })); });
+    if(typeof XLSX!=='undefined'){ const wb=XLSX.utils.book_new(); const ws=XLSX.utils.aoa_to_sheet([HDR,...rows]);
+      ws['!cols']=cols.map(c=>({wch:c.width||14})); XLSX.utils.book_append_sheet(wb,ws,'Count'); XLSX.writeFile(wb,base+'.xlsx'); toast('Template downloaded'); }
     else { const all=[HDR,...rows]; dlBlob(all.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n'),base+'.csv','text/csv'); toast('Template downloaded (CSV)'); } }
 }
 // Parse an uploaded template AoA → [{sku, counted}] using the 'sku' + 'counted' (or 'count'/'qty') columns.
