@@ -3912,7 +3912,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-08-27 14:05Z';
+const WR_BUILD='2026-08-27 15:45Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -6424,7 +6424,7 @@ async function _shPushInsert(rows){
 function shPushStage(){
   const prods=(window._shGaps&&window._shGaps.noVariant)?null:null;
   const all=(window._shProds||[]).filter(p=>!isArchivedProd(p))
-    .map(p=>({sku:p.sku, name:prodLabel({...p},{noSku:true})}));
+    .map(p=>({sku:p.sku, name:prodLabel(p,{noSku:true})}));
   $('modal').innerHTML=`<div><h3>Stage one SKU</h3>
     <p class="mini">Writes a single row into the queue. <b>Nothing is sent to Shopify by this app</b> — it is sent by
       <code>wr-shopify-push.gs</code>, after somebody approves the row, and only for SKUs on that script's allow-list.
@@ -6643,7 +6643,7 @@ async function renderShopify(){
         <span class="mini" style="color:var(--muted)">${G.known} Shopify SKU(s) read${G.at?' · '+esc(String(G.at).slice(0,16).replace('T',' ')):''}</span></div>
       ${nA?`<div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>Shopify says</th><th>Here</th><th class="num">Stock</th></tr></thead><tbody>
         ${G.toArchive.slice(0,40).map(p=>{ const pic=stockPicFor(p.sku);
-          return `<tr><td>${esc(p.name||p.sku)}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div></td>
+          return `<tr><td>${prodLabelHtml(p,{noSku:true})}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div></td>
           <td><span class="badge b-draft">${esc(p.shopStatus)}</span></td><td><span class="badge b-received">active</span></td>
           <td class="num">${pic?spStockCell(pic):'<span class="mini" style="color:var(--muted)">—</span>'}</td></tr>`; }).join('')}
         </tbody></table></div>
@@ -6656,7 +6656,7 @@ async function renderShopify(){
           archived it will not appear on a new transfer or order form.</div>`
         :`<div class="hint">Every product Shopify has archived is archived here too. Nothing to do.</div>`}
       ${nR?`<div class="hint" style="margin-top:8px;border-left:3px solid var(--earth,#b5762a)"><b>${nR} the other way round</b> — archived here, still on sale in Shopify:
-        ${G.toRestore.slice(0,8).map(p=>esc(p.name||p.sku)).join(' · ')}${nR>8?' … +'+(nR-8):''}.
+        ${G.toRestore.slice(0,8).map(p=>prodLabelHtml(p,{noSku:true})).join(' · ')}${nR>8?' … +'+(nR-8):''}.
         The shop can still take money for these and nothing here will offer them. Un-archive the product, or archive it in Shopify.</div>`:''}
       ${G.noVariant.length?`<div class="mini" style="color:var(--muted);margin-top:6px">${G.noVariant.length} ERP product(s) have no Shopify variant at all — custom-order SKUs and anything not sold online. Not a fault, and not touched.</div>`:''}
     </div>`;
@@ -7217,7 +7217,7 @@ async function renderMRP(){
   Object.keys(coAll).forEach(s=>{ if(coFresh[s] && (+mrpDemand[s]||0)!==coAll[s].packs) coPend[s]=coAll[s].packs; });
   window._mrpCoPend=coPend;
   const nCoPend=Object.keys(coPend).length;
-  const _pName={}; prods.forEach(p=>{ _pName[p.sku]=p.name||p.sku; });
+  const _pName={}; prods.forEach(p=>{ _pName[p.sku]=prodLabel(p,{noSku:true})||p.sku; });
 
   /* ---- Custom orders get their own section -------------------------------
      They were rows 130-odd deep in a list of 135 products, so nobody saw them
@@ -8817,7 +8817,7 @@ async function openTransferReceive(){
   if(!lines.length){ try{ lines=await db.children(MODELS.transfers.o2m, formRec.transfer_ref); formChildren=lines; }catch(e){} }
   if(!lines.length){ toast('No products to receive',true); return; }
   const creator=formRec.created_by||'—';
-  let prodMap={}; try{ (await db.list('products',{})).forEach(p=>prodMap[p.sku]={name:p.name,box:(+p.box_size||1)}); }catch(e){}
+  let prodMap={}; try{ (await db.list('products',{})).forEach(p=>prodMap[p.sku]={name:prodLabel(p,{noSku:true}),box:(+p.box_size||1)}); }catch(e){}
   /* A transfer can carry ingredients now, and an ingredient is WEIGHED. The
      dialog said "packs actually received" over a line holding 9.8 kg of
      ostrich, and the row showed a bare SKU because ingredients are not in the
@@ -8957,7 +8957,7 @@ async function renderDashboard(){
   const varVal=openVars.reduce((s,v)=>s+Math.abs(+v.gap_value||0),0);
   const openPo=po.filter(p=>['open','rfq','quoted','confirmed'].includes(p.status)).length;
   // labels to reorder (per site, below par)
-  const reorder=[]; prod.forEach(p=>{ [['bulacan','Bulacan'],['pasig','Pasig']].forEach(sc=>{ const oh=+p['sticker_'+sc[0]+'_on_hand']||0, par=+p['sticker_'+sc[0]+'_par']||0; if(par>0 && oh<par) reorder.push({name:p.name+(oh||par?'':''),cur:oh,par,order:par-oh,site:sc[1]}); }); });
+  const reorder=[]; prod.forEach(p=>{ [['bulacan','Bulacan'],['pasig','Pasig']].forEach(sc=>{ const oh=+p['sticker_'+sc[0]+'_on_hand']||0, par=+p['sticker_'+sc[0]+'_par']||0; if(par>0 && oh<par) reorder.push({name:prodLabel(p,{noSku:true}),cur:oh,par,order:par-oh,site:sc[1]}); }); });
   reorder.sort((a,b)=>b.order-a.order);
   // family rollup
   let famArr=Object.keys(famVal).map(k=>({label:k,value:famVal[k]})).sort((a,b)=>b.value-a.value);
@@ -9993,7 +9993,7 @@ async function coImpApply(){
 
 function _coProdOptions(sel){ const list=Object.values(_coProd).filter(p=>!isArchivedProd(p) && !p.is_custom)
     .map(p=>{ const G=prodGroup(p); return {...p, _g1:G.g1, _g2:G.g2}; });
-  return hierGroups(list,{g1:'_g1',g2:'_g2'}).map(G=>G.subs.map(S=>`<optgroup label="${esc(G.g1+' › '+(S.g2||''))}">`+S.items.map(p=>`<option value="${esc(p.sku)}" ${sel===p.sku?'selected':''}>${esc(p.name||p.sku)}</option>`).join('')+`</optgroup>`).join('')).join(''); }
+  return hierGroups(list,{g1:'_g1',g2:'_g2'}).map(G=>G.subs.map(S=>`<optgroup label="${esc(G.g1+' › '+(S.g2||''))}">`+S.items.map(p=>`<option value="${esc(p.sku)}" ${sel===p.sku?'selected':''}>${prodLabelHtml(p,{noSku:true})}</option>`).join('')+`</optgroup>`).join('')).join(''); }
 /* ============ Kitchen Batch, printed from the order =======================
    The Fresh Food Calculator produces this sheet before an order exists; the
    kitchen has been working from it for a year and reads it fluently. Once the
@@ -11191,7 +11191,7 @@ async function prodLoadDraft(){
     // pick the latest run for this date
     rows.sort((a,b)=>String(b.run_ref||'').localeCompare(String(a.run_ref||'')));
     const runRef=rows[0].run_ref; const mine=rows.filter(r=>r.run_ref===runRef);
-    const pmap={}; (window._prodAllProducts||[]).forEach(p=>pmap[p.sku]=p.name);
+    const pmap={}; (window._prodAllProducts||[]).forEach(p=>pmap[p.sku]=prodLabel(p,{noSku:true}));
     prodRunRef=runRef;
     prodPlanLines=mine.map(r=>({product_sku:r.product_sku, name:pmap[r.product_sku]||r.product_sku, planned_packs:+r.planned_packs||0, good_packs:+r.good_packs||0, reject_packs:+r.reject_packs||0, waste_g:+r.waste_g||0, output_lot:r.output_lot||''}));
   }catch(e){}
@@ -11829,7 +11829,7 @@ function drawKitchenCartBody(){
     body+=`<tr style="background:#f6f8f4"><td colspan="6" style="padding-left:10px">▸ <b>${esc(G.g1+' › '+(S.g2||''))}</b></td></tr>`;
     S.items.forEach(p=>{ const hasT=+prodTargetMap[p.sku]>0; const rem=hasT?_prodRemain(p.sku,0):0; const v=(window._kcQty&&window._kcQty[p.sku]!=null)?window._kcQty[p.sku]:'';
       const pic=stockPicFor(p.sku);
-      body+=`<tr><td>${esc(p.name)}<div class="mini"><code>${esc(p.sku)}</code></div></td>
+      body+=`<tr><td>${prodLabelHtml(p,{noSku:true})}<div class="mini"><code>${esc(p.sku)}</code></div></td>
         <td class="num">${spStockCell(pic)}</td><td class="num">${spCoverCell(pic)}</td>
         <td class="num mini">${prodTargetMap[p.sku]||'—'}</td><td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${hasT?(rem||'—'):'—'}</td>
         <td><input type="number" step="any" inputmode="decimal" value="${v}" placeholder="${rem||0}" oninput="window._kcQty['${esc(p.sku)}']=this.value===''?'':(+this.value||0)" style="width:70px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); }));
@@ -11838,7 +11838,14 @@ function drawKitchenCartBody(){
 function prodCartApply(){ const q=window._kcQty||{}; let n=0;
   Object.keys(q).forEach(sku=>{ const v=q[sku]; const packs=(v===''||v==null)?0:(+v||0); const p=(window._prodAllProducts||[]).find(x=>x.sku===sku)||{name:sku};
     let line=prodPlanLines.find(l=>l.product_sku===sku);
-    if(packs>0){ if(line){ line.good_packs=packs; } else { prodPlanLines.push({product_sku:sku,name:p.name||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:packs,reject_packs:0,waste_g:0,output_lot:''}); } n++; }
+    /* A BARE NAME IS NOT A PRODUCT.
+       "Mackerel" is two products at two pack sizes, and the 20-piece meatball
+       packs are seven products that share one name outright — the protein is
+       the variant. Putting p.name on a production line printed seven identical
+       rows on the run sheet, which is how the wrong bag gets made. prodLabel is
+       the one place that decides how a product reads, and it appends the
+       variant whenever the name does not already contain it. */
+    if(packs>0){ if(line){ line.good_packs=packs; } else { prodPlanLines.push({product_sku:sku,name:prodLabel(p,{noSku:true})||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:packs,reject_packs:0,waste_g:0,output_lot:''}); } n++; }
     else if(line){ prodPlanLines=prodPlanLines.filter(l=>l.product_sku!==sku); }
   });
   closeModal(); drawProdPlan(); prodPackTouch(); toast(n?('Cart applied · '+n+' product(s) in the plan'):'Plan cleared');
@@ -13125,7 +13132,7 @@ function prodSetSub(orig,val){ window._prodSub=window._prodSub||{}; if(!val||val
 function prodRemainCell(i){ const l=prodPlanLines[i]; const el=$('prem'+i); if(!el)return;
   if(!(+prodTargetMap[l.product_sku]>0)){ el.innerHTML='<span class="mini" style="color:var(--muted)">—</span>'; return; }
   const rem=_prodRemain(l.product_sku,l.good_packs); el.innerHTML=`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`; }
-function prodAddLine(sku){ if(!sku)return; if(prodPlanLines.some(l=>l.product_sku===sku)){ drawProdPlan(); return; } const p=(window._prodAllProducts||[]).find(x=>x.sku===sku)||{}; prodPlanLines.push({product_sku:sku,name:p.name||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:0,reject_packs:0,waste_g:0,output_lot:''}); drawProdPlan(); }
+function prodAddLine(sku){ if(!sku)return; if(prodPlanLines.some(l=>l.product_sku===sku)){ drawProdPlan(); return; } const p=(window._prodAllProducts||[]).find(x=>x.sku===sku)||{}; prodPlanLines.push({product_sku:sku,name:prodLabel({...p,sku},{noSku:true})||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:0,reject_packs:0,waste_g:0,output_lot:''}); drawProdPlan(); }
 function prodDelLine(i){ prodPlanLines.splice(i,1); drawProdPlan(); prodPackTouch(); }
 /* `status` writes the product lines. Pass allowEmpty when the run is legitimately
    product-free — a prep-only day, where every product came off the plan and only
@@ -14726,7 +14733,7 @@ async function renderCountForm(idEnc){
       const _pm=_countProcMaps(ai,_bs,_bn); const ctx={bs:_bs,bn:_bn,procBases:_pm.bases,procCat:_pm.catByBase};
       const im={}; ai.forEach(i=>{ im[i.sku]={cl:_countIngClass(i,ctx), kind:'ingredient'}; });
       (await db.list('products',{})).forEach(p=>{ const G=prodGroup(p);
-        im[p.sku]={n:p.name,fam:(p.family||'Other'),g1:G.g1,g2:G.g2,so:G.rank,kind:'product',box:(+p.box_size||1)}; });
+        im[p.sku]={n:prodLabel(p,{noSku:true}),fam:(p.family||'Other'),g1:G.g1,g2:G.g2,so:G.rank,kind:'product',box:(+p.box_size||1)}; });
       countLines.forEach(l=>{
         if(String(l.ref_sku).startsWith('STK-')){ const h=im[String(l.ref_sku).slice(4)]; l.cat=((h&&h.fam)||'Other')+' — Stickers'; l.g1=((h&&h.g1)||'Products')+' — Stickers'; l.g2=(h&&h.g2)||'Other'; l.grank=600000+((h&&h.so)||0); l.name=l.name||l.ref_sku; l.uom='pcs'; l.scale=1; }
         else { const h=im[l.ref_sku];
@@ -15073,7 +15080,7 @@ async function countLoad(){
         _shopMeta.matched++; srcTag='shopify';
       } else { _shopMeta.fellBack++; srcTag='erp-fallback'; }
     }
-    lines.push({ref_sku:p.sku,name:p.name,book_qty:bq,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order,
+    lines.push({ref_sku:p.sku,name:prodLabel(p,{noSku:true}),book_qty:bq,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order,
       bookSrc:srcTag, erpQty:erpQ,
       shopRaw:(_shopBook&&_shopBook.phys[p.sku]!=null)?(+_shopBook.phys[p.sku]||0):null,
       shopSince:(_shopBook&&_shopBook.after[p.sku])||0});
@@ -15084,7 +15091,12 @@ async function countLoad(){
   }
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
   if(wantStk) prods.slice().sort(cmpItems).forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
-    lines.push({ref_sku:'STK-'+p.sku,name:p.name+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',catrank:_grank(p.family)+0.5,g1:(p.group_1||'Products')+' — Stickers',g2:(p.group_2||p.family||'Other'),grank:600000+_so(p),uom:'pcs',scale:1,sort_order:p.sort_order}); });
+    /* THE LABEL IS PER SKU, so its count line has to name the SKU it belongs to.
+       Seven meatball packs share one product name and differ only by variant;
+       "20-Piece Meatball Packs — Sticker" seven times on a count sheet is seven
+       rolls nobody can tell apart, and a label counted against the wrong variant
+       is a label ordered for the wrong variant. */
+    lines.push({ref_sku:'STK-'+p.sku,name:prodLabel(p,{noSku:true})+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',catrank:_grank(p.family)+0.5,g1:(p.group_1||'Products')+' — Stickers',g2:(p.group_2||p.family||'Other'),grank:600000+_so(p),uom:'pcs',scale:1,sort_order:p.sort_order}); });
   countLines=lines;
   await loadBins();
   const _sm=window._countShopMeta;
@@ -15503,7 +15515,7 @@ async function recipeCostHtml(){
   const cost=p=>{ let c=0; boms.filter(b=>b.product_sku===p.sku).forEach(b=>{ const it=ings.find(i=>i.sku===b.ingredient_sku)||{}; const y=(+it.yield_pct||100)/100; const rawg=(+b.usable_g||0)/(y||1); c+=(rawg/1000)*(+it.list_price_kg||0); }); return c; };
   let h=`<div class="repcard"><h3 style="margin:0 0 8px">Recipe cost per product</h3><table><thead><tr><th>Product</th><th class="num">Pack (g)</th><th class="num">Ingredient cost/pack</th><th class="num">Sell</th><th class="num">Margin</th></tr></thead><tbody>`;
   const rcRow=p=>{ const c=cost(p), sell=+p.sell_price||0, mg=sell?((sell-c)/sell*100):0;
-    return `<tr><td>${esc(p.name)}</td><td class="num">${p.pack_g}</td><td class="num">${fmt(c)}</td><td class="num">${fmt(sell)}</td><td class="num" style="color:${mg<0?'var(--danger)':'var(--ok)'}">${sell?mg.toFixed(0)+'%':'—'}</td></tr>`; };
+    return `<tr><td>${prodLabelHtml(p,{noSku:true})}</td><td class="num">${p.pack_g}</td><td class="num">${fmt(c)}</td><td class="num">${fmt(sell)}</td><td class="num" style="color:${mg<0?'var(--danger)':'var(--ok)'}">${sell?mg.toFixed(0)+'%':'—'}</td></tr>`; };
   hierGroups(prods,{g1:'group_1',g2:'group_2'}).forEach(G=>{
     h+=`<tr style="background:#e7f0e9"><td colspan="5"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
     G.subs.forEach(S=>{ h+=`<tr style="background:#f6f8f4"><td colspan="5" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(rcRow).join(''); });
@@ -16340,9 +16352,9 @@ async function _openingSections(uploaded, loc){
   const supLines=sup.map(i=>({sku:i.sku,name:i.name,type:'supply',unit:(i.uom||'pcs'),location:loc,qty:q(i.sku),
     book:_bookIng(i), cost:_costIng(i), g1:'Kitchen Supplies',g2:(i.category||'Supplies'),grank:_grank(i.category||'Supplies')*1000+_so(i),form:'supply'}));
   const prodLines=[],stkLines=[]; prods.slice().sort(cmpItems).forEach(p=>{
-    prodLines.push({sku:p.sku,name:p.name,type:'product',unit:'packs',location:loc,qty:q(p.sku),
+    prodLines.push({sku:p.sku,name:prodLabel(p,{noSku:true}),type:'product',unit:'packs',location:loc,qty:q(p.sku),
       book:_bookProd(p.sku), cost:(+p.tot_cost_ref||0), g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),form:''});
-    stkLines.push({sku:'STK-'+p.sku,name:p.name+' — Sticker',type:'sticker',unit:'pcs',location:loc,qty:q('STK-'+p.sku),
+    stkLines.push({sku:'STK-'+p.sku,name:prodLabel(p,{noSku:true})+' — Sticker',type:'sticker',unit:'pcs',location:loc,qty:q('STK-'+p.sku),
       book:(+p['sticker_'+loc+'_on_hand']||0), cost:0, g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),form:''}); });
   return {ingredients:ingLines, products:prodLines, supplies:supLines, stickers:stkLines};
 }
@@ -17382,14 +17394,14 @@ async function trPick(kind){
   let rows=[];
   if(kind==='product'){
     let ps=[]; try{ ps=await db.list('products',{}); }catch(e){}
-    rows=ps.map(p=>({sku:p.sku,name:p.name||p.sku,cat:p.group_1||p.family||'Products',oh:+oh[p.sku]||0,div:1,unit:'packs'}));
+    rows=ps.map(p=>({sku:p.sku,name:prodLabel(p,{noSku:true})||p.sku,cat:p.group_1||p.family||'Products',oh:+oh[p.sku]||0,div:1,unit:'packs'}));
   } else if(kind==='sticker'){
     /* A sticker is named by the PRODUCT it goes on, and its stock is counted on
        that product's row. Listing the sticker ingredients instead showed 22
        rows all reading zero. */
     let ps=[]; try{ ps=await db.list('products',{}); }catch(e){}
     rows=ps.filter(p=>p.active!==false)
-      .map(p=>({sku:p.sku,name:(p.name||p.sku)+' — label',cat:p.group_1||p.family||'Labels',oh:+oh[p.sku]||0,div:1,unit:'pcs'}));
+      .map(p=>({sku:p.sku,name:(prodLabel(p,{noSku:true})||p.sku)+' — label',cat:p.group_1||p.family||'Labels',oh:+oh[p.sku]||0,div:1,unit:'pcs'}));
   } else {
     let ings=[]; try{ ings=await listIngredients(); }catch(e){}
     rows=ings.filter(i=>{ const st=_trIsSticker(i), sup=isSupplyItem(i);
