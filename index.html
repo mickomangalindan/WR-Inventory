@@ -2677,6 +2677,16 @@ function pqMove(sku,v){ const n=parseFloat(v);
   try{ localStorage.setItem('wr_packreq_move',JSON.stringify(PQ_MOVE)); }catch(e){} pqDraw(); }
 function pqToggle(k){ PQ[k]=PQ[k]?0:1;
   try{ localStorage.setItem('wr_packreq',JSON.stringify(PQ)); }catch(e){} stockPicInvalidate(); pqDraw(); }
+/* The instant a transfer's movements are filed under: local midnight of the
+   transfer date. Blank or unparseable falls back to now(), because a movement
+   with no date at all is worse than one dated late. */
+function _transferStamp(t){
+  const d=String((t&&t.transfer_date)||'').slice(0,10);
+  const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(d);
+  if(!m) return '';
+  try{ const dt=new Date(+m[1], +m[2]-1, +m[3], 0, 0, 0, 0);
+    return isNaN(dt.getTime()) ? '' : dt.toISOString(); }catch(e){ return ''; }
+}
 const _pqCeil=(v,step)=>{ const s=+step||0; if(!(s>0)) return Math.ceil(v); return Math.ceil(v/s)*s; };
 
 function pqCalc(r){
@@ -3014,10 +3024,12 @@ function _pqDrift(rows){
    now compares the snapshot with the ledger AS IT STOOD AT THE COUNT — like for
    like. A gap there is a real adjustment somebody made on one side only. */
 async function pqBuildRows(){
-  let prods=[], mom=[], movs=[];
+  let prods=[], mom=[], movs=[], trs=[], tls=[];
   try{ prods=await db.list('products',{}); }catch(e){}
   try{ mom=await momLoad(); }catch(e){}
   try{ movs=await db.list('inventory_movements',{}); }catch(e){}
+  try{ trs=await db.list('transfers',{}); }catch(e){}
+  try{ tls=await db.list('transfer_lines',{}); }catch(e){}
   const sellLoc=planSellLoc(), makeLoc=planProduceLoc()||'bulacan';
   const snap=await pqSnapLoad();
   const shopBy={}; let shopSrc='the ledger at '+sellLoc; let waterLine=null;
@@ -3030,6 +3042,44 @@ async function pqBuildRows(){
     const t=snap.at?new Date(snap.at).getTime():NaN;
     if(!isNaN(t)) waterLine=t;
   }
+  /* ---- STOCK THAT HAS LEFT BUT HAS NOT ARRIVED ON THE BOOKS -------------
+     Nothing posts to the ledger when a transfer is SENT. Both legs — the
+     transfer_out at the kitchen and the transfer_in at the shop — are written
+     in one go when somebody presses Receive. So between the van leaving and the
+     receipt being confirmed, the ledger still says every pack is at the kitchen.
+
+     That is survivable while the shop's figure also comes from our own ledger:
+     the packs are simply counted at the wrong site, late. It stops being
+     survivable the moment the shop's figure comes from SHOPIFY, because
+     warehouse uploads to Shopify when the van ARRIVES, not when someone gets
+     round to confirming the receipt here. In that window Shopify counts them at
+     Pasig and our ledger counts them at Bulacan, and Current Stock reports them
+     twice — which is exactly the overstatement that stops the kitchen producing.
+
+     The water line cannot help: it reconciles the SELL site against the
+     snapshot, and this is the supply site holding stock it no longer has.
+
+     So packs on a sent-but-not-received transfer are taken OUT of the pipeline
+     and carried as their own figure. They are not silently dropped — every
+     screen shows them as "in transit", because the honest statement is that we
+     do not know which side holds them until the receipt is confirmed, and
+     confirming it is the one action that resolves it. */
+  const transit={};
+  (trs||[]).forEach(t=>{
+    if(String(t.status||'')!=='sent') return;
+    const from=String(t.from_code||''), to=String(t.to_code||'');
+    (tls||[]).forEach(l=>{
+      if(l.transfer_ref!==t.transfer_ref) return;
+      if(String(l.kind||'product')!=='product') return;      // Shopify holds no count for meat or labels
+      const q=Math.max(0,(+l.sent_packs||0)-(+l.received_packs||0));
+      if(!(q>0)) return;
+      const sku=l.product_sku; if(!sku) return;
+      const o=transit[sku]=transit[sku]||{qty:0, fromSell:0, fromOther:0, refs:[]};
+      o.qty+=q;
+      if(from===sellLoc) o.fromSell+=q; else o.fromOther+=q;
+      if(o.refs.indexOf(t.transfer_ref)<0) o.refs.push(t.transfer_ref);
+    });
+  });
   /* Three buckets per SKU: the sell site split at the water line, and
      everywhere else as one pipeline figure. */
   const ohBy={};
@@ -3068,7 +3118,12 @@ async function pqBuildRows(){
       const ledSell=oh.sellAt+oh.sellAfter;             // ledger at the sell site right now
       const hasSnap=(shopBy[p.sku]!=null);
       const shop=hasSnap ? Math.max(0, shopBy[p.sku]+oh.sellAfter) : Math.max(0,ledSell);
-      const other=Math.max(0, oh.other);
+      /* The pipeline is what we can actually fetch from a site we hold. Packs
+         already on a van are not that, and if the shop has uploaded them they
+         are on the shelf as well — so they come out of the pipeline and are
+         shown on their own. */
+      const tr=transit[p.sku]||{qty:0, fromSell:0, fromOther:0, refs:[]};
+      const other=Math.max(0, oh.other - tr.fromOther);
       /* LIKE FOR LIKE MEANS "MOVES AT THE SAME MOMENT", NOT "SOUNDS SIMILAR".
          Our ledger raises a sale when the ORDER is placed. Shopify moves the
          unit out of `available` at that same instant; `on_hand` does not drop
@@ -3098,6 +3153,7 @@ async function pqBuildRows(){
         consSites:Object.keys(oh.consSites||{}).filter(k=>(+oh.consSites[k]||0)>0.0001)
                      .sort((a,b)=>(+oh.consSites[b]||0)-(+oh.consSites[a]||0))
                      .map(k=>({code:k, qty:Math.max(0,+oh.consSites[k]||0)})),
+        inTransit:tr.qty, transitRefs:tr.refs,
         other, bul:Math.max(0,+oh.other||0), sold:(+soldBy[p.sku]||0)};
     });
   return {rows, src:shopSrc, snap, waterLine};
@@ -3147,6 +3203,7 @@ async function stockPicture(force){
     const sellable=Math.max(0,+r.shop||0), pipeline=Math.max(0,+r.other||0);
     by[r.sku]={ sku:r.sku, name:r.name, sellable, pipeline, current:sellable+pipeline,
       otherSites:(r.otherSites||[]),
+      inTransit:Math.max(0,+r.inTransit||0), transitRefs:(r.transitRefs||[]),
       consigned:Math.max(0,+r.consigned||0), consSites:(r.consSites||[]),
       shopQ:(r.snapQ==null?null:+r.snapQ), postG:+r.postG||0, drift:r.drift,
       sold:+r.sold||0, perDay:c.perDay, coverDays:c.cover,
@@ -3183,12 +3240,16 @@ function spStockCell(s,opt){
   /* Shown, never added. A consignee's shelf and a breeder colony are stock that
      exists and is not ours to plan with. */
   const cons=(s.consSites||[]);
+  /* Shown, never added — because until the receipt is confirmed nobody can say
+     whether the shop has already put them on sale. */
+  const transitBit=(s.inTransit>0)
+    ? `<div class="mini" style="color:var(--berry)" title="On a transfer that has been sent but not confirmed received${(s.transitRefs||[]).length?' ('+esc((s.transitRefs||[]).join(', '))+')':''}. Not counted at either site: the ledger still has them at the kitchen, and the shop may already have put them on sale. Confirm the receipt and they land where they belong.">🚚 ${_spN(s.inTransit)} in transit — confirm the receipt</div>` : '';
   const consBit=(s.consigned>0)
     ? `<div class="mini" style="color:var(--muted)" title="Not counted in Current stock, because it is not ours to pull from — the same rule ⚙ Planning locations states for a consignee or a breeder colony. Tick the site under &quot;Counts as supply&quot; if that is wrong.">not ours: ${_spN(s.consigned)}${cons.length?' at '+cons.map(x=>esc(locName(x.code))).join(', '):''}</div>` : '';
   return `<b>${_spN(s.current)}</b>
     <div class="mini" style="color:var(--muted)"><span style="color:#2f5d33">${_spN(s.sellable)}</span> sellable · <span style="color:var(--earth,#b5762a)" title="${esc(pipeTitle)}">${_spN(s.pipeline)}</span> not yet${
       sites.length===1 ? ' at '+esc(where)
-      : sites.length>1 ? ` <b style="color:var(--earth,#b5762a)" title="${esc(pipeTitle)}">at ${sites.length} sites</b>` : ''}</div>${shopBit}${consBit}`;
+      : sites.length>1 ? ` <b style="color:var(--earth,#b5762a)" title="${esc(pipeTitle)}">at ${sites.length} sites</b>` : ''}</div>${shopBit}${transitBit}${consBit}`;
 }
 function spCoverCell(s){
   if(!s) return '<span class="mini" style="color:var(--muted)">—</span>';
@@ -3253,6 +3314,11 @@ function pqDraw(){
     ${kpi('Made, not yet sellable', Math.round(rows.reduce((a,r)=>a+r.other,0)), 'waiting on a transfer', 'var(--earth,#b5762a)')}
     ${(()=>{ const mv=rows.reduce((a,r)=>a+pqCalc(r).toMove,0);
        return kpi('Of that, a transfer not a run', Math.round(mv), mv?'move these before making anything':'nothing to move', mv?'var(--earth,#b5762a)':'#4e7a3e'); })()}
+    ${(()=>{ const tr=rows.reduce((a,r)=>a+(+r.inTransit||0),0);
+       if(!(tr>0)) return '';
+       const refs=[...new Set(rows.flatMap(r=>r.transitRefs||[]))];
+       return kpi('🚚 In transit', Math.round(tr),
+         'sent, not confirmed received'+(refs.length?' · '+esc(refs.join(', ')):''), 'var(--berry)'); })()}
     ${(()=>{ if(!PQ.minOn) return kpi('Rounding','off','asking for the exact shortfall','var(--muted)');
        const pad=rows.reduce((a,r)=>a+(calc[r.sku].padded||0),0);
        const share=totProduce>0?Math.round(pad/totProduce*100):0;
@@ -3298,6 +3364,13 @@ function pqDraw(){
            <b>wr-shopify-inventory.gs</b> — a read-only hourly pull, it holds no write scope and cannot change anything
            in Shopify — or load a one-off count with <b>📥 Shopify count</b>.`
         : `${_pqDrift(rows)}`}
+      ${(()=>{ const tr=rows.reduce((a,r)=>a+(+r.inTransit||0),0); if(!(tr>0)) return '';
+         const refs=[...new Set(rows.flatMap(r=>r.transitRefs||[]))];
+         return `<br><b style="color:var(--berry)">🚚 ${Math.round(tr)} pack(s) are on a transfer that has been sent but not confirmed received</b>
+           (${esc(refs.join(', '))}). Nothing posts to the ledger until somebody presses <b>Receive</b>, so until then the books still
+           say those packs are at ${esc(planProduceLoc()||'the kitchen')} — while the shop may already have put them on sale. They are
+           held out of <b>not yet sellable</b> so they cannot be counted at both sites at once, and shown here instead.
+           <b>Confirming the receipt is what puts them where they belong.</b>`; })()}
       ${noSales?`<br><b style="color:var(--earth,#b5762a)">${noSales} product(s) have no sales in the window</b> — their average is zero, so they ask for nothing. Import sales on the Sales Momentum screen to include them.`:''}
     </div>
     <div style="overflow-x:auto" class="stickyhead"><table style="min-width:1180px"><thead><tr>
@@ -3912,7 +3985,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-08-27 15:45Z';
+const WR_BUILD='2026-08-28 06:30Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -5262,11 +5335,33 @@ async function wdtSheetLoad(){
     const P=plot[sku]||weeks.map(()=>0), M=made[sku]||weeks.map(()=>0);
     let lastI=-1; for(let i=P.length-1;i>=0;i--){ if(P[i]>0){ lastI=i; break; } }
     const effPlot = lastI>=0 ? P[lastI] : 0;
-    const restated = P.reduce((a,q,i)=>a+((i<lastI&&q>0)?q:0),0);
+    /* "Asked again" is a statement about catalogue plots superseding each other.
+       A custom order is never superseded — it is owed until it is made — so its
+       plot rows are not restatements and must not be reported as such. */
+    const restated = /^CUST-/i.test(String(sku)) ? 0 : P.reduce((a,q,i)=>a+((i<lastI&&q>0)?q:0),0);
     /* Only what was made AFTER the newest plot reduces it — the plot already
        counted everything on the shelf on the day it was worked out. */
     const madeAfter = lastI>=0 ? M.slice(lastI).reduce((a,b)=>a+b,0) : M.reduce((a,b)=>a+b,0);
-    const target = effPlot + (cust[sku]||0);
+    /* A CUSTOM ORDER IS COUNTED ONCE, FROM THE ORDER.
+       A CUST- SKU can reach the plot columns two ways: the demand-sync writes a
+       cache row when the order is locked, and whoever builds the week's plot
+       leaves the custom SKUs on it (mrpPullPackReq deliberately does not touch
+       them). Either way the plot then holds the same packs the order holds, and
+       adding the two together ordered every custom pack twice — 60 packs owed to
+       one customer read as a target of 120.
+
+       The code already decided which of the two is authoritative: coOpenDemand
+       is documented as replacing the demand table as the source of truth for
+       CUST- SKUs, because that table "is only a cache written at lock time: it
+       can be missing, or stale". So for a custom SKU the ORDER is the target and
+       the plot is history. The plot columns still print — they are how you see
+       what was asked for and when — they simply stop being added.
+
+       For a completed order this also does the right thing without a special
+       case: the order contributes nothing, so the target falls to zero and its
+       old plot row stops looking like something still owed. */
+    const isCust = /^CUST-/i.test(String(sku)) || !!(pBy[sku]||{}).is_custom;
+    const target = isCust ? (+cust[sku]||0) : (effPlot + (cust[sku]||0));
     const still = Math.max(0, target - madeAfter);
     const madeAll = M.reduce((a,b)=>a+b,0);
     const b=+beg[sku]||0, sl=+sold[sku]||0, ot=+other[sku]||0;
@@ -5336,7 +5431,7 @@ function _wdtSheetHtml(){
       </tr>
       <tr>
         <th class="stk1">SKU</th><th class="stk2">Product name › variant</th>
-        <th class="num" title="What is still owed. The newest plot for this product, plus any committed custom order — NOT the plot columns added up.">Target</th>
+        <th class="num" title="What is still owed. For a catalogue product: the newest plot, plus any committed custom order — NOT the plot columns added up. For a CUSTOM order the target is the ORDER itself and the plot columns are history: the same packs reach the plot through the demand sync, so adding both would order them twice.">Target</th>
         <th class="num" title="Everything produced inside the window. Shown for the record; it is not the figure subtracted from Target.">Made this period</th>
         <th class="num" title="Target minus what was made AFTER the newest plot.">Still to make</th>
         <th class="num" title="Current stock = what the shop can sell now + what is made but still off-shelf. The same two numbers Regular Packs shows, read the same way. Sellable already IS the Shopify reading, water-line adjusted — it is printed underneath so you can see it, not added again.">Current<br>stock</th>
@@ -5368,9 +5463,11 @@ function _wdtSheetHtml(){
       ${r.made.map(v=>`<td class="num mini" style="color:${v?'#2f5d33':'var(--muted)'}">${v||'—'}</td>`).join('')}
       <td class="num mini" style="color:var(--muted)">${r.sold?n2(-r.sold):'—'}</td>
       <td class="num mini" style="color:var(--muted)">${n2(r.end)}${Math.abs(r.drift)>0.001?`<div class="mini" style="color:var(--danger)" title="Beginning + produced + sold ± other does not reach the ledger's own figure. The gap is ${n2(r.drift)} pack(s) — a movement inside the window that none of these columns describes.">off by ${n2(r.drift)}</div>`:''}</td>
-      ${r.plots.map((q,i)=>`<td class="num">${q?(i<lastI
+      ${r.plots.map((q,i)=>`<td class="num">${q?(r.isCustom
+          ? `<span class="mini" style="color:var(--muted)" title="A custom order is counted from the ORDER, not from the plot — the same packs reach the plot through the demand sync, and adding both would order them twice. Shown for the record.">${q}</span>`
+          : (i<lastI
           ? `<span class="mini" style="color:var(--muted);text-decoration:line-through" title="Asked for ${q}, never made — but the newer plot has already asked again. Counting both would order the same packs twice.">${q}</span>`
-          : `<b>${q}</b>`):'<span class="mini" style="color:var(--muted)">—</span>'}</td>`).join('')}
+          : `<b>${q}</b>`)):'<span class="mini" style="color:var(--muted)">—</span>'}</td>`).join('')}
       <td>${r.still===0?'<span class="mini" style="color:var(--muted)">—</span>'
           : r.ready===true?'<span class="badge b-received">ready</span>'
           : r.ready===false?`<span class="badge b-open" style="background:#fbe3dd;color:#8a3520">short</span>
@@ -7295,13 +7392,50 @@ async function renderMRP(){
     const plotted=new Set(((await mrpPlans())||[]).map(pl=>String(pl.plan_date||pl.date||'').slice(0,10)).filter(Boolean));
     const byDate={};
     let drows=[]; try{ drows=await db.list('demand',{}); }catch(e){}
+    /* A SETTLED ORDER IS NOT UNPLOTTED DEMAND.
+       The demand table is a CACHE: coAddDemand writes a row the moment a custom
+       order is locked, and nothing removes it when the order is completed. So a
+       finished order leaves its row behind for ever, and this panel — which only
+       knows that a row exists on a date with no saved plot — reported it as
+       demand nobody has planned. That is where the "couple of draft demands
+       nobody can explain" came from: they are not drafts and nobody abandoned
+       anything, they are receipts for work that is already done.
+
+       coOpenDemand is the source of truth for CUST- SKUs, so a cache row whose
+       order is closed is counted here as settled: excluded from the warning,
+       counted separately, and clearable in one go. */
+    let cOrders=[], cLines=[];
+    try{ cOrders=await db.list('custom_orders',{}); cLines=await db.list('custom_order_lines',{}); }catch(e){}
+    const openRef={}; (cOrders||[]).forEach(o=>{ if(coIsOpen(o.status)) openRef[o.order_ref]=true; });
+    const ownerOf={}; (cLines||[]).forEach(l=>{ if(l.product_sku && !ownerOf[l.product_sku]) ownerOf[l.product_sku]=l.order_ref; });
+    const settled=[];
     (drows||[]).forEach(r=>{ const d=String(r.plan_date||'').slice(0,10);
-      if(!d || (+r.qty||0)<=0 || plotted.has(d) || d===MRPDATE) return;
+      if(!d || (+r.qty||0)<=0) return;
+      const own=ownerOf[r.sku];
+      if(own && !openRef[own]){ settled.push({...r, order:own}); return; }   // finished — not a plan to make
+      if(plotted.has(d) || d===MRPDATE) return;
       const g=byDate[d]=byDate[d]||{date:d,skus:0,packs:0,eg:[]};
       g.skus++; g.packs+=(+r.qty||0); if(g.eg.length<4) g.eg.push(r.sku);
     });
     unplot=Object.values(byDate).sort((a,b)=>a.date.localeCompare(b.date));
-  }catch(e){}
+    window._mrpSettled=settled;
+  }catch(e){ window._mrpSettled=[]; }
+  const _settled=window._mrpSettled||[];
+  if(_settled.length){
+    const dates=[...new Set(_settled.map(x=>String(x.plan_date||'').slice(0,10)))].sort();
+    const orders=[...new Set(_settled.map(x=>x.order))].sort();
+    dh+=`<div class="repcard" style="margin-top:14px">
+      <div class="repbar"><span>${_settled.length} settled demand row(s) — nothing to plan</span>
+        <span class="mini" style="color:var(--muted)">from custom orders that are already finished</span></div>
+      <div class="hint">These are cache rows written when an order was locked. The orders
+        (${orders.map(esc).join(', ')}) are <b>completed</b>, so the packs have been made and nothing is owed —
+        but nothing removes the row when an order closes, so they sat on ${dates.map(esc).join(' and ')} looking
+        like demand nobody had planned. They are <b>not</b> abandoned drafts, and they are no longer counted anywhere:
+        the Weekly Demand Target takes a custom order's target from the order itself, never from this cache.
+        Clearing them is tidying, not a correction.</div>
+      <div style="margin-top:8px"><button class="btn sec sm" onclick="mrpClearSettled()">🧹 Clear ${_settled.length} settled row(s)</button></div>
+    </div>`;
+  }
   if(unplot.length){
     dh+=`<div class="repcard" style="margin-top:14px;border-left:4px solid #e0b400">
       <div class="repbar"><span>⚠ Demand exists on ${unplot.length} date(s) you have not plotted</span>
@@ -7713,6 +7847,30 @@ async function mrpGoDate(d){ MRPDATE=d; await renderMRP();
    order stays exactly where it is — it simply stops saying "Added in Demand"
    and goes back to "For Demand Planning", and ☁ Sync demand will bring it
    back if it was cleared by mistake. */
+/* Remove the cache rows for orders that are finished. Only those: the filter is
+   rebuilt here rather than trusting what the screen last rendered, because a
+   delete that works from stale state is how the wrong rows go. */
+async function mrpClearSettled(){
+  let drows=[], cOrders=[], cLines=[];
+  try{ drows=await db.list('demand',{}); cOrders=await db.list('custom_orders',{}); cLines=await db.list('custom_order_lines',{}); }
+  catch(e){ toast('Could not read the demand table — '+saveErrMsg(e), true); return; }
+  const openRef={}; (cOrders||[]).forEach(o=>{ if(coIsOpen(o.status)) openRef[o.order_ref]=true; });
+  const ownerOf={}; (cLines||[]).forEach(l=>{ if(l.product_sku && !ownerOf[l.product_sku]) ownerOf[l.product_sku]=l.order_ref; });
+  const kill=(drows||[]).filter(r=>{ const own=ownerOf[r.sku]; return own && !openRef[own] && r.id!=null; });
+  if(!kill.length){ toast('Nothing settled to clear'); return; }
+  const orders=[...new Set(kill.map(r=>ownerOf[r.sku]))];
+  if(!confirm('Clear '+kill.length+' settled demand row(s)?\n\n'
+    +'They belong to these finished orders:\n  '+orders.join('\n  ')
+    +'\n\nThe ORDERS are not touched — only the cache rows they left in the demand table. '
+    +'Nothing that is still owed is affected: an order that is still open keeps its row.')) return;
+  showBusy('Clearing…');
+  let n=0, bad='';
+  for(const r of kill){ try{ await db.del('demand','id',r.id); n++; }catch(e){ bad=String((e&&e.message)||e); } }
+  hideBusy();
+  toast(n+' settled row(s) cleared'+(bad?(' · '+bad):''), !!bad);
+  sysLog('mrp','demand','🧹 '+n+' settled demand cache row(s) cleared by '+CURRENT_USER);
+  renderMRP();
+}
 async function mrpClearDemand(date){
   const d=String(date||MRPDATE||'').slice(0,10);
   if(!d){ toast('Pick a plan date first',true); return; }
@@ -8190,8 +8348,27 @@ async function postTransfer(t){ try{
       }catch(e){ console.warn('sticker transfer',e); }
       n++; continue;
     }
-    if(sent>0) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:from,qty:-sent*mult,unit_cost:uc,movement_type:'transfer_out',note:'Transfer '+t.transfer_ref});
-    if(recv>0) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:to,qty:recv*mult,unit_cost:uc,movement_type:'transfer_in',note:'Transfer '+t.transfer_ref});
+    /* FILED UNDER THE DAY THE STOCK MOVED, NOT THE DAY SOMEBODY TYPED IT.
+       created_at is the business timestamp in this schema — the water line, Live
+       Stock's period columns and the Weekly Demand Target's as-of all read it as
+       "when did this happen". Leaving it to default to now() meant a van that
+       left on Friday and was confirmed on Monday was filed on Monday.
+
+       That is not merely untidy. Warehouse uploads the arriving stock to Shopify
+       when the van ARRIVES; the receipt here is confirmed later. If the Shopify
+       reading is taken in between, the packs are inside the snapshot AND the
+       receipt then lands after the water line and is added on top — the same
+       packs, twice. Filing the movement under transfer_date puts it below the
+       water line where it belongs, and the snapshot absorbs it exactly once.
+
+       Midnight of the transfer date is deliberately early in the day: where we
+       cannot tell whether the shop uploaded before or after the reading, this
+       errs towards the snapshot already containing it. That understates the
+       shelf slightly rather than overstating it, and an understated shelf makes
+       one pack too many, where an overstated shelf makes none at all. */
+    const _mvAt=_transferStamp(t);
+    if(sent>0) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:from,qty:-sent*mult,unit_cost:uc,movement_type:'transfer_out',note:'Transfer '+t.transfer_ref,...(_mvAt?{created_at:_mvAt}:{})});
+    if(recv>0) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:to,qty:recv*mult,unit_cost:uc,movement_type:'transfer_in',note:'Transfer '+t.transfer_ref,...(_mvAt?{created_at:_mvAt}:{})});
     const gap=sent-recv; if(Math.abs(gap)>0.0001){ flags++; try{ await db.create('variance_log',{check_type:'4 · Transfer',source_ref:t.transfer_ref,expected:sent,actual:recv,gap_qty:-gap,gap_value:Math.round(uc*mult*gap*100)/100,location:'in-transit',responsible_user:CURRENT_USER,status:'open',note:l.product_sku+' sent '+sent+' vs received '+recv}); }catch(e){} }
     n++; }
   sysLog('transfers',t.transfer_ref,'🚚 Received — '+n+' line(s) posted; '+flags+' shortfall(s) flagged by '+CURRENT_USER); toast('Transfer posted · '+flags+' shortfall(s)');
