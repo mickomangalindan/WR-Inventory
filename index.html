@@ -4128,7 +4128,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-08-31 06:10Z';
+const WR_BUILD='2026-08-31 07:40Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -6935,12 +6935,75 @@ async function renderShopify(){
         <code>select * from public.wr_shopify_repost();</code>.</div></div>`;
   }
 
-  /* ---------------- archived in Shopify, still live here ---------------- */
   let _prodsAll=[]; try{ _prodsAll=await db.list('products',{}); }catch(e){}
   window._shProds=_prodsAll;
   /* The same stock picture the four planning screens read, so "what is still on
      the shelf" is the same number here as it is there. */
   try{ await stockPicture(); }catch(e){}
+  h=salesStaleHtml()+h;
+
+  /* ---------------- SOLD ON SHOPIFY, NEVER DEDUCTED HERE -----------------
+     Two independent feeds describe the same sales: wr-shopify-sales-report.gs
+     writes sales_momentum, and wr-shopify-pull.gs writes the stock movements.
+     Where they disagree, one of them has stopped — and only one of them is
+     load-bearing for stock.
+
+     A product with real sales and NOT ONE deduction in the ledger is the exact
+     shape of the fault: its shelf figure has only ever gone up, since the day
+     it was created. Nothing errors, nothing turns red; the number simply drifts
+     away from the shop's own count at the rate the shop is selling. It stays
+     invisible until somebody happens to compare one row by eye.
+
+     This is that comparison, run over the whole catalogue, every time the
+     screen opens. */
+  const _momAll=await momLoad().catch(()=>[]);
+  const _soldBy={}, _lastSold={};
+  try{ (await db.list('inventory_movements',{})).forEach(v=>{
+    const t=String(v.movement_type||''); if(t!=='sale'&&t!=='refund'&&t!=='return') return;
+    _soldBy[v.ref_sku]=(_soldBy[v.ref_sku]||0)+1;
+    const at=String(v.created_at||''); if(at>(_lastSold[v.ref_sku]||'')) _lastSold[v.ref_sku]=at;
+  }); }catch(e){}
+  const _pBy={}; (_prodsAll||[]).forEach(p=>_pBy[p.sku]=p);
+  const _never=[], _stopped=[], _unmatched=[];
+  const _dayAgo=d=>Math.floor((Date.now()-new Date(d).getTime())/864e5);
+  (_momAll||[]).forEach(m=>{
+    const u60=+m.u60||0, u30=+m.u30||0; if(!(u60>0)) return;
+    const p=_pBy[m.sku];
+    if(!p){ _unmatched.push({sku:m.sku, name:m.product||'', u30, u60}); return; }
+    if(p.is_custom) return;                       // made to order, never a shelf balance
+    if(!_soldBy[m.sku]) _never.push({sku:m.sku, name:prodLabel(p,{noSku:true}), u30, u60});
+    else if(_lastSold[m.sku] && _dayAgo(_lastSold[m.sku])>=SALES_STALE_DAYS)
+      _stopped.push({sku:m.sku, name:prodLabel(p,{noSku:true}), u30, u60, days:_dayAgo(_lastSold[m.sku])});
+  });
+  _never.sort((a,b)=>b.u30-a.u30); _unmatched.sort((a,b)=>b.u30-a.u30);
+  const _u30never=_never.reduce((a,x)=>a+x.u30,0);
+  const _u30all=(_momAll||[]).reduce((a,m)=>a+((_pBy[m.sku]&&!_pBy[m.sku].is_custom)?(+m.u30||0):0),0);
+  if(_never.length || _unmatched.length){
+    h+=`<div class="repcard" style="margin-top:12px;border-left:4px solid var(--danger)">
+      <div class="repbar"><span>⚠ Sold on Shopify, never deducted from the ledger</span>
+        <span class="mini" style="color:var(--muted)">${_never.length} product(s)${_u30all>0?' · '+Math.round(100*_u30never/_u30all)+'% of the last month of sales':''}</span></div>
+      <div class="hint" style="margin:0 0 8px">Sales reach stock through their own feed. These products have sales in Sales Momentum and
+        <b>not one deduction</b> in the ledger — so their shelf figure has only ever gone up. Nothing errors when this happens, which is why it
+        can run for weeks. The reason each one did not post is recorded against the event; run <b>sql/wr_shopify_sales_gap.sql</b> to see it,
+        or check <b>${esc(WR_SQL_FILE)}</b>’s <code>shopify_sku_map</code> if the code simply needs a ruling.</div>
+      ${_never.length?`<div style="overflow-x:auto;max-height:320px" class="stickyhead"><table><thead><tr><th>Product</th><th class="num">Sold 30d</th><th class="num">Sold 60d</th><th class="num">Deductions</th></tr></thead><tbody>
+        ${_never.slice(0,40).map(x=>`<tr><td>${esc(x.name)}<div class="mini" style="color:var(--muted)"><code>${esc(x.sku)}</code></div></td>
+          <td class="num"><b>${num(Math.round(x.u30))}</b></td><td class="num mini" style="color:var(--muted)">${num(Math.round(x.u60))}</td>
+          <td class="num"><b style="color:var(--danger)">none</b></td></tr>`).join('')}
+        </tbody></table></div>${_never.length>40?`<div class="mini" style="color:var(--muted);margin-top:6px">+ ${_never.length-40} more</div>`:''}`:''}
+      ${_stopped.length?`<div class="hint" style="margin-top:8px;border-left:3px solid var(--earth,#b5762a)"><b>${_stopped.length} more posted once and then stopped</b> —
+        ${esc(_stopped.slice(0,6).map(x=>x.name+' ('+x.days+'d)').join(' · '))}${_stopped.length>6?' …':''}. That is the same feed, failing later rather than never.</div>`:''}
+      ${_unmatched.length?`<div style="margin-top:10px"><div class="mini" style="color:var(--muted);margin-bottom:4px">${_unmatched.length} Shopify code(s) the ERP has no product for — each needs one ruling, once</div>
+        <div style="overflow-x:auto;max-height:220px"><table><tbody>
+        ${_unmatched.slice(0,20).map(x=>`<tr><td><code>${esc(x.sku)}</code></td><td class="mini">${esc(x.name)}</td><td class="num mini">${num(Math.round(x.u30))} in 30d</td></tr>`).join('')}
+        </tbody></table></div>
+        <div class="hint" style="margin-top:6px">A customer's name in that column is a made-to-order mix: it is a real sale that must not move a food balance, and
+          <code>select * from public.wr_shopify_ack_unmatched();</code> says so once and for all. Anything else that IS sold from stock needs a row in
+          <code>shopify_sku_map</code>. Either way, finish with <code>select * from public.wr_shopify_repost();</code></div></div>`:''}
+    </div>`;
+  }
+
+  /* ---------------- archived in Shopify, still live here ---------------- */
   const G=shStatusGaps(_prodsAll); window._shGaps=G;
   if(_shProdStat===null){
     h+=`<div class="repcard" style="margin-top:12px;border-left:4px solid var(--earth,#b5762a)">
