@@ -3209,7 +3209,48 @@ async function pqBuildRows(){
         inTransit:tr.qty, transitRefs:tr.refs,
         other, bul:Math.max(0,+oh.other||0), sold:(+soldBy[p.sku]||0)};
     });
-  return {rows, src:shopSrc, snap, waterLine};
+  /* HOW LONG SINCE A SALE LAST POSTED.
+     The ledger can be perfectly healthy in every other respect and still be
+     badly wrong about the shop, because SALES arrive through their own feed. If
+     that feed stops, nothing breaks and nothing complains: production keeps
+     posting, transfers keep posting, and the shelf figure simply stops going
+     down. It drifts up, quietly, at exactly the rate the shop is selling.
+
+     That is what happened here — the orders sync last posted on 22 August while
+     the rest of the ledger stayed current to the 31st, and Pasig's ledger ended
+     up around a third higher than the shop's own count.
+
+     So the age of the newest sale is carried with the stock picture. It is
+     cheap: every movement has already been read to build the picture. */
+  let lastSale='';
+  (movs||[]).forEach(v=>{ const t=String(v.movement_type||'');
+    if(t!=='sale'&&t!=='refund'&&t!=='return') return;
+    const at=String(v.created_at||''); if(at>lastSale) lastSale=at; });
+  let saleAgeDays=null;
+  if(lastSale){ const ms=Date.now()-new Date(lastSale).getTime();
+    if(isFinite(ms)) saleAgeDays=Math.max(0, ms/864e5); }
+  return {rows, src:shopSrc, snap, waterLine, lastSale, saleAgeDays};
+}
+/* Two days is the threshold, not one: a quiet Sunday is not a broken feed, and
+   the sync itself only runs hourly. Past two days a shop that sells every day
+   has posted nothing, and that is a fault rather than a lull. */
+const SALES_STALE_DAYS=2;
+function salesFeedStale(){
+  const p=_stockPic; if(!p || p.saleAgeDays==null) return null;
+  return (p.saleAgeDays>=SALES_STALE_DAYS) ? {days:p.saleAgeDays, at:p.lastSale} : null;
+}
+function salesStaleHtml(){
+  const st=salesFeedStale(); if(!st) return '';
+  const d=Math.floor(st.days);
+  return `<div class="hint" style="margin:0 0 8px;border-left:4px solid var(--danger);background:#fdf3f0">
+    <b style="color:var(--danger)">⚠ No sale has posted to the ledger for ${d} day(s)</b> — the last one was
+    ${esc(String(st.at||'').slice(0,16).replace('T',' '))}. Everything else is still posting, so this is the
+    <b>Shopify orders sync</b> specifically, not the app.<br>
+    While it is stopped the ledger at <b>${esc(locName(planSellLoc()))}</b> only ever goes UP: production and transfers
+    still land, nothing is taken off for what the shop sells. Every figure here that comes from our own ledger is
+    overstated by however much has sold since then. Figures read from <b>Shopify</b> are unaffected and remain correct.<br>
+    Open <b>Analytics → Shopify sync</b>, then run <code>pullShopify()</code> in the Apps Script; anything it was holding
+    settles with <code>select * from public.wr_shopify_repost();</code>.</div>`;
 }
 
 /* ================= ONE STOCK PICTURE, READ THE SAME WAY EVERYWHERE =========
@@ -3265,6 +3306,7 @@ async function stockPicture(force){
       padded:c.padded, coverAfter:c.coverAfter };
   });
   _stockPic={ by, src:built.src||err, err, snap:built.snap, waterLine:built.waterLine,
+              lastSale:built.lastSale||'', saleAgeDays:(built.saleAgeDays==null?null:built.saleAgeDays),
               sellLoc:planSellLoc(), makeLoc:planProduceLoc()||'bulacan',
               at:(built.snap&&built.snap.at)||'' };
   _stockPicAt=now;
@@ -3426,6 +3468,7 @@ function pqDraw(){
         style="min-width:150px;padding:5px 8px;border:1px solid var(--line);border-radius:6px">
       <label class="mini"><input type="checkbox" ${PQ_ONLY?'checked':''} onchange="PQ_ONLY=this.checked;pqDraw()"> only what needs producing</label>
     </div>
+    ${salesStaleHtml()}
     <div class="hint" style="margin:0 0 8px">
       <b>Current stock</b> is <b>what the shop can sell</b> + <b>what is made and sitting at the kitchen</b> — the same sum the sheet does by hand as
       "Shopify + this week's production", except both halves here are read rather than typed. The second half is <b>real stock in a freezer</b>,
@@ -3926,12 +3969,22 @@ function drawLiveStock(){
   const totVal=window._lsTotVal||0;
   const mh=(typeof moneyHidden==='function'&&moneyHidden());
   const kpi=(l,val,s,col)=>`<div class="kpi"><div class="l">${l}</div><div class="v"${col?` style="color:${col}"`:''}>${val}</div><div class="s">${s||''}</div></div>`;
-  let h=`<div class="kpirow">
+  let h=salesStaleHtml()+`<div class="kpirow">
     ${kpi('Items in stock', rows.length+(rows.length===nAll?'':(' <span class="mini" style="color:var(--muted)">of '+nAll+'</span>')),
       (LS_CAT==='all'?'':((LS_CATS.find(c=>c.k===LS_CAT)||{}).l+' · '))+(LS_LOC==='all'?'all sites':LS_LOC)+((LS_Q||LS_FLAG)?' · filtered':''))}
     ${kpi('⚠ Below reorder/PAR', nBelow, 'need replenishing', nBelow?'var(--earth,#b5762a)':'')}
     ${kpi('🔴 Negative', nNeg, 'ledger to investigate', nNeg?'var(--danger)':'')}
     ${mh?'':kpi('Stock value', fmt(totVal), 'at moving-avg cost', 'var(--berry)')}
+    ${(()=>{ if(!window._lsPic) return '';
+       let n=0, tot=0;
+       rows.forEach(r=>{ if(r.kind!=='product') return; const sp=stockPicFor(r.sku);
+         if(!sp || sp.shopQ==null) return;
+         const led=(LS_LOC===planSellLoc())?r.end:(+sp.sellable||0);
+         const g=led-sp.shopQ; if(Math.abs(g)>=1){ n++; tot+=g; } });
+       if(!n) return '';
+       return kpi('⚠ Disagree with Shopify', n,
+         (tot>0?'ledger reads '+Math.round(tot)+' HIGHER in total':'ledger reads '+Math.abs(Math.round(tot))+' lower in total'),
+         'var(--danger)'); })()}
   </div>`;
 
   const qf=(v,div)=> div===1000? (Math.round(v/1000*100)/100).toLocaleString('en-PH',{maximumFractionDigits:2}) : num(Math.round(v));
@@ -3951,7 +4004,21 @@ function drawLiveStock(){
     const list=byG2[g2].slice().sort((a,b)=>_lr(a)-_lr(b)||cmpItems(a,b));
     h+=`<tr style="background:#f6f8f4"><td colspan="${(mh?11:12)+SP}" style="padding-left:24px">▸ <b>${esc(g2)}</b> <span class="mini">(${list.length})</span></td></tr>`;
     list.forEach(r=>{ const endCol=r.neg?'var(--danger)':(r.below?'var(--earth,#b5762a)':'var(--ink)');
-      const flag=r.neg?'<span style="color:var(--danger);font-weight:700">🔴 negative</span>':(r.below?'<span style="color:var(--earth,#b5762a);font-weight:700">⚠ reorder</span>':'<span class="mini" style="color:var(--ok)">ok</span>');
+      /* THE SHOP'S OWN COUNT, WHEN IT DISAGREES WITH OURS.
+         A row could show Ending 54 in one column and "33 Shopify" two columns
+         along, with nothing saying those are the same product at the same site
+         and cannot both be true. The gap is the whole point: it is either sales
+         that have not posted, or an adjustment somebody made on one side only.
+         Either way it is the most useful thing on the row and it was the one
+         thing the row did not say. */
+      const _sp=(r.kind==='product')?stockPicFor(r.sku):null;
+      const _shows=_sp && _sp.shopQ!=null && (LS_LOC===planSellLoc()||LS_LOC==='all');
+      const _led=_shows ? ((LS_LOC===planSellLoc()) ? r.end : (+_sp.sellable||0)) : null;
+      const _gap=_shows ? Math.round((_led-_sp.shopQ)*100)/100 : 0;
+      const _drift=_shows && Math.abs(_gap)>=1;
+      const flag=_drift
+        ? `<span style="color:var(--danger);font-weight:700" title="Our ledger at ${esc(locName(planSellLoc()))} says ${num(Math.round(_led))}; Shopify's own count says ${num(Math.round(_sp.shopQ))}. They describe the same packs on the same shelf, so one of them is wrong.${salesFeedStale()?' The sales feed has not posted for '+Math.floor(salesFeedStale().days)+' day(s), which would explain a ledger that reads HIGH.':''}">⚠ ${_gap>0?'+':''}${num(_gap)} vs Shopify</span>`
+        : (r.neg?'<span style="color:var(--danger);font-weight:700">🔴 negative</span>':(r.below?'<span style="color:var(--earth,#b5762a);font-weight:700">⚠ reorder</span>':'<span class="mini" style="color:var(--ok)">ok</span>'));
       const cl=r.below||r.neg?' style="cursor:pointer"':' style="cursor:pointer"';
       const model=pm[r.sku]?'products':'ingredients';
       h+=`<tr${cl} onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open item">
@@ -4061,7 +4128,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-08-31 04:20Z';
+const WR_BUILD='2026-08-31 06:10Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -4129,7 +4196,16 @@ const BACKUP_TABLES=[
   'deliveries','delivery_lines',
   // ledgers, planning, logs & attachments
   'inventory_movements','variance_log','demand','mrp_plans','mrp_plan_lines',
-  'saved_reports','record_notes','record_attachments','bulk_change_requests','activity_log'];
+  'saved_reports','record_notes','record_attachments','bulk_change_requests','activity_log',
+  /* THE SHOPIFY SIDE WAS NOT IN THE SNAPSHOT AT ALL.
+     shopify_events is the record of every sale, refund and return the shop has
+     told us about, and the map is the ruling on every code somebody decided was
+     ice or packaging rather than stock. A "full-database snapshot" that omits
+     them cannot restore the thing that reconciles the ledger to the shop. They
+     are listed last because they are the only tables that may not exist yet on
+     an older database — a missing one is recorded as an error against that
+     table and does not stop the rest. */
+  'shopify_events','shopify_sku_map','shopify_inventory','shopify_products','shopify_push_queue'];
 /* A BACKUP THAT IS SILENTLY SHORT IS WORSE THAN NO BACKUP.
    This read each table with a plain select and no limit, which PostgREST caps at
    a thousand rows without saying so. Once inventory_movements passed a thousand,
@@ -4173,7 +4249,21 @@ const RESTORE_PK={ locations:'code', suppliers:'name', ingredients:'sku', produc
   app_config:'key', app_settings:'key', ref_counters:'key', sales_momentum:'sku', item_bins:'sku,location_code',
   purchase_orders:'po_ref', goods_receipts:'gr_ref', supplier_invoices:'invoice_ref',
   production_batches:'batch_ref', transfers:'transfer_ref', count_sessions:'count_ref',
-  sales_orders:'order_ref', deliveries:'delivery_ref' };
+  sales_orders:'order_ref', deliveries:'delivery_ref',
+  shopify_sku_map:'shop_sku', shopify_inventory:'sku,location_name', shopify_products:'sku' };
+/* ---- TABLES THAT ARE BACKED UP BUT MUST NEVER BE RESTORED ----------------
+   shopify_events carries a BEFORE INSERT trigger that POSTS a stock movement
+   for every row. Loading a backup of it would replay every sale the shop has
+   ever made straight back into the ledger — on top of the inventory_movements
+   the same backup is already restoring. The shelf would be deducted twice for
+   nine months of trading, and nothing would say so.
+
+   It is still worth backing up: it is the record of what the shop told us, and
+   the only thing that can rebuild the ledger if the movements are ever lost.
+   Restoring it is a deliberate, supervised job (truncate, load with the trigger
+   disabled, then wr_shopify_repost), not something a restore button should do
+   on its way past. */
+const RESTORE_SKIP=new Set(['shopify_events']);
 // Tables whose 'id' is a meaningful key (not a throwaway surrogate) — keep it on restore & upsert on it.
 const RESTORE_KEEP_ID=new Set(['profiles']);
 // Tables we never DELETE during restore (only upsert) — profiles is linked to auth users; wiping it
@@ -4223,13 +4313,14 @@ async function restoreBackup(){
   const errs=[]; let ins=0;
   try{
     // 1) clear existing rows — children first (reverse of the FK-ordered list). Skip NO_DELETE tables.
-    for(const t of [...BACKUP_TABLES].reverse()){ if(RESTORE_NO_DELETE.has(t)) continue;
+    for(const t of [...BACKUP_TABLES].reverse()){ if(RESTORE_NO_DELETE.has(t)||RESTORE_SKIP.has(t)) continue;
       const pk=(RESTORE_PK[t]||'id').split(',')[0];   // first column of a composite key for the filter
       try{ await sb(t+'?'+pk+'=not.is.null',{method:'DELETE',prefer:'return=minimal'}); }
       catch(e){ errs.push('clear '+t+': '+(e.message||e)); } }
     // 2) load the snapshot — parents first. Drop surrogate id (identity regenerates) EXCEPT where the
     //    id is a real key (profiles). Upsert natural-key tables on their conflict key.
     for(const t of BACKUP_TABLES){ let rows=d[t]; if(!Array.isArray(rows)||!rows.length) continue;
+      if(RESTORE_SKIP.has(t)){ errs.push('skipped '+t+' on purpose — restoring it would re-post every sale into the ledger a second time'); continue; }
       const keepId=RESTORE_KEEP_ID.has(t);
       rows=rows.map(r=>{ const c={...r}; if(!keepId) delete c.id; return c; });
       const pk=RESTORE_PK[t]||'id'; const upsert=(pk!=='id')||keepId;
