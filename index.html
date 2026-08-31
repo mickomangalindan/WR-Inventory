@@ -917,6 +917,53 @@ async function sb(path, opts={}){
     throw new Error(r.status+' '+t.slice(0,180)); }
   const txt = await r.text(); return txt? JSON.parse(txt):[];
 }
+/* ---- READING A TABLE THAT HAS OUTGROWN ONE PAGE -------------------------
+   PostgREST caps a response at its configured maximum — 1000 rows on Supabase —
+   and says nothing when it does. It is not an error and there is no flag in the
+   body: you simply get a thousand rows and no way to tell whether that was the
+   whole table.
+
+   inventory_movements passed a thousand rows on 28 August, and everything that
+   read it with the default limit quietly started working from the OLDEST
+   thousand: the stock picture behind Regular Packs, the Weekly Demand Target's
+   on-hand column, the weekly count's book quantity, the production plan. A
+   transfer posted on the 29th existed in the database and was invisible in the
+   app, which is exactly how it was found.
+
+   So a read that wants a whole table must page. Range headers are used rather
+   than offset= because PostgREST returns Content-Range, which tells us the real
+   total and lets a caller prove it read all of it.
+
+   THE CAP IS A GUARD, NOT A LIMIT. It stops a runaway loop on a table nobody
+   expected to be enormous; when it is hit the read THROWS rather than returning
+   a short answer, because a silently short answer is the bug this exists to
+   fix. */
+const SB_PAGE=1000, SB_MAX_PAGES=200;
+async function sbAll(path, opts={}){
+  const sep = path.indexOf('?')>=0 ? '&' : '?';
+  let out=[], from=0, pages=0, total=null;
+  for(;;){
+    const to=from+SB_PAGE-1;
+    const r = await fetch(SUPA.url.replace(/\/$/,'')+'/rest/v1/'+path+sep+'limit='+SB_PAGE+'&offset='+from, {
+      ...opts, headers:{ apikey:SUPA.key, Authorization:'Bearer '+(SUPA.token||SUPA.key),
+        'Content-Type':'application/json', Prefer:'count=exact', Range:from+'-'+to, ...(opts.headers||{}) }});
+    if(!r.ok){ const t=await r.text();
+      if(r.status===401 && REQUIRE_AUTH && SUPA && SUPA.token){ delete SUPA.token; delete SUPA.role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); updateMode(); showGate('Your session expired — please sign in again.'); }
+      throw new Error(r.status+' '+t.slice(0,180)); }
+    const cr=r.headers.get('content-range')||'';
+    const m=/\/(\d+|\*)\s*$/.exec(cr); if(m && m[1]!=='*') total=+m[1];
+    const txt=await r.text(); const rows=txt?JSON.parse(txt):[];
+    out=out.concat(rows);
+    pages++;
+    if(rows.length<SB_PAGE) break;
+    if(total!=null && out.length>=total) break;
+    if(pages>=SB_MAX_PAGES) throw new Error('Refusing to keep reading '+path.split('?')[0]
+      +' — over '+(SB_MAX_PAGES*SB_PAGE).toLocaleString('en-PH')+' rows. A short answer here would be silently wrong, so this stops loudly instead.');
+    from+=SB_PAGE;
+  }
+  out._total=total; out._pages=pages;
+  return out;
+}
 async function sbAuth(email,password){
   const r=await fetch(SUPA.url.replace(/\/$/,'')+'/auth/v1/token?grant_type=password',{method:'POST',
     headers:{apikey:SUPA.key,'Content-Type':'application/json'},body:JSON.stringify({email,password})});
@@ -959,12 +1006,18 @@ const db = {
     const T=m.srcTable||model;   // a model may read/write a shared physical table (e.g. supplies → ingredients)
     const cols=dbSearchCols(model), term=_sanitizeTerm(search);
     if(isLive()){
-      const lim='&limit='+(per||1000);
+      /* NO `per` MEANS "ALL OF IT", NOT "THE FIRST THOUSAND".
+         Every caller that wrote db.list('inventory_movements',{}) meant the
+         ledger, and for months got the ledger, because the ledger was under a
+         thousand rows. The default has to mean what the callers meant. */
+      const all=(per==null) || (+per>SB_PAGE);
+      const lim='&limit='+(per||SB_PAGE);
       let filt='';
       // Two or more words is an AND across columns ("beef kidney"), which ilike
       // cannot express — read the table and match in the browser instead.
       if(term && cols.length && term.split(' ').length>1){
-        return _localSearch(await sb((await _readRel(T))+'?select=*'+lim), cols, term);
+        const rel0=await _readRel(T);
+        return _localSearch(all? await sbAll(rel0+'?select=*') : await sb(rel0+'?select=*'+lim), cols, term);
       }
       if(term && cols.length){
         filt = cols.length===1
@@ -972,7 +1025,7 @@ const db = {
           : '&or=('+cols.map(c=>c+'.ilike.*'+encodeURIComponent(term)+'*').join(',')+')';
       }
       const rel=await _readRel(T);
-      try{ return await sb(rel+'?select=*'+filt+lim); }
+      try{ return all ? await sbAll(rel+'?select=*'+filt) : await sb(rel+'?select=*'+filt+lim); }
       catch(e){
         // A declared column may not exist on this database yet (older schema, or a
         // masked view that drops it). Rather than showing "no results", fall back
@@ -981,7 +1034,7 @@ const db = {
         try{
           if(m.name) return await sb(rel+'?select=*&'+m.name+'=ilike.*'+encodeURIComponent(term)+'*'+lim);
         }catch(e2){}
-        const rows=await sb(rel+'?select=*'+lim);
+        const rows=all ? await sbAll(rel+'?select=*') : await sb(rel+'?select=*'+lim);
         return _localSearch(rows, cols, term);
       }
     } else {
@@ -3224,19 +3277,38 @@ const _spN=v=>(v==null?'—':(Math.round((+v||0)*100)/100).toLocaleString('en-PH
 function spStockCell(s,opt){
   opt=opt||{};
   if(!s) return '<span class="mini" style="color:var(--muted)">'+(opt.blank||'—')+'</span>';
-  const shopBit=(s.shopQ!=null)
-    ? `<div class="mini" style="color:var(--muted)" title="the Shopify reading itself, before the movements posted since it was taken — it is already inside Sellable, not added to it">Shopify ${_spN(s.shopQ)}${s.postG?(s.postG>0?' +':' ')+_spN(s.postG)+' since':''}</div>` : '';
-  /* Name the sites the off-shelf packs are actually at. One site and it is
-     named outright; more than one and each is named with its share, because
-     "one transfer away" stops being true the moment there are two of them. */
+  /* SAY WHERE THE PACKS ARE, NOT WHAT THEY ARE NOT.
+     This used to read "54 not yet at Bulacan Commissary", which says the exact
+     opposite of what is true: the packs ARE at Bulacan, they are simply not on
+     the shop's shelf. "not yet sellable" and "at Bulacan" got joined into one
+     phrase and the join inverted the meaning.
+
+     So each half is now labelled by a fact nobody has to parse — where it is,
+     and where the figure came from:
+         33 Shopify · 54 at Bulacan Commissary
+     Two places, two numbers, and the sum above them. */
   const sites=(s.otherSites||[]);
   const where = sites.length===1 ? locName(sites[0].code)
               : sites.length>1   ? sites.map(x=>locName(x.code)+' '+_spN(x.qty)).join(' · ')
               : '';
   const pipeTitle = sites.length>1
-    ? 'off-shelf at MORE THAN ONE site — '+where+'. That is more than one transfer, so treat it as more than one job.'
-    : (sites.length===1 ? 'made, and sitting at '+where+' — one transfer away from being sellable'
-                        : 'made but off-shelf');
+    ? 'made, and sitting at MORE THAN ONE site — '+where+'. That is more than one transfer, so treat it as more than one job. Not on the shop\'s shelf, so not sellable until it is moved.'
+    : (sites.length===1 ? 'made, and sitting at '+where+' — real stock, one transfer away from being sellable'
+                        : 'made but not on the shop\'s shelf');
+  /* WHERE THE SELLABLE FIGURE CAME FROM, in the label rather than on a second
+     line repeating the same number. The old cell printed "Shopify 33" under
+     "33 sellable" — the same figure twice, which is noise on every row. The
+     movements posted since the reading are the only part worth a second line,
+     and they are only shown when there are any. */
+  const fromShop=(s.shopQ!=null);
+  const sellLabel = fromShop ? 'Shopify' : ('at '+locName((_stockPic&&_stockPic.sellLoc)||'pasig'));
+  const sellTitle = fromShop
+    ? ('Shopify\'s available at '+locName((_stockPic&&_stockPic.sellLoc)||'pasig')
+       +' — what a customer can actually buy, with packs committed to unfulfilled orders already taken out.'
+       +(s.postG?(' The reading itself was '+_spN(s.shopQ)+'; '+_spN(Math.abs(s.postG))+' have '+(s.postG>0?'arrived':'left')+' since it was taken.'):''))
+    : ('our own ledger at '+locName((_stockPic&&_stockPic.sellLoc)||'pasig')+' — the Shopify inventory feed is not running, so this is our figure, not the shop\'s.');
+  const sinceBit=(fromShop && s.postG)
+    ? `<div class="mini" style="color:var(--muted)" title="${esc(sellTitle)}">Shopify read ${_spN(s.shopQ)}, ${s.postG>0?'+':''}${_spN(s.postG)} since</div>` : '';
   /* Shown, never added. A consignee's shelf and a breeder colony are stock that
      exists and is not ours to plan with. */
   const cons=(s.consSites||[]);
@@ -3246,10 +3318,13 @@ function spStockCell(s,opt){
     ? `<div class="mini" style="color:var(--berry)" title="On a transfer that has been sent but not confirmed received${(s.transitRefs||[]).length?' ('+esc((s.transitRefs||[]).join(', '))+')':''}. Not counted at either site: the ledger still has them at the kitchen, and the shop may already have put them on sale. Confirm the receipt and they land where they belong.">🚚 ${_spN(s.inTransit)} in transit — confirm the receipt</div>` : '';
   const consBit=(s.consigned>0)
     ? `<div class="mini" style="color:var(--muted)" title="Not counted in Current stock, because it is not ours to pull from — the same rule ⚙ Planning locations states for a consignee or a breeder colony. Tick the site under &quot;Counts as supply&quot; if that is wrong.">not ours: ${_spN(s.consigned)}${cons.length?' at '+cons.map(x=>esc(locName(x.code))).join(', '):''}</div>` : '';
+  const pipeBit=(s.pipeline>0 || sites.length)
+    ? ` · <span style="color:var(--earth,#b5762a)" title="${esc(pipeTitle)}">${_spN(s.pipeline)}</span> ${
+        sites.length===1 ? 'at '+esc(where)
+        : sites.length>1 ? `<b style="color:var(--earth,#b5762a)" title="${esc(pipeTitle)}">at ${sites.length} sites</b>`
+        : 'off the shelf'}` : '';
   return `<b>${_spN(s.current)}</b>
-    <div class="mini" style="color:var(--muted)"><span style="color:#2f5d33">${_spN(s.sellable)}</span> sellable · <span style="color:var(--earth,#b5762a)" title="${esc(pipeTitle)}">${_spN(s.pipeline)}</span> not yet${
-      sites.length===1 ? ' at '+esc(where)
-      : sites.length>1 ? ` <b style="color:var(--earth,#b5762a)" title="${esc(pipeTitle)}">at ${sites.length} sites</b>` : ''}</div>${shopBit}${transitBit}${consBit}`;
+    <div class="mini" style="color:var(--muted)"><span style="color:#2f5d33" title="${esc(sellTitle)}">${_spN(s.sellable)}</span> ${esc(sellLabel)}${pipeBit}</div>${sinceBit}${transitBit}${consBit}`;
 }
 function spCoverCell(s){
   if(!s) return '<span class="mini" style="color:var(--muted)">—</span>';
@@ -3311,7 +3386,7 @@ function pqDraw(){
     ${kpi('To produce', Math.round(totProduce), 'packs, across '+rows.filter(r=>calc[r.sku].produce>0).length+' product(s)', totProduce?'var(--berry)':'#4e7a3e')}
     ${kpi('Below reorder point', nAlert, nAlert?'current stock under ROP':'every product above ROP', nAlert?'var(--danger)':'#4e7a3e')}
     ${kpi('Sellable now', Math.round(rows.reduce((a,r)=>a+r.shop,0)), 'from '+esc(window._pqSrc||'the ledger'))}
-    ${kpi('Made, not yet sellable', Math.round(rows.reduce((a,r)=>a+r.other,0)), 'waiting on a transfer', 'var(--earth,#b5762a)')}
+    ${kpi('Made, at '+esc(planSupplyLocs().map(locName).join(' / ')||'the kitchen'), Math.round(rows.reduce((a,r)=>a+r.other,0)), 'real stock — waiting on a transfer to the shop', 'var(--earth,#b5762a)')}
     ${(()=>{ const mv=rows.reduce((a,r)=>a+pqCalc(r).toMove,0);
        return kpi('Of that, a transfer not a run', Math.round(mv), mv?'move these before making anything':'nothing to move', mv?'var(--earth,#b5762a)':'#4e7a3e'); })()}
     ${(()=>{ const tr=rows.reduce((a,r)=>a+(+r.inTransit||0),0);
@@ -3352,9 +3427,10 @@ function pqDraw(){
       <label class="mini"><input type="checkbox" ${PQ_ONLY?'checked':''} onchange="PQ_ONLY=this.checked;pqDraw()"> only what needs producing</label>
     </div>
     <div class="hint" style="margin:0 0 8px">
-      <b>Current stock</b> is <b>sellable now</b> + <b>made, not yet sellable</b> — the same sum the sheet does by hand as
-      "Shopify + this week's production", except both halves here are read rather than typed.
-      <b>Not yet sellable counts only sites you can pull from</b> (${esc(planSupplyLocs().join(', ')||'bulacan')}).
+      <b>Current stock</b> is <b>what the shop can sell</b> + <b>what is made and sitting at the kitchen</b> — the same sum the sheet does by hand as
+      "Shopify + this week's production", except both halves here are read rather than typed. The second half is <b>real stock in a freezer</b>,
+      not stock that has failed to arrive somewhere: it is at ${esc(planSupplyLocs().map(locName).join(', ')||'Bulacan')} and one transfer away from being sellable.
+      <b>Only sites you can pull from are counted</b> (${esc(planSupplyLocs().map(locName).join(', ')||'Bulacan')}).
       A consignee's shelf and a breeder colony are shown under a row as <i>not ours</i> and never added — we cannot fetch it,
       so counting it would under-produce by exactly the quantity we cannot have.
       <br><b>Sellable now is read from ${esc(window._pqSrc||'the ledger')}.</b>
@@ -3369,15 +3445,15 @@ function pqDraw(){
          return `<br><b style="color:var(--berry)">🚚 ${Math.round(tr)} pack(s) are on a transfer that has been sent but not confirmed received</b>
            (${esc(refs.join(', '))}). Nothing posts to the ledger until somebody presses <b>Receive</b>, so until then the books still
            say those packs are at ${esc(planProduceLoc()||'the kitchen')} — while the shop may already have put them on sale. They are
-           held out of <b>not yet sellable</b> so they cannot be counted at both sites at once, and shown here instead.
+           held out of the <b>at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</b> column so they cannot be counted at both sites at once, and shown here instead.
            <b>Confirming the receipt is what puts them where they belong.</b>`; })()}
       ${noSales?`<br><b style="color:var(--earth,#b5762a)">${noSales} product(s) have no sales in the window</b> — their average is zero, so they ask for nothing. Import sales on the Sales Momentum screen to include them.`:''}
     </div>
     <div style="overflow-x:auto" class="stickyhead"><table style="min-width:1180px"><thead><tr>
       <th style="min-width:200px">Product</th>
-      <th class="num" title="what the shop can sell right now — ${esc(window._pqSrc||'the ledger')}">Sellable</th>
-      <th class="num" title="made, and sitting at a site we can pull from — ${esc(planSupplyLocs().join(', ')||'bulacan')} — so one transfer away. Stock held with a consignee or as breeders is NOT in here: we cannot fetch it, so counting it would make the planner under-produce by exactly the quantity it cannot have. Tick a site under &quot;Counts as supply&quot; in ⚙ Planning locations to change that.">Not yet<br>sellable</th>
-      <th class="num" title="sellable + not yet sellable">Current<br>stock</th>
+      <th class="num" title="What the shop can sell right now — ${esc(window._pqSrc||'the ledger')}. Packs committed to unfulfilled orders are already taken out, because a committed pack cannot save you from running out.">At ${esc(locName(planSellLoc()))}<br>(sellable)</th>
+      <th class="num" title="Made, and sitting at a site we can pull from — ${esc(planSupplyLocs().map(locName).join(', ')||'Bulacan')}. Real stock in a freezer, one transfer away from the shop’s shelf. Stock held with a consignee or as breeders is NOT in here: we cannot fetch it, so counting it would make the planner under-produce by exactly the quantity it cannot have. Tick a site under &quot;Counts as supply&quot; in ⚙ Planning locations to change that.">At ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</th>
+      <th class="num" title="what the shop can sell + what is at the kitchen">Current<br>stock</th>
       <th class="num" title="how many days the SELLABLE shelf lasts at the current rate — this is the priority order, and it ignores stock sitting at the other site because that stock does not stop this shelf running out">Days<br>cover</th>
       <th class="num" title="units sold in the sales window">Sold<br>${PQ.win}d</th>
       <th class="num" title="units sold ÷ window days">Ave.<br>/day</th>
@@ -3865,7 +3941,7 @@ function drawLiveStock(){
   const _gmin=arr=>Math.min(...arr.map(_lr));
   const byG1={}; rows.forEach(r=>{ (byG1[r.g1]=byG1[r.g1]||[]).push(r); });
   h+=`<div class="repcard"><div style="overflow-x:auto"><table><thead><tr>
-    <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num" title="Sold on Shopify, less anything refunded or returned">−Sold</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${SP?`<th class="num" title="Finished packs only. Current stock = what ${esc(planSellLoc())} can sell now + what is made but still off-shelf. Business-wide, whatever the Site filter above says — sellable is by definition at the shop.">Current<br>stock</th><th class="num" title="Days the sellable shelf lasts · everything we own against New Par + safety stock">Cover<br>d · %</th>`:''}${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
+    <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num" title="Sold on Shopify, less anything refunded or returned">−Sold</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${SP?`<th class="num" title="Finished packs only. Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. Business-wide, whatever the Site filter above says — the sellable half is by definition at the shop.">Current<br>stock</th><th class="num" title="Days the sellable shelf lasts · everything we own against New Par + safety stock">Cover<br>d · %</th>`:''}${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
   if(!rows.length) h+=`<tr><td colspan="${(mh?11:12)+SP}" class="empty">${(LS_Q||LS_FLAG)?'Nothing matches that search.':(LS_ACT?'Nothing needs action ✅':'No stock movements yet.')}</td></tr>`;
   Object.keys(byG1).sort((a,b)=>_gmin(byG1[a])-_gmin(byG1[b])||cmpGroupKeys(a,b)).forEach(g1=>{
     const g1list=byG1[g1]; const gval=g1list.reduce((s,r)=>s+r.value,0);
@@ -3890,7 +3966,7 @@ function drawLiveStock(){
   });
   h+=`</tbody></table></div>
     <div class="hint" style="margin-top:8px"><b>Ending = Begin + In + Prod − Used ± Transfer ± Adjust</b>, straight from the ledger — so it both explains and equals current on-hand. Ingredients show in <b>kg</b>, finished goods in <b>packs</b>, supplies in their unit. Rows open the item; <b style="color:var(--earth,#b5762a)">⚠ reorder</b> = at/below reorder or PAR, <b style="color:var(--danger)">🔴 negative</b> = a ledger gap to fix. ${LS_LOC==='all'?'Showing every site combined — switch Site to split them.':''}
-    ${SP?`<br><b>Current stock</b> and <b>Cover</b> are finished-goods columns and are <b>business-wide whatever the Site filter says</b> — <span style="color:#2f5d33">sellable</span> is by definition what ${esc(planSellLoc())} can sell right now, <span style="color:var(--earth,#b5762a)">not yet sellable</span> is everything we own somewhere else. They are the same numbers Regular Packs, the Weekly Demand Target and the Production Plan read, so the four screens cannot disagree about what current stock means.`
+    ${SP?`<br><b>Current stock</b> and <b>Cover</b> are finished-goods columns and are <b>business-wide whatever the Site filter says</b> — the first figure is what <span style="color:#2f5d33">${esc(locName(planSellLoc()))}</span> can sell right now, the second is what is sitting <span style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</span>. They are the same numbers Regular Packs, the Weekly Demand Target and the Production Plan read, so the four screens cannot disagree about what current stock means.`
       :'<br><b>Current stock</b> and <b>Cover</b> are hidden because the clock has been stopped at a past date — today’s shelf is not an answer to a question about last month.'}</div></div>`;
   $('content').innerHTML=h;
   if(typeof applyStickyHeads==='function') applyStickyHeads($('content'));
@@ -3985,7 +4061,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-08-28 06:30Z';
+const WR_BUILD='2026-08-31 04:20Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -4054,13 +4130,41 @@ const BACKUP_TABLES=[
   // ledgers, planning, logs & attachments
   'inventory_movements','variance_log','demand','mrp_plans','mrp_plan_lines',
   'saved_reports','record_notes','record_attachments','bulk_change_requests','activity_log'];
+/* A BACKUP THAT IS SILENTLY SHORT IS WORSE THAN NO BACKUP.
+   This read each table with a plain select and no limit, which PostgREST caps at
+   a thousand rows without saying so. Once inventory_movements passed a thousand,
+   every "full-database snapshot" quietly stopped at the oldest thousand — and
+   restore DELETES the table before loading the file, so restoring one of those
+   would have destroyed every movement after the cut. The snapshot people take
+   before a risky change was itself the risk.
+
+   It pages now, and it RECORDS what it counted. `_meta.rows` lets a restore
+   prove the file is whole rather than trusting that it is. */
 async function exportBackup(){
-  toast('Building backup…'); const dump={_meta:{app:'WR ERP',exported_by:CURRENT_USER,live:isLive()}};
-  for(const t of BACKUP_TABLES){ try{ dump[t]=isLive()? await sb((await _readRel(t))+'?select=*') : (DEMO[t]||[]); }catch(e){ dump[t]={error:String(e.message||e)}; } }
+  toast('Building backup…'); showBusy('Reading every table…');
+  const dump={_meta:{app:'WR ERP',exported_by:CURRENT_USER,live:isLive(),
+    at:new Date().toISOString(), paged:true, rows:{}, short:[]}};
+  try{
+    for(const t of BACKUP_TABLES){
+      try{
+        const rows = isLive()? await sbAll((await _readRel(t))+'?select=*') : (DEMO[t]||[]);
+        dump[t]=rows;
+        dump._meta.rows[t]=rows.length;
+        /* The server's own count, where it gave one. If it disagrees with what
+           we hold, say so IN THE FILE — a mismatch discovered at restore time is
+           a mismatch discovered too late. */
+        if(rows._total!=null && rows._total!==rows.length) dump._meta.short.push(t+': read '+rows.length+' of '+rows._total);
+      }catch(e){ dump[t]={error:String(e.message||e)}; dump._meta.short.push(t+': '+String(e.message||e)); }
+    }
+  } finally { hideBusy(); }
   const blob=new Blob([JSON.stringify(dump,null,1)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
   a.download='wr-erp-backup-'+todayISO()+'.json'; document.body.appendChild(a); a.click(); a.remove();
-  toast('Backup downloaded ('+BACKUP_TABLES.length+' tables)');
+  const tot=Object.values(dump._meta.rows).reduce((x,y)=>x+y,0);
+  toast(dump._meta.short.length
+    ? ('⚠ Backup downloaded but '+dump._meta.short.length+' table(s) were incomplete — see _meta.short')
+    : ('Backup downloaded — '+BACKUP_TABLES.length+' tables, '+tot.toLocaleString('en-PH')+' rows'),
+    !!dump._meta.short.length);
 }
 // Conflict key per backup table — used to clear rows (delete filter) and to upsert natural-key tables.
 // Tables not listed default to 'id' (a surrogate identity column): their id is dropped on restore
@@ -4093,6 +4197,26 @@ async function restoreBackup(){
   if(typeof curRole==='function' && curRole()!=='Admin'){ toast('Only an Admin can restore',true); return; }
   const d=window._restoreDump; if(!d){ toast('Choose a backup file first',true); return; }
   if(!isLive()){ toast('Restore runs against the live database only',true); return; }
+  /* REFUSE TO RESTORE A FILE THAT MAY BE TRUNCATED.
+     A backup taken before the paging fix stops at exactly a thousand rows on any
+     table that had more, and restore deletes before it loads. Exactly 1000 rows
+     is the fingerprint of that cap; it is a suspicious number for a real table
+     to land on, and the cost of being wrong about it is one extra confirmation
+     against losing a ledger. A file written by the paged exporter says so in
+     _meta.paged and is trusted. */
+  const _suspect=(d._meta&&d._meta.paged)?[]:BACKUP_TABLES.filter(t=>Array.isArray(d[t])&&d[t].length===1000);
+  const _short=(d._meta&&d._meta.short)||[];
+  if(_suspect.length){
+    if(!confirm('⚠ THIS BACKUP LOOKS TRUNCATED.\n\n'
+      +_suspect.join(', ')+'\n\n'
+      +(_suspect.length===1?'That table holds':'Those tables hold')+' exactly 1000 rows, which is the row cap the database applies to a read that does not page — not a number a real table usually lands on. It was taken by an older version of the app, before that was fixed.\n\n'
+      +'RESTORE DELETES EVERY ROW FIRST, so anything past the cut would be gone for good. Take a fresh backup with this version and use that instead.\n\n'
+      +'Continue anyway?')) return;
+  }
+  if(_short.length){
+    if(!confirm('⚠ This backup recorded '+_short.length+' incomplete table(s) when it was taken:\n\n'
+      +_short.join('\n')+'\n\nRestoring it would load those tables short. Continue anyway?')) return;
+  }
   if(!confirm('RESTORE will DELETE the current contents of the '+BACKUP_TABLES.length+' backed-up tables (master data, transactions, and the stock ledger) and load the backup in their place.\n\nThis cannot be undone. Continue?')) return;
   if(window._postLock){ toast('Busy…',true); return; } window._postLock=true;
   showBusy('Restoring backup…');
@@ -5418,7 +5542,7 @@ function _wdtSheetHtml(){
     </div>
     <div class="hint" style="margin:0 0 8px"><b>Target is what is still owed — not the two plot columns added together.</b> A demand plot is Par + safety <i>minus what is on the shelf</i>, so the newest plot for a product already contains what the older ones asked for. The plot columns on the right show the demand repeating; the Target column refuses to count it twice. Only production <i>after</i> the newest plot reduces it, because the plot was worked out against the shelf as it stood that day.<br>
       <b>Priority is by cover</b> — what is on hand divided by how fast it sells, so low stock and fast moving are one question. Rows are in that order.<br>
-      <b>Current stock is two numbers, not three.</b> <b style="color:#2f5d33">Sellable</b> is what ${esc(planSellLoc())} can sell right now — the Shopify reading plus every movement posted at the shop since it was taken. <b style="color:var(--earth,#b5762a)">Not yet sellable</b> is what is made and sitting at a site we can pull from (${esc(planSupplyLocs().join(', ')||'bulacan')}) — one transfer away. Stock held with a consignee or as breeders is listed as <i>not ours</i> and never added. They add to Current stock; the Shopify figure printed under them is already <i>inside</i> Sellable and is shown so it can be checked, not so it can be added again.
+      <b>Current stock is two places, not three numbers.</b> The first is what <b style="color:#2f5d33">${esc(locName(planSellLoc()))}</b> can sell right now — the Shopify reading plus every movement posted at the shop since it was taken. The second is what is made and sitting <b style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(', ')||'Bulacan')}</b> — real stock, one transfer away. Stock held with a consignee or as breeders is listed as <i>not ours</i> and never added. They add to Current stock; the Shopify figure printed under them is already <i>inside</i> Sellable and is shown so it can be checked, not so it can be added again.
       ${_wdtPicSrc?`<br><span style="color:var(--muted)">Sellable read from ${esc(_wdtPicSrc)}.</span>`
         :`<br><span style="color:var(--earth,#b5762a)">Showing a back-dated sheet, so the columns fall back to the ledger at both sites — a live Shopify reading cannot describe a past day.</span>`}</div>
     <div style="overflow-x:auto" class="stickyhead wdtsheet"><table style="min-width:${900+wk.length*150}px"><thead>
@@ -11624,7 +11748,7 @@ function drawProdPlan(){
       : `<span style="color:var(--earth,#b5762a);font-size:12px">No locked demand for this week — <b>targets are blank on purpose</b>. Save a plan in Demand/MRP to lock it. You can still build and post this run without one.</span>`}</div>
     <div class="smart" style="margin:8px 0"><div class="stile"><div class="v">${totTarget}</div><div class="l">Target packs</div></div><div class="stile"><div class="v">${totGood}</div><div class="l">This run (good)</div></div><div class="stile"><div class="v" style="color:${totRemain>0?'var(--berry)':'#4e7a3e'}">${totRemain}</div><div class="l">Remaining to make</div></div></div>
     <div style="overflow-x:auto"><table style="min-width:1060px"><thead><tr><th>Product</th>
-      <th class="num" title="Current stock = what ${esc(planSellLoc())} can sell now + what is made but still off-shelf. Sellable already IS the Shopify reading, water-line adjusted.">Current<br>stock</th>
+      <th class="num" title="Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. The first figure already IS the Shopify reading, water-line adjusted — it is not added a second time.">Current<br>stock</th>
       <th class="num" title="Days = how long the sellable shelf lasts. % = everything we own against New Par + safety. High % with low days means the packs exist but are at the wrong site — send a van, not a butchery day.">Cover<br>d · %</th>
       <th class="num">Target</th><th class="num">Produced (wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
     ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodProducedMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
@@ -11982,13 +12106,13 @@ function prodKitchenCart(){
   const groups=[...new Set(prods.map(p=>p.group_1||'—'))].sort();
   $('modal').innerHTML=`<div><h3>🔎 Search &amp; add products</h3>
     <p class="mini">Search or filter, then enter <b>packs to produce</b> per product. It starts from the current plan; Apply rebuilds it. Target &amp; remaining come from the demand plot for this production week.<br>
-      <b>Current stock</b> is <span style="color:#2f5d33">sellable at ${esc(planSellLoc())}</span> + <span style="color:var(--earth,#b5762a)">made but not yet on the shelf</span>. <b>Cover</b> is days on the shelf, then the share of New Par + safety we hold everywhere. A high % beside a low day count means the packs exist and are at the wrong site.</p>
+      <b>Current stock</b> is what <span style="color:#2f5d33">${esc(locName(planSellLoc()))}</span> can sell + what is sitting <span style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</span> — two places, two numbers. <b>Cover</b> is days on the shelf, then the share of New Par + safety we hold everywhere. A high % beside a low day count means the packs exist and are at the wrong site.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
       <input id="kc_q" placeholder="🔎 search name / SKU / group…" oninput="window._kcQ=this.value;drawKitchenCartBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
       <select id="kc_g" onchange="window._kcG=this.value;drawKitchenCartBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All groups</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
     </div>
     <div class="mscroll" style="overflow-x:auto"><table style="min-width:640px"><thead><tr><th>Product</th>
-      <th class="num" title="what the shop can sell now + what is made but still off-shelf">Current<br>stock</th>
+      <th class="num" title="what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}">Current<br>stock</th>
       <th class="num" title="days the sellable shelf lasts · everything we own against New Par + safety">Cover<br>d · %</th>
       <th class="num">Target</th><th class="num">Remaining</th><th class="num">Produce</th></tr></thead><tbody id="kcBody"></tbody></table></div>
     <div class="mfoot"><button class="btn" onclick="prodCartApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
@@ -17992,7 +18116,7 @@ const KB = {
        'Set the five levers on the toolbar: lead time · movement × · cycle days · sales window · case size. Movement can be overridden per product; leave the cell blank to use the global figure.',
        '📥 Shopify count loads a real count by hand (Shopify → Products → Inventory → Export). ☁ Send to Demand writes the request as demand for a plan date. ▶ Send to Production Plan puts it straight on the run.',
        'Or pull it from the other end: Demand/MRP → 🧮 Pull from Regular Packs loads the same answer into the plot.'],
-    l:['<b>Current stock</b> = <b>sellable now</b> + <b>made, not yet sellable</b>. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here both numbers come out of the ledger, and they are shown apart because the gap between them is a transfer somebody still has to do.',
+    l:['<b>Current stock</b> = <b>what the shop can sell</b> + <b>what is at the kitchen</b> — named by place, because "not yet sellable at Bulacan" reads as if it had failed to arrive there, when it is sitting in the freezer. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here both numbers come out of the ledger, and they are shown apart because the gap between them is a transfer somebody still has to do.',
        '<b>There is no Shopify inventory feed.</b> The Shopify sync is one way and pulls ORDERS — the token carries read_orders and read_products, nothing else. <code>wr_shopify_stock</code> is not a feed either: it is this ledger\'s own balance at the selling site, named for what WOULD be pushed if anything ever pushed. So <b>Sellable</b> is our ledger, kept current by the sales the sync posts.',
        'If you want the shop\'s OWN number, load it by hand: Shopify → Products → Inventory → Export, then <b>📥 Shopify count</b>. It is a snapshot, not a feed — the screen says how old it is, and any product where the count and our ledger disagree is flagged on its row. That gap is the finding: it means somebody adjusted one side and not the other.',
        '<b>☁ Send to Demand</b> writes the request into the demand table for a plan date, tagged <code>packs production request</code> — the same place the Google Sheet sync lands, so Demand/MRP picks it up. Re-sending replaces only the rows this screen wrote; a sheet import or a custom order on the same date is left alone.',
