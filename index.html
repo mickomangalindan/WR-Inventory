@@ -117,7 +117,13 @@
   /* On-hand chips. Same two colours as the Processed / Raw tags, so a glance
      tells you WHICH stock a number is — the green one is what you already made,
      the brown one is what you can still pull from the chiller. */
-  .ohchip{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 6px;border-radius:10px;
+  .iconbtn{font:inherit;font-size:15px;line-height:1;cursor:pointer;background:var(--card,#fff);
+  border:1px solid var(--line);border-radius:6px;padding:4px 8px;color:var(--ink);margin-left:4px}
+.iconbtn:hover{background:#f2f4ef}
+.iconbtn:focus-visible{outline:2px solid var(--berry);outline-offset:1px}
+.iconbtn.danger{color:var(--danger)}
+.iconbtn.add{font-weight:700;color:#2f5d33;border-color:#8fbd7c;margin-left:0}
+.ohchip{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 6px;border-radius:10px;
           margin-left:6px;white-space:nowrap;vertical-align:1px}
   .ohchip.proc{background:#dbeddb;color:#1e6b2e}
   .ohchip.raw{background:#f0ece3;color:#7a6432}
@@ -4128,7 +4134,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-08-31 07:40Z';
+const WR_BUILD='2026-09-01 03:10Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -12341,7 +12347,7 @@ function drawOutPickBody(){
         const overdrawn=want>0 && i._rawSku && want*1000>ohRaw+0.5;
         body+=`<tr><td style="padding-left:26px"><span class="tagf tagf-proc">Processed</span> <b>${esc(i._nm)}</b>${_ohChip('proc',ohOut)}${i.is_intermediate?'':'<div class="mini" style="color:var(--earth,#b5762a)">⚠ <b>Intermediate</b> is not ticked on this ingredient — tick it in Master Data so it behaves as a processed output everywhere</div>'}</td>
           <td class="mini">${i._raw?`<span class="tagf tagf-raw">Raw</span> ${esc(i._raw)}${_ohChip('raw',ohRaw,{short:overdrawn})}`:'<span style="color:var(--danger)">no raw parent</span>'}</td>
-          <td class="num mini" style="color:var(--muted)">${i.yield_pct?esc(i.yield_pct)+'%':'—'}</td>
+          <td class="num mini" style="color:var(--muted)">${i.yield_pct?_pctTxt(i.yield_pct)+'%':'—'}</td>
           <td><input type="number" step="any" inputmode="decimal" value="${v}"
             oninput="_opSet('${esc(i.sku)}',this.value)" onchange="_opSet('${esc(i.sku)}',this.value,true)"
             style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px${overdrawn?';border-color:var(--danger);color:var(--danger)':''}"
@@ -13416,6 +13422,8 @@ function _kbLongDate(d){ try{ const t=new Date(String(d)+'T00:00:00'); if(isNaN(
 
 /* ---- BOM substitution for a run (#3) with add/remove counter ---- */
 async function prodSubstitute(){
+  window._subOpen='';
+  try{ await subLoadCtx(); }catch(e){}
   const lines=prodPlanLines.filter(l=>(+l.good_packs||0)>0);
   if(!lines.length){ toast('Add products with packs first',true); return; }
   const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
@@ -13521,6 +13529,278 @@ function drawSubPickOne(){
 }
 function _spFocus(){ const el=$('spQ'); if(el && document.activeElement!==el){ el.focus(); try{ el.setSelectionRange(el.value.length,el.value.length); }catch(e){} } }
 
+
+/* ============ A SUBSTITUTION IS A LIST OF WHAT WAS ACTUALLY USED =========
+   It used to be one code exchanged for one other code: _prodSub[orig] = repl.
+   The kitchen does not work that way. Sixteen kilos of lamb short is covered by
+   the four kilos of lamb there are plus ten of beef and six of buffalo. Forced
+   to name ONE replacement, people picked the biggest part and the rest was made
+   up off the books.
+
+   So a substitution is a LIST OF PARTS IN KILOS — what came off the scale:
+
+       _prodSub['ING-LAMB-TRIM'] = [ {sku:'ING-LAMB-TRIM', g:4000},
+                                     {sku:'ING-BEEF-TRIM', g:10000},
+                                     {sku:'ING-BUFF-TRIM', g:6000} ]
+
+   KILOS, NOT SHARES. A share is the tidier primitive and it is the wrong one
+   here: by the time this dialog opens the run is built and the packs are
+   counted, so the requirement is a fixed number of kilos and the kitchen knows
+   exactly what it weighed out. Asking someone to convert 6 kg into 30% of 20 kg
+   is arithmetic the app should be doing, and it is arithmetic done wrong at
+   half past five on a Friday.
+
+   The proportion is still what the recipe consumes — it is simply derived at
+   the last moment, from the kilos, rather than typed.
+
+   The original ingredient may be one of the parts. That is how "use what we
+   have and top up" is said, and it is why nothing here is called a
+   "replacement".
+
+   THE OLD ONE-FOR-ONE FORM STILL READS. Saved drafts hold the string form, and
+   a draft written last week must open this week. */
+function subSplit(orig){
+  const v=(window._prodSub||{})[orig];
+  if(v==null||v==='') return null;
+  if(typeof v==='string') return (v===orig)?null:[{sku:v, g:null}];   // the old whole-line swap
+  if(Array.isArray(v)){
+    const a=v.filter(x=>x&&x.sku).map(x=>({sku:String(x.sku),
+      /* pct is the shape this held for one build in between; read it so nobody
+         loses a draft over an internal change of mind. */
+      g:(x.g!=null?Math.max(0,+x.g||0):(x.pct!=null?null:null)), pct:(x.pct!=null?+x.pct:null)}));
+    return a.length?a:null;
+  }
+  return null;
+}
+function subParts(orig){ return subSplit(orig)||[]; }
+function subTotalG(orig){ return subParts(orig).reduce((s,x)=>s+(+x.g||0),0); }
+function subIsReal(orig){ const a=subSplit(orig); return !!(a&&a.length); }
+/* Allocated must match what the run needs, within 50 g — the scale's own
+   rounding, not a licence to be short. Under-filling makes a lighter pack than
+   the recipe says, and that is found months later in a margin if at all. */
+function subBalanced(orig, needG){
+  const n=+needG||0; if(!(n>0)) return true;
+  const parts=subParts(orig); if(!parts.length) return true;
+  if(parts.some(x=>x.g==null)) return true;           // a legacy whole-line swap carries no kilos
+  return Math.abs(subTotalG(orig)-n)<=50;
+}
+function subStore(orig, parts){
+  window._prodSub=window._prodSub||{};
+  const a=(parts||[]).filter(x=>x&&x.sku).map(x=>({sku:x.sku, g:Math.max(0,Math.round(+x.g||0))}));
+  if(!a.length) delete window._prodSub[orig];
+  else window._prodSub[orig]=a;
+}
+function subRowDel(orig, i, ctx){
+  const parts=subParts(orig).slice(); parts.splice(i,1);
+  subStore(orig, parts); subRedraw(ctx);
+}
+function subReset(orig, ctx){ window._prodSub=window._prodSub||{}; delete window._prodSub[orig]; subRedraw(ctx); }
+function subRedraw(ctx){ if(ctx==='sub') drawSubPick(); else drawPreConfirmSub(); }
+
+/* ---- the one picker: choose an ingredient, type the kilos ---------------
+   Add and Replace are the same act with a different starting point, so they are
+   the same panel. It searches, because the masterlist is a hundred and sixty
+   items and scrolling one is how the wrong meat gets picked; and it shows what
+   is in the freezer beside each, because choosing something that is also short
+   is the mistake this whole screen exists to prevent. */
+function subAsk(orig, i, ctx, needG){
+  const parts=subParts(orig);
+  const cur=(i!=null && parts[i])?parts[i]:null;
+  const left=Math.max(0, (+needG||0) - subTotalG(orig) + (cur?(+cur.g||0):0));
+  window._subAsk={orig, i:(i==null?null:i), ctx, needG:+needG||0,
+    sku:(cur?cur.sku:''), g:(cur?(+cur.g||0):left), q:'', cat:''};
+  drawSubAsk();
+}
+function subAskPick(sku){ if(!window._subAsk) return; window._subAsk.sku=sku; drawSubAskBody(); drawSubAskChosen(); }
+function subAskQty(v){ if(!window._subAsk) return; window._subAsk.g=Math.max(0,(parseFloat(v)||0))*1000; drawSubAskBody(); drawSubAskChosen(); }
+/* REDRAW THE LIST, NOT THE DIALOG. The old handler rebuilt the whole modal on
+   every keystroke and then hunted the caret back into the box — the same bug
+   the output picker already learned the hard way. The search box and the kilos
+   field are written once; only the rows and the "Chosen" strip redraw. */
+function subAskSearch(v){ if(!window._subAsk) return; window._subAsk.q=v; drawSubAskBody(); }
+function subAskCat(v){ if(!window._subAsk) return; window._subAsk.cat=v; drawSubAskBody(); }
+function subAskClose(){ const A=window._subAsk; window._subAsk=null; if(A) subRedraw(A.ctx); }
+function subAskSave(){
+  const A=window._subAsk; if(!A) return;
+  const el=$('saQty'); if(el) A.g=Math.max(0,(parseFloat(el.value)||0))*1000;
+  if(!A.sku){ toast('Choose an ingredient first',true); return; }
+  if(!(A.g>0)){ toast('How many kilos?',true); return; }
+  const parts=subParts(A.orig).slice();
+  if(A.i!=null && parts[A.i]){
+    /* REPLACING OVERWRITES SOMETHING SOMEBODY ALREADY WEIGHED, so it asks first.
+       Adding does not: an extra line is visible on the list and one press of ✕
+       undoes it. A replace silently loses the weight that was there. */
+    const old=parts[A.i];
+    const oldNm=((window._subIm||{})[old.sku]||{}).name||old.sku;
+    const newNm=((window._subIm||{})[A.sku]||{}).name||A.sku;
+    const same=(old.sku===A.sku);
+    const msg=same
+      ? ('Change '+oldNm+' from '+(Math.round((+old.g||0)/10)/100)+' kg to '+(Math.round(A.g/10)/100)+' kg?')
+      : ('Replace '+oldNm+' ('+(Math.round((+old.g||0)/10)/100)+' kg) with '+newNm+' ('+(Math.round(A.g/10)/100)+' kg)?\n\n'
+         +'The run will draw '+newNm+' instead, at its own yield and its own cost.');
+    if(!confirm(msg)) return;
+    parts[A.i]={sku:A.sku, g:A.g};
+  }
+  else {
+    const dup=parts.findIndex(x=>x.sku===A.sku);
+    /* Adding something already on the list adds to it rather than making a
+       second row for the same meat — two lines of beef is a total nobody adds
+       up correctly by eye. */
+    if(dup>=0) parts[dup]={sku:A.sku, g:(+parts[dup].g||0)+A.g};
+    else parts.push({sku:A.sku, g:A.g});
+  }
+  subStore(A.orig, parts);
+  const nm=((window._subIm||{})[A.sku]||{}).name||A.sku;
+  window._subAsk=null; subRedraw(A.ctx);
+  toast((A.i!=null?'Changed to ':'Added ')+nm+' · '+(Math.round(A.g/10)/100)+' kg');
+}
+function _subAskFocus(){ const el=$('saQ'); if(el && document.activeElement!==el){ el.focus(); try{ el.setSelectionRange(el.value.length,el.value.length); }catch(e){} } }
+/* THE PICKER READS LIKE THE COUNT SHEET, because it is the same freezer.
+   This list used to be flat and sorted by most-stock-first, which sounds
+   helpful until you are standing in front of a hundred and sixty items looking
+   for goat liver and the goat is scattered down the page between beef and
+   duck. Browse & add for output ingredients settled this: category → base
+   material, master order inside, a category filter, a multi-word search that
+   also reads the SKU and the raw parent, and a stock chip on every row. One
+   set of habits for both pickers. */
+function _subAskRows(){
+  const A=window._subAsk||{};
+  const rows=_outIngRows(window._subAllIngs||window._subCandidates||[], window._subCandidates||[]);
+  const q=String(A.q||'').toLowerCase().split(/\s+/).filter(Boolean);
+  const gf=A.cat||'';
+  const match=i=>{
+    if(gf && (i._g1||'—')!==gf) return false;
+    if(!q.length) return true;
+    const t=[i._nm,i.name,i.sku,i._g1,i._g2,i._raw,i.raw_input,i.category].filter(Boolean).join(' ').toLowerCase();
+    return q.every(w=>t.includes(w));                    // every word, not the whole phrase
+  };
+  return rows.filter(match);
+}
+function drawSubAskBody(){
+  const A=window._subAsk; if(!A) return;
+  const oh=window._subOh||{};
+  const shown=_subAskRows();
+  let body='';
+  hierGroups(shown,{g1:'_g1',g2:'_g2'}).forEach(G=>{
+    body+=`<tr class="grp"><td colspan="2" style="padding-left:10px">▸ <b>${esc(G.g1)}</b></td></tr>`;
+    G.subs.forEach(S=>{
+      if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="2" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
+      S.items.forEach(i=>{
+        const sel=(A.sku===i.sku), isOrig=(i.sku===A.orig), proc=isProcessedItem(i);
+        const have=+oh[i.sku]||0;
+        /* the chip turns red only on the row you have actually chosen: a
+           shortage matters when you are about to draw against it, not before */
+        const short=sel && (+A.g||0)>have+0.5;
+        body+=`<tr style="cursor:pointer;${sel?'background:var(--pick,#eef3ec)':''}" onclick="subAskPick('${esc(i.sku)}')" title="use ${esc(i._nm)}">
+          <td style="padding-left:26px">${sel?'<b>● </b>':''}<span class="tagf ${proc?'tagf-proc':'tagf-raw'}">${proc?'Processed':'Raw'}</span> <b>${esc(i._nm)}</b>${_ohChip(proc?'proc':'raw',have,{short:short})}${isOrig?' <span class="mini" style="color:var(--muted)">— the recipe\'s own</span>':''}
+            <div class="mini" style="color:var(--muted)"><code>${esc(i.sku)}</code>${i._raw?' · from '+esc(i._raw):''}</div></td>
+          <td class="num mini" style="color:var(--muted)">${i.yield_pct?_pctTxt(i.yield_pct)+'%':'—'}</td></tr>`;
+      });
+    });
+  });
+  const el=$('saBody');
+  if(el) el.innerHTML=body||'<tr><td colspan="2" class="empty">Nothing matches that search.</td></tr>';
+  const c=$('saCount');
+  if(c) c.textContent=shown.length+' of '+(window._subCandidates||[]).length+' ingredients';
+}
+function drawSubAskChosen(){
+  const A=window._subAsk; if(!A) return;
+  const im=window._subIm||{}, oh=window._subOh||{};
+  const kg=g=>(Math.round((+g||0)/10)/100);
+  const nm=A.sku?((im[A.sku]||{}).name||A.sku):'';
+  const have=A.sku?(+oh[A.sku]||0):0;
+  const over=A.sku && (+A.g||0)>have+0.5;
+  const el=$('saChosen'); if(!el) return;
+  el.innerHTML=`<div class="mini" style="color:var(--muted)">Chosen</div>
+    <b>${nm?esc(nm):'<span style="color:var(--danger)">nothing yet</span>'}</b>
+    ${nm?`<div class="mini" style="color:${over?'var(--danger)':'var(--muted)'}">${kg(have)} kg on hand at ${esc(planProduceLoc())}${over?' — less than you are about to use':''}</div>`:''}`;
+}
+function drawSubAsk(){
+  const A=window._subAsk; if(!A) return;
+  const im=window._subIm||{};
+  const kg=g=>(Math.round((+g||0)/10)/100);
+  const origName=(im[A.orig]||{}).name||A.orig;
+  const cats=[...new Set(_outIngRows(window._subAllIngs||window._subCandidates||[], window._subCandidates||[]).map(i=>i._g1||'—'))].sort();
+  $('modal').innerHTML=`<div><h3>${A.i!=null?'🔎 Change this ingredient':'🔎 Add an ingredient'}</h3>
+    <p class="mini">Covering <b>${esc(origName)}</b>. Pick what was used and type <b>how many kilos</b> — the actual weight off the scale, not a share.<br>
+    Grouped by <b>category → base material</b>, the same way the count sheet and <b>Output ingredients — browse &amp; add</b> read. The chip is stock on hand at <b>${esc(planProduceLoc())}</b>: <span class="ohchip proc">green</span> processed, <span class="ohchip raw">brown</span> raw, and <span class="ohchip short">red</span> once you ask for more than there is.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
+      <input id="saQ" value="${esc(A.q||'')}" placeholder="🔎 search name / SKU / raw parent…" oninput="subAskSearch(this.value)"
+        style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
+      <select onchange="subAskCat(this.value)" style="padding:6px;border:1px solid var(--line);border-radius:6px">
+        <option value="">All categories</option>${cats.map(g=>`<option value="${esc(g)}" ${A.cat===g?'selected':''}>${esc(g)}</option>`).join('')}</select>
+      <span id="saCount" class="mini" style="color:var(--muted)"></span>
+    </div>
+    <div class="mscroll" style="overflow-x:auto;max-height:340px"><table class="stickyhead"><thead><tr>
+      <th>Ingredient</th><th class="num">Std yield</th></tr></thead><tbody id="saBody"></tbody></table></div>
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-top:12px;padding:10px;background:#f6f8f4;border-radius:8px">
+      <div id="saChosen" style="flex:1;min-width:180px"></div>
+      <label class="mini" style="display:flex;flex-direction:column;gap:3px">Kilos used
+        <input id="saQty" type="number" step="any" inputmode="decimal" value="${A.g?kg(A.g):''}"
+          oninput="subAskQty(this.value)" placeholder="0"
+          style="width:110px;text-align:right;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:15px"></label>
+    </div>
+    <div class="mfoot" style="margin-top:12px"><button class="btn" onclick="subAskSave()">${A.i!=null?'Save':'Add'}</button>
+      <button class="btn sec" onclick="subAskClose()">Cancel</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
+  drawSubAskBody(); drawSubAskChosen(); _subAskFocus();
+}
+/* One editor, used by the pre-confirm dialog and by the Substitute screen, so
+   the two cannot drift into two different ideas of what a substitution is. */
+function subEditorHtml(orig, opt){
+  opt=opt||{};
+  const ctx=opt.ctx||'pre';
+  const im=(window._subIm||{}), oh=(window._subOh||{});
+  const needG=+opt.needG||0;
+  const parts=subParts(orig);
+  const kg=g=>(Math.round((+g||0)/10)/100);
+  const used=subTotalG(orig);
+  const left=Math.round((needG-used)*10)/10;
+  const bal=subBalanced(orig, needG);
+  const legacy=parts.some(x=>x.g==null);
+  const rows=parts.map((pt,i)=>{
+    const have=+oh[pt.sku]||0;
+    const short=(+pt.g||0)>have+0.5;
+    const isOrig=pt.sku===orig;
+    return `<tr>
+      <td><b>${esc((im[pt.sku]||{}).name||pt.sku)}</b>${isOrig?' <span class="mini" style="color:var(--muted)">— the recipe\'s own</span>':''}
+        <div class="mini" style="color:${short?'var(--danger)':'var(--muted)'}">${have>0?kg(have)+' kg on hand':'nothing on hand'}${short?' — less than this line uses ⚠':''}</div></td>
+      <td class="num" style="white-space:nowrap"><b>${pt.g==null?'<span class="mini" style="color:var(--muted)">whole line</span>':kg(pt.g)+' kg'}</b></td>
+      <td class="mini" style="white-space:nowrap;text-align:right">
+        <button class="iconbtn" title="Swap this for something else, or change the weight" aria-label="Replace ${esc((im[pt.sku]||{}).name||pt.sku)}"
+          onclick="subAsk('${esc(orig)}',${i},'${ctx}',${needG})">↻</button>
+        <button class="iconbtn danger" title="Take this line off" aria-label="Remove ${esc((im[pt.sku]||{}).name||pt.sku)}"
+          onclick="subRowDel('${esc(orig)}',${i},'${ctx}')">✕</button></td>
+    </tr>`;
+  }).join('');
+  return `<div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fbfbf8">
+    ${parts.length?`<table style="width:100%"><thead><tr>
+      <th style="text-align:left">What was used</th><th class="num">Kilos</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table>`
+      :`<div class="mini" style="color:var(--muted);padding:4px 0">Nothing added — the run will make what stock allows.</div>`}
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+      <button class="iconbtn add" title="Add an ingredient to this line" aria-label="Add an ingredient"
+        onclick="subAsk('${esc(orig)}',null,'${ctx}',${needG})">＋</button>
+      <span class="mini" style="color:var(--muted)">add what was used</span>
+      ${parts.length?`<button class="btn sec sm" onclick="subReset('${esc(orig)}','${ctx}')" title="clear this section and use the recipe as written">↺ Back to the recipe</button>`:''}
+      <span style="flex:1"></span>
+      ${!parts.length?'' : legacy
+        ? '<b class="mini" style="color:var(--muted)">whole line swapped (from an older draft)</b>'
+        : `<b class="mini" style="color:${bal?'#2f5d33':'var(--danger)'}">${kg(used)} of ${kg(needG)} kg${bal?' ✓':(left>0?` · ${kg(left*1)} kg still to allocate`:` · ${kg(-left)} kg over`)}</b>`}
+    </div>
+  </div>`;
+}
+/* The candidate list and the stock figures both dialogs read. Built once per
+   opening rather than per row. */
+async function subLoadCtx(){
+  let ings=[]; try{ ings=await listIngredients(); }catch(e){}
+  const im={}; ings.forEach(i=>im[i.sku]=i);
+  window._subIm=im;
+  window._subAllIngs=ings;
+  window._subCandidates=ings.filter(i=>!isSupplyItem(i));
+  try{ window._subOh=await _ingOhBulacanG(); }catch(e){ window._subOh={}; }
+  return {ings, im};
+}
 function drawSubPick(){
   const C=window._subCtx||{req:[],im:{},ings:[],oh:{}};
   const oh=C.oh||{};
@@ -13528,7 +13808,7 @@ function drawSubPick(){
   let rows=C.req.map(sku=>{ const it=C.im[sku]||{};
     const cl=_ksCat(it.category||'');
     return {sku, name:it.name||sku, cat:cl.l||'—', color:cl.c,
-      alt:(it.approved_alt||'').trim(), chosen:(window._prodSub||{})[sku]||'',
+      alt:(it.approved_alt||'').trim(), chosen:subIsReal(sku)?'y':'',
       need:(((window._prodNeedRows||[]).find(r=>r.sku===sku)||{}).needG)||0,
       oh:+oh[sku]||0};
   });
@@ -13551,11 +13831,14 @@ function drawSubPick(){
         <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${r.alt?' · approved alt: <b>'+esc(r.alt)+'</b>':''}</div></td>
         <td class="num mini" style="color:var(--muted)">${r.need?kg(r.need)+' kg':'—'}</td>
         <td class="num mini" style="color:${short?'var(--danger)':(r.oh>0?'#1e6b2e':'var(--muted)')}">${r.oh?kg(r.oh)+' kg':'—'}${short?' ⚠':''}</td>
-        <td>${r.chosen
-          ? `<button class="btn sm" style="max-width:250px;text-align:left" onclick="subPickOpen('${esc(r.sku)}')">⇄ ${esc((C.im[r.chosen]||{}).name||r.chosen)}</button>
-             <button class="btn sm sec" title="put the recipe ingredient back" onclick="prodSetSub('${esc(r.sku)}','');drawSubPick()">✕</button>`
-          : `<button class="btn sm sec" onclick="subPickOpen('${esc(r.sku)}')">🔎 Choose a replacement…</button>
-             ${r.alt?`<div class="mini" style="color:var(--muted);margin-top:2px">approved: ${esc(r.alt)}</div>`:''}`}</td></tr>`;
+        <td>${(window._subOpen===r.sku)
+          ? subEditorHtml(r.sku,{ctx:'sub', needG:r.need})
+          : (r.chosen
+            ? `<button class="btn sm" style="max-width:320px;text-align:left" onclick="window._subOpen='${esc(r.sku)}';drawSubPick()">⇄ ${esc(subParts(r.sku).map(pt=>((C.im[pt.sku]||{}).name||pt.sku)+(pt.g==null?'':' '+(Math.round(pt.g/10)/100)+' kg')).join(' + '))}</button>
+               <button class="iconbtn danger" title="put the recipe ingredient back" onclick="subReset('${esc(r.sku)}','sub')">✕</button>
+               ${subBalanced(r.sku, r.need)?'':'<div class="mini" style="color:var(--danger)">⚠ the kilos do not add up to what the run needs</div>'}`
+            : `<button class="btn sm sec" onclick="window._subOpen='${esc(r.sku)}';drawSubPick()">＋ Replace or split…</button>
+               ${r.alt?`<div class="mini" style="color:var(--muted);margin-top:2px">approved: ${esc(r.alt)}</div>`:''}`)}</td></tr>`;
     }).join('')).join('');
   $('modal').innerHTML=`<div><h3>🔁 Substitute BOM ingredients — this run</h3>
     <p class="mini">When an ingredient is unavailable, swap it for another for <b>this production run only</b>. The recipe grams stay the same; the replacement is processed &amp; consumed instead, with its own yield &amp; cost. The finished product is unchanged.</p>
@@ -13576,7 +13859,8 @@ function drawSubPick(){
     <div class="mscroll" style="overflow-x:auto;max-height:420px"><table class="stickyhead"><thead><tr>
       <th>Recipe ingredient</th><th class="num">Needed</th><th class="num">On hand</th><th>Replace with</th></tr></thead>
       <tbody>${body||'<tr><td colspan="4" class="empty">Nothing matches that search.</td></tr>'}</tbody></table></div>
-    <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px"><b id="subCount">${Object.keys(window._prodSub).length}</b> substitution(s) set for this run</div>
+    <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px"><b id="subCount">${(C.req||[]).filter(x=>subIsReal(x)).length}</b> substitution(s) set for this run
+      <span class="mini" style="color:var(--muted)">· an ingredient can be covered by more than one thing — open one and add parts</span></div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="closeModal();drawProdPlan()">✅ Apply</button><button class="btn sec" onclick="window._prodSub={};drawSubPick()">Clear all</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   modalWide(true);
 }
@@ -13842,7 +14126,21 @@ async function _prodShortages(){
   const oh=await _ingOhBulacanG();   // processed & raw on-hand (grams) at Bulacan
   const need={};
   prodLines.forEach(l=>{ const packs=+l.good_packs||0; (bm[l.product_sku]||[]).forEach(line=>{ need[line.ingredient_sku]=(need[line.ingredient_sku]||0)+line.processed_g*packs; }); });
-  outLines.forEach(l=>{ const sub=(window._prodSub||{})[l.ingredient_sku]; const sku=(sub&&im[sub])?sub:l.ingredient_sku; need[sku]=(need[sku]||0)+(+l.needed_kg||0)*1000; });
+  /* An output ingredient on the plan is a prep job, and it can be split the
+     same way — the run needs 12 kg of processed lamb and the kitchen makes 8
+     from lamb and 4 from beef. */
+  outLines.forEach(l=>{
+    const g=(+l.needed_kg||0)*1000; if(!(g>0)) return;
+    const raw=subSplit(l.ingredient_sku);
+    const parts=(raw||[]).filter(x=>im[x.sku]||x.sku===l.ingredient_sku);
+    let use;
+    if(!parts.length) use=[{sku:l.ingredient_sku, share:1}];
+    else if(parts.some(x=>x.g==null)) use=parts.map(x=>({sku:x.sku, share:1/parts.length}));
+    else { const tot=parts.reduce((a,x)=>a+(+x.g||0),0);
+      use = tot>0 ? parts.map(x=>({sku:x.sku, share:(+x.g||0)/tot})) : [{sku:l.ingredient_sku, share:1}]; }
+    use.forEach(u=>{ const part=g*(+u.share||0); if(!(part>0)) return;
+      need[u.sku]=(need[u.sku]||0)+part; });
+  });
   const out=[];
   Object.keys(need).forEach(sku=>{ const it=im[sku]||{}; const y=(+it.yield_pct||100)/100||1; const p=_procParent(it,bySku,byName);
     const neededG=need[sku]; const ohProc=Math.max(0,oh[sku]||0); const ohRaw=p?Math.max(0,oh[p.sku]||0):0;
@@ -13887,20 +14185,50 @@ async function prodConfirm(){
 async function drawPreConfirmSub(){
   const sh=await _prodShortages();
   if(!sh.length){ closeModal(); await openProdActuals(); return; }   // all resolved → proceed
-  const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i);
+  const {im}=await subLoadCtx();
   window._prodSub=window._prodSub||{};
-  const rows=sh.map(s=>{ const it=im[s.sku]||{}; const alt=(it.approved_alt||'').trim(); const chosen=window._prodSub[s.sku]||'';
-    const opts=_procIngOptions(ings,{selected:chosen, exclude:s.sku, placeholder:null,
-      star:o=>alt&&String(o.name||'').trim().toLowerCase()===alt.toLowerCase()});
-    return `<tr><td>${esc(s.name)}<div class="mini">need <b>${s.needKg}</b> · already made ${s.readyKg||0} · <b>to make ${s.makeKg}</b> · <span style="color:var(--danger)">not covered ${s.shortKg} kg</span>${alt?' · approved alt: <b>'+esc(alt)+'</b>':''}</div></td>
-      <td><select onchange="prodPreSetSub('${esc(s.sku)}',this.value)" style="width:280px"><option value="" ${!chosen?'selected':''}>— keep &amp; make what we can —</option>${opts}</select></td></tr>`; }).join('');
-  const nSub=Object.keys(window._prodSub).length;
+  /* ONE SECTION PER SHORT INGREDIENT, each with its own editor.
+     The old dialog gave every row a single dropdown, so the answer had to be
+     ONE ingredient. Every section now takes as many parts as the kitchen
+     actually plans to use, shows what each works out to in kilos, and says
+     whether there is enough of it — because choosing a replacement that is
+     itself short is the mistake this screen exists to prevent. */
+  const rows=sh.map(s=>{
+    const it=im[s.sku]||{}; const alt=(it.approved_alt||'').trim();
+    /* THE SPLIT APPLIES TO THE WHOLE RECIPE LINE, not just to the shortfall.
+       Replacing an ingredient changes what every pack consumes, so the kilos
+       beside each share are shares of the FULL requirement. Showing shares of
+       the 16 kg still to make while the maths split the whole 36 kg would have
+       been two different sums on one screen. */
+    const needG=(+s.needG||0) || (parseFloat(s.needKg)||0)*1000;
+    const done=subIsReal(s.sku), bal=subBalanced(s.sku, needG);
+    return `<tr><td style="vertical-align:top;min-width:220px">
+        <b>${esc(s.name)}</b>
+        <div class="mini">need <b>${s.needKg}</b> · already made ${s.readyKg||0} · <b>to make ${s.makeKg}</b>
+          · <span style="color:var(--danger)">not covered ${s.shortKg} kg</span></div>
+        ${alt?`<div class="mini" style="color:var(--muted)">approved alt: <b>${esc(alt)}</b></div>`:''}
+        <div class="mini" style="margin-top:4px">${done
+          ? (bal?'<span style="color:#2f5d33;font-weight:700">✓ covered by '+subParts(s.sku).length+' ingredient(s)</span>'
+                :'<span style="color:var(--danger);font-weight:700">⚠ the kilos do not add up to what the run needs</span>')
+          : '<span style="color:var(--muted)">unchanged — the run will make what stock allows</span>'}</div></td>
+      <td style="vertical-align:top">${subEditorHtml(s.sku,{ctx:'pre', needG})}
+        <div class="mini" style="color:var(--muted);margin-top:3px">this run needs <b>${s.needKg} kg</b> of it in total — a replacement changes every pack, not only the ones stock cannot cover</div></td></tr>`;
+  }).join('');
+  const nSub=sh.filter(x=>subIsReal(x.sku)).length;
+  const bad=sh.filter(x=>subIsReal(x.sku)&&!subBalanced(x.sku,(+x.needG||0)||(parseFloat(x.needKg)||0)*1000));
   $('modal').innerHTML=`<div><h3>⚠ Before confirming — ${sh.length} ingredient(s) short</h3>
-    <p class="mini">Using <b>processed stock first, then raw</b>, these can't fully cover the run. Pick a <b>replacement</b> for any you want to swap (it's consumed instead, at its own yield &amp; cost — the finished product is unchanged), or leave as-is and the run will make what stock allows. You can still confirm either way.</p>
-    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Short ingredient</th><th>Replace with</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div style="margin-top:8px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px"><b id="preSubCount">${nSub}</b> replacement(s) set for this run</div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="drawPreConfirmSub()">↻ Re-check stock</button><button class="wfbtn" onclick="closeModal();openProdActuals()">✅ Continue to confirm</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
-  $('overlay').classList.add('on');
+    <p class="mini">Using <b>processed stock first, then raw</b>, these can't fully cover the run.
+      Press <b>＋</b> on a section and say what was used and <b>how many kilos</b> — the weight off the scale. Add as many as you
+      like: one recipe line can be covered by two or three things, and the recipe's own ingredient can stay as one of them, which is
+      "use what we have and top up". <b>↻</b> swaps a line for something else, <b>✕</b> takes it off. Each is processed and consumed at
+      <b>its own yield and its own cost</b>; the finished product is unchanged. Leave a section alone and the run makes what stock allows.</p>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th style="width:32%">Short ingredient</th><th>Made up of</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="margin-top:8px;padding:8px 10px;background:${bad.length?'#fdf3f0':'#f6f8f4'};border-radius:8px;font-size:13px">
+      <b id="preSubCount">${nSub}</b> of ${sh.length} section(s) covered${bad.length?` · <b style="color:var(--danger)">${bad.length} where the kilos do not add up</b>`:''}</div>
+    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="drawPreConfirmSub()">↻ Re-check stock</button>
+      <button class="wfbtn" ${bad.length?'disabled title="Fix the sections where the kilos do not add up first"':''} onclick="${bad.length?'':'closeModal();openProdActuals()'}">✅ Continue to confirm</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
 }
 async function prodPreSetSub(orig,val){ prodSetSub(orig,val); await drawPreConfirmSub(); }   // set + re-check live
 // Processed on-hand (grams) at Bulacan — live reads the view, DEMO sums the ledger.
@@ -14812,12 +15140,45 @@ async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=awai
      price_kg_processed was blank, this fell back to a RAW price against
      PROCESSED grams and dropped the yield entirely. */
   let led={}; try{ led=await ingCostLedger(); }catch(e){}
-  boms.forEach(b=>{ let ingSku=b.ingredient_sku;
-    if(sub[ingSku]&&im[sub[ingSku]]) ingSku=sub[ingSku];        // run substitution: consume the replacement instead (#3)
-    const it=im[ingSku]||{}; const y=(+it.yield_pct||100)/100||1;
-    const procG=(+b.usable_g||0), rawG=procG/y;                 // recipe grams unchanged; yield/cost from the (sub) ingredient
-    const costG=ingCostG(it,led).g;                             // processed cost per g
-    (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:ingSku, processed_g:procG, raw_g:rawG, unit_cost_g:costG}); });
+  boms.forEach(b=>{
+    /* ONE RECIPE LINE CAN NOW BECOME SEVERAL. A substitution is a split, so a
+       line asking for 100 g of lamb may issue 25 g of lamb, 45 g of beef and
+       30 g of buffalo — each at ITS OWN yield and ITS OWN cost, which is the
+       point: the three do not trim the same or cost the same, and averaging
+       them would put the difference somewhere nobody could find it.
+
+       The share is applied to the recipe grams exactly as entered. It is not
+       normalised to 100: the editor refuses to save a split that does not add
+       up, so a total that is not 100 here came from an older saved draft and
+       silently "correcting" it would hide that. */
+    /* THE KILOS BECOME A PROPORTION AT THE LAST MOMENT.
+       The kitchen types what it weighed — 4 kg lamb, 10 beef, 6 buffalo — but a
+       BOM line is per pack, and this ingredient may feed several products on the
+       same run. So the parts are turned into shares of what they add up to, and
+       the recipe grams are divided that way. Type kilos, consume proportions;
+       the conversion is the app's job, not somebody's at half past five.
+
+       Dividing by the parts' OWN total rather than by the run requirement is
+       deliberate: it keeps the pack full even when the weights entered do not
+       quite match what the run needs. The editor flags that gap in kilos where
+       a person can see it; the pack is not quietly made lighter as well. */
+    const raw=subSplit(b.ingredient_sku);
+    const parts=(raw||[]).filter(x=>im[x.sku]||x.sku===b.ingredient_sku);
+    let use;
+    if(!parts.length) use=[{sku:b.ingredient_sku, share:1}];
+    else if(parts.some(x=>x.g==null)) use=parts.map(x=>({sku:x.sku, share:1/parts.length}));  // legacy whole-line swap
+    else { const tot=parts.reduce((a,x)=>a+(+x.g||0),0);
+      use = tot>0 ? parts.map(x=>({sku:x.sku, share:(+x.g||0)/tot}))
+                  : [{sku:b.ingredient_sku, share:1}]; }
+    use.forEach(u=>{
+      const it=im[u.sku]||{}; const y=(+it.yield_pct||100)/100||1;
+      const procG=(+b.usable_g||0)*(+u.share||0), rawG=procG/y;
+      if(!(procG>0)) return;
+      const costG=ingCostG(it,led).g;
+      (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:u.sku, processed_g:procG, raw_g:rawG, unit_cost_g:costG,
+        sub_of:(u.sku===b.ingredient_sku?'':b.ingredient_sku), sub_share:(+u.share||0)});
+    });
+  });
   return m; }
 
 /* ============ Locations · the sites everything else keys off ==============
@@ -15014,6 +15375,10 @@ function _ohChip(kind, grams, opts){
   const what=kind==='proc'?'processed and on hand':'raw on hand';
   return `<span class="ohchip ${cls}" title="${kg} kg ${what} at ${esc(planProduceLoc())}">${kg} kg</span>`;
 }
+/* 96.89999999999999% is not a yield, it is a float. The master stores 96.9 and
+   the browser prints what a double actually holds; every screen that showed a
+   yield showed the tail. One rounding, used everywhere a percent is printed. */
+function _pctTxt(v){ const x=+v; return isFinite(x) ? String(Math.round(x*10)/10) : esc(String(v==null?'':v)); }
 function _outName(i,cl){ return String(cl&&cl.name||i.name||i.sku).replace(/\s+—\s+(Processed|Raw)$/i,'').trim(); }
 /* ONE grouped <optgroup> builder for every ingredient dropdown in the app —
    category › base material › master sort order, the same reading order as the
