@@ -1779,14 +1779,147 @@ async function relOptions(model){
     // Group ingredients the way the count sheet does — category › base material —
     // instead of one flat "Ingredients" bucket with no subgroup at all.
     const ctxRows=_outIngRows(rows, rows); const cl={};
-    ctxRows.forEach(x=>{ cl[x.sku]={g1:x._g1, g2:x._g2, nm:x._nm, gr:x._grank}; });
-    list.forEach(o=>{ const c=cl[o.v]||{}; o.g1=c.g1||o.rg||o.cat||'Ingredients'; o.g2=c.g2||null; o.n=c.nm||o.n; o._gr=c.gr||0; });
+    ctxRows.forEach(x=>{ cl[x.sku]={g1:x._g1, g2:x._g2, nm:x._nm, gr:x._grank, raw:x._raw}; });
+    const byS={}; rows.forEach(r=>{ byS[r.sku]=r; });
+    list.forEach(o=>{ const c=cl[o.v]||{}; o.g1=c.g1||o.rg||o.cat||'Ingredients'; o.g2=c.g2||null; o.n=c.nm||o.n; o._gr=c.gr||0;
+      o.kind=isProcessedItem(byS[o.v])?'proc':'raw'; o.raw=c.raw||''; });
+    /* TWO IDENTICAL LINES IN THE DROPDOWN, and no way to tell them apart.
+       The display name strips the "— Processed" / "— Raw" suffix, which reads
+       well when an item stands alone and is a trap when a cut and its processed
+       form share a name: "Chicken breast fillet" appeared twice under its own
+       heading, and picking the wrong one puts raw where processed belongs — a
+       different yield and a different cost, found months later in a margin.
+       The suffix goes back on wherever, and only wherever, it is load-bearing. */
+    const seen={}; list.forEach(o=>{ seen[o.n]=(seen[o.n]||0)+1; });
+    list.forEach(o=>{ if(seen[o.n]>1){
+      const suf=(o.kind==='proc')?' — Processed':' — Raw';
+      o.n=o.n+suf; o.t=o.t+suf; } });
+    const seen2={}; list.forEach(o=>{ seen2[o.n]=(seen2[o.n]||0)+1; });
+    list.forEach(o=>{ if(seen2[o.n]>1) o.n=o.n+' ('+o.v+')'; });   // still ambiguous → the code decides
     list.sort((a,b)=>(a._gr-b._gr)||a.so-b.so||String(a.n).localeCompare(b.n));
   }
   relCache[model]=list;
   return list;
 }
 // Build <option>/<optgroup> markup — grouped (Group › Subgroup) when the options carry group tags.
+/* ---- ONE BROWSER BEHIND EVERY REL PICKER ---------------------------------
+   Every "pick an ingredient / product / supplier" control in the app was a bare
+   <select>: a hundred and sixty options, no search, no filter, and a native
+   dropdown that on a laptop shows about twenty at a time. The confirm sheet and
+   the output-ingredient picker were fixed one at a time; this fixes the rest at
+   the source, because they all read the same relCache and all render through
+   relOptsHTML. The select stays — it is fast for anyone who knows the name and
+   it keeps keyboard use working — and a 🔎 beside it opens this.
+
+   It also does the thing a <select> cannot: tick several and add them all as
+   lines at once, which is how a recipe with twelve ingredients actually gets
+   entered.                                                                    */
+let _rb=null;
+async function relBrowse(model, opts){
+  opts=opts||{};
+  let list=[]; try{ list=await relOptions(model); }catch(e){ toast('Could not load '+model,true); return; }
+  _rb={model, list, q:'', cat:'', multi:!!opts.multi, sel:{},
+       title:opts.title||('Browse '+((MODELS[model]||{}).label||model)),
+       hint:opts.hint||'', exclude:opts.exclude||{},
+       onPick:opts.onPick||null, onAdd:opts.onAdd||null, cur:opts.cur||''};
+  drawRelBrowse();
+}
+function _rbRows(){
+  const B=_rb; if(!B) return [];
+  const q=String(B.q||'').toLowerCase().split(/\s+/).filter(Boolean);
+  const gf=B.cat||'';
+  return B.list.filter(o=>{
+    if(B.exclude[o.v]) return false;
+    if(gf && (o.g1||'Other')!==gf) return false;
+    if(!q.length) return true;
+    /* Every word, anywhere — name, code, group, base material, the raw parent.
+       Somebody looking for goat liver types "goat liver"; somebody holding a bag
+       types the code off it. Both have to work. */
+    const t=[o.n,o.t,o.v,o.g1,o.g2,o.cat,o.rg,o.raw].filter(Boolean).join(' ').toLowerCase();
+    return q.every(w=>t.includes(w));
+  });
+}
+function relBrowseSearch(v){ if(_rb){ _rb.q=v; drawRelBrowseBody(); } }
+function relBrowseCat(v){ if(_rb){ _rb.cat=v; drawRelBrowseBody(); } }
+function relBrowseToggle(v){ if(!_rb) return; if(_rb.sel[v]) delete _rb.sel[v]; else _rb.sel[v]=1; drawRelBrowseBody(); }
+function relBrowsePick(v){
+  const B=_rb; if(!B) return;
+  if(B.multi){ relBrowseToggle(v); return; }
+  _rb=null; closeModal(); if(B.onPick) B.onPick(v);
+}
+function relBrowseAdd(){
+  const B=_rb; if(!B) return;
+  const picked=Object.keys(B.sel);
+  if(!picked.length){ toast('Nothing ticked yet',true); return; }
+  _rb=null; closeModal(); if(B.onAdd) B.onAdd(picked);
+}
+function relBrowseClose(){ _rb=null; closeModal(); }
+function drawRelBrowseBody(){
+  const B=_rb; if(!B) return;
+  const rows=_rbRows(); let body='', g1=null, g2=null;
+  rows.forEach(o=>{
+    const a=o.g1||'Other', b=(o.g2||'');
+    if(a!==g1){ g1=a; g2=null; body+=`<tr class="grp"><td style="padding-left:10px">▸ <b>${esc(a)}</b></td></tr>`; }
+    if(b!==g2){ g2=b; if(b) body+=`<tr style="background:#fbfbf8"><td style="padding-left:26px" class="mini"><b>${esc(b)}</b></td></tr>`; }
+    const sel=B.multi?!!B.sel[o.v]:(B.cur===o.v);
+    const tick=B.multi
+      ? `<input type="checkbox" ${sel?'checked':''} onclick="event.stopPropagation();relBrowseToggle('${esc(o.v)}')" style="display:inline-block;width:auto;min-width:0;margin:0 7px 0 0;vertical-align:-1px">`
+      : (sel?'<b>● </b>':'');
+    const kind=o.kind?`<span class="tagf ${o.kind==='proc'?'tagf-proc':'tagf-raw'}">${o.kind==='proc'?'Processed':'Raw'}</span> `:'';
+    body+=`<tr style="cursor:pointer;${sel?'background:var(--pick,#eef3ec)':''}" onclick="relBrowsePick('${esc(o.v)}')" title="${esc(o.n)}">
+      <td style="padding-left:26px">${tick}${kind}<b>${esc(o.n)}</b>
+        <div class="mini" style="color:var(--muted)"><code>${esc(o.v)}</code>${o.raw?' · from '+esc(o.raw):''}</div></td></tr>`;
+  });
+  const el=$('rbBody');
+  if(el) el.innerHTML=body||'<tr><td class="empty">Nothing matches that search.</td></tr>';
+  const c=$('rbCount');
+  if(c) c.textContent=rows.length+' of '+B.list.length+(B.multi?(' · '+Object.keys(B.sel).length+' ticked'):'');
+  const ad=$('rbAdd');
+  if(ad) ad.textContent='Add '+(Object.keys(B.sel).length||'')+' line(s)';
+}
+function drawRelBrowse(){
+  const B=_rb; if(!B) return;
+  const cats=[...new Set(B.list.map(o=>o.g1||'Other'))];
+  $('modal').innerHTML=`<div><h3>🔎 ${esc(B.title)}</h3>
+    ${B.hint?`<p class="mini">${B.hint}</p>`:''}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
+      <input id="rbQ" placeholder="🔎 search name / code / group…" oninput="relBrowseSearch(this.value)"
+        style="flex:1;min-width:200px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
+      <select onchange="relBrowseCat(this.value)" style="padding:6px;border:1px solid var(--line);border-radius:6px">
+        <option value="">All categories</option>${cats.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
+      <span id="rbCount" class="mini" style="color:var(--muted)"></span>
+    </div>
+    <div class="mscroll" style="overflow-x:auto;max-height:380px"><table class="stickyhead"><thead><tr>
+      <th>${esc((MODELS[B.model]||{}).label||B.model)}</th></tr></thead><tbody id="rbBody"></tbody></table></div>
+    <div class="mfoot" style="margin-top:12px">
+      ${B.multi?`<button class="btn" id="rbAdd" onclick="relBrowseAdd()">Add line(s)</button>`:''}
+      <button class="btn sec" onclick="relBrowseClose()">${B.multi?'Cancel':'Close'}</button>
+      ${B.multi?'':'<span class="mini" style="color:var(--muted);align-self:center;margin-left:8px">click a row to choose it</span>'}</div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
+  drawRelBrowseBody();
+  const q=$('rbQ'); if(q) q.focus();
+}
+/* the 🔎 beside one line's dropdown */
+async function relPickCell(i,col,model){
+  const cur=((formChildren||[])[i]||{})[col]||'';
+  await relBrowse(model,{cur, title:'Choose — '+((MODELS[model]||{}).label||model),
+    hint:'Grouped the way the count sheet reads. Click a row to put it on this line.',
+    onPick:v=>{ lSet(i,col,v); renderLines(); }});
+}
+/* the 🔎 that fills several lines at once */
+async function relAddLines(col,model){
+  const have={}; (formChildren||[]).forEach(l=>{ if(l&&l[col]) have[l[col]]=1; });
+  await relBrowse(model,{multi:true, exclude:have,
+    title:'Browse & add — '+((MODELS[model]||{}).label||model),
+    hint:'Tick as many as you need and add them in one go — each becomes a line to fill in. Anything already on the list is left out.',
+    onAdd:list=>{ list.forEach(v=>{ const r={}; r[col]=v; formChildren.push(r); }); renderLines();
+      toast(list.length+' line(s) added — fill in the quantities'); }});
+}
+/* the 🔎 beside a field on the record itself */
+async function relPickField(n,model){
+  await relBrowse(model,{cur:(formRec||{})[n]||'', title:'Choose — '+((MODELS[model]||{}).label||model),
+    onPick:v=>{ fSet(n,v); const el=$('fld_'+n); if(el) el.value=v; }});
+}
 function relOptsHTML(opts,v,plain){
   const lbl=o=>plain?(o.n||o.t):o.t;
   if(!opts.some(o=>o.g1)) return opts.map(o=>`<option value="${esc(o.v)}" ${v===o.v?'selected':''}>${esc(lbl(o))}</option>`).join('');
@@ -1872,7 +2005,7 @@ async function renderForm(){
     if(f.t==='longtext') return `<textarea rows="2" oninput="fSet('${f.n}',this.value)" ${dis}>${esc(v)}</textarea>`;
     if(f.t==='bool') return `<select onchange="fSet('${f.n}',this.value==='true')" ${dis}><option value="false" ${!v?'selected':''}>No</option><option value="true" ${v?'selected':''}>Yes</option></select>`;
     if(f.t==='select') return `<select onchange="fSet('${f.n}',this.value)" ${dis}>${(f.o||[]).map(o=>`<option ${v===o?'selected':''}>${o}</option>`).join('')}</select>`;
-    if(f.t==='rel'){ const opts=relCache[f.rel]||[]; return `<select onchange="fSet('${f.n}',this.value)" ${dis}><option value="">—</option>${relOptsHTML(opts,v)}</select>`; }
+    if(f.t==='rel'){ const opts=relCache[f.rel]||[]; return `<span style="display:inline-flex;gap:4px;align-items:center;width:100%"><select id="fld_${esc(f.n)}" onchange="fSet('${f.n}',this.value)" ${dis}><option value="">—</option>${relOptsHTML(opts,v)}</select><button type="button" class="iconbtn" ${dis} title="Browse — search, filter and read it grouped" aria-label="Browse" onclick="relPickField('${f.n}','${f.rel}')">🔎</button></span>`; }
     if(f.t==='date') return `<input type="date" value="${esc(v)}" oninput="fSet('${f.n}',this.value)" ${dis}>`;
     /* A URL field rendered as a bare text box looks like a dead string — you cannot
        tell it is a link, and you certainly cannot open it. Keep it editable, but put
@@ -1903,6 +2036,8 @@ async function renderForm(){
         Something arrived that is not on it? Record it in <b>📦 Receive the rest</b>, which posts the stock, prices it, marks the line <b>ordered 0</b> and raises a variance.
         Genuinely wrong order? <b>✖ Cancel</b> it and raise a new one.</div>`
       :`${m.o2mLoader?`<button class="btn sm sec" style="margin-right:8px" onclick="${m.o2mLoader.fn}()">${m.o2mLoader.label}</button>`:''}
+      ${(()=>{ const rc=o.cols.find(c=>c.t==='rel' && typeof c.rel==='string');
+         return rc?`<button class="btn sm sec" style="margin-right:8px" onclick="relAddLines('${rc.n}','${rc.rel}')" title="tick several and add them all at once">🔎 Browse &amp; add</button>`:''; })()}
       ${(m.o2mLoaders||[]).map(b=>`<button class="btn sm sec" style="margin-right:6px" onclick="${b.fn.indexOf('(')>0?b.fn:b.fn+'()'}">${b.label}</button>`).join('')}<span class="addrow" onclick="addLine()">＋ Add a line</span>`}</div></div>`;
     }
   }
@@ -2369,7 +2504,7 @@ function renderLines(){
          PRODUCTS: a product code (RASPGCGD0500) carries pack size and variant that
          the name does not, while RAW-BEEF-LIVER next to "Beef liver" says nothing. */
       const skuHint=(v&&_rel==='products')?`<div class="mini"><code>${esc(v)}</code></div>`:'';
-      return `<td><select data-col="${esc(c.n)}" onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}><option value="">—</option>${relOptsHTML(opts,v,true)}</select>${skuHint}</td>`;}
+      return `<td><span style="display:inline-flex;gap:3px;align-items:center;max-width:100%"><select data-col="${esc(c.n)}" onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}><option value="">—</option>${relOptsHTML(opts,v,true)}</select><button type="button" class="iconbtn" ${ro} title="Browse — search, filter and read it grouped the way the count sheet reads" aria-label="Browse" onclick="relPickCell(${i},'${c.n}','${_rel}')">🔎</button></span>${skuHint}</td>`;}
     if(c.t==='select')return `<td><select data-col="${esc(c.n)}" onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}>${(c.o||[]).map(op=>`<option ${v===op?'selected':''}>${op}</option>`).join('')}</select></td>`;
     // Transfer "Sent" packs: case-packed finished goods entered as boxes + loose packs (like receiving & count).
     if(c.n==='sent_packs' && !ro){ const box=(PM[ln.product_sku]||{}).box||1;
@@ -4134,7 +4269,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-01 03:10Z';
+const WR_BUILD='2026-09-01 06:40Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -10585,6 +10720,149 @@ async function coKitchenBatch(){
   </div></body></html>`);
   w.document.close(); w.focus(); setTimeout(()=>{ try{ w.print(); }catch(e){} },300);
 }
+/* ---- CANCELLING AN ORDER THAT IS ALREADY LOCKED ---------------------------
+   Cancel used to be offered only on a Draft, which is the one state where
+   cancelling costs nothing — nothing has been created yet. The moment an order
+   is locked it mints CUST- SKUs, writes their BOMs and pushes packs into
+   demand, and from then on there was no way out of it at all: a wrong order, a
+   customer who changed their mind, a duplicate locked twice, all of it stayed
+   in the demand run for ever, quietly asking the kitchen to make packs nobody
+   wanted. "Mark completed" was the only exit, and it is a lie — it says the
+   packs were made.
+
+   Cancelling a locked order is safe exactly while nothing downstream has taken
+   it up. So it is checked, per SKU, against the three things that could have:
+   a production plan, a saved demand plot, and packs already produced. If any of
+   them has, the cancel is refused and says which — because at that point the
+   right move is to take it off that plan first, where somebody can see it go. */
+async function coCancelCheck(){
+  const out={blocked:[], demandRows:[], skus:[], packs:0};
+  const lines=(coLines||[]).filter(l=>l.product_sku && (+l.packs||0)>0);
+  if(!lines.length) return out;
+  const ev=await coPlanEvidence().catch(()=>({planned:{},inDemand:{}}));
+  /* Packs already made against these SKUs. A partly produced order is not a
+     mistake to be erased — it is stock that exists. */
+  const made={};
+  try{ let rows;
+    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
+    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
+    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
+  }catch(e){}
+  /* A CUST- code means nothing to a person. The order line already carries the
+     recipe name that was quoted, and the catalogue carries the product name; a
+     refusal that says "CUST-7F3A9C is on a production plan" is not a refusal
+     anybody can act on. */
+  const pname={}; try{ (await db.list('products',{})).forEach(p=>{ pname[p.sku]=prodLabel(p,{noSku:true})||p.name||p.sku; }); }catch(e){}
+  const nameOf=l=>String(l.description||pname[l.product_sku]||l.product_sku);
+  const seen={};
+  lines.forEach(l=>{
+    const sku=l.product_sku; out.packs+=(+l.packs||0);
+    if(!seen[sku]){ seen[sku]=1; out.skus.push(sku); }
+    const p=(ev.planned||{})[sku], d=(ev.inDemand||{})[sku];
+    if(p) out.blocked.push(nameOf(l)+' — on production plan '+(p.ref||'(draft)')+(p.date?' for '+p.date:''));
+    else if(d && d.ref) out.blocked.push(nameOf(l)+' — '+(d.locked?'in locked demand ':'on the demand plot ')+d.ref+(d.date?' for '+d.date:''));
+    else if((made[sku]||0)>0) out.blocked.push(nameOf(l)+' — '+made[sku]+' pack(s) already produced');
+    /* A bare row in the `demand` table is OUR OWN cache, written by the lock.
+       That is not somebody else's plan, so it is not a blocker — it is exactly
+       what this has to clean up, or the packs stay in the run after the order
+       is gone. */
+    else if(d && d.src==='row') out.demandRows.push({sku, date:d.date, qty:d.qty});
+  });
+  return out;
+}
+async function coCancelLocked(){
+  if(!coRec.order_ref){ toast('Nothing to cancel yet',true); return; }
+  showBusy('Checking what this order is tied to…');
+  let chk;
+  try{ chk=await coCancelCheck(); }catch(e){ hideBusy(); toast(_coErr(e),true); return; }
+  hideBusy();
+  if(chk.blocked.length){
+    alert('This order cannot be cancelled from here — it has already been taken up:\n\n• '
+      +chk.blocked.join('\n• ')
+      +'\n\nTake it off that plan first (or, if the packs were made, mark the order completed). '
+      +'Cancelling it now would leave the plan asking for packs against an order that no longer exists.');
+    return;
+  }
+  const undo=[];
+  undo.push('the order is marked cancelled and stops asking for '+chk.packs+' pack(s)');
+  if(chk.demandRows.length) undo.push(chk.demandRows.length+' demand row(s) written when it was locked are removed');
+  undo.push('its custom SKUs are archived if nothing else uses them (the SKU and its recipe are kept, just not offered)');
+  if(!confirm('Cancel '+coRec.order_ref+'?\n\nNothing downstream has picked it up yet, so this is clean:\n\n• '
+    +undo.join('\n• ')+'\n\nThe order stays on the list as Cancelled — it is not deleted.')) return;
+  showBusy('Cancelling — unwinding demand…');
+  try{
+    /* 1 · take back the demand this order pushed */
+    let removed=0;
+    for(const l of (coLines||[])){
+      const sku=l.product_sku, q=+l.packs||0; if(!sku||!(q>0)) continue;
+      const when=String(coRec.needed_date||coRec.order_date||'').slice(0,10);
+      if(!when) continue;
+      if(isLive()){
+        try{ const ex=await sb('demand?select=id,qty&sku=eq.'+encodeURIComponent(sku)+'&plan_date=eq.'+encodeURIComponent(when));
+          if(ex&&ex.length){ const left=(+ex[0].qty||0)-q;
+            if(left>0.0001) await sb('demand?id=eq.'+encodeURIComponent(ex[0].id),{method:'PATCH',body:JSON.stringify({qty:left})});
+            else await sb('demand?id=eq.'+encodeURIComponent(ex[0].id),{method:'DELETE'});
+            removed++; }
+        }catch(e){}
+      } else {
+        DEMO.demand=DEMO.demand||[];
+        const i=DEMO.demand.findIndex(d=>d.sku===sku&&String(d.plan_date||'')===when);
+        if(i>=0){ const left=(+DEMO.demand[i].qty||0)-q;
+          if(left>0.0001) DEMO.demand[i].qty=left; else DEMO.demand.splice(i,1);
+          removed++; }
+      }
+    }
+    /* 2 · the order itself */
+    try{ await db.update('custom_orders','order_ref',coRec.order_ref,{status:'cancelled'}); }catch(e){}
+    coRec.status='cancelled';
+    /* 3 · the CUST- SKUs this order minted, if no other order still wants them.
+       Archived, never deleted: the BOM is the only record of what that recipe
+       was, and a deleted product takes its recipe with it. */
+    let archived=0;
+    try{
+      const otherLines=(await db.list('custom_order_lines',{})).filter(l=>l.order_ref!==coRec.order_ref);
+      const orders={}; (await db.list('custom_orders',{})).forEach(o=>{ orders[o.order_ref]=o; });
+      const stillWanted={};
+      otherLines.forEach(l=>{ const o=orders[l.order_ref]; if(o && coIsOpen(o.status) && l.product_sku) stillWanted[l.product_sku]=1; });
+      for(const sku of chk.skus){
+        if(!/^CUST-/i.test(sku) || stillWanted[sku]) continue;
+        try{ await db.update('products','sku',sku,{active:false}); archived++; }catch(e){}
+      }
+    }catch(e){}
+    relCache['products']=null; delete relCache['products'];
+    sysLog('custom_orders',coRec.order_ref,'✕ Locked order cancelled by '+CURRENT_USER
+      +' — '+removed+' demand row(s) taken back, '+archived+' custom SKU(s) archived');
+    hideBusy();
+    toast('Cancelled · '+removed+' demand row(s) taken back'+(archived?(' · '+archived+' custom SKU(s) archived'):''));
+    coBackToList();
+  }catch(e){ hideBusy(); toast(_coErr(e),true); }
+}
+/* Deleting is the harder promise: it removes the record, so it is offered only
+   on an order that is already CANCELLED and has nothing hanging off it. Anything
+   else keeps its history — a cancelled order on the list is a fact somebody may
+   need to explain later, and an order that has silently disappeared is not. */
+async function coDeleteOrder(){
+  if(!coRec.order_ref) return;
+  if(coStat(coRec.status)!=='cancelled'){ toast('Cancel the order first — only a cancelled order can be deleted',true); return; }
+  showBusy('Checking what still points at this order…');
+  let chk; try{ chk=await coCancelCheck(); }catch(e){ hideBusy(); toast(_coErr(e),true); return; }
+  hideBusy();
+  if(chk.blocked.length){
+    alert('This order cannot be deleted — something still points at it:\n\n• '+chk.blocked.join('\n• ')
+      +'\n\nIt stays on the list as Cancelled, which is the honest record anyway.');
+    return;
+  }
+  if(!confirm('Delete '+coRec.order_ref+' permanently?\n\nThe order and its '+(coLines||[]).length
+    +' line(s) are removed and cannot be recovered. Its custom SKUs and their recipes are KEPT (archived), '
+    +'because the recipe is the only record of what was quoted.\n\nCancelled is usually the better answer — it keeps the history.')) return;
+  showBusy('Deleting…');
+  try{
+    try{ await db.replaceChildren({model:'custom_order_lines',fk:'order_ref'}, coRec.order_ref, []); }catch(e){}
+    await db.del('custom_orders','order_ref',coRec.order_ref);
+    sysLog('custom_orders',coRec.order_ref,'🗑 Cancelled order deleted by '+CURRENT_USER);
+    hideBusy(); toast('Deleted'); coBackToList();
+  }catch(e){ hideBusy(); toast(_coErr(e),true); }
+}
 function drawCOForm(){
   const locked = coIsLocked(coRec.status);
   $('crumb').innerHTML=`<b>Custom Orders</b> / ${esc(coRec.order_ref||'New quote')}`;
@@ -10592,6 +10870,8 @@ function drawCOForm(){
     ${!locked?`<button class="btn sec" onclick="coSave()">💾 Save quote</button><button class="wfbtn" onclick="coLock()">🔒 Lock order</button>`:''}
     ${coIsOpen(coRec.status)?`<button class="btn sec" onclick="coFulfil()">✓ Mark completed</button>`:''}
     ${!locked&&coRec.order_ref?`<button class="btn sec" onclick="coCancel()">✕ Cancel</button>`:''}
+    ${(locked&&coIsOpen(coRec.status)&&coRec.order_ref)?`<button class="btn sec" style="color:var(--danger)" onclick="coCancelLocked()" title="the customer pulled out, or this was locked by mistake — takes the packs back out of demand, if nothing has planned them yet">✕ Cancel order</button>`:''}
+    ${(coStat(coRec.status)==='cancelled'&&coRec.order_ref)?`<button class="btn sec" style="color:var(--danger)" onclick="coDeleteOrder()" title="remove the record entirely — only possible while nothing points at it">🗑 Delete</button>`:''}
     <button class="btn sec" onclick="coKitchenBatch()" title="the Fresh Food Calculator's Kitchen Batch sheet, from this order">🍳 Kitchen Batch</button>
     ${coRec.order_ref?`<button class="btn sec" onclick="coDuplicate()" title="start a new quote holding this order's lines and recipes">⧉ Duplicate</button>`:''}
     ${!locked?`<button class="btn sec" onclick="coImportSheet()" title="a Production Request CSV — one mix per line">📥 Import sheet</button>`:''}
@@ -11914,7 +12194,7 @@ function drawProdPlan(){
     ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodProducedMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
       const _pic=stockPicFor(l.product_sku);
       return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${t?'':'<div class="mini" style="color:var(--muted)">no target — made to order</div>'}
-        ${(_pic&&_pic.toMove>0&&_pic.toMake<=0)?`<div class="mini" style="color:var(--earth,#b5762a)" title="the packs already exist at ${esc(planProduceLoc())} — this line needs a transfer, not a run">↦ ${_spN(_pic.toMove)} already made — transfer, don't produce</div>`:''}</td>
+        ${(_pic&&_pic.toMove>0&&_pic.toMake<=0)?`<div class="mini" style="color:var(--earth,#b5762a)" title="the packs already exist at ${esc(locName(planProduceLoc()))} — this line needs a transfer, not a run">↦ ${_spN(_pic.toMove)} already made — transfer, don't produce</div>`:''}</td>
       <td class="num">${spStockCell(_pic)}</td>
       <td class="num">${spCoverCell(_pic)}</td>
       <td class="num">${t||'—'}</td><td class="num" style="color:var(--muted)">${p||'—'}</td>
@@ -11953,7 +12233,7 @@ function drawProdPlan(){
       <b>net to processed stock = Processed Created − drip</b>.</span></div>
     <div style="overflow-x:auto"><table style="min-width:1080px"><thead>
       <tr><th rowspan="2">Processed (make this)</th><th rowspan="2">From raw</th>
-        <th class="num" colspan="2" style="border-bottom:1px solid var(--line)">Stock on hand · ${esc(planProduceLoc())}</th>
+        <th class="num" colspan="2" style="border-bottom:1px solid var(--line)">Stock on hand · ${esc(locName(planProduceLoc()))}</th>
         <th class="num" colspan="4" style="border-bottom:1px solid var(--line)">What the prep run does</th>
         <th class="num" rowspan="2">= Net to<br><span style="font-weight:400;opacity:.8">processed stock</span></th>
         <th class="num" rowspan="2">Yield</th><th rowspan="2"></th></tr>
@@ -12161,7 +12441,7 @@ async function prodPackAddSupply(){
   const oh=window._prodSupOh||{};
   window._psSel={}; window._psQ='';
   $('modal').innerHTML=`<div><h3>＋ Supplies used on this run</h3>
-    <p class="mini">Whatever the run consumed — vacuum bags, spout pouches, styro boxes, gloves. Quantity is in the item's own unit. Confirming the run posts these as a deduction at <b>${esc(planProduceLoc())}</b>.</p>
+    <p class="mini">Whatever the run consumed — vacuum bags, spout pouches, styro boxes, gloves. Quantity is in the item's own unit. Confirming the run posts these as a deduction at <b>${esc(locName(planProduceLoc()))}</b>.</p>
     <input placeholder="🔎 search…" oninput="window._psQ=this.value;drawPsBody()" style="width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;margin-bottom:8px">
     <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Supply</th><th class="num">On hand</th><th class="num">Used</th><th>Unit</th></tr></thead><tbody id="psBody"></tbody></table></div>
     <div class="mfoot"><button class="btn" onclick="prodPackSupApply()">✅ Add</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
@@ -12320,7 +12600,7 @@ function prodOutPick(){
   const groups=[...new Set(_outIngRows(window._prodAllIngredients||[],ings).map(i=>i._g1||'—'))].sort();
   $('modal').innerHTML=`<div><h3>🔎 Output ingredients — browse &amp; add</h3>
     <p class="mini">Grouped by <b>category → base material</b>, the same way the weekly count sheet reads. Enter the <b>raw kg you plan to pull</b> against any row — the output is worked out from that item's yield, and both stay editable on the plan.<br>
-    The chips are stock on hand at <b>${esc(planProduceLoc())}</b>: <span class="ohchip proc">green</span> is processed you have <b>already made</b> — you may not need to prep at all — and <span class="ohchip raw">brown</span> is the raw you can still pull. A raw figure turns <span class="ohchip short">red</span> when you ask for more than there is.</p>
+    The chips are stock on hand at <b>${esc(locName(planProduceLoc()))}</b>: <span class="ohchip proc">green</span> is processed you have <b>already made</b> — you may not need to prep at all — and <span class="ohchip raw">brown</span> is the raw you can still pull. A raw figure turns <span class="ohchip short">red</span> when you ask for more than there is.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
       <input id="op_q" placeholder="🔎 search name / SKU / raw parent…" oninput="window._opQ=this.value;drawOutPickBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
       <select onchange="window._opG=this.value;drawOutPickBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All categories</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
@@ -13559,9 +13839,25 @@ function _spFocus(){ const el=$('spQ'); if(el && document.activeElement!==el){ e
 
    THE OLD ONE-FOR-ONE FORM STILL READS. Saved drafts hold the string form, and
    a draft written last week must open this week. */
+/* ---- THREE STATES, NOT TWO ------------------------------------------------
+   An ingredient on a run is one of:
+     nothing set   — the recipe as written                       (null)
+     a split       — these things, these kilos                   ([{sku,g},…])
+     TAKEN OUT     — none of it went in, and nothing replaced it ({drop:true})
+   The third one was missing, and there was no way to say it: an empty list is
+   indistinguishable from "never touched", so a run that simply left the mackerel
+   out had to be recorded as a run that used it. Stock then went down by
+   something that never left the freezer. */
+function subIsDrop(orig){
+  const v=(window._prodSub||{})[orig];
+  return !!(v && typeof v==='object' && !Array.isArray(v) && v.drop);
+}
+function subDrop(orig){ (window._prodSub=window._prodSub||{})[orig]={drop:true}; }
+function subUndrop(orig){ if(window._prodSub) delete window._prodSub[orig]; }
 function subSplit(orig){
   const v=(window._prodSub||{})[orig];
   if(v==null||v==='') return null;
+  if(typeof v==='object' && !Array.isArray(v)) return v.drop?[]:null;   // taken out: nothing goes in
   if(typeof v==='string') return (v===orig)?null:[{sku:v, g:null}];   // the old whole-line swap
   if(Array.isArray(v)){
     const a=v.filter(x=>x&&x.sku).map(x=>({sku:String(x.sku),
@@ -13574,12 +13870,13 @@ function subSplit(orig){
 }
 function subParts(orig){ return subSplit(orig)||[]; }
 function subTotalG(orig){ return subParts(orig).reduce((s,x)=>s+(+x.g||0),0); }
-function subIsReal(orig){ const a=subSplit(orig); return !!(a&&a.length); }
+function subIsReal(orig){ if(subIsDrop(orig)) return true; const a=subSplit(orig); return !!(a&&a.length); }
 /* Allocated must match what the run needs, within 50 g — the scale's own
    rounding, not a licence to be short. Under-filling makes a lighter pack than
    the recipe says, and that is found months later in a margin if at all. */
 function subBalanced(orig, needG){
   const n=+needG||0; if(!(n>0)) return true;
+  if(subIsDrop(orig)) return true;                    // nothing to allocate — that is the point
   const parts=subParts(orig); if(!parts.length) return true;
   if(parts.some(x=>x.g==null)) return true;           // a legacy whole-line swap carries no kilos
   return Math.abs(subTotalG(orig)-n)<=50;
@@ -13595,7 +13892,7 @@ function subRowDel(orig, i, ctx){
   subStore(orig, parts); subRedraw(ctx);
 }
 function subReset(orig, ctx){ window._prodSub=window._prodSub||{}; delete window._prodSub[orig]; subRedraw(ctx); }
-function subRedraw(ctx){ if(ctx==='sub') drawSubPick(); else drawPreConfirmSub(); }
+function subRedraw(ctx){ if(ctx==='sub') drawSubPick(); else if(ctx==='act') drawActSub(); else drawPreConfirmSub(); }
 
 /* ---- the one picker: choose an ingredient, type the kilos ---------------
    Add and Replace are the same act with a different starting point, so they are
@@ -13609,6 +13906,16 @@ function subAsk(orig, i, ctx, needG){
   const left=Math.max(0, (+needG||0) - subTotalG(orig) + (cur?(+cur.g||0):0));
   window._subAsk={orig, i:(i==null?null:i), ctx, needG:+needG||0,
     sku:(cur?cur.sku:''), g:(cur?(+cur.g||0):left), q:'', cat:''};
+  drawSubAsk();
+}
+/* REPLACE THE WHOLE LINE. Adding beef to an empty list already replaces the
+   lamb — the lamb simply is not on the list — but nobody reads it that way, so
+   the act has its own button and its own wording. It opens the same picker
+   with the full requirement already in the kilos box, because "replace it"
+   means "all of it" unless somebody says otherwise. */
+function subAskWhole(orig, ctx, needG){
+  window._subAsk={orig, i:null, ctx, needG:+needG||0, whole:true,
+    sku:'', g:+needG||0, q:'', cat:''};
   drawSubAsk();
 }
 function subAskPick(sku){ if(!window._subAsk) return; window._subAsk.sku=sku; drawSubAskBody(); drawSubAskChosen(); }
@@ -13625,14 +13932,27 @@ function subAskSave(){
   const el=$('saQty'); if(el) A.g=Math.max(0,(parseFloat(el.value)||0))*1000;
   if(!A.sku){ toast('Choose an ingredient first',true); return; }
   if(!(A.g>0)){ toast('How many kilos?',true); return; }
-  const parts=subParts(A.orig).slice();
+  let parts=subParts(A.orig).slice();
+  if(A.whole){
+    /* Replacing the whole line throws away every part already on it, so it
+       says so first and names what it is about to lose. */
+    if(parts.length){
+      const was=parts.map(p=>_subName(p.sku)+(p.g==null?'':' '+(Math.round((+p.g||0)/10)/100)+' kg')).join(' + ');
+      if(!confirm('Replace the whole line with '+_subName(A.sku)+' ('+(Math.round(A.g/10)/100)+' kg)?\n\nThis clears what is on it now: '+was)) return;
+    }
+    subStore(A.orig,[{sku:A.sku, g:A.g}]);
+    const nmW=_subName(A.sku);
+    window._subAsk=null; subRedraw(A.ctx);
+    toast(_subName(A.orig)+' replaced by '+nmW+' · '+(Math.round(A.g/10)/100)+' kg');
+    return;
+  }
   if(A.i!=null && parts[A.i]){
     /* REPLACING OVERWRITES SOMETHING SOMEBODY ALREADY WEIGHED, so it asks first.
        Adding does not: an extra line is visible on the list and one press of ✕
        undoes it. A replace silently loses the weight that was there. */
     const old=parts[A.i];
-    const oldNm=((window._subIm||{})[old.sku]||{}).name||old.sku;
-    const newNm=((window._subIm||{})[A.sku]||{}).name||A.sku;
+    const oldNm=_subName(old.sku);
+    const newNm=_subName(A.sku);
     const same=(old.sku===A.sku);
     const msg=same
       ? ('Change '+oldNm+' from '+(Math.round((+old.g||0)/10)/100)+' kg to '+(Math.round(A.g/10)/100)+' kg?')
@@ -13650,7 +13970,7 @@ function subAskSave(){
     else parts.push({sku:A.sku, g:A.g});
   }
   subStore(A.orig, parts);
-  const nm=((window._subIm||{})[A.sku]||{}).name||A.sku;
+  const nm=_subName(A.sku);
   window._subAsk=null; subRedraw(A.ctx);
   toast((A.i!=null?'Changed to ':'Added ')+nm+' · '+(Math.round(A.g/10)/100)+' kg');
 }
@@ -13713,7 +14033,7 @@ function drawSubAskChosen(){
   const el=$('saChosen'); if(!el) return;
   el.innerHTML=`<div class="mini" style="color:var(--muted)">Chosen</div>
     <b>${nm?esc(nm):'<span style="color:var(--danger)">nothing yet</span>'}</b>
-    ${nm?`<div class="mini" style="color:${over?'var(--danger)':'var(--muted)'}">${kg(have)} kg on hand at ${esc(planProduceLoc())}${over?' — less than you are about to use':''}</div>`:''}`;
+    ${nm?`<div class="mini" style="color:${over?'var(--danger)':'var(--muted)'}">${kg(have)} kg on hand at ${esc(locName(planProduceLoc()))}${over?' — less than you are about to use':''}</div>`:''}`;
 }
 function drawSubAsk(){
   const A=window._subAsk; if(!A) return;
@@ -13721,9 +14041,9 @@ function drawSubAsk(){
   const kg=g=>(Math.round((+g||0)/10)/100);
   const origName=(im[A.orig]||{}).name||A.orig;
   const cats=[...new Set(_outIngRows(window._subAllIngs||window._subCandidates||[], window._subCandidates||[]).map(i=>i._g1||'—'))].sort();
-  $('modal').innerHTML=`<div><h3>${A.i!=null?'🔎 Change this ingredient':'🔎 Add an ingredient'}</h3>
+  $('modal').innerHTML=`<div><h3>${A.whole?('🔎 Replace '+esc(_subName(A.orig))+' entirely'):(A.i!=null?'🔎 Change this ingredient':'🔎 Add an ingredient')}</h3>
     <p class="mini">Covering <b>${esc(origName)}</b>. Pick what was used and type <b>how many kilos</b> — the actual weight off the scale, not a share.<br>
-    Grouped by <b>category → base material</b>, the same way the count sheet and <b>Output ingredients — browse &amp; add</b> read. The chip is stock on hand at <b>${esc(planProduceLoc())}</b>: <span class="ohchip proc">green</span> processed, <span class="ohchip raw">brown</span> raw, and <span class="ohchip short">red</span> once you ask for more than there is.</p>
+    Grouped by <b>category → base material</b>, the same way the count sheet and <b>Output ingredients — browse &amp; add</b> read. The chip is stock on hand at <b>${esc(locName(planProduceLoc()))}</b>: <span class="ohchip proc">green</span> processed, <span class="ohchip raw">brown</span> raw, and <span class="ohchip short">red</span> once you ask for more than there is.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
       <input id="saQ" value="${esc(A.q||'')}" placeholder="🔎 search name / SKU / raw parent…" oninput="subAskSearch(this.value)"
         style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
@@ -13740,7 +14060,7 @@ function drawSubAsk(){
           oninput="subAskQty(this.value)" placeholder="0"
           style="width:110px;text-align:right;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:15px"></label>
     </div>
-    <div class="mfoot" style="margin-top:12px"><button class="btn" onclick="subAskSave()">${A.i!=null?'Save':'Add'}</button>
+    <div class="mfoot" style="margin-top:12px"><button class="btn" onclick="subAskSave()">${A.whole?'Replace':(A.i!=null?'Save':'Add')}</button>
       <button class="btn sec" onclick="subAskClose()">Cancel</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on');
   drawSubAskBody(); drawSubAskChosen(); _subAskFocus();
@@ -13752,8 +14072,22 @@ function subEditorHtml(orig, opt){
   const ctx=opt.ctx||'pre';
   const im=(window._subIm||{}), oh=(window._subOh||{});
   const needG=+opt.needG||0;
-  const parts=subParts(orig);
   const kg=g=>(Math.round((+g||0)/10)/100);
+  const O=esc(_subName(orig));
+  /* TAKEN OUT ALTOGETHER. Its own state, with its own way back, because an
+     empty list already means "nothing set" and the two have to be told apart:
+     one leaves the recipe alone, the other consumes nothing at all. */
+  if(subIsDrop(orig)){
+    return `<div style="border:1px solid #e6c9c2;border-radius:8px;padding:10px 12px;background:#fdf3f0">
+      <b style="color:var(--danger)">✕ Not used in this run</b>
+      <div class="mini" style="color:var(--muted);margin-top:2px">The recipe asks for <b>${kg(needG)} kg</b> of <b>${O}</b>.
+        None of it goes into the product and nothing is drawn from stock. The pack is that much lighter.</div>
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn sec sm" onclick="subUndrop('${esc(orig)}');subRedraw('${ctx}')" title="use ${O} as the recipe says">↺ Put it back</button>
+        <button class="btn sec sm" onclick="subUndrop('${esc(orig)}');subAsk('${esc(orig)}',null,'${ctx}',${needG})" title="say what went in instead">＋ Something else went in instead</button>
+      </div></div>`;
+  }
+  const parts=subParts(orig);
   const used=subTotalG(orig);
   const left=Math.round((needG-used)*10)/10;
   const bal=subBalanced(orig, needG);
@@ -13763,34 +14097,52 @@ function subEditorHtml(orig, opt){
     const short=(+pt.g||0)>have+0.5;
     const isOrig=pt.sku===orig;
     return `<tr>
-      <td><b>${esc((im[pt.sku]||{}).name||pt.sku)}</b>${isOrig?' <span class="mini" style="color:var(--muted)">— the recipe\'s own</span>':''}
+      <td><b>${esc(_subName(pt.sku))}</b>${isOrig?' <span class="mini" style="color:var(--muted)">— the recipe\'s own</span>':''}
         <div class="mini" style="color:${short?'var(--danger)':'var(--muted)'}">${have>0?kg(have)+' kg on hand':'nothing on hand'}${short?' — less than this line uses ⚠':''}</div></td>
       <td class="num" style="white-space:nowrap"><b>${pt.g==null?'<span class="mini" style="color:var(--muted)">whole line</span>':kg(pt.g)+' kg'}</b></td>
       <td class="mini" style="white-space:nowrap;text-align:right">
-        <button class="iconbtn" title="Swap this for something else, or change the weight" aria-label="Replace ${esc((im[pt.sku]||{}).name||pt.sku)}"
+        <button class="iconbtn" title="Swap this line for something else, or change its weight" aria-label="Replace ${esc(_subName(pt.sku))}"
           onclick="subAsk('${esc(orig)}',${i},'${ctx}',${needG})">↻</button>
-        <button class="iconbtn danger" title="Take this line off" aria-label="Remove ${esc((im[pt.sku]||{}).name||pt.sku)}"
+        <button class="iconbtn danger" title="Take this line off the list" aria-label="Remove ${esc(_subName(pt.sku))}"
           onclick="subRowDel('${esc(orig)}',${i},'${ctx}')">✕</button></td>
     </tr>`;
   }).join('');
-  return `<div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fbfbf8">
-    ${parts.length?`<table style="width:100%"><thead><tr>
-      <th style="text-align:left">What was used</th><th class="num">Kilos</th><th></th></tr></thead>
-      <tbody>${rows}</tbody></table>`
-      :`<div class="mini" style="color:var(--muted);padding:4px 0">Nothing added — the run will make what stock allows.</div>`}
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
-      <button class="iconbtn add" title="Add an ingredient to this line" aria-label="Add an ingredient"
+  /* THREE THINGS A PERSON WANTS TO DO, NAMED. Before this there was one ＋ and
+     the rest had to be inferred: replacing meant adding the new thing and
+     knowing that the original's absence from the list was itself the swap, and
+     removing outright was not possible at all. Each is now a button that says
+     what it does. */
+  const actions=`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+      <button class="iconbtn add" title="Add another ingredient to this line" aria-label="Add an ingredient"
         onclick="subAsk('${esc(orig)}',null,'${ctx}',${needG})">＋</button>
-      <span class="mini" style="color:var(--muted)">add what was used</span>
+      <span class="mini" style="color:var(--muted)">${parts.length?'add another':'add what was used'}</span>
+      ${parts.length?'':`<button class="btn sec sm" title="one ingredient took the place of ${O} — pick it and it takes the whole ${kg(needG)} kg"
+        onclick="subAskWhole('${esc(orig)}','${ctx}',${needG})">↻ Replace it entirely</button>`}
+      <button class="btn sec sm" style="color:var(--danger)" title="none of ${O} went in, and nothing replaced it"
+        onclick="subDropAsk('${esc(orig)}','${ctx}',${needG})">✕ Not used at all</button>
       ${parts.length?`<button class="btn sec sm" onclick="subReset('${esc(orig)}','${ctx}')" title="clear this section and use the recipe as written">↺ Back to the recipe</button>`:''}
       <span style="flex:1"></span>
       ${!parts.length?'' : legacy
         ? '<b class="mini" style="color:var(--muted)">whole line swapped (from an older draft)</b>'
         : `<b class="mini" style="color:${bal?'#2f5d33':'var(--danger)'}">${kg(used)} of ${kg(needG)} kg${bal?' ✓':(left>0?` · ${kg(left*1)} kg still to allocate`:` · ${kg(-left)} kg over`)}</b>`}
-    </div>
+    </div>`;
+  return `<div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fbfbf8">
+    ${parts.length?`<table style="width:100%"><thead><tr>
+      <th style="text-align:left">What was used</th><th class="num">Kilos</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table>`
+      :`<div class="mini" style="color:var(--muted);padding:4px 0">Nothing added — the run will use <b>${O}</b> as the recipe says.</div>`}
+    ${actions}
   </div>`;
 }
-/* The candidate list and the stock figures both dialogs read. Built once per
+/* Taking an ingredient out is not a typo-sized action — the pack gets lighter
+   and the costing changes — so it is asked for in words before it happens. */
+function subDropAsk(orig, ctx, needG){
+  const O=_subName(orig);
+  if(!confirm('Take '+O+' out of this run?\n\nThe recipe asks for '+(Math.round((+needG||0)/10)/100)+' kg of it. '
+    +'None will be drawn from stock and none goes into the product, so the pack is that much lighter.\n\n'
+    +'If something went in INSTEAD, press Cancel and use ＋ or Replace instead.')) return;
+  subDrop(orig); subRedraw(ctx);
+}/* The candidate list and the stock figures both dialogs read. Built once per
    opening rather than per row. */
 async function subLoadCtx(){
   let ings=[]; try{ ings=await listIngredients(); }catch(e){}
@@ -14247,7 +14599,27 @@ async function openProdActuals(){
   const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
   // (A) processed output needed by finished-product BOMs (aggregate grams)
   const agg={};
-  prodPlanLines.forEach(l=>{ const packs=+l.good_packs||0; if(packs<=0)return; (bm[l.product_sku]||[]).forEach(line=>{ const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{neededG:0,costG:line.unit_cost_g}; a.neededG+=line.processed_g*packs; }); });
+  /* WHAT THE RECIPE LINE ASKS FOR, BEFORE ANY SUBSTITUTION. The parts of a
+     split add back up to the line, so summing them by the line they came from
+     recovers it — which is the figure the ＋/↻ editor allocates against. */
+  const baseNeed={};
+  /* Read off the RECIPE, not off the substituted map: an ingredient that was
+     taken out of the run has no line in the map at all, and "put it back"
+     needs to know what it was asking for. */
+  prodPlanLines.forEach(l=>{ const packs=+l.good_packs||0; if(packs<=0)return;
+    (window._bomRawLines||[]).forEach(b2=>{ if(b2.product_sku!==l.product_sku) return;
+      baseNeed[b2.ingredient_sku]=(baseNeed[b2.ingredient_sku]||0)+(+b2.usable_g||0)*packs; }); });
+  prodPlanLines.forEach(l=>{ const packs=+l.good_packs||0; if(packs<=0)return; (bm[l.product_sku]||[]).forEach(line=>{
+    const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{neededG:0,costG:line.unit_cost_g,subOf:null};
+    a.neededG+=line.processed_g*packs;
+    /* An ingredient can be a recipe line in one product and a replacement in
+       another. Used in its own right anywhere wins, so ↻ on its row edits its
+       own line rather than somebody else's. */
+    const so=line.sub_orig||'';
+    if(so===''||so===line.ingredient_sku) a.subOf='';
+    else if(a.subOf===null) a.subOf=so;
+  }); });
+  window._paBaseNeed=baseNeed;
   // an override on the prep list is what the kitchen will really pull
   const _ov=window._prodNeed||{};
   Object.keys(_ov).forEach(sku=>{ if(agg[sku]) agg[sku].neededG=+_ov[sku]||0; });
@@ -14279,7 +14651,7 @@ async function openProdActuals(){
                               : Math.max(0,(parseFloat(_ol.needed_kg)||0)*1000);
     const rawG=(type==='A') ? shortG/y
                             : Math.max(0,(parseFloat(_ol.raw_kg)||0)*1000);
-    return {sku, name:it.name||sku, type, parent:(p&&p.sku)||'', parentCostG:(+(p||{}).moving_avg_cost_kg||+(p||{}).list_price_kg||0)/1000,
+    return {sku, name:it.name||sku, type, subOf:((type==='A'&&agg[sku]&&agg[sku].subOf)||''), parent:(p&&p.sku)||'', parentCostG:(+(p||{}).moving_avg_cost_kg||+(p||{}).list_price_kg||0)/1000,
       outCostG:(type==='A'?(agg[sku]&&agg[sku].costG):((+it.price_kg_processed||+it.moving_avg_cost_kg||+it.list_price_kg||0)/1000))||0,
       yield:y, neededKg:Math.round(neededG/10)/100, ohKg:Math.round(ohG/10)/100,
       thawPct:(+it.thaw_loss_pct||0),
@@ -14314,7 +14686,13 @@ async function openProdActuals(){
      this screen; making them disagree is how a line gets missed. */
   try{ if(!window._prodNeedRows||!window._prodNeedRows.length) window._prodNeedRows=await prodNeedRows(); }catch(e){}
   const _ord={}; (window._prodNeedRows||[]).forEach((r,i)=>{ _ord[r.sku]=i; });
-  const _bySheet=(u,v)=>((_ord[u.sku]!=null?_ord[u.sku]:9e9)-(_ord[v.sku]!=null?_ord[v.sku]:9e9));
+  /* A REPLACEMENT SITS WITH THE LINE IT STANDS IN FOR. Beef used instead of
+     lamb is not on the prep sheet at all, so it sorted to the bottom — a page
+     away from the lamb row that explains why it is there, which is how a line
+     gets weighed twice or not at all. It takes the lamb's place in the order
+     and sits just under it. */
+  const _pos=r=>{ const k=r.subOf||r.sku; const i=_ord[k]; return (i!=null?i:9e9)+(r.subOf?0.5:0); };
+  const _bySheet=(u,v)=>(_pos(u)-_pos(v));
   A.sort(_bySheet); B.sort(_bySheet);
   window._prodAct=A.concat(B);
   /* What the PLAN says, before anybody touches it. Kept so "has this been
@@ -14325,13 +14703,23 @@ async function openProdActuals(){
      browser died before the run was posted. Merged by SKU, so a plan that has
      since changed still gets its new lines. */
   window._paRestored=null;
-  const _d=paDraftRead();
+  const _rebuild=!!window._paRebuilding; window._paRebuilding=false;
+  /* A REBUILD IS NOT A RECOVERY. The draft holds every cell, seeded values
+     included; replaying it over a sheet whose requirements just changed would
+     put yesterday's 20 kg back on a line that now needs 8. So a rebuild takes
+     only what somebody actually typed, and lets everything else re-seed. */
+  const _d=_rebuild?null:paDraftRead();
   if(_d){
     let hit=0;
     window._prodAct.forEach(x=>{ const r=_d.rows[x.sku]; if(!r) return;
       PA_DRAFT_FIELDS.forEach(f=>{ if(r[f]!==undefined) x[f]=r[f]; }); hit++; });
-    if(hit && paDirty()) window._paRestored=new Date(_d.at).toLocaleString();
+    if(hit && paDirty() && !_rebuild) window._paRestored=new Date(_d.at).toLocaleString();
     else paDraftClear();
+  }
+  if(_rebuild && window._paCarry){
+    window._prodAct.forEach(x=>{ const r=window._paCarry[x.sku]; if(!r) return;
+      PA_DRAFT_FIELDS.forEach(f=>{ if(r[f]!==undefined) x[f]=r[f]; }); });
+    window._paCarry=null;
   }
   drawProdActuals();
 }
@@ -14646,7 +15034,7 @@ function _paRefresh(){
   const w=$('paWarn');
   if(w){ const n=(window._prodAct||[]).filter(x=>_paCalc(x).short).length;
     w.style.display=n?'block':'none';
-    if(n) w.innerHTML=`<b>${n} ingredient(s) come up short</b> — more was used in the product than the run made available, so stock will go negative. Raise <b>Processed created</b>, or lower <b>Used in product</b>.`; }
+    if(n) w.innerHTML=`<b>${n} ingredient(s) come up short</b> — more was used in the product than the run made available, so stock will go negative. Raise <b>Processed created</b>, lower <b>Used in product</b>, or press <b>＋</b> on the row to record what was used instead.`; }
 }
 // Recompute raw + output defaults from the edited Processed-used (keeps processed-first sound).
 function _paSync(i){ const x=(window._prodAct||[])[i]; if(!x)return;
@@ -14673,6 +15061,124 @@ function paLossCell(x,id){
     style="color:${col};font-weight:${Math.abs(c.over)>0.0005?'700':'400'}">${k(c.loss)}</span>`
     +(Math.abs(c.over)>0.0005?`<div class="mini" style="color:var(--danger)">${c.over>0?'+':''}${k(c.over)} vs standard</div>`
       :(c.lossCertain?'':'<div class="mini" style="color:var(--muted)">split modelled</div>'));
+}
+/* ---- ＋ / ↻ ON EVERY ROW OF THE CONFIRM SHEET ------------------------------
+   THIS IS WHERE THE KITCHEN ACTUALLY SAYS WHAT IT USED, and until now the
+   substitution editor was not here. It lived in two places: the Substitute
+   screen, and a gate that only opens when stock says an ingredient cannot cover
+   the run. Both of those are forecasts. The confirm sheet is the record — it is
+   opened after the run with the weights in hand, and "we used buffalo because
+   the lamb was gone" is a fact by then, not a plan. Anyone whose stock happened
+   to cover the run on paper never saw the editor at all — five ingredients and
+   no ＋ anywhere, which is exactly what was reported.
+   So: the same editor, the same ＋ ↻ ✕, on every mix row, short or not. */
+/* ONE PLACE THAT KNOWS AN INGREDIENT'S NAME, and four places to look for it.
+   The editor's own map is built when the sheet opens; if that read failed or
+   came back stale, the row printed a bare SKU — "used instead of I-BUFF" —
+   which is exactly the sort of thing a person cannot act on. Every screen that
+   already knows the name is asked in turn before giving up on it. */
+function _subName(sku){
+  const im=window._subIm||{};
+  if(im[sku]&&im[sku].name) return im[sku].name;
+  const a=(window._prodAllIngredients||[]).find(i=>i.sku===sku); if(a&&a.name) return a.name;
+  const r=(window._prodAct||[]).find(y=>y.sku===sku);            if(r&&r.name) return r.name;
+  const q=(window._prodNeedRows||[]).find(y=>y.sku===sku);       if(q&&q.name) return q.name;
+  return sku;
+}
+function _paSubCell(x){
+  if(!x || x.type!=='A') return '';
+  const key=x.subOf||x.sku;                       // the RECIPE line, not the part
+  const im=window._subIm||{};
+  const parts=subParts(key);
+  const kg=g=>(Math.round((+g||0)/10)/100);
+  const nm=k=>esc(_subName(k));
+  const instead=(x.subOf&&x.subOf!==x.sku)
+    ? '<div class="mini" style="color:var(--berry)">↔ used instead of <b>'+nm(x.subOf)+'</b></div>' : '';
+  const list=parts.length
+    ? '<div class="mini" style="color:var(--muted)">'+parts.map(pt=>nm(pt.sku)+(pt.g==null?'':' '+kg(pt.g)+' kg')).join(' + ')+'</div>' : '';
+  const who=esc(_subName(key));
+  return instead+list
+    +'<div style="margin-top:3px">'
+    +'<button class="iconbtn '+(parts.length?'':'add')+'" title="Add what was used alongside '+who+', replace '+who+' entirely, or record that none of it went in"'
+    +' aria-label="Record a substitution for '+who+'" onclick="actSub(\''+esc(key)+'\')">'+(parts.length?'↻':'＋')+'</button>'
+    +' <span class="mini" style="color:var(--muted)">'+(parts.length?'change what was used':'add, replace or remove')+'</span></div>';
+}
+function _paDroppedHtml(){
+  const base=window._paBaseNeed||{};
+  const out=Object.keys(base).filter(sku=>subIsDrop(sku));
+  if(!out.length) return '';
+  const kg=g=>(Math.round((+g||0)/10)/100);
+  /* AN INGREDIENT THAT WAS TAKEN OUT HAS NO ROW — that is what taking it out
+     means — so without this strip it would vanish off the sheet with no way
+     back and no record that a decision was ever made. */
+  return '<div style="margin:0 0 10px;padding:8px 10px;border:1px solid #e6c9c2;background:#fdf3f0;border-radius:6px;font-size:12.5px">'
+    +'<b style="color:var(--danger)">✕ Taken out of this run</b> — nothing is drawn from stock for these, and the pack is that much lighter.'
+    +out.map(sku=>'<div style="margin-top:5px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+      +'<b>'+esc(_subName(sku))+'</b><span class="mini" style="color:var(--muted)">recipe asks for '+kg(base[sku])+' kg</span>'
+      +'<button class="btn sec sm" onclick="actUndrop(\''+esc(sku)+'\')">↺ Put it back</button>'
+      +'<button class="btn sec sm" onclick="actSub(\''+esc(sku)+'\')">✎ Something went in instead</button></div>').join('')
+    +'</div>';
+}
+async function actUndrop(sku){
+  subUndrop(sku);
+  window._paCarry=_paDirtySnap(); paDraftSave(true); window._paRebuilding=true;
+  await openProdActuals();
+  toast(_subName(sku)+' is back on the run');
+}
+async function actSub(orig){
+  if(!(window._subIm||{})[orig]){ try{ await subLoadCtx(); }catch(e){} }
+  paDraftSave(true);                                   // the sheet is about to be redrawn — keep every keystroke
+  window._prodSub=window._prodSub||{};
+  window._actSub={orig, was:JSON.parse(JSON.stringify(window._prodSub))};
+  drawActSub();
+}
+function _actNeedG(orig){
+  const b=+((window._paBaseNeed||{})[orig])||0;
+  if(b>0) return b;
+  const r=(window._prodAct||[]).find(y=>y.sku===orig||y.subOf===orig);
+  return r?(+r.neededKg||0)*1000:0;
+}
+function drawActSub(){
+  const A=window._actSub; if(!A) return;
+  const im=window._subIm||{};
+  const nm=_subName(A.orig);
+  const needG=_actNeedG(A.orig);
+  const kg=g=>(Math.round((+g||0)/10)/100);
+  $('modal').innerHTML='<div><h3>What was used for '+esc(nm)+'?</h3>'
+    +'<p class="mini">This run needs <b>'+kg(needG)+' kg</b> of <b>'+esc(nm)+'</b> in total. Three things you can say here: <b>＋ add</b> what went in beside it, <b>↻ replace</b> it entirely, or <b>✕ not used at all</b>. Press <b>＋</b> and say what was used'
+    +' and <b>how many kilos</b> — the weight off the scale. Add as many as it took: one recipe line can be covered by two or three'
+    +' things, and <b>'+esc(nm)+'</b> can stay as one of them, which is "use what we had and top up". <b>↻</b> swaps a line for'
+    +' something else, <b>✕</b> takes it off. Each is drawn and costed at <b>its own yield and its own price</b>; the finished'
+    +' product is unchanged.</p>'
+    +subEditorHtml(A.orig,{ctx:'act', needG})
+    +'<div class="mfoot" style="margin-top:12px"><button class="btn" onclick="actSubDone()">✅ Apply to the sheet</button>'
+    +'<button class="btn sec" onclick="actSubCancel()">Cancel</button></div></div>';
+  modalWide(true); $('overlay').classList.add('on');
+}
+function actSubCancel(){ const A=window._actSub; window._actSub=null;
+  if(A) window._prodSub=A.was;                        // leave it exactly as it was found
+  drawProdActuals(); }
+async function actSubDone(){
+  const A=window._actSub; window._actSub=null; if(!A) return;
+  const needG=_actNeedG(A.orig);
+  if(subIsReal(A.orig) && !subBalanced(A.orig,needG)){
+    toast('The kilos do not add up to the '+(Math.round(needG/10)/100)+' kg this run needs',true);
+    window._actSub=A; drawActSub(); return;
+  }
+  /* The sheet is REBUILT rather than patched: a substitution changes which
+     ingredients appear, what each needs and what each costs, and a dozen
+     derived figures hang off that. Everything typed is written to the draft
+     first and merged back by SKU, so weights already on the sheet survive. */
+  /* Carried IN MEMORY as well as through the draft. The draft lives in
+     localStorage, which a private window or a full quota can refuse without
+     saying so — and losing twenty minutes of weighing to a silent storage
+     failure is not a trade worth making for one line of code. */
+  window._paCarry=_paDirtySnap();
+  paDraftSave(true); window._paRebuilding=true;
+  await openProdActuals();
+  const p=subParts(A.orig);
+  toast(p.length?('Recorded — '+_subName(A.orig)+' covered by '+p.length+' ingredient(s)')
+                :'Back to the recipe as written');
 }
 function _paRow(x,i){
   const c=_paCalc(x);
@@ -14708,7 +15214,7 @@ function _paRow(x,i){
       default:       return '<td class="num mini" style="color:var(--muted)">—</td>';
     }
   };
-  return `<tr style="box-shadow:inset 4px 0 0 ${_col}"><td><span class="cat-dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${_col};margin-right:6px"></span><b>${esc(x.name)}</b></td>
+  return `<tr style="box-shadow:inset 4px 0 0 ${_col}"><td style="vertical-align:top"><span class="cat-dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${_col};margin-right:6px"></span><b>${esc(x.name)}</b>${_paSubCell(x)}</td>
     ${paCols().map(k=>cell(k.k)).join('')}</tr>
   <tr class="parecap"><td colspan="${paSpan()}" id="parc${i}">${_paRecap(x)}</td></tr>`;
 }
@@ -14727,6 +15233,19 @@ function _paRow(x,i){
 const PA_DRAFT_FIELDS=['frozenOutKg','procUsedKg','actualRawKg','actualMadeKg','usedKg','excessKg',
                        'advTouched','thawTouched','excessAnchor'];
 function paDraftKey(){ return 'wr_pa_draft_'+(prodPlanDate||todayISO()); }
+/* Only the cells that differ from what the plan seeded — i.e. what a person
+   actually typed. Booleans compare as booleans; weights compare at scale
+   precision, so a value typed back to its original is honestly not dirty. */
+function _paDirtySnap(){
+  const seed=window._paSeed||{}, o={};
+  (window._prodAct||[]).forEach(x=>{ const s0=seed[x.sku]||{}, r={};
+    PA_DRAFT_FIELDS.forEach(f=>{ const a=x[f], b=s0[f];
+      const same=(typeof a==='boolean'||typeof b==='boolean') ? (!!a===!!b)
+                                                             : (Math.abs((+a||0)-(+b||0))<=0.0005);
+      if(!same) r[f]=a; });
+    if(Object.keys(r).length) o[x.sku]=r; });
+  return o;
+}
 function _paSnap(a){ const o={};
   (a||[]).forEach(x=>{ const r={}; PA_DRAFT_FIELDS.forEach(f=>r[f]=x[f]); o[x.sku]=r; });
   return o; }
@@ -14828,13 +15347,15 @@ function drawProdActuals(){
   $('modal').innerHTML=`<div><h3>Confirm production — record what actually happened</h3>
     <div style="margin:6px 0 10px;padding:9px 11px;background:#f6f8f4;border-radius:8px;font-size:12.5px;line-height:1.5">
       ${PA_HELP}
+      <div style="margin-top:6px;color:var(--muted)">Used something else? Press <b>＋</b> under an ingredient's name. From there you can <b>add</b> what went in beside it, <b>replace</b> it entirely, or say it was <b>not used at all</b> — one line can be covered by two or three things, and the original can stay as one of them.</div>
       <div style="margin-top:7px">${paToggleBtn()}</div>
     </div>
     ${window._paRestored?`<div style="margin:0 0 10px;padding:8px 10px;border:1px solid #b9d3bd;background:#f1f7f1;border-radius:6px;font-size:12.5px">
       ↩ <b>Picked up where you left off</b> — the weights you typed at ${esc(window._paRestored)} are back on the sheet.
       Nothing was posted to stock.
       <button class="btn sm sec" style="margin-left:8px" onclick="paStartFresh()">✕ Start fresh from the plan</button></div>`:''}
-    <div id="paWarn" style="display:${short.length?'block':'none'};margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px"><b>${short.length} ingredient(s) come up short</b> — more is going into the product than the run made available, so stock will go negative. Raise <b>Processed created</b>, or lower <b>Used in product</b>.</div>
+    ${_paDroppedHtml()}
+    <div id="paWarn" style="display:${short.length?'block':'none'};margin:0 0 10px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px"><b>${short.length} ingredient(s) come up short</b> — more is going into the product than the run made available, so stock will go negative. Raise <b>Processed created</b>, lower <b>Used in product</b>, or press <b>＋</b> on the row to record what was used instead.</div>
     ${A.length?`<div class="mini" style="margin:6px 0 2px;font-weight:700">For products (mix ingredients)</div>
     <div class="mscroll" style="overflow-x:auto"><table class="pa">${head}<tbody>${A.map(x=>_paRow(x,idx(x))).join('')}</tbody></table></div>`:''}
     ${B.length?`<div class="mini" style="margin:12px 0 2px;font-weight:700">Output ingredients (make to stock)</div>
@@ -15132,6 +15653,12 @@ function _bomBoneY(boms){
 }
 async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=await listIngredients();
   window._boneYMap=_bomBoneY(boms);
+  /* The recipe AS WRITTEN, kept aside. Everything downstream reads the map
+     after substitutions, which is right for what to consume and useless for
+     "what did this line originally ask for" — the figure the editor allocates
+     against, and the only way back for an ingredient that was taken out
+     altogether and so appears nowhere in the map at all. */
+  window._bomRawLines=boms;
   const im={}; ings.forEach(i=>im[i.sku]=i); const m={}; const sub=window._prodSub||{};
   /* Same cost function as the margin report, on the same ledger. The two used
      different precedence — this one read price_kg_processed first, the report
@@ -15162,6 +15689,7 @@ async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=awai
        deliberate: it keeps the pack full even when the weights entered do not
        quite match what the run needs. The editor flags that gap in kilos where
        a person can see it; the pack is not quietly made lighter as well. */
+    if(subIsDrop(b.ingredient_sku)) return;           // taken out of the run: it consumes nothing
     const raw=subSplit(b.ingredient_sku);
     const parts=(raw||[]).filter(x=>im[x.sku]||x.sku===b.ingredient_sku);
     let use;
@@ -15176,7 +15704,12 @@ async function prodBOMMap(){ const boms=await db.list('bom_lines',{}), ings=awai
       if(!(procG>0)) return;
       const costG=ingCostG(it,led).g;
       (m[b.product_sku]=m[b.product_sku]||[]).push({ingredient_sku:u.sku, processed_g:procG, raw_g:rawG, unit_cost_g:costG,
-        sub_of:(u.sku===b.ingredient_sku?'':b.ingredient_sku), sub_share:(+u.share||0)});
+        sub_of:(u.sku===b.ingredient_sku?'':b.ingredient_sku),
+        /* sub_of is empty on the part that IS the original, which is right for
+           "what replaced what" but useless for "which recipe line is this".
+           The confirm sheet needs the second question answered, because that
+           is the section its ＋ and ↻ edit. */
+        sub_orig:(parts.length?b.ingredient_sku:''), sub_share:(+u.share||0)});
     });
   });
   return m; }
@@ -15370,10 +15903,10 @@ function _outIngRows(ings, list){
 function _ohChip(kind, grams, opts){
   opts=opts||{};
   const kg=Math.round((+grams||0)/10)/100;
-  if(!(kg>0)) return `<span class="ohchip none" title="nothing on hand at ${esc(planProduceLoc())}">0 kg</span>`;
+  if(!(kg>0)) return `<span class="ohchip none" title="nothing on hand at ${esc(locName(planProduceLoc()))}">0 kg</span>`;
   const cls=opts.short?'short':(kind==='proc'?'proc':'raw');
   const what=kind==='proc'?'processed and on hand':'raw on hand';
-  return `<span class="ohchip ${cls}" title="${kg} kg ${what} at ${esc(planProduceLoc())}">${kg} kg</span>`;
+  return `<span class="ohchip ${cls}" title="${kg} kg ${what} at ${esc(locName(planProduceLoc()))}">${kg} kg</span>`;
 }
 /* 96.89999999999999% is not a yield, it is a float. The master stores 96.9 and
    the browser prints what a double actually holds; every screen that showed a
@@ -17797,7 +18330,7 @@ function drawStickerReorder(){
      the numbers below the fold. They are reference material — read once, then in
      the way — so they live under the table, folded up. */
   h+=`<details style="margin-top:10px"><summary style="cursor:pointer;font-weight:700;font-size:12.5px;color:var(--muted)">How Need is worked out, and why to trust PAR</summary>
-    <div class="hint" style="margin:0 0 8px">One label per pack. <b>Need</b> is the larger of <b>production</b> (packs planned − on hand − on order) and <b>PAR top-up</b> (PAR − on hand − on order) — not the sum, because the same label serves both. <b>On order</b> is pieces on a confirmed sticker PO that have not been received yet, so a batch already at the printer is not bought a second time; it drops out the moment the PO is received. Rounded up to whole <b>sheets</b> where a product says how many print per sheet. Production demand comes from ${planTag}; labels are pulled at <b>${esc(planProduceLoc())}</b>, so the other site only ever shows PAR top-up.
+    <div class="hint" style="margin:0 0 8px">One label per pack. <b>Need</b> is the larger of <b>production</b> (packs planned − on hand − on order) and <b>PAR top-up</b> (PAR − on hand − on order) — not the sum, because the same label serves both. <b>On order</b> is pieces on a confirmed sticker PO that have not been received yet, so a batch already at the printer is not bought a second time; it drops out the moment the PO is received. Rounded up to whole <b>sheets</b> where a product says how many print per sheet. Production demand comes from ${planTag}; labels are pulled at <b>${esc(locName(planProduceLoc()))}</b>, so the other site only ever shows PAR top-up.
       <b>Every custom order shares one label</b> — the Custom Name Sticker, under Custom Orders below. Only an order flagged for a printed name gets its own line.</div>
     <div style="margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);background:#f6f8f4;border-radius:6px;font-size:12.5px">
       <b>Trust PAR over On hand.</b> Label stock only moved at a count, so the figures drifted. From this build, confirming a production run deducts the labels it used (Production Plan → <b>Packaging &amp; labels used</b>), so On hand becomes reliable from the next run onward. Until then, plan against PAR — the <b>PAR top-up</b> column ignores production entirely.</div>
@@ -18335,14 +18868,14 @@ function openTransferLoad(){
   // no save required — this only stages lines in memory
   const to=todayISO();
   const from=isoLocal(new Date(Date.now()-6*864e5));
-  $('modal').innerHTML=`<div><h3>⬇ Load finished stock from ${esc(planProduceLoc())}</h3>
+  $('modal').innerHTML=`<div><h3>⬇ Load finished stock from ${esc(locName(planProduceLoc()))}</h3>
     <p class="mini">Two ways, and they answer different questions. Everything on hand is right when the site is being
       emptied. A production window is right when you are sending <b>this week's run</b> and something else is deliberately
       staying behind.</p>
     <div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">
       <label style="display:flex;gap:9px;align-items:flex-start;padding:10px;border:1px solid var(--line);border-radius:8px;cursor:pointer">
         <input type="radio" name="tlmode" value="all" checked style="margin-top:3px">
-        <span><b>Everything on hand</b><div class="mini" style="color:var(--muted)">All finished packs at ${esc(planProduceLoc())}, whenever they were made.</div></span></label>
+        <span><b>Everything on hand</b><div class="mini" style="color:var(--muted)">All finished packs at ${esc(locName(planProduceLoc()))}, whenever they were made.</div></span></label>
       <label style="display:flex;gap:9px;align-items:flex-start;padding:10px;border:1px solid var(--line);border-radius:8px;cursor:pointer">
         <input type="radio" name="tlmode" value="win" style="margin-top:3px">
         <span><b>Only what was produced between</b>
