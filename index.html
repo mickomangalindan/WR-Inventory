@@ -4297,7 +4297,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-01 09:30Z';
+const WR_BUILD='2026-09-01 10:15Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -18907,8 +18907,25 @@ function _otherLoc(from){
 function _trIsSticker(i){ return /sticker|label/i.test(String(i.category||'')); }
 async function _trOnHand(kind, loc){
   const oh={}, want=(TR_KINDS[kind]||{}).ledger||'product';
-  if(want==='sticker'){            // not a ledger item — it lives on the product row
+  if(want==='sticker'){
+    // a PRODUCT label is not a ledger item — it lives on the product row
     try{ (await db.list('products',{})).forEach(p=>{ const v=+p['sticker_'+loc+'_on_hand']||0; if(v) oh[p.sku]=v; }); }catch(e){}
+    /* …but the shared Custom Name Sticker IS a ledger item, because it is held
+       as a supply. Reading only the product columns is why it could not be
+       transferred: the Stickers tab never listed it, and the Supplies tab threw
+       it out for being a sticker, so the one label every custom order runs
+       through could not be moved between sites at all. */
+    try{
+      const lbl=new Set((await listIngredients()).filter(_isLabelSupply).map(i=>i.sku));
+      if(lbl.size){
+        if(isLive()){ (await db.list('stock_balance',{})).forEach(b=>{
+            if(String(b.kind||'')==='ingredient' && String(b.location_code||'')===loc && lbl.has(b.ref_sku))
+              oh[b.ref_sku]=(oh[b.ref_sku]||0)+(+b.on_hand||0); }); }
+        else (DEMO.inventory_movements||[]).forEach(m=>{
+            if(String(m.kind||'')==='ingredient' && String(m.location_code||'')===loc && lbl.has(m.ref_sku))
+              oh[m.ref_sku]=(oh[m.ref_sku]||0)+(+m.qty||0); });
+      }
+    }catch(e){}
     return oh;
   }
   if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(b=>{
@@ -18935,12 +18952,25 @@ async function trPick(kind){
        that product's row. Listing the sticker ingredients instead showed 22
        rows all reading zero. */
     let ps=[]; try{ ps=await db.list('products',{}); }catch(e){}
-    rows=ps.filter(p=>p.active!==false)
-      .map(p=>({sku:p.sku,name:(prodLabel(p,{noSku:true})||p.sku)+' — label',cat:p.group_1||p.family||'Labels',oh:+oh[p.sku]||0,div:1,unit:'pcs'}));
+    /* A custom recipe has no label of its own — it packs behind the shared
+       Custom Name Sticker below — so listing one per custom recipe offers rolls
+       that were never printed. Archived products, same. */
+    rows=ps.filter(p=>!isArchivedProd(p) && !(p.is_custom||/^CUST-/.test(p.sku)))
+      .map(p=>({sku:p.sku,name:(prodLabel(p,{noSku:true})||p.sku)+' — label',cat:p.group_1||p.family||'Labels',
+                oh:+oh[p.sku]||0,div:1,unit:'pcs',led:'sticker'}));
+    /* THE SHARED LABELS, from the ledger. They post as ordinary ingredient
+       movements, not as a product-column adjustment, so each row carries the
+       ledger it belongs to rather than the tab assuming one for all of them. */
+    try{
+      (await listIngredients()).filter(_isLabelSupply).forEach(i=>{
+        rows.push({sku:i.sku, name:(i.name||i.sku), cat:'Shared labels', oh:+oh[i.sku]||0, div:1,
+                   unit:(String(i.uom||'pcs').trim()||'pcs'), led:'ingredient'});
+      });
+    }catch(e){}
   } else {
     let ings=[]; try{ ings=await listIngredients(); }catch(e){}
-    rows=ings.filter(i=>{ const st=_trIsSticker(i), sup=isSupplyItem(i);
-        if(kind==='supply')  return sup && !st;
+    rows=ings.filter(i=>{ const st=_isLabelSupply(i)||_trIsSticker(i), sup=isSupplyItem(i);
+        if(kind==='supply')  return sup && !st;      // labels live on the Stickers tab now
         return !sup && !st; })
       .map(i=>({sku:i.sku,name:i.name||i.sku,cat:i.category||'—',oh:+oh[i.sku]||0,
                 div:(kind==='supply')?1:1000,
@@ -19023,10 +19053,15 @@ function trPickApply(){
   if(!picked.length){ toast('Nothing typed yet',true); return; }
   formChildren=formChildren||[];
   let added=0, merged=0;
+  const ledOf={}; (_trPickRows||[]).forEach(r=>{ ledOf[r.sku]=r.led||K.ledger; });
   picked.forEach(sku=>{
-    const ex=formChildren.find(l=>String(l.product_sku)===String(sku) && (l.kind||'product')===K.ledger);
+    /* A product label moves two counters on the product row; a shared label is
+       an ordinary ledger movement. Same tab, two postings — so the line records
+       which one it is instead of the tab deciding for every row. */
+    const led=ledOf[sku]||K.ledger;
+    const ex=formChildren.find(l=>String(l.product_sku)===String(sku) && (l.kind||'product')===led);
     if(ex){ ex.sent_packs=(+ex.sent_packs||0)+_trQty[sku]; merged++; }
-    else { formChildren.push({kind:K.ledger, product_sku:sku, sent_packs:_trQty[sku], received_packs:0}); added++; }
+    else { formChildren.push({kind:led, product_sku:sku, sent_packs:_trQty[sku], received_packs:0}); added++; }
   });
   renderLines(); closeModal();
   toast(added+' line(s) added'+(merged?(' · '+merged+' merged into an existing line'):''));
