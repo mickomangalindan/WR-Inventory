@@ -4082,6 +4082,34 @@ async function renderLiveStock(){
     return {sku:a.sku, name, variant:(it.variant||''), g1, g2, grank, unit, div, kind, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf,
             sold:a.sold, back:a.back, adj:a.adj, end, value:a.val, par, below, neg, sort_order:it.sort_order};
   }).filter(r=> r.begin||r.recv||r.prod||r.cons||r.tf||r.sold||r.back||r.adj);
+
+  /* ---- LABEL STOCK IS NOT IN THE LEDGER ------------------------------------
+     This screen is built entirely from inventory_movements, and a product's
+     label stock is not a movement — it is a column on the product, one per
+     site, written by the weekly count. So the 🏷 Stickers tab existed and was
+     permanently almost empty: it could only ever show label SUPPLIES that
+     happened to have ledger rows, which is one item, and only after somebody
+     had posted an opening for it.
+
+     The labels are read from where they actually live. They carry no movement
+     history, so the row says so rather than printing an opening and a set of
+     zeros that look like a week with no activity. A back-dated window cannot
+     answer this at all — a column holds today's number and nothing else — so
+     they are left out entirely rather than answered wrongly. */
+  if(!LS_TO){
+    const _locs=(LS_LOC==='all') ? ((LOCS||[]).map(l=>l.code).filter(Boolean)) : [LS_LOC];
+    const _sites=_locs.length?_locs:['bulacan'];
+    prods.filter(p=>!isArchivedProd(p) && !(p.is_custom||/^CUST-/.test(p.sku))).forEach(p=>{
+      let oh=0, par=0;
+      _sites.forEach(lc=>{ oh+=+p['sticker_'+lc+'_on_hand']||0; par+=+p['sticker_'+lc+'_par']||0; });
+      if(!(oh>0||par>0)) return;                       // never set up — not stock, just a blank field
+      rows.push({sku:'STK-'+p.sku, name:prodLabel(p,{noSku:true})+' — Sticker', variant:'',
+        g1:'🏷 Stickers & labels', g2:'Product labels', grank:900000+_so(p),
+        unit:'pcs', div:1, kind:'sticker', noLedger:true,
+        begin:oh, recv:0, prod:0, cons:0, tf:0, sold:0, back:0, adj:0,
+        end:oh, value:0, par, below:(par>0&&oh<par), neg:(oh<-0.0001), sort_order:p.sort_order});
+    });
+  }
   if(LS_CAT!=='all') rows=rows.filter(r=>r.kind===LS_CAT);
   if(LS_ACT) rows=rows.filter(r=>r.below||r.neg);
 
@@ -4163,7 +4191,7 @@ function drawLiveStock(){
       const cl=r.below||r.neg?' style="cursor:pointer"':' style="cursor:pointer"';
       const model=pm[r.sku]?'products':'ingredients';
       h+=`<tr${cl} onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open item">
-        <td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code></div></td><td class="mini">${esc(r.unit)}</td>
+        <td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${r.noLedger?' · counted, not moved — no ledger history':''}</div></td><td class="mini">${esc(r.unit)}</td>
         <td class="num">${qf(r.begin,r.div)}</td><td class="num">${r.recv?qf(r.recv,r.div):'—'}</td><td class="num">${r.prod?qf(r.prod,r.div):'—'}</td>
         <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td>
         <td class="num"${(r.sold||r.back)?' title="sold '+qf(r.sold,r.div)+(r.back?' · back '+qf(r.back,r.div):'')+'"':''}>${(r.sold||r.back)?qf(r.sold+r.back,r.div):'—'}</td>
@@ -4269,7 +4297,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-01 06:40Z';
+const WR_BUILD='2026-09-01 09:30Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -16394,7 +16422,22 @@ async function countLoad(){
   const _bs={}, _bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
   const _pm=_countProcMaps(ings,_bs,_bn); const ctx={bs:_bs,bn:_bn,procBases:_pm.bases,procCat:_pm.catByBase};
   ings.slice().sort(cmpItems).forEach(i=>{ const cl=_countIngClass(i,ctx);
-    if(cl.isSup){ if(wantSup) lines.push({ref_sku:i.sku,name:cl.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:cl.g2,catrank:_grank('Supplies'),g1:cl.g1,g2:cl.g2,lsG1:cl.lsG1,lsG2:cl.lsG2,lsRank:cl.lsRank,grank:cl.grank,uom:cl.uom,scale:cl.scale,form:cl.form,sort_order:i.sort_order}); return; }
+    if(cl.isSup){
+      /* A STICKER THAT IS A SUPPLY IS STILL A STICKER.
+         The shared Custom Name Sticker — the label every custom order packs
+         behind — is held as a supply item, so ticking "Stickers" never loaded
+         it: it only ever appeared under "Supplies", filed with the gloves and
+         the eco-bags. The counter who was sent to count labels counted every
+         label except the one that matters most. It is loaded by EITHER scope
+         now, once, and files under Stickers so it is counted with its own kind. */
+      const isLbl=_isLabelSupply(i);
+      if(!(wantSup || (isLbl && wantStk))) return;
+      const g1=isLbl?'🏷 Stickers & labels':cl.g1, g2=isLbl?(i.category||'Labels'):cl.g2;
+      lines.push({ref_sku:i.sku,name:cl.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:g2,
+        catrank:isLbl?_grank('Stickers'):_grank('Supplies'),g1,g2,
+        lsG1:g1,lsG2:g2,lsRank:isLbl?900:cl.lsRank,grank:isLbl?900000+_so(i):cl.grank,
+        uom:cl.uom,scale:cl.scale,form:cl.form,sort_order:i.sort_order,isLabel:isLbl});
+      return; }
     if(!wantIng) return;
     lines.push({ref_sku:i.sku, name:cl.name, book_qty:stock[i.sku]||0, counted_qty:'', cat:cl.g2, catrank:_grank(i.category), g1:cl.g1, g2:cl.g2, lsG1:cl.lsG1, lsG2:cl.lsG2, lsRank:cl.lsRank, grank:cl.grank, uom:cl.uom, scale:cl.scale, form:cl.form, sort_order:i.sort_order}); });
   /* Products only, and only when asked: read the book figure from Shopify's
@@ -16443,7 +16486,13 @@ async function countLoad(){
     toast('No Shopify reading is available — book qty came from our ledger instead',true);
   }
   // Stickers are product attributes (per site), not ledger items — count each product's label stock at this location.
-  if(wantStk) prods.slice().sort(cmpItems).forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
+  /* A CUSTOM RECIPE HAS NO LABEL OF ITS OWN — it packs behind the shared
+     Custom Name Sticker, which is loaded above — so printing one sticker line
+     per custom recipe put hundreds of rolls on the count sheet that have never
+     been printed and can never be counted. Archived products are out for the
+     same reason: nobody is counting labels for a product that is gone. */
+  if(wantStk) prods.filter(p=>!isArchivedProd(p) && !(p.is_custom||/^CUST-/.test(p.sku)))
+    .sort(cmpItems).forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
     /* THE LABEL IS PER SKU, so its count line has to name the SKU it belongs to.
        Seven meatball packs share one product name and differ only by variant;
        "20-Piece Meatball Packs — Sticker" seven times on a count sheet is seven
@@ -18141,7 +18190,13 @@ async function renderStickerReorder(){
   let personal={}, custOrderOf={};
   try{ (await db.list('custom_orders',{})).forEach(o=>{ if(o.personalized_sticker) personal[o.order_ref]=o.customer_name||o.order_ref; }); }catch(e){}
   try{ (await db.list('custom_order_lines',{})).forEach(l=>{ if(l.product_sku) custOrderOf[l.product_sku]=l.order_ref; }); }catch(e){}
-  let sharedPacks=0; const personalRows=[];
+  /* TWO KINDS OF CUSTOM LABEL, and only two. Every custom recipe packs behind
+     the shared Custom Name Sticker; the exception is an order flagged for a
+     PRINTED NAME, which somebody has to physically print and so gets a line of
+     its own. A per-recipe label is not a thing that exists — giving each custom
+     product its own sticker line would invent SKUs that are never printed,
+     which is the bug this rule was written to prevent in the first place. */
+  let sharedPacks=0, sharedSkus=0; const personalRows=[];
   const _mk=(o)=>{
     /* The tier is the fallback, not the override: a per-product figure that has
        actually been filled in still wins. */
@@ -18164,18 +18219,21 @@ async function renderStickerReorder(){
         packs, inc:pinc, incRefs:(onOrderRefs[p.sku]||[]), forProd:Math.max(0,packs-pinc), forPar:0, perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0,
         supplier:(p.sticker_supplier||'').trim(), link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'',
         net:p.sticker_net||'', kind:'personal', note:ref+' · printed name, no stock held'}));
-    } else sharedPacks+=packs;
+      return false;
+    }
+    sharedPacks+=packs; sharedSkus++;
     return false;
   }).map(p=>{
     const oh=+p['sticker_'+_stkRoLoc+'_on_hand']||0;
     const par=+p['sticker_'+_stkRoLoc+'_par']||0;
     const packs=madeHere?(+planned[p.sku]||0):0;
     const inc=+onOrder[p.sku]||0;                 // already coming, do not buy twice
-    return _mk({sku:p.sku, name:p.name||p.sku, variant:p.variant||'', group_1:p.group_1||'Other', group_2:p.group_2||p.family||'Other',
+    return _mk({sku:p.sku, name:p.name||p.sku, variant:p.variant||'',
+      group_1:p.group_1||'Other', group_2:p.group_2||p.family||'Other', note:'',
       sort_order:p.sort_order, oh, par, packs, inc, incRefs:(onOrderRefs[p.sku]||[]),
       forProd:Math.max(0,packs-oh-inc), forPar:Math.max(0,par-oh-inc),
       perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0, supplier:(p.sticker_supplier||'').trim(),
-      link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'', net:p.sticker_net||'', kind:'product', note:''});
+      link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'', net:p.sticker_net||'', kind:'product'});
   });
   // the shared custom label is a SUPPLY item — PAR and stock live on the ingredients row
   try{
@@ -18192,7 +18250,16 @@ async function renderStickerReorder(){
         forProd:Math.max(0,packs-on-inc), forPar:Math.max(0,par-on-inc),
         perSheet:0, price:+i.list_price_kg||0, supplier:(i.supplier||'').trim(), link:_firstUrl(i.sticker_art_url||i.notes||i.source||''),
         dim:'', net:i.uom||'pcs', kind:'shared',
-        note:(i.sku===CUSTOM_STICKER_SKU?'used by every custom order':'')}));
+        /* ALWAYS ON THE ORDER LIST, even at zero. This is the one label
+           somebody checks every single week — every custom order packs behind
+           it — and a row that only appears once the maths says "short" is a row
+           nobody can check. It is pinned into the To-order view with no
+           quantity filled in, so the answer can be zero and still be an answer
+           somebody gave. */
+        pinned:(i.sku===CUSTOM_STICKER_SKU),
+        note:(i.sku===CUSTOM_STICKER_SKU
+          ? ('shared by every custom order — '+sharedSkus+' recipe(s), '+sharedPacks+' pack(s) this week')
+          : '')}));
     });
   }catch(e){}
   _stkRoRows=_stkRoRows.concat(personalRows);
@@ -18232,6 +18299,112 @@ function _stkRoTotals(){
   const n=Object.keys(_stkRoQty).filter(k=>+_stkRoQty[k]>0).length;
   const el=$('stkRoTot'); if(el) el.innerHTML=`${n} label(s) · <b>${pcs.toLocaleString('en-PH')}</b> pieces · est. <b>₱${(Math.round(val*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2})}</b>`;
 }
+/* ---- TOPPING UP AN ORDER THAT IS ALREADY GOING OUT ------------------------
+   A sticker order carries a fixed cost — delivery, and the printer's setup —
+   that does not care how many labels are on it. So the week you order four
+   labels is the cheapest week you will ever get for the fifth, and the thing
+   the warehouse actually wants is "while we are ordering anyway, what else is
+   nearly due?"
+
+   The temptation is to answer that by widening the default view back to all
+   140 labels, which is what the "To order" default was introduced to stop.
+   So it is a separate, folded strip under the table, and it appears only when
+   an order is actually being raised. Lean by default, there when it is useful.
+
+   RANKED BY COVER, NOT BY STOCK. "Still healthy" is not the same as "worth
+   adding": a label with 400 pieces and 300 packs a week is nearly out, and one
+   with 60 pieces and no demand is not worth a peso. Cover — what is on hand
+   plus what is coming, divided by a week's packs — is the only figure that
+   orders them the way the money does. A label nothing is planned for has no
+   cover figure and is never suggested: buying it is guesswork.               */
+function _stkTopupWeeks(){
+  let w=0; try{ w=+localStorage.getItem('wr_stk_topup_weeks')||0; }catch(e){}
+  return (w>0&&w<=52)?w:6;
+}
+function _stkSetTopupWeeks(v){
+  const w=Math.max(1,Math.min(52,Math.round(+v||0)))||6;
+  try{ localStorage.setItem('wr_stk_topup_weeks',String(w)); }catch(e){}
+  drawStickerReorder();
+}
+function _stkCover(r){
+  const wk=+r.packs||0; if(!(wk>0)) return null;          // no demand → no honest answer
+  return ((+r.oh||0)+(+r.inc||0))/wk;
+}
+/* What to put on the order for one of these. The printer's minimum pack is the
+   natural unit — you cannot buy half of one — and where there is no pack size
+   known, one week of packs. */
+function _stkTopupQty(r){
+  const per=+r.perSheet||0;
+  if(per>0) return per;
+  return Math.max(1, Math.ceil(+r.packs||0));
+}
+function _stkTopupRows(){
+  const H=_stkTopupWeeks();
+  return (_stkRoRows||[]).map(r=>({r, cover:_stkCover(r)}))
+    .filter(x=>x.cover!=null && !(x.r.order>0) && !(+_stkRoQty[x.r.sku]>0) && x.cover<=H)
+    .sort((a,b)=>a.cover-b.cover);
+}
+function _stkTopupAdd(sku){
+  const r=(_stkRoRows||[]).find(x=>x.sku===sku); if(!r) return;
+  _stkRoQty[sku]=_stkTopupQty(r);
+  drawStickerReorder();
+  toast((r.name||sku)+' added — '+_stkRoQty[sku]+' piece(s)');
+}
+function _stkTopupAddAll(){
+  const list=_stkTopupRows();
+  if(!list.length){ toast('Nothing due inside that window',true); return; }
+  list.forEach(x=>{ _stkRoQty[x.r.sku]=_stkTopupQty(x.r); });
+  drawStickerReorder();
+  toast(list.length+' label(s) added to the order');
+}
+function _stkTopupToggle(){
+  window._stkTopupOpen=!window._stkTopupOpen; drawStickerReorder();
+}
+function _stkTopupHtml(){
+  const onOrderNow=Object.keys(_stkRoQty).filter(k=>+_stkRoQty[k]>0).length;
+  if(!onOrderNow) return '';                    // nothing is going out — nothing to top up
+  const H=_stkTopupWeeks();
+  const list=_stkTopupRows();
+  const open=!!window._stkTopupOpen;
+  const peso=v=>'₱'+(Math.round((+v||0)*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2});
+  const addVal=list.reduce((s,x)=>s+_stkTopupQty(x.r)*(+x.r.price||0),0);
+  let h=`<div class="repcard" style="margin-top:12px;padding:10px 12px">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn sm sec" onclick="_stkTopupToggle()" style="font-weight:700">${open?'▾':'▸'} Worth adding while you are ordering</button>
+      <span class="mini" style="color:var(--muted)">${list.length} label(s) run out within</span>
+      <input type="number" min="1" max="52" step="1" value="${H}" onchange="_stkSetTopupWeeks(this.value)"
+        style="width:56px;text-align:right;padding:3px 5px;border:1px solid var(--line);border-radius:5px" title="how far ahead to look">
+      <span class="mini" style="color:var(--muted)">week(s)${list.length?' · about '+peso(addVal)+' to cover them all':''}</span>
+      <span style="flex:1"></span>
+      ${list.length?`<button class="btn sm" onclick="_stkTopupAddAll()">＋ Add all ${list.length}</button>`:''}
+    </div>`;
+  if(!open){
+    h+=`<div class="mini" style="color:var(--muted);margin-top:5px">The delivery is already paid for on this order — these are the labels
+      that would be next, ranked by how many weeks of cover they have left. ${list.length?'Open it to pick, or add them all.':'Nothing is close enough to be worth it.'}</div></div>`;
+    return h;
+  }
+  h+=`<div class="mini" style="color:var(--muted);margin:6px 0 8px">Cover is <b>(on hand + on order) ÷ packs planned this week</b>. Labels with no
+    planned packs are not listed — there is nothing to base a guess on. Adding puts the printer's minimum pack on the order; change the number in the table like any other line.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Label</th><th class="num">On hand</th><th class="num">On order</th>
+      <th class="num">Packs / wk</th><th class="num">Cover</th><th class="num">Add</th><th class="num">Est.</th><th></th></tr></thead><tbody>`;
+  if(!list.length) h+=`<tr><td colspan="8" class="empty">Nothing runs out inside ${H} week(s) — this order is already the right size.</td></tr>`;
+  list.forEach(x=>{
+    const r=x.r, q=_stkTopupQty(r);
+    const wks=Math.round(x.cover*10)/10;
+    const col=x.cover<=2?'var(--danger)':(x.cover<=4?'var(--earth,#b5762a)':'var(--muted)');
+    h+=`<tr><td><b>${esc(r.name||r.sku)}</b>${r.variant?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}
+        <div class="mini" style="color:var(--muted)"><code>${esc(String(r.sku).replace(/^PERSONAL:/,''))}</code></div></td>
+      <td class="num mini">${(+r.oh||0).toLocaleString('en-PH')}</td>
+      <td class="num mini" style="color:var(--muted)">${r.inc?(+r.inc).toLocaleString('en-PH'):'—'}</td>
+      <td class="num mini">${(+r.packs||0).toLocaleString('en-PH')}</td>
+      <td class="num"><b style="color:${col}">${wks} wk</b></td>
+      <td class="num">${q.toLocaleString('en-PH')}${r.perSheet?`<div class="mini" style="color:var(--muted)">sold by ${r.perSheet}</div>`:''}</td>
+      <td class="num mini">${r.price?peso(q*(+r.price||0)):'<span style="color:var(--danger)">no price</span>'}</td>
+      <td><button class="btn sm sec" onclick="_stkTopupAdd('${esc(r.sku)}')">＋ Add</button></td></tr>`;
+  });
+  h+=`</tbody></table></div></div>`;
+  return h;
+}
 function drawStickerReorder(){
   const rows=_stkRoRows;
   const short=rows.filter(r=>r.order>0);
@@ -18264,6 +18437,13 @@ function drawStickerReorder(){
       ${tile(toOrder,'To order', toOrder?'var(--berry)':'#4e7a3e')}
       ${tile(noPar,'No PAR set', noPar?'var(--earth,#b5762a)':'#4e7a3e')}
     </div>
+    ${(()=>{ const pers=rows.filter(r=>r.kind==='personal').length;
+       const sh=rows.find(r=>r.sku===CUSTOM_STICKER_SKU);
+       if(!pers && !sh) return '';
+       return `<div class="mini" style="margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);background:#f6f8f4;border-radius:6px">
+         <b>Custom orders use two kinds of label.</b> Every custom recipe packs behind the <b>generic Custom Name Sticker</b>${sh?` — ${(+sh.packs||0).toLocaleString('en-PH')} pack(s) this week, ${(+sh.oh||0).toLocaleString('en-PH')} on hand`:''};
+         only an order flagged for a <b>printed name</b> gets a line of its own${pers?` (${pers} this week)`:', and none does this week'}.
+         The generic label is <b>always listed under To order</b>, even at zero, so its count is checked every week rather than only when the maths says it is short.</div>`; })()}
     ${noPar>0?`<div style="margin:0 0 10px;padding:9px 11px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
       <b>${noPar} of ${tracked} labels have no PAR set${withPar?', only '+withPar+' does':''}.</b> A label with no PAR can never ask to be reordered: <b>PAR top-up</b> is zero when PAR is zero, and <b>production</b> need stays zero until a demand plan is locked${window._stkRoPlanRef?'':' (none is)'}. Set a Label PAR on each product's <b>🏷️ Stickers</b> tab, or run section 8 of <code>wr_sticker_reorder.sql</code> to seed them in bulk.</div>`:''}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 10px">
@@ -18285,7 +18465,8 @@ function drawStickerReorder(){
       <th class="num">Need</th><th class="num">Order</th><th class="num" title="the printer's minimum pack for this size">Packs</th><th class="num">₱/pc</th><th>Supplier</th>
     </tr></thead><tbody>`;
   const shown=rows.filter(r=>{
-    if(_stkRoView==='order') return r.order>0||_stkRoQty[r.sku];
+    /* r.pinned is always shown here — see the note on the shared custom label. */
+    if(_stkRoView==='order') return r.order>0||_stkRoQty[r.sku]||r.pinned;
     if(_stkRoView==='below') return r.par>0 && r.oh<r.par;
     return true;                                   // 'all' — the live stock list
   });
@@ -18301,7 +18482,7 @@ function drawStickerReorder(){
           : '<span style="color:var(--danger)" title="no minimum pack known for this size">—</span>';
         const bare=String(r.sku).replace(/^PERSONAL:/,'');
         h+=`<tr><td>${n}</td>
-          <td><b>${esc(r.name||bare)}</b>${(r.variant&&varAppend(r.name||bare,r.variant)!==String(r.name||bare))?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}${r.note?`<div class="mini" style="color:var(--berry)">${esc(r.note)}</div>`:''}</td>
+          <td><b>${esc(r.name||bare)}</b>${(r.variant&&varAppend(r.name||bare,r.variant)!==String(r.name||bare))?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}${r.note?`<div class="mini" style="color:var(--berry)">${esc(r.note)}</div>`:''}${(r.pinned&&!(r.order>0))?'<div class="mini" style="color:var(--muted)">always listed — check the count, leave it blank if nothing is needed</div>':''}</td>
           <td class="mini">${esc(r.net||'')||'—'}</td>
           <td><code>${esc(bare)}</code></td>
           <td>${r.link&&safeUrl(r.link)!=='#'?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener noreferrer">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>
@@ -18326,12 +18507,13 @@ function drawStickerReorder(){
     h+=`<tr><td colspan="16" class="empty">${_stkRoView==='all'?'No labels in the master yet.':'Nothing in this view — switch to <b>All labels</b> to see the full stock list.'}</td></tr>`;
   h+=`</tbody><tfoot><tr><th colspan="11" class="num">Totals</th><th class="num">${totNeed.toLocaleString('en-PH')}</th><th class="num">${totOrder.toLocaleString('en-PH')}</th><th colspan="3" class="num">est. ₱${(Math.round(totVal*100)/100).toLocaleString('en-PH',{minimumFractionDigits:2})}</th></tr></tfoot></table></div>
     <div class="pager" id="stkRoTot"></div></div>`;
+  h+=_stkTopupHtml();
   /* The two explanations used to sit between the buttons and the table, pushing
      the numbers below the fold. They are reference material — read once, then in
      the way — so they live under the table, folded up. */
   h+=`<details style="margin-top:10px"><summary style="cursor:pointer;font-weight:700;font-size:12.5px;color:var(--muted)">How Need is worked out, and why to trust PAR</summary>
     <div class="hint" style="margin:0 0 8px">One label per pack. <b>Need</b> is the larger of <b>production</b> (packs planned − on hand − on order) and <b>PAR top-up</b> (PAR − on hand − on order) — not the sum, because the same label serves both. <b>On order</b> is pieces on a confirmed sticker PO that have not been received yet, so a batch already at the printer is not bought a second time; it drops out the moment the PO is received. Rounded up to whole <b>sheets</b> where a product says how many print per sheet. Production demand comes from ${planTag}; labels are pulled at <b>${esc(locName(planProduceLoc()))}</b>, so the other site only ever shows PAR top-up.
-      <b>Every custom order shares one label</b> — the Custom Name Sticker, under Custom Orders below. Only an order flagged for a printed name gets its own line.</div>
+      <b>Custom orders take one of two labels.</b> Every custom recipe shares the <b>Custom Name Sticker</b> — a supply item with its own stock and its own PAR, listed under Custom Orders below and always shown in <b>To order</b> so somebody checks it each week, even when the answer is zero. Only an order flagged for a <b>printed name</b> gets a line of its own, one per order, because someone has to physically print it.</div>
     <div style="margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);background:#f6f8f4;border-radius:6px;font-size:12.5px">
       <b>Trust PAR over On hand.</b> Label stock only moved at a count, so the figures drifted. From this build, confirming a production run deducts the labels it used (Production Plan → <b>Packaging &amp; labels used</b>), so On hand becomes reliable from the next run onward. Until then, plan against PAR — the <b>PAR top-up</b> column ignores production entirely.</div>
   </details>`;
