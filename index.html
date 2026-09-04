@@ -1147,11 +1147,31 @@ function _so(r){ const v=+(r&&r.sort_order); return (isFinite(v)&&v>0)?v:999999;
    Live Stock headed its product groups "📦 Raw Feeding" and the pickers headed
    the same group "Raw Feeding", which reads as two different lists to anyone
    moving between the screens. */
+/* TWO SETS OF FIELDS SAID THE SAME THING AND ONLY ONE OF THEM WORKED.
+   A product carries Feeding Format and Mix Category on its form — the two
+   fields anybody adding a product actually fills in — and separately group_1 /
+   group_2, which is what every grouped screen reads and which nothing fills in
+   automatically. Two new BARF Buffalo products were entered correctly, with the
+   right Feeding Format and the right Mix Category, and landed under "Products ›
+   Other" on every screen in the app because the two grouping columns were
+   still null. That is not a mistake anyone can be expected to spot: the form
+   showed the right answers.
+
+   So the grouping falls back through the fields that mean the same thing,
+   newest-filled first. Nothing is renamed and nothing is migrated — a product
+   that already carries group_1 is untouched — but one entered from the form
+   alone now groups the way the form implies. */
+function prodG1(p){
+  p=p||{};
+  return String(p.group_1||p.feeding_format||p.product_line||'Products').trim()||'Products';
+}
+function prodG2(p){
+  p=p||{};
+  return String(p.group_2||p.mix_category||p.family||'Other').trim()||'Other';
+}
 function prodGroup(p){
   p=p||{};
-  return {g1:'📦 '+(p.group_1||'Products'),
-          g2:(p.group_2||p.family||'Other'),
-          rank:_so(p)};
+  return {g1:'📦 '+prodG1(p), g2:prodG2(p), rank:_so(p)};
 }
 function cmpItems(a,b){ return _so(a)-_so(b) || String(a.name||a.variant||a.sku||a.ref_sku||'').localeCompare(String(b.name||b.variant||b.sku||b.ref_sku||'')); }
 // 3-level hierarchy: Group (group_1) → Subgroup (group_2) → Item (sort_order). Groups ordered by their first item.
@@ -1646,7 +1666,19 @@ async function renderList(){
     if(f.n==='status') return `<td${L}><span class="badge b-${v}">${esc(statusLabel(state.model,v))}</span></td>`;
     return `<td${L}>${esc(v)}</td>`;
   };
-  const numCols=cols.filter(f=>['currency','number'].includes(f.t));
+  /* ---- ADDING UP A PRICE PER PACK GIVES YOU NOTHING ----------------------
+     The master data list summed every numeric column it could find, so the
+     Products list footed with the sum of 168 sell prices and 168 unit costs —
+     ₱ figures that correspond to nothing, sitting where a person expects a
+     total to mean something. Worse, they appeared on every group heading too,
+     so each category carried its own meaningless subtotal.
+
+     A total is only honest for a column you would actually add up: quantities,
+     values that are already extended, counts. A RATE — a price per pack, a cost
+     per kg, a pack weight, a percentage, a yield, a PAR level — is not one, and
+     the way to tell is the field itself, not its type. So rates are excluded by
+     name and the footer shows the count alone when nothing is left to add. */
+  const numCols=cols.filter(f=>['currency','number'].includes(f.t) && _listSums(f));
   /* Click a heading to sort by it. Applied BEFORE grouping so a grouped list
      still orders its items the way you asked. */
   if(state._sortBy){
@@ -1695,7 +1727,7 @@ async function renderList(){
   } else {
     body=rows.map(r=>`<tr onclick="openForm('${encodeURIComponent(r[m.pk])}')">${bulk?bcb(r):''}${cols.map((f,ci)=>cell(f,r,ci)).join('')}</tr>`).join('');
   }
-  const foot = numCols.length&&rows.length? `<tfoot><tr style="background:#faf9f4">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td style="font-weight:700">Total · ${rows.length}</td>`; return numCols.includes(f)?sumCell(f,sumOf(rows,f)):'<td></td>'; }).join('')+`</tr></tfoot>`:'';
+  const foot = rows.length? `<tfoot><tr style="background:#faf9f4">${bulk?'<td></td>':''}`+cols.map((f,idx)=>{ if(idx===0) return `<td style="font-weight:700">${rows.length} record(s)</td>`; return numCols.includes(f)?sumCell(f,sumOf(rows,f)):'<td></td>'; }).join('')+`</tr></tfoot>`:'';
   $('content').innerHTML = `<div id="bulkbar" class="bulkbar" style="display:none"></div><div class="listcard">
     <table class="mcards autow"><thead><tr>${bulk?'<th style="width:34px"><input type="checkbox" onclick="selAll(this.checked)"></th>':''}${cols.map((f,ci)=>{
       const on=state._sortBy===f.n, ar=on?(state._sortDir===-1?' ▾':' ▴'):'';
@@ -1919,6 +1951,18 @@ async function relAddLines(col,model){
 async function relPickField(n,model){
   await relBrowse(model,{cur:(formRec||{})[n]||'', title:'Choose — '+((MODELS[model]||{}).label||model),
     onPick:v=>{ fSet(n,v); const el=$('fld_'+n); if(el) el.value=v; }});
+}
+/* Which columns a list may add up. Explicit sum:true / sum:false on the field
+   wins; otherwise anything that reads as a per-unit rate is out. */
+const _NO_SUM=/(^|_)(price|cost|rate|pct|percent|yield|par|reorder|min|max|shelf_life|lead_time|size|weight|per_sheet|per_pack|_kg|_g|_ml)($|_)/i;
+function _listSums(f){
+  if(!f) return false;
+  if(f.sum===true) return true;
+  if(f.sum===false) return false;
+  const n=String(f.n||'');
+  if(_NO_SUM.test(n)) return false;
+  if(/^(pack_g|box_size|sort_order|sell_price|tot_cost_ref)$/.test(n)) return false;
+  return true;
 }
 function relOptsHTML(opts,v,plain){
   const lbl=o=>plain?(o.n||o.t):o.t;
@@ -4297,7 +4341,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-01 10:15Z';
+const WR_BUILD='2026-09-04 05:40Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -5660,7 +5704,15 @@ async function wdtSheetLoad(){
   const weeks=W.weeks, start=W.start, asOf=W.asOf;
   const wIdx=d=>{ const m=_wdtMonday(d); return weeks.findIndex(w=>w.mon===m); };
 
-  const prods=await db.list('products',{});
+  /* ARCHIVED IS ARCHIVED ON EVERY SCREEN. A cancelled custom order's SKU is
+     retired, not deleted — the recipe is the only record of what was quoted —
+     and the target sheet kept asking for it every week regardless. The archived
+     set is kept as well as filtered out, because the demand map is keyed by SKU
+     from the demand table and the plots: dropping the product from the lookup
+     would only have left the row nameless, not gone. */
+  const _allProds=await db.list('products',{});
+  const pArch=new Set(_allProds.filter(isArchivedProd).map(p=>p.sku));
+  const prods=_allProds.filter(p=>!isArchivedProd(p));
   const pBy={}; prods.forEach(p=>pBy[p.sku]=p);
 
   /* ---- the ledger, split at the window edges. Both sites, as the note on
@@ -6123,7 +6175,15 @@ async function wdtLoad(){
      with a forward date. Set it, and the whole page reads as at that day. */
   const asOf=_wdtAsOf||'';
   const histor=!!asOf;
-  const prods=await db.list('products',{});
+  /* ARCHIVED IS ARCHIVED ON EVERY SCREEN. A cancelled custom order's SKU is
+     retired, not deleted — the recipe is the only record of what was quoted —
+     and the target sheet kept asking for it every week regardless. The archived
+     set is kept as well as filtered out, because the demand map is keyed by SKU
+     from the demand table and the plots: dropping the product from the lookup
+     would only have left the row nameless, not gone. */
+  const _allProds=await db.list('products',{});
+  const pArch=new Set(_allProds.filter(isArchivedProd).map(p=>p.sku));
+  const prods=_allProds.filter(p=>!isArchivedProd(p));
   const pBy={}; prods.forEach(p=>pBy[p.sku]=p);
   const stock={}; try{
     /* As-of stock has to come off the LEDGER — stock_balance only ever knows
@@ -6165,6 +6225,8 @@ async function wdtLoad(){
      planned, which used to vanish from the week entirely. */
   /* WEEK mode closes the window at the plot week's last day unless someone
      typed a date. RUN mode leaves it open, which is what it always did. */
+  Object.keys(dem).forEach(sku=>{ if(pArch.has(sku)) delete dem[sku]; });
+  Object.keys(carry).forEach(sku=>{ if(pArch.has(sku)) delete carry[sku]; });
   const from=_wdtFrom||date;
   const weekEnd=_wdtWeekEnd(from);
   const to = _wdtTo || asOf || (_wdtMode==='week' ? weekEnd : '');
@@ -7699,6 +7761,12 @@ function wdtPrint(which){
   w.document.close();
   w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},300);
 }
+/* AN ARCHIVED PRODUCT IS NOT A THING TO PLAN. Cancelling a custom order
+   archives the CUST- SKU it minted — the recipe is kept, the product is
+   retired — but Demand/MRP and the Weekly Demand Target both read the whole
+   products table with no filter, so a cancelled order's SKU carried on asking
+   to be planned every week after the order itself had gone. Two of them were
+   still on the list with their order deleted and no demand row anywhere. */
 async function renderMRP(){
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderMRP()">↻ Compute</button>
@@ -7707,7 +7775,9 @@ async function renderMRP(){
     <button class="btn sec" onclick="openPlanLocs()">⚙ Planning locations</button>
     <button class="wfbtn" onclick="generatePOsFromMRP()">🧾 Generate Draft POs</button>
     <div class="sp"></div><span style="color:var(--muted)">demand + lead time + PAR → replenishment → PO</span>`;
-  const prods=await db.list('products',{}), boms=await db.list('bom_lines',{}), ings=await listIngredients();
+  const _allP=await db.list('products',{});
+  const allBySku={}; _allP.forEach(p=>allBySku[p.sku]=p);
+  const prods=_allP.filter(p=>!isArchivedProd(p)), boms=await db.list('bom_lines',{}), ings=await listIngredients();
   const sups=await db.list('suppliers',{});
   const supMin={}; sups.forEach(s=>{ const nm=(s.name||'').trim(); if(nm) supMin[nm]=(+s.min_order_kg||0)*1000; });   // supplier min order → grams
   // Only the locations configured as SUPPLY. Summing every location counted
@@ -7856,8 +7926,15 @@ async function renderMRP(){
     const openRef={}; (cOrders||[]).forEach(o=>{ if(coIsOpen(o.status)) openRef[o.order_ref]=true; });
     const ownerOf={}; (cLines||[]).forEach(l=>{ if(l.product_sku && !ownerOf[l.product_sku]) ownerOf[l.product_sku]=l.order_ref; });
     const settled=[];
+    /* A ROW FOR AN ARCHIVED PRODUCT IS NOT DEMAND EITHER. Cancelling a custom
+       order retires its SKU; if a cache row outlived the cancel, it kept this
+       warning lit for a week nobody was ever going to plan. It counts as
+       settled — real, finished with, and clearable in one press — rather than
+       as work still outstanding. */
     (drows||[]).forEach(r=>{ const d=String(r.plan_date||'').slice(0,10);
       if(!d || (+r.qty||0)<=0) return;
+      if(allBySku[r.sku] && isArchivedProd(allBySku[r.sku])){
+        settled.push({...r, order:(ownerOf[r.sku]||'(archived product)')}); return; }
       const own=ownerOf[r.sku];
       if(own && !openRef[own]){ settled.push({...r, order:own}); return; }   // finished — not a plan to make
       if(plotted.has(d) || d===MRPDATE) return;
@@ -10142,6 +10219,53 @@ function coSyncNeeded(){
 }
 function coIsLocked(s){ const k=coStat(s); return k!=='draft'; }
 function _coHash(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))|0; } return (h>>>0).toString(36); }
+/* A CODE NOBODY CAN READ IS A CODE NOBODY CAN CHECK.
+   CUST-9K8TX3 is a hash of the recipe. That was deliberate — two orders with
+   the identical mix at the identical pack size get one SKU, which is what stops
+   the same recipe being made twice — but it is unreadable everywhere it lands:
+   the production sheet, the demand run, the count sheet, the Shopify code.
+   Nobody can tell CUST-9K8TX3 from CUST-113IR94, and both turned out to be the
+   same customer's Buffalo mix.
+
+   The identity stays exactly where it was — the recipe hash still decides
+   whether two lines ARE the same product, worked out below from the recipe
+   itself — but the visible code is built from what a person would say out loud:
+   customer, dog or mix name, pack size. CUST-CHEBLA-DUCKMB-400. Collisions get
+   a numeric suffix; nothing is ever silently reused for a different recipe. */
+function _coSlug(v, max){
+  const t=String(v==null?'':v)
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g,'')     // strip accents
+    .toUpperCase().replace(/[^A-Z0-9]+/g,'');
+  return t.slice(0, Math.max(1,+max||6));
+}
+/* The words worth keeping out of a free-text mix name. "Gently Cooked BARF
+   Buffalo + Pork" is mostly boilerplate; the proteins are the part that
+   identifies it. */
+const _CO_STOP=/^(GENTLY|COOKED|COOKABLE|RAW|BARF|MIX|THE|AND|WITH|FOR|GC|PACK|PACKS|ONLY|NEW|ORIGINAL)$/;
+function _coNameSlug(desc, max, customer){
+  /* The customer's own name is already the first segment, and half the mixes
+     are typed as "Che Blaquera - GC BARF Duck Only Meatballs" — so CHEBLA-
+     CHEBLAQU tells you the customer twice and the mix not at all. Their name
+     comes out of the mix words before anything else is picked. */
+  const cw=new Set(String(customer||'').replace(/[^A-Za-z0-9 ]+/g,' ')
+    .split(/\s+/).filter(Boolean).map(w=>w.toUpperCase()));
+  const words=String(desc||'').replace(/[^A-Za-z0-9+ ]+/g,' ').split(/\s+/).filter(Boolean)
+    .map(w=>w.toUpperCase()).filter(w=>!_CO_STOP.test(w) && !cw.has(w));
+  const use=words.length?words:String(desc||'').split(/\s+/).filter(Boolean).map(w=>w.toUpperCase());
+  /* one or two words, trimmed — enough to recognise, short enough to print */
+  return _coSlug(use.slice(0,2).join(''), max||8);
+}
+function coCustSku(customer, desc, packG, taken){
+  const cust=_coSlug(customer,6) || 'CUST';
+  const nm=_coNameSlug(desc,8,customer) || 'MIX';
+  const pk=Math.round(+packG||0);
+  let base='CUST-'+cust+'-'+nm+(pk>0?('-'+pk):'');
+  base=base.slice(0,48);
+  const used=taken||new Set();
+  if(!used.has(base)) return base;
+  for(let i=2;i<200;i++){ const c=(base+'-'+i).slice(0,50); if(!used.has(c)) return c; }
+  return base+'-'+Date.now().toString(36).toUpperCase().slice(-4);
+}
 function _coRecipeKey(recipe, packG){ const norm=(recipe||[]).filter(r=>r.ingredient_sku&&+r.grams>0).map(r=>r.ingredient_sku+':'+(+r.grams)).sort().join('|'); return _coHash(norm+'@'+(+packG||0)); }
 function _coLineTotal(l){ return Math.round((+l.packs||0)*(+l.unit_price||0)*100)/100; }
 function _coSubtotal(){ return coLines.reduce((s,l)=>s+_coLineTotal(l),0); }
@@ -11140,7 +11264,9 @@ function _coRecipeSummaryHtml(){
   // #2 duplicate check — does this exact recipe already exist as a custom SKU?
   const clean=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0);
   let dupHtml='';
-  if(clean.length && packG>0){ const sku='CUST-'+_coRecipeKey(clean,packG).toUpperCase(); const dup=_coProd[sku];
+  if(clean.length && packG>0){ const key=_coRecipeKey(clean,packG);
+    const dup=Object.values(_coProd||{}).find(p=>p&&p._rkey===key) || _coProd['CUST-'+key.toUpperCase()];
+    const sku=dup?dup.sku:('CUST-'+key.toUpperCase());
     if(dup) dupHtml=`<div style="margin-top:6px;color:#2f7d33">♻ This exact recipe already exists as <b>${esc(dup.name||sku)}</b> (<code>${esc(sku)}</code>) — locking will <b>reuse</b> it, no duplicate SKU is created.</div>`; }
   return `Recipe total <b>${Math.round(totG)} g</b>${packG?` of ${packG} g pack ${Math.abs(totG-packG)<0.5?'<span style="color:#4e7a3e">✓ matches</span>':`<span style="color:var(--earth,#b5762a)">(${totG>packG?'+':''}${Math.round(totG-packG)} g vs pack)</span>`}`:''} · <b>${now}</b> ingredient(s) — <span style="color:#4e7a3e">${added} added</span>, <span style="color:var(--danger)">${removed} removed</span> since opened${dupHtml}`;
 }
@@ -11224,12 +11350,27 @@ async function coLock(){
   if(!coRec.order_ref){ try{ coRec.order_ref=(await genRef('CO',{date:coRec.order_date})).ref; }catch(e){ coRec.order_ref='CO-'+_mmddyyyy(coRec.order_date)+'-'+String(Date.now()).slice(-4); } }
   showBusy('Locking order — creating SKUs, BOMs & demand…');
   try{
-    const existProd=new Set((await db.list('products',{})).map(p=>p.sku));
+    const allProds=await db.list('products',{});
+    const existProd=new Set(allProds.map(p=>p.sku));
+    /* recipe fingerprint → the SKU that already carries it */
+    const byRecipe={};
+    try{
+      const bl=await db.list('bom_lines',{}); const byProd={};
+      bl.forEach(b=>{ if(/^CUST-/i.test(String(b.product_sku||''))) (byProd[b.product_sku]=byProd[b.product_sku]||[]).push(b); });
+      allProds.forEach(p=>{ const rows=byProd[p.sku]; if(!rows||!rows.length) return;
+        const key=_coRecipeKey(rows.map(r=>({ingredient_sku:r.ingredient_sku, grams:+r.usable_g||0})), +p.pack_g||0);
+        if(!byRecipe[key]) byRecipe[key]=p.sku; });
+    }catch(e){}
     let made=0; const demErrs=[];
     for(const l of coLines){
       if(l.line_type==='custom'){
         const recipe=(l.recipe||[]).filter(r=>r.ingredient_sku&&+r.grams>0);
-        const sku='CUST-'+_coRecipeKey(recipe,l.pack_size_g).toUpperCase();
+        const rkey=_coRecipeKey(recipe,l.pack_size_g);
+        /* the same mix at the same pack size is the same product, however it
+           happens to be spelled — that check has not changed, only where the
+           answer is kept */
+        const sku=byRecipe[rkey] || coCustSku(coRec.customer_name, l.description, l.pack_size_g, existProd);
+        byRecipe[rkey]=sku;
         l.product_sku=sku;
         if(!existProd.has(sku)){
           const prec={sku, group_1:'Custom Orders', group_2:(coRec.customer_name||'Custom'), family:'Custom', variant:(l.description||'Custom meal'),
@@ -15962,10 +16103,27 @@ function _ingGroupOptions(allIngs, list, opts){
 function _procIngOptions(allIngs, opts){ opts=opts||{};
   const list=(allIngs||[]).filter(i=>isProcessedItem(i) && i.sku!==opts.exclude && (!opts.filter||opts.filter(i)));
   return _ingGroupOptions(allIngs, list, opts); }
+/* RESOLVING A PARENT BY NAME IS AMBIGUOUS WHENEVER A CUT AND ITS PROCESSED
+   FORM SHARE ONE. "Beef green tripe" is the name of both RAW-BEEF-GREEN-TRIPE
+   and OUT-BEEF-GREEN-TRIPE, and byName keeps whichever was seen last — so
+   "Beef green tripe (precooked)", which has no source_sku at all, adopted the
+   PROCESSED tripe as its parent instead of the raw. Its category, its group and
+   its purchasing all then hung off the wrong item.
+   A declared source_sku still wins outright. Falling back to the name now
+   prefers a RAW parent, because that is what raw_input names — a processed
+   sibling is only accepted when there is no raw one to be had. */
 function _procParent(it,bySku,byName){ if(!it) return null;
   const bySrc=it.source_sku&&bySku[it.source_sku]?bySku[it.source_sku]:null;
-  const ri=(it.raw_input||'').trim().toLowerCase(); const byRi=(ri&&byName[ri]&&byName[ri].sku!==it.sku)?byName[ri]:null;
-  return bySrc||byRi||null; }
+  if(bySrc) return bySrc;
+  const ri=(it.raw_input||'').trim().toLowerCase();
+  if(!ri) return null;
+  const cand=(byName&&byName[ri]&&byName[ri].sku!==it.sku)?byName[ri]:null;
+  if(cand && !isProcessedItem(cand)) return cand;      // already the raw one
+  if(bySku){ for(const k in bySku){ const c=bySku[k];
+    if(!c || c.sku===it.sku) continue;
+    if(String(c.name||'').trim().toLowerCase()!==ri) continue;
+    if(!isProcessedItem(c)) return c; } }              // prefer the raw of that name
+  return cand||null; }
 /* ---- A processing chain can be longer than one hop ------------------------
    A live rabbit is not butchered into cuts. It is DRESSED first, and only then
    broken down — and the two lose weight for completely different reasons, at
