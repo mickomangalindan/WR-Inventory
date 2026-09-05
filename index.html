@@ -707,12 +707,13 @@ const MODELS = {
       {n:'thaw_loss_pct',l:'Thaw / drip loss %',t:'number'},
       {n:'is_live_animal',l:'Live animal',t:'bool'},{n:'is_intermediate',l:'Intermediate',t:'bool'},
       {n:'is_supply',l:'Kitchen supply (not a food ingredient)',t:'bool'},
+      {n:'supply_led',l:'Supply-led (skip demand planning & POs — we take whatever a supplier has)',t:'bool'},
       {n:'uom',l:'Unit / pack',t:'text'},
       {n:'notes',l:'Notes',t:'longtext'}],
     list:['name','processing_method','category','gently_cooked','cookable','raw_feeding','yield_pct','list_price_kg','supplier1'],
     groups:[['sku','name','ingredient_group','sort_order','raw_input','processing_method','category','uom','source','storage','yield_pct','costing_override','approved_alt'],
             ['list_price_kg','price_kg_processed','price_g_raw','price_g_processed','moving_avg_cost_kg','supplier1','supplier2','supplier'],
-            ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','pack_size_kg','lead_time_days','shelf_life_days','thaw_loss_pct','is_live_animal','is_intermediate','is_supply']],
+            ['gently_cooked','cookable','raw_feeding','par_g','reorder_g','min_order_kg','pack_size_kg','lead_time_days','shelf_life_days','thaw_loss_pct','is_live_animal','is_intermediate','is_supply','supply_led']],
     tabs:[{l:'🥩 Item & yield', groups:[0]},{l:'₱ Costing', groups:[1]},{l:'⚙ Flags & stock', groups:[2]}],
     full:['notes'] },
 
@@ -754,11 +755,13 @@ const MODELS = {
       {n:'sticker_per_sheet',l:'Stickers per sheet/page',t:'number'},
       {n:'sticker_bulacan_on_hand',l:'Labels — Bulacan on hand',t:'number'},{n:'sticker_bulacan_par',l:'Labels — Bulacan PAR',t:'number'},
       {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'},
+      {n:'sticker_archived',l:'Sticker retired (stop ordering & counting this label)',t:'bool'},
+      {n:'supply_led',l:'Supply-led (skip demand planning & POs — we make whatever arrives)',t:'bool'},
       {n:'is_custom',l:'Custom order product',t:'bool'}],
     list:['name','status','family','variant','pack_g','sell_price'],
-    groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
+    groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status','supply_led'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
             ['cost_debone','cost_butcher','cost_sousvide','cost_ecobag','cost_thermal'],
-            ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_per_sheet','sticker_price','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par']],
+            ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_per_sheet','sticker_price','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par','sticker_archived']],
     tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'💰 Cost profile', groups:[3]},{l:'🏷️ Stickers', groups:[4]}],
     o2m:{ field:'bom', model:'bom_lines', fk:'product_sku', label:'Recipe (BOM)',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ingredient_category',l:'Category',t:'text'},{n:'usable_g',l:'Grams/pack',t:'number'},{n:'pct_of_pack',l:'% of pack',t:'number'},{n:'has_bones',l:'Bones',t:'text'},{n:'method_override',l:'Method',t:'text'}] } },
@@ -1963,6 +1966,56 @@ function _listSums(f){
   if(_NO_SUM.test(n)) return false;
   if(/^(pack_g|box_size|sort_order|sell_price|tot_cost_ref)$/.test(n)) return false;
   return true;
+}
+/* ---- DEMAND COMES IN CASES, NOT IN ONES ----------------------------------
+   Packing runs in trays and ships in boxes, so a demand of 25 packs is a
+   request nobody can actually fill: the line makes 24 or it makes 36. Typing
+   the true retail guess and letting the plan pretend it is achievable pushed
+   the rounding onto the floor, where it was done differently every week and
+   never written down. The plot rounds UP — short is worse than spare, because
+   spare sells next week and short is a customer who left. */
+const DEM_MIN=24, DEM_INC=12;
+function demStepOn(){ try{ return localStorage.getItem('wr_dem_step')!=='off'; }catch(e){ return true; } }
+function demStepToggle(){ try{ localStorage.setItem('wr_dem_step', demStepOn()?'off':'on'); }catch(e){}
+  toast(demStepOn()?('Rounding ON — minimum '+DEM_MIN+', then steps of '+DEM_INC):'Rounding OFF — type any quantity');
+  if(typeof renderMRP==='function') renderMRP(); }
+function demSnap(v){
+  const n=Math.max(0, Math.round(+v||0));
+  if(!(n>0)) return 0;                       // zero is a real answer: do not make it 24
+  if(!demStepOn()) return n;
+  if(n<=DEM_MIN) return DEM_MIN;
+  return DEM_MIN + Math.ceil((n-DEM_MIN)/DEM_INC)*DEM_INC;
+}
+function demStepNote(){
+  return demStepOn()
+    ? 'Quantities round up to a minimum of <b>'+DEM_MIN+'</b>, then in steps of <b>'+DEM_INC+'</b> — the line packs in trays, so 25 is not a thing it can make. Zero stays zero.'
+    : '<b>Rounding is off</b> — quantities go in exactly as typed, including ones the line cannot pack.';
+}
+/* Custom orders are NOT rounded. A customer ordered 14; making 24 is 10 packs
+   of somebody's bespoke recipe that nobody will ever buy. */
+function mrpSetDem(sku, v){
+  const raw=Math.max(0, Math.round(+v||0));
+  const isCust=/^CUST-/i.test(String(sku||''));
+  const q=isCust?raw:demSnap(raw);
+  if(q>0) mrpDemand[sku]=q; else delete mrpDemand[sku];
+  if(!isCust && q!==raw && raw>0) toast(raw+' → '+q+' — minimum '+DEM_MIN+', then steps of '+DEM_INC);
+  renderMRP();
+}
+
+/* ---- SUPPLY-LED ITEMS ARE NOT PLANNED, THEY ARE CAUGHT --------------------
+   Lamb and rabbit do not arrive because we asked for them; they arrive when a
+   supplier has them, and then the whole delivery is produced. Putting them in
+   the demand run and on a purchase order pretends we control the quantity, and
+   every week produced a plan and a PO that could not be filled — noise that
+   trained everyone to ignore the shortfall column.
+
+   They stay in the production target and in production itself, because the
+   moment stock does land the team makes all of it, and that is exactly what
+   those two screens are for. */
+function isSupplyLed(r){
+  if(!r) return false;
+  const v=r.supply_led;
+  return v===true||v==='true'||v==='Y'||v==='y'||v===1;
 }
 function relOptsHTML(opts,v,plain){
   const lbl=o=>plain?(o.n||o.t):o.t;
@@ -3569,6 +3622,18 @@ function spCoverCell(s){
    The generic list screens archive with `active=false`; the Shopify sync marks
    `shopify_status`; some older rows carry `archived`. One product must not be
    live on one screen and archived on another, so every screen asks here. */
+/* A STICKER IS RETIRED SEPARATELY FROM THE PRODUCT IT GOES ON.
+   Several labels are being dropped for products that are still very much on
+   sale — a design change, a supplier change — and there was no way to say that:
+   the only switch was the product's own archive, which would have taken the
+   product off the shop with it. So the sticker carries its own flag, and the
+   rolls already in the box stay visible behind a toggle rather than
+   disappearing along with the line that orders them. */
+function isArchivedSticker(p){
+  if(!p) return false;
+  const v=p.sticker_archived;
+  return v===true||v==='true'||v==='Y'||v==='y'||v===1;
+}
 function isArchivedProd(p){
   if(!p) return false;
   if(p.active===false) return true;
@@ -4143,7 +4208,7 @@ async function renderLiveStock(){
   if(!LS_TO){
     const _locs=(LS_LOC==='all') ? ((LOCS||[]).map(l=>l.code).filter(Boolean)) : [LS_LOC];
     const _sites=_locs.length?_locs:['bulacan'];
-    prods.filter(p=>!isArchivedProd(p) && !(p.is_custom||/^CUST-/.test(p.sku))).forEach(p=>{
+    prods.filter(p=>!isArchivedProd(p) && !isArchivedSticker(p) && !(p.is_custom||/^CUST-/.test(p.sku))).forEach(p=>{
       let oh=0, par=0;
       _sites.forEach(lc=>{ oh+=+p['sticker_'+lc+'_on_hand']||0; par+=+p['sticker_'+lc+'_par']||0; });
       if(!(oh>0||par>0)) return;                       // never set up — not stock, just a blank field
@@ -4341,7 +4406,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-04 05:40Z';
+const WR_BUILD='2026-09-05 08:35Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -7820,12 +7885,31 @@ async function renderMRP(){
      does not belong in the "what do I plan today" table either, so it moves to
      its own collapsed group with the plan it is sitting on.                     */
   const coEv=await coPlanEvidence().catch(()=>({planned:{},inDemand:{}}));
+  /* A ROW IN THE DEMAND TABLE IS NOT A PLAN, and treating it as one is how
+     orders vanished into the "already planned" fold while their own badge read
+     "not planned yet". Only two things count as planned: a saved demand PLOT
+     (it carries a DP reference the kitchen works from) or a live production
+     plan. Everything else is still to plan and belongs in the open list. */
   const coDone={}, coFresh={};
   Object.keys(coAll).forEach(k=>{
-    const w=coWhyText(coEv,k);
-    if(w) coDone[k]=w; else coFresh[k]=true;
+    const p=(coEv.planned||{})[k], d=(coEv.inDemand||{})[k];
+    const reallyPlanned = !!p || !!(d && d.ref);
+    if(reallyPlanned) coDone[k]=coWhyText(coEv,k)||'already planned'; else coFresh[k]=true;
   });
   window._mrpCoEv=coEv; window._mrpCoDone=coDone;
+  /* ---- A LOCKED WEEK IS CLOSED ------------------------------------------
+     An order that arrives on Wednesday cannot join Monday's locked plot. The
+     ingredients for that plot have been bought, the run has been scheduled
+     against it, and quietly adding packs to a document everybody has already
+     acted on is how a kitchen ends up short on the very thing it thought it
+     had covered. The plot for a locked week is read-only here; new orders wait
+     for the next run, and the screen offers to go there. */
+  const _lockedPlot=(mrpPlanCache||[]).map(p=>({p, d:String(p.plan_date||p.date||'').slice(0,10)}))
+    .filter(x=>x.d===MRPDATE && ((x.p.data||x.p)||{}).locked)
+    .map(x=>((x.p.data||x.p)||{}))[0]||null;
+  window._mrpLocked=_lockedPlot;
+  const _nextMon=(()=>{ try{ const dt=new Date(MRPDATE+'T00:00:00'); dt.setDate(dt.getDate()+7); return isoLocal(dt); }catch(e){ return ''; } })();
+  window._mrpNextRun=_nextMon;
   const coPend={};
   // "Add all" only ever pulls the ones that are NOT already planned somewhere.
   Object.keys(coAll).forEach(s=>{ if(coFresh[s] && (+mrpDemand[s]||0)!==coAll[s].packs) coPend[s]=coAll[s].packs; });
@@ -7862,14 +7946,20 @@ async function renderMRP(){
         <td>${esc(_pName[sku]||sku)}<div class="mini"><code>${esc(sku)}</code></div></td>
         <td class="mini" style="white-space:nowrap;${late?'color:var(--danger);font-weight:700':''}">${esc(c.needed||'—')}${late?' · overdue':''}</td>
         <td class="num"><b>${c.packs}</b></td>
-        <td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${mrpDemand[sku]||''}" onchange="mrpDemand['${sku}']=+this.value||0;renderMRP()"></td>
+        <td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${mrpDemand[sku]||''}" onchange="mrpSetDem('${sku}',this.value)" title="a customer's own quantity — never rounded"></td>
         <td>${state}</td></tr>`; };
     const _cohead=`<thead><tr><th>Customer / order</th><th>Product</th><th>Needed</th><th class="num">Ordered</th><th class="num">In this run</th><th>Where it stands</th></tr></thead>`;
     dh+=`<div class="repcard" style="border-left:4px solid var(--berry)">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <h3 style="margin:0">🧑‍🍳 Custom orders — ${nFreshOrders.size} to plan${nDoneOrders.size?(', '+nDoneOrders.size+' already planned'):''}</h3>
-        ${nCoPend?`<button class="btn sm" onclick="mrpPullCustom()">＋ Add the ${nCoPend} unplanned to this run</button>`:''}
+        ${nCoPend?(_lockedPlot
+          ? `<button class="btn sm sec" onclick="mrpGoDate('${esc(_nextMon)}')" title="this week is locked — plan them in the next run">→ Plan the ${nCoPend} new one(s) in the next run (${esc(_nextMon)})</button>`
+          : `<button class="btn sm" onclick="mrpPullCustom()">＋ Add the ${nCoPend} unplanned to this run</button>`):''}
       </div>
+      ${_lockedPlot?`<div style="margin:6px 0 8px;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
+        🔒 <b>${esc(MRPDATE)} is locked</b> (${esc(_lockedPlot.ref||'saved plot')}). Ingredients were bought against it and the run is scheduled from it, so orders that arrived afterwards do <b>not</b> join it —
+        adding packs to a document everybody has already acted on is how the kitchen ends up short on the thing it thought was covered.
+        New orders go into the next run, <b>${esc(_nextMon)}</b>.</div>`:''}
       <div class="hint" style="margin:6px 0 8px">Every <b>locked</b> order that still owes packs, <b>whatever week it is scheduled for</b>. An order already on a saved demand plot or a live production plan drops out of the table below — it is not new work — but it stays listed underneath, because <b>the packs are still owed until they are actually produced</b>. Only confirmed production clears an order from here for good.</div>
       ${freshSkus.length
         ? `<div style="overflow-x:auto"><table>${_cohead}<tbody>${freshSkus.map(k=>_corow(k,false)).join('')}</tbody></table></div>
@@ -7982,15 +8072,31 @@ async function renderMRP(){
       <button class="btn sm sec" onclick="mrpImport()">⬆ Paste</button>
       <button class="btn sm sec" onclick="mrpSheetSync()" title="Pulls the demand table for this plan date, plus every locked custom order regardless of its scheduled date">☁ Sync demand (sheets + custom orders)</button>
       <button class="btn sm sec" onclick="mrpPullPackReq()" title="Work out the catalogue shortfall from par and sales, and load it into the plot below">🧮 Pull from Regular Packs</button>
-      <button class="btn sm sec" onclick="mrpClearDemand(MRPDATE)" title="Remove the demand rows recorded against this date — by source, and without deleting the orders">🗑 Clear demand for this date</button></div>`;
+      <button class="btn sm sec" onclick="mrpClearDemand(MRPDATE)" title="Remove the demand rows recorded against this date — by source, and without deleting the orders">🗑 Clear demand for this date</button>
+      <button class="btn sm ${demStepOn()?'':'sec'}" onclick="demStepToggle()" title="round quantities to what the line can actually pack">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button></div>
+    <div class="hint" style="margin:6px 0 0">${demStepNote()}</div>`;
   dh+=`<h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3>
     <table><thead><tr><th>Product</th><th>SKU</th><th class="num">Demand</th></tr></thead><tbody>`;
   /* Name + Variant, then the code beneath. "Rabbit Meat (GC)" exists at 250 g
      and 500 g and they are different rows to plan — the variant is the only
      thing that tells them apart. */
-  const _demRow=p=>`<tr><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div></td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="any" inputmode="decimal" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpDemand['${p.sku}']=+this.value||0;renderMRP()"></td></tr>`;
+  const _demRow=p=>`<tr><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div></td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="1" inputmode="numeric" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpSetDem('${p.sku}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}"></td></tr>`;
   // custom-order SKUs are planned in the card above, not here
-  const catalogue=prods.filter(p=>!coAll[p.sku]);
+  /* SUPPLY-LED PRODUCTS ARE NOT PLANNED HERE. Lamb and rabbit arrive when a
+     supplier has them and the whole delivery gets made; asking the plot for a
+     quantity we cannot obtain produced a target and a PO every week that could
+     not be filled, which is how a shortfall column stops being read. They keep
+     their place in the production target and in production itself. */
+  const _supLed=prods.filter(isSupplyLed);
+  const catalogue=prods.filter(p=>!coAll[p.sku] && !isSupplyLed(p));
+  if(_supLed.length){
+    dh=dh.replace('<tbody>','<tbody>'+
+      '<tr><td colspan="3" style="background:#fff8e1;border-left:3px solid #e0b400">'
+      +'<b>'+_supLed.length+' supply-led product(s) are not planned here</b> — '
+      +esc(_supLed.slice(0,6).map(p=>prodLabel(p,{noSku:true})).join(', '))+(_supLed.length>6?' …':'')
+      +'. They arrive when a supplier has the material and the whole delivery is produced, so a demand figure for them is a wish, not a plan. '
+      +'They still appear in the <b>Weekly Demand Target</b> and in <b>Production</b>, which is where "make all of it" is decided.</td></tr>');
+  }
   hierGroups(catalogue,{g1:'group_1',g2:'group_2'}).forEach(G=>{
     dh+=`<tr style="background:#e7f0e9"><td colspan="3"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
     G.subs.forEach(S=>{ dh+=`<tr style="background:#f6f8f4"><td colspan="3" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(_demRow).join(''); });
@@ -8040,14 +8146,21 @@ async function renderMRP(){
   //   restore the small reorder buffer.
   const RAW_REORDER_G = 5000;   // reorder point for raw ingredients: 5 kg
   const plan=[];
+  window._mrpSupLedIng=[];
   /* mrpAdd holds items the buyer put on the order by hand — anything in the master
      that the demand roll-up did not surface: a supply, a processed form bought in
      rather than made, a raw with healthy stock you want to top up anyway. The
      quantity is in the ITEM'S OWN unit (kg for food, the uom for supplies), which
      is why the row carries `unit` from here on. */
+  const _supLedIng=[];
   ings.forEach(it=>{
     const added=+mrpAdd[it.sku]||0;
     const sup=isSupplyItem(it);
+    /* SAME RULE ON THE BUYING SIDE. A PO for lamb trim is not an order anybody
+       can place — the supplier tells us, not the other way round. It is still
+       listed, by name, so nobody thinks the app forgot it. Adding it by hand on
+       the plot still works: that is a buyer making a deliberate call. */
+    if(isSupplyLed(it) && !added){ _supLedIng.push(it); return; }
     if(it.is_intermediate && !added) return;   // processed forms are made, not bought — unless asked for by name
     if(sup && !added) return;                  // supplies reorder on PAR in their own module — unless asked for by name
     const rawNeed=need[it.sku]||0;   // already as-purchased — processed forms have been rolled up into this one
@@ -8076,7 +8189,7 @@ async function renderMRP(){
       remark:(mrpRemarks[it.sku]||''),supplier:defSup,price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
   });
   plan.sort((a,b)=>b.final-a.final);
-  window._mrpPlan=plan;
+  window._mrpPlan=plan; window._mrpSupLedIng=_supLedIng;
   const _pu=window._mrpProcUse||{}; const _puN=Object.keys(_pu).length;
   let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">2 · Replenishment plan</h3>
     ${_puN?`<div class="hint" style="margin:0 0 6px">Processed stock counts: <b>${_puN} processed ingredient(s)</b> covered part of this demand from stock already made (${Object.keys(_pu).slice(0,3).map(k=>esc(ingName(k))+' '+(Math.round(_pu[k]/10)/100)+' kg').join(', ')}${_puN>3?', …':''}), so no raw is ordered for that portion.</div>`:''}
@@ -8103,7 +8216,10 @@ async function renderMRP(){
     rh+=`<tr><td colspan="12" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">🏭 ${esc(sup)} <span style="opacity:.6;font-weight:400">— ${sItems.length} item(s) · <b>${kgf(sKg)} kg</b> · est. ₱${Math.round(sVal).toLocaleString('en-PH')}${minTag}</span></td></tr>`;
     arr.sort((a,b)=>b.final-a.final).forEach(l=>{ rh+=_rowHtml(l); });
   });
-  if(!plan.length) rh+=`<tr><td colspan="12" class="empty">Enter demand above — raws reorder when demand outstrips stock or ending stock drops to ~5 kg. Or use <b>＋ Add item to order</b> to put something on the order yourself.</td></tr>`;
+  if(_supLedIng.length) rh+=`<tr><td colspan="12" style="background:#fff8e1;border-left:3px solid #e0b400;padding:7px 9px;font-size:12.5px">
+    <b>${_supLedIng.length} supply-led ingredient(s) are never put on a purchase order</b> — ${esc(_supLedIng.slice(0,8).map(i=>i.name||i.sku).join(', '))}${_supLedIng.length>8?' …':''}.
+    The supplier tells us when there is material, not the other way round, so an order for them is a wish. Put one on this order by hand with <b>＋ Add item to order</b> when a supplier has actually offered stock.</td></tr>`;
+  if(!plan.length && !_supLedIng.length) rh+=`<tr><td colspan="12" class="empty">Enter demand above — raws reorder when demand outstrips stock or ending stock drops to ~5 kg. Or use <b>＋ Add item to order</b> to put something on the order yourself.</td></tr>`;
   const toBuy=plan.filter(l=>l.final>0); const totVal=toBuy.reduce((s,l)=>s+(l.final/1000)*l.price,0); const totKg=_supKg(plan);
   rh+=`</tbody></table></div>
     <div style="margin-top:8px"><button class="btn sec sm" onclick="mrpAddOpen()">＋ Add item to order</button>
@@ -8352,7 +8468,7 @@ async function mrpPullPackReq(){
   let co={}; try{ co=await coOpenDemandMap(); }catch(e){}
   let n=0, skipped=0;
   rows.forEach(x=>{ if(co[x.r.sku]!=null){ skipped++; return; }
-    mrpDemand[x.r.sku]=Math.round(x.c.produce); n++; });
+    mrpDemand[x.r.sku]=demSnap(x.c.produce); n++; });
   sysLog('mrp',MRPDATE,'🧮 Regular Packs loaded into the plot — '+n+' SKU(s) / '+Math.round(tot)+' pack(s) by '+CURRENT_USER);
   await renderMRP();
   toast('Loaded '+n+' catalogue SKU(s)'+(skipped?(' · '+skipped+' left to their custom orders'):'')+' — review, then 💾 Save the plot');
@@ -11021,6 +11137,7 @@ function drawCOForm(){
   $('cp').innerHTML=`<div class="title">Custom Orders</div>
     ${!locked?`<button class="btn sec" onclick="coSave()">💾 Save quote</button><button class="wfbtn" onclick="coLock()">🔒 Lock order</button>`:''}
     ${coIsOpen(coRec.status)?`<button class="btn sec" onclick="coFulfil()">✓ Mark completed</button>`:''}
+    ${(coIsLocked(coRec.status)&&coIsOpen(coRec.status)&&coRec.order_ref)?`<button class="btn sec" onclick="coCloseOut()" title="stop it asking for packs that are never going to be made — records what was produced and writes off the rest">📕 Close out</button>`:''}
     ${!locked&&coRec.order_ref?`<button class="btn sec" onclick="coCancel()">✕ Cancel</button>`:''}
     ${(locked&&coIsOpen(coRec.status)&&coRec.order_ref)?`<button class="btn sec" style="color:var(--danger)" onclick="coCancelLocked()" title="the customer pulled out, or this was locked by mistake — takes the packs back out of demand, if nothing has planned them yet">✕ Cancel order</button>`:''}
     ${(coStat(coRec.status)==='cancelled'&&coRec.order_ref)?`<button class="btn sec" style="color:var(--danger)" onclick="coDeleteOrder()" title="remove the record entirely — only possible while nothing points at it">🗑 Delete</button>`:''}
@@ -11398,6 +11515,45 @@ async function coLock(){
   }catch(e){ hideBusy(); toast(_coErr(e),true); }
 }
 function prec2Name(l){ return (l.description||'Custom meal')+' · '+(l.pack_size_g||0)+'g'; }
+/* ---- CLOSING AN ORDER THAT IS NOT GOING TO BE FINISHED --------------------
+   An order stops asking for packs when it is COMPLETED. That is the right rule
+   and it was the only exit — but "Mark completed" says the packs were made, and
+   when 117 of 420 were never produced, saying so is a lie that then has to be
+   explained to whoever reads the production target next month.
+
+   So the same close, said honestly: what was made, what was not, and a note in
+   the log that the remainder was written off rather than produced. The order
+   leaves the target either way; the difference is that the record still tells
+   the truth a year from now. */
+async function coCloseOut(){
+  if(!coRec.order_ref){ toast('Save the order first',true); return; }
+  showBusy('Working out what is still owed…');
+  let owed=0, made=0, ordered=0, lines=[];
+  try{
+    const map=await coOpenDemand();
+    Object.keys(map).forEach(sku=>{ (map[sku].orders||[]).forEach(o=>{ if(o.ref===coRec.order_ref) owed+=(+o.packs||0); }); });
+    ordered=(coLines||[]).reduce((a,l)=>a+(+l.packs||0),0);
+    made=Math.max(0, ordered-owed);
+    lines=(coLines||[]).map(l=>({sku:l.product_sku, name:l.description||l.product_sku, packs:+l.packs||0}));
+  }catch(e){}
+  hideBusy();
+  const msg = owed>0
+    ? ('Close out '+coRec.order_ref+'?\n\n'
+       +'Ordered '+ordered+' pack(s) · produced '+made+' · still owed '+owed+'.\n\n'
+       +'The remaining '+owed+' pack(s) are written off — not made, not owed, and out of the demand run and the production target from now on. '
+       +'The order is marked completed and the write-off is recorded in its log so the gap can be explained later.')
+    : ('Close out '+coRec.order_ref+'?\n\nEverything ordered has been produced. This marks it completed and takes it out of the target.');
+  if(!confirm(msg)) return;
+  try{
+    await db.update('custom_orders','order_ref',coRec.order_ref,{status:'completed'});
+    coRec.status='completed';
+    sysLog('custom_orders',coRec.order_ref, (owed>0
+      ? '📕 Closed out by '+CURRENT_USER+' — '+made+' of '+ordered+' pack(s) produced, '+owed+' written off (not produced, ingredients already consumed)'
+      : '📕 Closed out by '+CURRENT_USER+' — all '+ordered+' pack(s) produced'));
+    toast(owed>0?('Closed · '+owed+' pack(s) written off'):'Closed');
+    coBackToList();
+  }catch(e){ toast(_coErr(e),true); }
+}
 async function coFulfil(){ if(!confirm('Mark this order fulfilled?')) return; try{ await db.update('custom_orders','order_ref',coRec.order_ref,{status:'completed'}); coRec.status='completed'; sysLog('custom_orders',coRec.order_ref,'✓ Fulfilled by '+CURRENT_USER); toast('Marked fulfilled'); drawCOForm(); }catch(e){ toast(e.message,true); } }
 async function coCancel(){ if(!confirm('Cancel this quote?')) return; try{ if(coRec.order_ref&&(await db.list('custom_orders',{})).some(o=>o.order_ref===coRec.order_ref)){ await db.update('custom_orders','order_ref',coRec.order_ref,{status:'cancelled'}); } coRec.status='cancelled'; toast('Cancelled'); coBackToList(); }catch(e){ toast(e.message,true); } }
 
@@ -16312,8 +16468,8 @@ function drawCountForm(){
   })();
   $('crumb').innerHTML=`<b>Weekly Inventory</b> / ${esc(countRec.count_ref||'New')}`;
   $('cp').innerHTML=`<div class="title">Weekly Inventory</div><div class="sp"></div><span style="color:var(--muted)">book qty auto · needs approval</span>`;
-  const scopes=['All','Ingredients','Supplies','Stickers','Sellable Products']; const sc=countRec.scope||['All'];
-  const scopeHtml=scopes.map(s=>`<label class="sck"><input type="checkbox" ${sc.includes(s)?'checked':''} ${approved?'disabled':''} onchange="countScope('${s}',this.checked)"> ${s}</label>`).join('');
+  const scopes=['All','Ingredients','Supplies','Stickers','Sellable Products','Retired']; const sc=countRec.scope||['All'];
+  const scopeHtml=scopes.map(s=>`<label class="sck" title="${s==='Retired'?'add back archived items that still have stock on the shelf':''}"><input type="checkbox" ${sc.includes(s)?'checked':''} ${approved?'disabled':''} onchange="countScope('${s}',this.checked)"> ${s==='Retired'?'Retired (still on the shelf)':s}</label>`).join('');
   // 3-level grouping (Group › Subgroup › Item), ordered by each line's grank.
   const _lr=i=>countLines[i].grank==null?500000:countLines[i].grank;
   const rowFor=(i,n)=>{ const l=countLines[i]; const s=+l.scale||1;
@@ -16359,6 +16515,7 @@ function drawCountForm(){
       <div><div class="fld"><label>Location</label><div class="val"><select ${approved?'disabled':''} onchange="countRec.location_code=this.value">${locOptions(countRec.location_code)}</select></div></div>
         <div class="fld"><label>Date</label><div class="val"><input type="date" value="${esc(countRec.count_date||'')}" ${approved?'disabled':''} oninput="countRec.count_date=this.value"></div></div></div>
       <div><div class="fld" style="align-items:flex-start"><label>Scope</label><div class="val" style="display:flex;flex-wrap:wrap;gap:12px">${scopeHtml}</div></div>
+        <div class="mini" style="color:var(--muted);margin:2px 0 0 0">Retired items are left off — archiving something takes it off the count sheet. <b>Retired</b> brings back only the ones that still hold stock, which is the case a retired label makes: no longer ordered, three hundred rolls still in the box.</div>
         ${_cntWantsProd?`<div class="fld" style="align-items:flex-start;margin-top:6px"><label title="Only affects PRODUCT lines. Ingredients, supplies and labels always come from our own ledger — Shopify does not know they exist.">Book qty for products</label>
           <div class="val" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
             ${[['erp','Our ledger'],['shopify','Shopify count']].map(([k,l])=>
@@ -16528,7 +16685,14 @@ function countVar(i){ const l=countLines[i]; const el=$('cv'+i); if(!el)return; 
 // Prefill every counted cell with the theoretical (book) qty — a starting point the counter adjusts.
 function countFillBook(){ if(countRec.status==='approved')return; if(!countLines.length){ toast('Load items first',true); return; }
   countLines.forEach(l=>{ l.counted_qty=+l.book_qty||0; }); drawCountForm(); toast('Counted prefilled with book qty — adjust where the physical count differs'); }
-function countScope(s,on){ let sc=countRec.scope||[]; if(s==='All'){ sc=on?['All']:[]; } else { sc=sc.filter(x=>x!=='All'); if(on)sc.push(s); else sc=sc.filter(x=>x!==s); } countRec.scope=sc; drawCountForm(); }
+/* "Retired" is not a scope of its own — it widens the others. Ticking it alone
+   would mean "count nothing, but include the retired ones", which is not a
+   sentence, so it keeps All selected alongside. */
+function countScope(s,on){ let sc=countRec.scope||[];
+  if(s==='All'){ sc=on?['All'].concat(sc.includes('Retired')?['Retired']:[]):sc.filter(x=>x==='Retired'); }
+  else if(s==='Retired'){ if(on){ if(!sc.length) sc=['All']; sc=sc.concat(['Retired']); } else sc=sc.filter(x=>x!=='Retired'); }
+  else { sc=sc.filter(x=>x!=='All'); if(on)sc.push(s); else sc=sc.filter(x=>x!==s); }
+  countRec.scope=[...new Set(sc)]; drawCountForm(); }
 // Unit of measure + display scale per count category. Ingredients are stored in
 // grams but weighed in kg (scale 1000); products in packs, stickers/supplies in pcs.
 /* ---- WHOSE NUMBER IS THE BOOK QTY? ---------------------------------------
@@ -16566,7 +16730,20 @@ function countSetBookSrc(v){
 function countUnitFor(cat){ if(cat==='Sellable Products') return {uom:'packs',scale:1}; if(cat==='Stickers') return {uom:'pcs',scale:1}; if(cat==='Supplies') return {uom:'pcs',scale:1}; return {uom:'kg',scale:1000}; }
 async function countLoad(){
   const sc=countRec.scope||['All'], all=sc.includes('All');
-  const ings=await db.list('ingredients',{}), prods=await db.list('products',{});
+  /* ---- ARCHIVING SOMETHING SHOULD TAKE IT OFF THE COUNT SHEET --------------
+     It did not. This screen read the WHOLE products and ingredients tables with
+     no filter at all, so nineteen retired lines — turkey, the no-juice gently
+     cooked range, the buffalo organs, all of them archived weeks ago and all
+     reading 0 packs — were still printed for somebody to walk the freezer and
+     count. Archiving them again would have changed nothing, because the data
+     was never the problem: the count sheet simply did not look.
+
+     A retired line that still has stock is a different case, and it is a real
+     one — a retired LABEL can have three hundred rolls in the box. So it is not
+     silently dropped either: tick "Retired (still on the shelf)" and every
+     archived item with a non-zero book qty comes back, and only those. */
+  const _wantArch=sc.includes('Retired');
+  const _allIngs=await db.list('ingredients',{}), _allProds=await db.list('products',{});
   const wantIng=all||sc.includes('Ingredients'), wantSup=all||sc.includes('Supplies'), wantStk=all||sc.includes('Stickers'), wantProd=all||sc.includes('Sellable Products');
   const loc=(countRec.location_code||'bulacan');
   // Book qty must be THIS location's stock. Summing every location made a Bulacan
@@ -16575,6 +16752,16 @@ async function countLoad(){
      could not be shown or tested without a live database. db.list falls back to
      the demo store cleanly, so the guard bought nothing. */
   let stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(String(s.location_code||'')!==loc) return; stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){}
+  /* Retired items only come back when they still hold something. An archived
+     line at zero is finished with; an archived line at 300 is a box on a shelf
+     somebody still has to open. */
+  const _stkOh=p=>(+p['sticker_'+loc+'_on_hand']||0);
+  const prods=_allProds.filter(p=>!isArchivedProd(p) || (_wantArch && ((+stock[p.sku]||0)!==0 || _stkOh(p)!==0)));
+  const ings =_allIngs .filter(i=>!isArchivedProd(i) || (_wantArch && (+stock[i.sku]||0)!==0));
+  window._countHidden={
+    prod:_allProds.filter(p=>isArchivedProd(p)).length,
+    ing:_allIngs.filter(i=>isArchivedProd(i)).length,
+    stk:_allProds.filter(p=>!isArchivedProd(p) && isArchivedSticker(p)).length };
   let lines=[];
   // Two-bin: count RAW and PROCESSED, grouped together under each raw material (matches the sheet).
   const _bs={}, _bn={}; ings.forEach(it=>{ _bs[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm)_bn[nm]=it; });
@@ -16625,7 +16812,7 @@ async function countLoad(){
       }
     }catch(e){}
   }
-  if(wantProd) prods.slice().sort(cmpItems).forEach(p=>{
+  if(wantProd) prods.filter(p=>!isArchivedProd(p) || _wantArch).slice().sort(cmpItems).forEach(p=>{
     const erpQ=stock[p.sku]||0;
     let bq=erpQ, srcTag='';
     if(_shopBook){
@@ -16649,7 +16836,8 @@ async function countLoad(){
      per custom recipe put hundreds of rolls on the count sheet that have never
      been printed and can never be counted. Archived products are out for the
      same reason: nobody is counting labels for a product that is gone. */
-  if(wantStk) prods.filter(p=>!isArchivedProd(p) && !(p.is_custom||/^CUST-/.test(p.sku)))
+  if(wantStk) prods.filter(p=>!(p.is_custom||/^CUST-/.test(p.sku)))
+    .filter(p=>(!isArchivedProd(p) && !isArchivedSticker(p)) || (_wantArch && (+p['sticker_'+loc+'_on_hand']||0)!==0))
     .sort(cmpItems).forEach(p=>{ const bq=+p['sticker_'+loc+'_on_hand']||0;
     /* THE LABEL IS PER SKU, so its count line has to name the SKU it belongs to.
        Seven meatball packs share one product name and differ only by variant;
@@ -16665,12 +16853,16 @@ async function countLoad(){
       +' ('+_sm.matched+' SKU(s)'+(_sm.fellBack?(', '+_sm.fellBack+' fell back to the ledger'):'')
       +(_sm.at?(', reading of '+String(_sm.at).replace('T',' ').slice(0,16)):'')+') by '+CURRENT_USER);
   }
+  const _h=window._countHidden||{};
+  const _hid=(_h.prod||0)+(_h.ing||0)+(_h.stk||0);
+  if(_hid && !_wantArch) sysLog('count_sessions',countRec.count_ref||'(new)',
+    '🗂 '+_hid+' retired line(s) left off the sheet ('+(_h.prod||0)+' product, '+(_h.ing||0)+' ingredient, '+(_h.stk||0)+' sticker) — tick “Retired” to count any that still hold stock');
   toast('Loaded '+countLines.length+' item(s)'+(wantStk?' · stickers at '+loc:'')
     +(_sm&&_sm.matched?(' · '+_sm.matched+' product(s) from Shopify'):'')); drawCountForm();
 }
 // Weekly-inventory reference: WI-MMDDYYYY [SCOPE].VXX. Scope tag from the selected scope.
 function _wiScopeTag(scope){ const s=scope||['All']; if(s.includes('All')||!s.length) return 'ALL';
-  const map={'Ingredients':'ING','Supplies':'SUP','Stickers':'STK','Sellable Products':'FG'};
+  const map={'Ingredients':'ING','Supplies':'SUP','Stickers':'STK','Sellable Products':'FG','Retired':'RET'};
   return s.map(x=>map[x]||String(x).slice(0,3).toUpperCase()).join('+'); }
 async function countSave(){
   try{
@@ -17737,6 +17929,15 @@ function applyDemandMap(map){ Object.keys(map).forEach(sku=>{ mrpDemand[sku]=+ma
 // One click for the banner: put the locked custom orders' packs into the demand boxes.
 async function mrpPullCustom(){ const m=window._mrpCoPend||{}; const n=Object.keys(m).length;
   if(!n){ toast('Nothing to pull — every locked custom order is already on a demand plot or a production plan'); return; }
+  /* A LOCKED WEEK DOES NOT TAKE NEW WORK. Refused rather than warned: the plot
+     has already been bought against, and "are you sure" on a screen somebody
+     runs every week is a question that gets answered yes by reflex. */
+  if(window._mrpLocked){
+    alert(MRPDATE+' is locked ('+((window._mrpLocked||{}).ref||'saved plot')+').\n\n'
+      +'Ingredients have been bought against that plot and the run is scheduled from it, so orders that arrived afterwards cannot join it.\n\n'
+      +'Plan these '+n+' in the next run: '+(window._mrpNextRun||'the following week')+'.');
+    return;
+  }
   applyDemandMap(m); await coSyncStatuses();
   toast('Pulled '+n+' custom-order SKU(s) into the demand for '+MRPDATE); }
 function mrpImport(){ const t=prompt('Paste demand lines — SKU,qty (one per line):'); if(!t)return; applyDemandMap(parseDemandCSV(t)); toast('Demand imported by SKU'); }
@@ -18192,7 +18393,7 @@ async function generateSuppliesPO(){
    Rounded up to whole sheets when the product says how many print per sheet —
    printers charge by the sheet, so ordering 61 of a 10-up label costs the same
    as ordering 70.                                                              */
-let _stkRoLoc='bulacan', _stkRoQty={}, _stkRoRows=[], _stkRoView='order';
+let _stkRoLoc='bulacan', _stkRoQty={}, _stkRoRows=[], _stkRoView='order', _stkRoSup='', _stkRoShowArch=false;
 /* ============ Receiving — goods in, without the money =====================
    The warehouse has to book a delivery in. Until now the only way to do that
    was to open the purchase order, which is a commercial document: unit prices,
@@ -18277,12 +18478,20 @@ async function renderStickerReorder(){
   $('cp').innerHTML=`<div class="title">Sticker Reorder <span onclick="openKB('sticker_reorder')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <select onchange="_stkRoLoc=this.value;_stkRoQty={};renderStickerReorder()">
       ${locOptions(_stkRoLoc)}</select>
+    <select onchange="_stkRoSup=this.value;drawStickerReorder()" title="the sticker file is two order sheets, one per printer">
+      <option value=""${_stkRoSup===''?' selected':''}>Both suppliers</option>
+      <option value="1"${_stkRoSup==='1'?' selected':''}>Supplier 1 — Main</option>
+      <option value="2"${_stkRoSup==='2'?' selected':''}>Supplier 2 — Gently Cooked</option></select>
+    <label class="mini" style="margin-left:6px"><input type="checkbox" ${_stkRoShowArch?'checked':''} onchange="_stkRoShowArch=this.checked;_stkRoQty={};renderStickerReorder()"> retired stickers${window._stkRoArchN?(' ('+window._stkRoArchN+')'):''}</label>
     <button class="btn sec" onclick="_stkRoFill('need')">↺ Reset to suggested</button>
     <button class="btn sec" onclick="_stkRoFill('zero')">✕ Clear all</button>
     <button class="wfbtn" onclick="generateStickerPO()">🧾 Generate Sticker PO</button>
     <div class="sp"></div><span style="color:var(--muted)">demand + custom orders + PAR → labels to order → PO</span>`;
 
-  const prods=(await db.list('products',{})).filter(p=>p.active!==false);
+  const _allProdsStk=(await db.list('products',{})).filter(p=>p.active!==false);
+  const _nArch=_allProdsStk.filter(isArchivedSticker).length;
+  window._stkRoArchN=_nArch;
+  const prods=_stkRoShowArch?_allProdsStk:_allProdsStk.filter(p=>!isArchivedSticker(p));
   // packs planned this week: the locked demand plot, plus any locked custom order
   let planned={};
   try{ const plans=await mrpPlans();
@@ -18605,6 +18814,7 @@ function drawStickerReorder(){
     ${noPar>0?`<div style="margin:0 0 10px;padding:9px 11px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
       <b>${noPar} of ${tracked} labels have no PAR set${withPar?', only '+withPar+' does':''}.</b> A label with no PAR can never ask to be reordered: <b>PAR top-up</b> is zero when PAR is zero, and <b>production</b> need stays zero until a demand plan is locked${window._stkRoPlanRef?'':' (none is)'}. Set a Label PAR on each product's <b>🏷️ Stickers</b> tab, or run section 8 of <code>wr_sticker_reorder.sql</code> to seed them in bulk.</div>`:''}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 10px">
+      <span class="mini" style="color:var(--muted)">${_stkRoSup==='1'?'Supplier 1 — Main sheet':(_stkRoSup==='2'?'Supplier 2 — Gently Cooked sheet':'Both order sheets')} ·</span>
       <span class="mini" style="color:var(--muted)">Show</span>
       ${[['all','All labels'],['below','Below PAR'],['order','To order']].map(([k,l])=>
         `<button class="btn sm ${_stkRoView===k?'':'sec'}" onclick="_stkRoView='${k}';window._stkRoViewTouched=1;drawStickerReorder()">${l}</button>`).join('')}
@@ -18622,7 +18832,14 @@ function drawStickerReorder(){
       <th class="num">PAR</th><th class="num">On hand</th><th class="num" title="pieces on a confirmed sticker PO that have not been received yet — subtracted so a label already coming is not bought twice">On order</th><th class="num">Packs</th><th class="num">PAR top-up</th>
       <th class="num">Need</th><th class="num">Order</th><th class="num" title="the printer's minimum pack for this size">Packs</th><th class="num">₱/pc</th><th>Supplier</th>
     </tr></thead><tbody>`;
+  /* WHICH PRINTER. The sticker file is two order sheets — Supplier 1 takes the
+     cookable, raw-feeding, toppers and custom labels; Supplier 2 takes gently
+     cooked and meatballs, because those bags sit in a sous-vide bath for hours
+     and need a different adhesive. Ordering from one sheet at a time is how the
+     file is actually used, so the screen can be narrowed the same way. */
+  const _supOf=r=>/supplier\s*2|gently\s*cook/i.test(String(r.supplier||''))?'2':'1';
   const shown=rows.filter(r=>{
+    if(_stkRoSup && _supOf(r)!==_stkRoSup) return false;
     /* r.pinned is always shown here — see the note on the shared custom label. */
     if(_stkRoView==='order') return r.order>0||_stkRoQty[r.sku]||r.pinned;
     if(_stkRoView==='below') return r.par>0 && r.oh<r.par;
@@ -19113,8 +19330,13 @@ async function trPick(kind){
     /* A custom recipe has no label of its own — it packs behind the shared
        Custom Name Sticker below — so listing one per custom recipe offers rolls
        that were never printed. Archived products, same. */
+    /* A RETIRED STICKER CAN STILL BE MOVED while stock remains — that is the
+       whole point of retiring the LABEL rather than the product — so it stays
+       on this tab, marked, rather than being hidden with rolls still in the box. */
     rows=ps.filter(p=>!isArchivedProd(p) && !(p.is_custom||/^CUST-/.test(p.sku)))
-      .map(p=>({sku:p.sku,name:(prodLabel(p,{noSku:true})||p.sku)+' — label',cat:p.group_1||p.family||'Labels',
+      .filter(p=>!isArchivedSticker(p) || (+oh[p.sku]||0)>0)
+      .map(p=>({sku:p.sku,name:(prodLabel(p,{noSku:true})||p.sku)+' — label'+(isArchivedSticker(p)?' (retired)':''),
+                cat:isArchivedSticker(p)?'Retired labels':(p.group_1||p.family||'Labels'),
                 oh:+oh[p.sku]||0,div:1,unit:'pcs',led:'sticker'}));
     /* THE SHARED LABELS, from the ledger. They post as ordinary ingredient
        movements, not as a product-column adjustment, so each row carries the
