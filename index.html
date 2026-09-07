@@ -739,7 +739,10 @@ const MODELS = {
     searchOn:['name','sku','barcode','group_1','group_2','family','variant','product_line','feeding_style','animal'],
     status:{f:'status',stages:['No SKU Yet','No Recipe Yet','Active - Scaled','Active']},
     fields:[
-      {n:'sku',l:'SKU',t:'text'},{n:'group_1',l:'Group',t:'text'},{n:'group_2',l:'Subgroup',t:'text'},{n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant / Product name',t:'text'},{n:'sort_order',l:'Sort #',t:'number'},
+      {n:'sku',l:'SKU',t:'text'},
+      {n:'group_1',l:'Group — where it is listed (blank = from Feeding format)',t:'text'},
+      {n:'group_2',l:'Subgroup (blank = from Mix category)',t:'text'},
+      {n:'family',l:'Family',t:'text'},{n:'variant',l:'Variant / Product name',t:'text'},{n:'sort_order',l:'Sort #',t:'number'},
       {n:'name',l:'Name',t:'text'},{n:'pack_g',l:'Pack (g)',t:'number'},{n:'box_size',l:'Packs per box',t:'number'},
       {n:'status',l:'Status',t:'select',o:['Active','Active - Scaled','No Recipe Yet','No SKU Yet']},
       {n:'product_line',l:'Product line',t:'text'},{n:'feeding_format',l:'Feeding format',t:'text'},
@@ -760,7 +763,7 @@ const MODELS = {
       {n:'replaced_by',l:'Phasing out — demand moves to',t:'rel',rel:'products'},
       {n:'is_custom',l:'Custom order product',t:'bool'}],
     list:['name','status','family','variant','pack_g','sell_price'],
-    groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status','supply_led','replaced_by'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
+    groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','group_1','group_2','animal','status','supply_led','replaced_by'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
             ['cost_debone','cost_butcher','cost_sousvide','cost_ecobag','cost_thermal'],
             ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_per_sheet','sticker_price','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par','sticker_archived']],
     tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'💰 Cost profile', groups:[3]},{l:'🏷️ Stickers', groups:[4]}],
@@ -1568,21 +1571,46 @@ function _so(r){ const v=+(r&&r.sort_order); return (isFinite(v)&&v>0)?v:999999;
    newest-filled first. Nothing is renamed and nothing is migrated — a product
    that already carries group_1 is untouched — but one entered from the form
    alone now groups the way the form implies. */
+/* AND "OTHER" IS NOT AN ANSWER — it is where a product lands when nobody has
+   given it one. `Other` and `Products` are the two buckets this app itself
+   writes when a group is missing, so a stored group_1 of 'Other' says exactly
+   what a blank one says: unclassified. Treating it as a real choice is why the
+   Savannah Safari meatballs stayed under "Other › Meatballs" however many
+   times the Product line, Feeding format and Mix category were corrected on
+   the form — the fields being edited were never consulted, because a value was
+   already sitting there.
+
+   Of the 41 products carrying group_1 = 'Other', forty are decommissioned
+   lines. Not one of them is a group anybody chose. */
+const G_UNSET=/^(other|others|products|product|uncategori[sz]ed|misc|none|n\/a|-|—|)$/i;
+function _gPick(){
+  for(let i=0;i<arguments.length;i++){
+    const v=String(arguments[i]==null?'':arguments[i]).trim();
+    if(v && !G_UNSET.test(v)) return v;
+  }
+  return '';
+}
 function prodG1(p){
   p=p||{};
-  return String(p.group_1||p.feeding_format||p.product_line||'Products').trim()||'Products';
+  return _gPick(p.group_1, p.feeding_format, p.product_line, p.feeding_style) || 'Products';
 }
 function prodG2(p){
   p=p||{};
-  return String(p.group_2||p.mix_category||p.family||'Other').trim()||'Other';
+  return _gPick(p.group_2, p.mix_category, p.family) || 'Other';
 }
+/* Decorate rows for hierGroups so every grouped screen asks the SAME question.
+   Reading group_1 / group_2 straight off the row is how screens drift apart —
+   the count sheet did exactly that, with its own private fallback, and put a
+   product somewhere the pickers did not. There is one definition of where a
+   pack sits, and this is how you get at it. */
+function pgRows(rows){ return (rows||[]).map(r=>({...r, _g1:prodG1(r), _g2:prodG2(r)})); }
 function prodGroup(p){
   p=p||{};
   return {g1:'📦 '+prodG1(p), g2:prodG2(p), rank:_so(p)};
 }
 function cmpItems(a,b){ return _so(a)-_so(b) || String(a.name||a.variant||a.sku||a.ref_sku||'').localeCompare(String(b.name||b.variant||b.sku||b.ref_sku||'')); }
 // 3-level hierarchy: Group (group_1) → Subgroup (group_2) → Item (sort_order). Groups ordered by their first item.
-const HIER={ products:{g1:'group_1', g2:'group_2'}, ingredients:{g1:'ingredient_group'} };
+const HIER={ products:{g1:'_g1', g2:'_g2'}, ingredients:{g1:'ingredient_group'} };
 function hierGroups(rows,H){
   const gmin=list=>Math.min(...list.map(_so));
   const byG1={}; rows.forEach(r=>{ const k=(r[H.g1]||'Other'); (byG1[k]=byG1[k]||[]).push(r); });
@@ -2117,7 +2145,7 @@ async function renderList(){
   } else if(HIER[state.model] && state.groupBy){
     // 3-level: Group → Subgroup → Item
     const span=cols.length+(bulk?1:0);
-    hierGroups(rows,HIER[state.model]).forEach(G=>{
+    hierGroups(state.model==='products'?pgRows(rows):rows, HIER[state.model]).forEach(G=>{
       body+=`<tr class="grp grp1"><td colspan="${span}" style="background:#e7f0e9;color:#2f5d33"><b style="font-size:13.5px">${esc(G.g1)}</b> <span style="opacity:.55;font-weight:400">(${G.all.length})</span></td></tr>`;
       G.subs.forEach(S=>{
         const twoLevel = S.g2==null; const pad = twoLevel?20:32;
@@ -2209,7 +2237,8 @@ async function relOptions(model){
   // `t` keeps the "Name (SKU)" form for places that show one line; `n` is the plain
   // name, for line tables that already print the SKU underneath — showing the code
   // twice on the same row is noise, not information.
-  let list=rows.map(r=>({v:r[m.pk], n:String(r[m.name]==null?r[m.pk]:r[m.name]), t:r[m.name]+(r[m.pk]!==r[m.name]?` (${r[m.pk]})`:''), g1:r.group_1, g2:r.group_2, cat:r.category, rg:r.ingredient_group, so:_so(r), _gr:0}));
+  const _isProd=(model==='products');
+  let list=rows.map(r=>({v:r[m.pk], n:String(r[m.name]==null?r[m.pk]:r[m.name]), t:r[m.name]+(r[m.pk]!==r[m.name]?` (${r[m.pk]})`:''), g1:_isProd?prodG1(r):r.group_1, g2:_isProd?prodG2(r):r.group_2, cat:r.category, rg:r.ingredient_group, so:_so(r), _gr:0}));
   // Products & ingredients get ordered + group tags so line pickers can show grouped optgroups.
   if(model==='products'){
     rows.forEach(r=>{ const o=list.find(x=>x.v===r.sku); if(o){ o.t=prodLabel(r); o.n=prodLabel(r,{noSku:true}); } });
@@ -3838,8 +3867,8 @@ async function pqBuildRows(){
       const physAtCount=hasSnap?shopBy[p.sku]:null;
       const committed=(snapCm && snapCm[p.sku]!=null) ? +snapCm[p.sku] : null;
       const onHandAt =(snapOn && snapOn[p.sku]!=null) ? +snapOn[p.sku] : null;
-      return {sku:p.sku, name:prodLabel({...p},{noSku:true}), group_1:(p.group_1||'Products'),
-        group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order, box:(+p.box_size||0),
+      return {sku:p.sku, name:prodLabel({...p},{noSku:true}), group_1:prodG1(p),
+        group_2:prodG2(p), sort_order:p.sort_order, box:(+p.box_size||0),
         shop, isCust, noRead, awaiting,
         snapQ:(hasSnap&&!isCust)?shopBy[p.sku]:null, postG:(hasSnap&&!isCust)?oh.sellAfter:0,
         ledSell, drift:(physAtCount!=null)?(physAtCount-ledAtCount):null, physAtCount,
@@ -4212,16 +4241,44 @@ function pqDraw(){
   const groups={};
   show.forEach(r=>{ const g=(PQ_GROUP==='hier')?r.group_1:'All products'; (groups[g]=groups[g]||[]).push(r); });
   const span=16;
-  Object.keys(groups).sort().forEach(g=>{
+  /* GROUP HEADINGS IN MASTER-DATA ORDER, like every other grouped screen.
+     This screen alone sorted them alphabetically, so Gently Cooked came before
+     Raw Feeding here and after it everywhere else — the same list of groups in
+     two orders depending on which tab you were on. The ROWS inside a group stay
+     in urgency order (see below); that part warehouse asked for. */
+  const _gmin=g=>Math.min.apply(null, groups[g].map(_so));
+  /* URGENCY WITHIN THE FAMILIAR SHAPE. The rows are ranked by the shelf that
+     runs out soonest — warehouse asked for that and it stays — but they now sit
+     under Group › Subgroup like every other screen, so somebody who knows where
+     a pack lives finds it in the same place here. The trade is deliberate and
+     worth saying out loud: the single most urgent product in the whole list is
+     no longer guaranteed to be the first row on the page. It is the first row
+     of its own block, and the "reorder needed" flag still marks it wherever it
+     sits. */
+  const _pqCmp=(a,b)=>{ const A=calc[a.sku], B=calc[b.sku];
+    const ca=(A.cover==null||A.cover>=900)?1e9:A.cover, cb=(B.cover==null||B.cover>=900)?1e9:B.cover;
+    return ca-cb || B.produce-A.produce || String(a.name).localeCompare(String(b.name)); };
+  const _pqUrg=list=>Math.min.apply(null, list.map(r=>{ const c=calc[r.sku];
+    return (c.cover==null||c.cover>=900)?1e9:c.cover; }));
+  const _pqTot=list=>k0(list.reduce((a,r)=>a+calc[r.sku].produce,0));
+  Object.keys(groups).sort((a,b)=>_gmin(a)-_gmin(b)||String(a).localeCompare(b)).forEach(g=>{
     const gr=groups[g];
     h+=`<tr class="grp"><td colspan="${span}" style="background:#e7f0e9;color:#2f5d33"><b>${esc(g)}</b>
-      <span style="opacity:.55;font-weight:400">· ${gr.length} · to produce ${k0(gr.reduce((a,r)=>a+calc[r.sku].produce,0))}</span></td></tr>`;
-    /* Priority order, which is what warehouse actually asked for: the shelf
-       that runs out soonest, first. A product with no sales has no cover and
-       cannot be ranked, so it sorts to the bottom rather than to the top. */
-    gr.sort((a,b)=>{ const A=calc[a.sku], B=calc[b.sku];
-      const ca=(A.cover==null||A.cover>=900)?1e9:A.cover, cb=(B.cover==null||B.cover>=900)?1e9:B.cover;
-      return ca-cb || B.produce-A.produce || String(a.name).localeCompare(String(b.name)); }).forEach(r=>{
+      <span style="opacity:.55;font-weight:400">· ${gr.length} · to produce ${_pqTot(gr)}</span></td></tr>`;
+    /* subgroups only when the screen is grouped at all — "All products" is the
+       flat view and must stay flat */
+    const subs={};
+    if(PQ_GROUP==='hier') gr.forEach(r=>{ const k=r.group_2||'Other'; (subs[k]=subs[k]||[]).push(r); });
+    else subs['']=gr;
+    Object.keys(subs).sort((a,b)=>{
+      const A=subs[a], B=subs[b];
+      return Math.min.apply(null,A.map(_so))-Math.min.apply(null,B.map(_so)) || String(a).localeCompare(b);
+    }).forEach(g2=>{
+      const sub=subs[g2];
+      if(g2) h+=`<tr class="grp"><td colspan="${span}" style="background:#f6f8f4;color:#4e7a3e;padding-left:22px">▸ <b>${esc(g2)}</b>
+        <span style="opacity:.6;font-weight:400">· ${sub.length} · to produce ${_pqTot(sub)}${
+          _pqUrg(sub)<1e9?` · soonest ${k1(_pqUrg(sub))}d`:''}</span></td></tr>`;
+      sub.sort(_pqCmp).forEach(r=>{
       const c=calc[r.sku];
       h+=`<tr>
         <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${c.alert?' · <b style="color:var(--danger)">reorder needed</b>':''}</div></td>
@@ -4251,6 +4308,7 @@ function pqDraw(){
           : ''}`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
         <td class="mini">${(!c.toMove&&!c.toMake)?'<span style="color:var(--muted)">—</span>'
           :`${c.toMove>0?`<b style="color:var(--earth,#b5762a)">MOVE ${k0(c.toMove)}</b>`:''}${(c.toMove>0&&c.toMake>0)?'<br>':''}${c.toMake>0?`<b style="color:var(--berry)">MAKE ${k0(c.toMake)}</b>`:''}${(c.toMove>0&&!c.toMake)?'<div style="color:var(--muted)">already made — just transfer it</div>':''}`}</td></tr>`;
+      });
     });
   });
   if(!show.length) h+=`<tr><td colspan="${span}" class="empty">${PQ_ONLY?'Nothing needs producing at these settings — untick “only what needs producing” to see every product.':'No products match that search.'}</td></tr>`;
@@ -4854,7 +4912,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-07 13:20Z';
+const WR_BUILD='2026-09-07 16:40Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -5586,14 +5644,14 @@ function recordPrintHtml(m, r, children){
       if((l.kind||'product')!=='product'){ const g=IG[l.product_sku]||{}; return {n:(g.name||ingName(l.product_sku)||l.product_sku), v:'', g1:(g.g1||'Ingredients'), g2:(g.g2||'')}; }
       const p=P[l.product_sku]||{};
       const nm=p.name||l.product_sku, v=(varAppend(nm,p.variant)===String(nm))?'':String(p.variant||'');
-      return {n:nm, v, g1:(p.group_1||'Products'), g2:(p.group_2||p.family||'Other'), so:p.sort_order};
+      return {n:nm, v, g1:prodG1(p), g2:prodG2(p), so:p.sort_order};
     };
     const rows=kids.map(l=>{ const x=_nm(l);
       return {...l, sku:l.product_sku, name:x.n, variant:x.v, group_1:x.g1, group_2:x.g2, sort_order:x.so}; });
     const anyRecv=isTr && rows.some(r=>(+r.received_packs||0)>0);
     const span=(isTr?6:3)+numCols.length; let n=0, body='';
     const _blank='<td class="wr"></td>';
-    hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    hierGroups(pgRows(rows),{g1:'_g1',g2:'_g2'}).forEach(G=>{
       body+=`<tr class="grp"><td colspan="${span}"><b>${esc(G.g1)}</b></td></tr>`;
       G.subs.forEach(S=>{
         if(S.g2 && !/^other$/i.test(String(S.g2))) body+=`<tr class="cat"><td colspan="${span}">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`;
@@ -5648,7 +5706,7 @@ function recordPrintHtml(m, r, children){
     const qCol=cols.find(c=>/qty|ordered_kg|available_kg/.test(c.n)); const pCol=cols.find(c=>/price/.test(c.n));
     const showAmt=!!(qCol&&pCol); let total=0;
     const span=2+numCols.length+(showAmt?1:0); let n=0, body='';
-    hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+    hierGroups(pgRows(rows),{g1:'_g1',g2:'_g2'}).forEach(G=>{
       body+=`<tr class="grp"><td colspan="${span}"><b>${esc(G.g1)}</b></td></tr>`;
       G.subs.forEach(S=>{
         if(S.g2) body+=`<tr class="cat"><td colspan="${span}">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`;
@@ -6318,12 +6376,13 @@ async function wdtSheetLoad(){
     const end=b+madeAll+sl+ot;
     const oh=+onHand[sku]||0;
     const p=pBy[sku]||{sku,name:sku};
-    return {sku, name:prodLabel(p,{noSku:true}), g1:p.group_1||'Products',
-            g2:p.group_2||p.family||'Other',
+    return {sku, name:prodLabel(p,{noSku:true}), g1:prodG1(p),
+            g2:prodG2(p),
             target, madeAll, madeAfter, still, oh,
             beg:b, made:M, sold:sl, other:ot, end,
             drift:Math.round((oh-end)*1000)/1000,
             plots:P, restated, custom:+cust[sku]||0,
+            sort_order:p.sort_order,
             isCustom:/^CUST-/.test(sku)};
   });
   await _wdtVelocity(rows);
@@ -6394,7 +6453,17 @@ function _wdtSheetHtml(){
         <th>Can make?</th>
       </tr></thead><tbody>`;
 
-  h+= rows.map(r=>{
+  /* GROUPED LIKE EVERY OTHER SCREEN, RANKED LIKE A WORK QUEUE.
+     This sheet used to be one flat list ordered purely by urgency. It printed
+     the group and subgroup under each product name, so the taxonomy was
+     visible but the list was not in it — somebody who knows the freezer by
+     Gently Cooked › Single Protein had to read every row to find one. It now
+     carries the same Group › Subgroup headings as Live Stock, the count sheet
+     and the pickers, with the rows INSIDE each subgroup still ordered by what
+     runs out first. The deliberate trade: the single most urgent product is no
+     longer guaranteed to be the top row of the page — it is the top row of its
+     own block, and a short line is still tinted wherever it sits. */
+  const _wrow=r=>{
     let lastI=-1; for(let i=r.plots.length-1;i>=0;i--){ if(r.plots[i]>0){ lastI=i; break; } }
     return `<tr style="background:${r.ready===false?'#fdf3f0':'var(--card,#fff)'}">
       <td class="mini stk1"><code>${esc(r.sku)}</code></td>
@@ -6422,8 +6491,33 @@ function _wdtSheetHtml(){
           : r.ready===true?'<span class="badge b-received">ready</span>'
           : r.ready===false?`<span class="badge b-open" style="background:#fbe3dd;color:#8a3520">short</span>
               <span class="mk mini" style="color:var(--danger)" title="${esc(r.shortName)} — need ${num(Math.round(r.needG/100)/10)}kg, have ${num(Math.round(r.haveG/100)/10)}kg">${esc(r.shortName)} · ${num(Math.round(r.needG/100)/10)}/${num(Math.round(r.haveG/100)/10)}kg</span>`
-          : '<span class="badge" style="background:#eef1ea;color:#5c5c5c">no recipe</span>'}</td></tr>`; }).join('')
-    || `<tr><td colspan="${10+wk.length*2}" class="empty">${_wdtOnlyOwed?'Nothing outstanding in this window — every target has been made.':'No demand or production in this window.'}</td></tr>`;
+          : '<span class="badge" style="background:#eef1ea;color:#5c5c5c">no recipe</span>'}</td></tr>`; };
+
+  const _wspan=11+wk.length*2;
+  const _wso=r=>{ const v=+(r&&r.sort_order); return (isFinite(v)&&v>0)?v:999999; };
+  const _wmin=list=>Math.min.apply(null, list.map(_wso));
+  const _wowed=list=>list.reduce((a,r)=>a+(+r.still||0),0);
+  const _g1s={};
+  rows.forEach(r=>{ const k=r.g1||'Products'; (_g1s[k]=_g1s[k]||[]).push(r); });
+  h+= (rows.length ? Object.keys(_g1s)
+        .sort((a,b)=>_wmin(_g1s[a])-_wmin(_g1s[b])||String(a).localeCompare(b))
+        .map(g1=>{
+    const G=_g1s[g1];
+    let out=`<tr class="grp grp1"><td colspan="${_wspan}" style="background:#e7f0e9;color:#2f5d33;font-weight:700;padding:6px 8px">${esc(g1)}
+      <span style="opacity:.55;font-weight:400">· ${G.length} · ${_wowed(G)} pack(s) still owed</span></td></tr>`;
+    const _g2s={};
+    G.forEach(r=>{ const k=r.g2||'Other'; (_g2s[k]=_g2s[k]||[]).push(r); });
+    out+=Object.keys(_g2s)
+      .sort((a,b)=>_wmin(_g2s[a])-_wmin(_g2s[b])||String(a).localeCompare(b))
+      .map(g2=>{
+        const S2=_g2s[g2];
+        return `<tr class="grp"><td colspan="${_wspan}" style="background:#f6f8f4;color:#4e7a3e;font-weight:600;padding:4px 8px 4px 22px">▸ <b>${esc(g2)}</b>
+          <span style="opacity:.6;font-weight:400">· ${S2.length} · ${_wowed(S2)} owed</span></td></tr>`
+          + S2.map(_wrow).join('');
+      }).join('');
+    return out;
+  }).join('')
+    : `<tr><td colspan="${_wspan}" class="empty">${_wdtOnlyOwed?'Nothing outstanding in this window — every target has been made.':'No demand or production in this window.'}</td></tr>`);
 
   h+=`</tbody></table></div>
     <div class="pager">${rows.length} product(s)${hidden>0?' · '+hidden+' fully-made hidden':''} · ${esc(S.start)} → ${esc(S.asOf)}
@@ -6582,8 +6676,8 @@ async function wdtMatrixLoad(plots, pBy, stock){
     const still=cells.reduce((a,c)=>a+c.still,0);
     const superseded=cells.reduce((a,c)=>a+(c.superseded||0),0);
     const firstOwed=cells.findIndex(c=>c.still>0);
-    return {sku, name:prodLabel(p,{noSku:true}), g1:p.group_1||'Products',
-            g2:p.group_2||p.family||'Other',
+    return {sku, name:prodLabel(p,{noSku:true}), g1:prodG1(p),
+            g2:prodG2(p),
             cells, still, superseded, spare:pool, oh:+stock[sku]||0,
             firstOwed:firstOwed<0?99:firstOwed,
             isCustom:/^CUST-/.test(sku)};
@@ -6763,7 +6857,7 @@ async function wdtLoad(){
     // the freezer against an outstanding order; that is what leads the list.
     const cover=remaining>0?(oh/remaining):99;
     return {sku, name:prodLabel(p,{noSku:true}), label:prodLabel(p),
-            g1:p.group_1||'Products', g2:p.group_2||p.family||'Other',
+            g1:prodG1(p), g2:prodG2(p),
             target, done, remaining, oh, cover,
             unplanned:!(+dem[sku]>0) && done>0,
             isCustom:/^CUST-/.test(sku), src:(src[sku]||[]).join(', ')};
@@ -8567,7 +8661,7 @@ async function renderMRP(){
       +'. They arrive when a supplier has the material and the whole delivery is produced, so a demand figure for them is a wish, not a plan. '
       +'They still appear in the <b>Weekly Demand Target</b> and in <b>Production</b>, which is where "make all of it" is decided.</td></tr>');
   }
-  hierGroups(catalogue,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+  hierGroups(pgRows(catalogue),{g1:'_g1',g2:'_g2'}).forEach(G=>{
     dh+=`<tr style="background:#e7f0e9"><td colspan="3"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
     G.subs.forEach(S=>{ dh+=`<tr style="background:#f6f8f4"><td colspan="3" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(_demRow).join(''); });
   });
@@ -9091,12 +9185,12 @@ async function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.
   let coCust={}; try{ (await db.list('custom_orders',{})).forEach(o=>{ coCust[o.order_ref]=o.customer_name||o.order_ref; }); }catch(e){}
   const demItems=demKeys.map(k=>{ const pr=pm[k]||{};
     return {sku:k, qty:+dem[k]||0, name:pr.name||k, variant:pr.variant||'',
-            group_1:pr.group_1||'Other', group_2:pr.group_2||pr.family||'Other', sort_order:pr.sort_order,
+            group_1:prodG1(pr), group_2:prodG2(pr), sort_order:pr.sort_order,
             cust:(pr.is_custom||/^CUST-/.test(k))?(coCust[coOwner[k]]||'Custom order'):''};});
   window._viewPlanDem=demItems;
   const totPacks=demItems.reduce((a,x)=>a+x.qty,0);
   let demRows='';
-  hierGroups(demItems,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+  hierGroups(pgRows(demItems),{g1:'_g1',g2:'_g2'}).forEach(G=>{
     demRows+=`<tr style="background:#e7f0e9"><td colspan="3"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.reduce((a,x)=>a+x.qty,0)} packs</span></td></tr>`;
     G.subs.forEach(S=>{
       demRows+=`<tr style="background:#f6f8f4"><td colspan="3" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
@@ -9126,7 +9220,7 @@ function demandPlotHtml(date, ref, d){
   const items=(window._viewPlanDem||[]).length?window._viewPlanDem
     :demKeys.map(k=>({sku:k,qty:+dem[k]||0,name:k,variant:'',group_1:'Other',group_2:'Other',cust:''}));
   let demRows='';
-  hierGroups(items,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+  hierGroups(pgRows(items),{g1:'_g1',g2:'_g2'}).forEach(G=>{
     demRows+=`<tr><td colspan="3" style="background:#e7f0e9;font-weight:700">${esc(G.g1)} — ${G.all.reduce((a,x)=>a+x.qty,0)} packs</td></tr>`;
     G.subs.forEach(S=>{
       demRows+=`<tr><td colspan="3" style="background:#f4f7f2;padding-left:18px">▸ ${esc(S.g2)}</td></tr>`;
@@ -13338,7 +13432,7 @@ async function prodPackAddLabel(){
   const sups=(window._prodAllIngredients||[]).filter(_isLabelSupply);
   window._plSel={}; window._plQ='';
   window._plRows=prods.map(p=>({sku:p.sku, name:(p.variant||p.name), kind:'product', unit:'pcs',
-      oh:+p['sticker_'+loc+'_on_hand']||0, g1:p.group_1||'Other', g2:p.group_2||p.family||'Other', sort_order:p.sort_order}))
+      oh:+p['sticker_'+loc+'_on_hand']||0, g1:prodG1(p), g2:prodG2(p), sort_order:p.sort_order}))
     .concat(sups.map(i=>({sku:i.sku, name:i.name, kind:'supply', unit:i.uom||'pcs',
       oh:+(window._prodSupOh||{})[i.sku]||0, g1:'Shared labels', g2:'', sort_order:9e8})));
   $('modal').innerHTML=`<div><h3>＋ Labels used on this run</h3>
@@ -13508,7 +13602,7 @@ function prodKitchenCart(){
   const prods=(window._prodAllProducts||[]); if(!prods.length){ toast('No products loaded',true); return; }
   window._kcQty={}; prodPlanLines.forEach(l=>{ window._kcQty[l.product_sku]=+l.good_packs||0; });   // start from the saved plan
   window._kcQ=''; window._kcG='';
-  const groups=[...new Set(prods.map(p=>p.group_1||'—'))].sort();
+  const groups=[...new Set(prods.map(p=>prodG1(p)))].sort();   // the group it is SHOWN under, or the filter hides rows that are on screen
   $('modal').innerHTML=`<div><h3>🔎 Search &amp; add products</h3>
     <p class="mini">Search or filter, then enter <b>packs to produce</b> per product. It starts from the current plan; Apply rebuilds it. Target &amp; remaining come from the demand plot for this production week.<br>
       <b>Current stock</b> is what <span style="color:#2f5d33">${esc(locName(planSellLoc()))}</span> can sell + what is sitting <span style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</span> — two places, two numbers. <b>Cover</b> is days on the shelf, then the share of New Par + safety we hold everywhere. A high % beside a low day count means the packs exist and are at the wrong site.</p>
@@ -13525,8 +13619,8 @@ function prodKitchenCart(){
 }
 function drawKitchenCartBody(){
   const prods=(window._prodAllProducts||[]); const q=(window._kcQ||'').toLowerCase().split(/\s+/).filter(Boolean); const gf=window._kcG||'';
-  const match=p=>{ if(gf && (p.group_1||'—')!==gf) return false; if(!q.length) return true;
-    const t=[p.name,p.sku,p.group_1,p.group_2,p.variant,p.family].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
+  const match=p=>{ if(gf && prodG1(p)!==gf) return false; if(!q.length) return true;
+    const t=[p.name,p.sku,prodG1(p),prodG2(p),p.group_1,p.group_2,p.variant,p.family].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
   /* Grouped and headed exactly as Live Stock heads it — same helper, so the
      two lists cannot disagree about which shelf a pack lives on. */
   const shown=prods.filter(match).map(p=>{ const G=prodGroup(p); return {...p, _g1:G.g1, _g2:G.g2}; });
@@ -14207,7 +14301,7 @@ async function prodKitchenSheet(){
     const _c=custOf[l.product_sku];
     return {sku:l.product_sku, packs, packG, perPack,
       customer:(_c&&_c.name)||'', orderRef:(_c&&_c.ref)||'', seq:(_c&&_c.seq!=null)?_c.seq:9e9,
-      fmt:p.group_1||'', mixCat:p.group_2||'',
+      fmt:prodG1(p), mixCat:prodG2(p),
       name:prodLabel({...p, sku:l.product_sku, name:(p.name||l.name||l.product_sku)},{noSku:true}),
       animal:p.animal||'Dog', ings:bom};
   });
@@ -17461,7 +17555,7 @@ async function countLoad(){
         _shopMeta.matched++; srcTag='shopify';
       } else { _shopMeta.fellBack++; srcTag='erp-fallback'; }
     }
-    lines.push({ref_sku:p.sku,name:prodLabel(p,{noSku:true}),book_qty:bq,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order,
+    lines.push({ref_sku:p.sku,name:prodLabel(p,{noSku:true}),book_qty:bq,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),g1:prodG1(p),g2:prodG2(p),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order,
       bookSrc:srcTag, erpQty:erpQ,
       shopRaw:(_shopBook&&_shopBook.phys[p.sku]!=null)?(+_shopBook.phys[p.sku]||0):null,
       shopSince:(_shopBook&&_shopBook.after[p.sku])||0});
@@ -17484,7 +17578,7 @@ async function countLoad(){
        "20-Piece Meatball Packs — Sticker" seven times on a count sheet is seven
        rolls nobody can tell apart, and a label counted against the wrong variant
        is a label ordered for the wrong variant. */
-    lines.push({ref_sku:'STK-'+p.sku,name:prodLabel(p,{noSku:true})+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',catrank:_grank(p.family)+0.5,g1:(p.group_1||'Products')+' — Stickers',g2:(p.group_2||p.family||'Other'),grank:600000+_so(p),uom:'pcs',scale:1,sort_order:p.sort_order}); });
+    lines.push({ref_sku:'STK-'+p.sku,name:prodLabel(p,{noSku:true})+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',catrank:_grank(p.family)+0.5,g1:prodG1(p)+' — Stickers',g2:prodG2(p),grank:600000+_so(p),uom:'pcs',scale:1,sort_order:p.sort_order}); });
   countLines=lines;
   await loadBins();
   const _sm=window._countShopMeta;
@@ -17908,7 +18002,7 @@ async function recipeCostHtml(){
   let h=`<div class="repcard"><h3 style="margin:0 0 8px">Recipe cost per product</h3><table><thead><tr><th>Product</th><th class="num">Pack (g)</th><th class="num">Ingredient cost/pack</th><th class="num">Sell</th><th class="num">Margin</th></tr></thead><tbody>`;
   const rcRow=p=>{ const c=cost(p), sell=+p.sell_price||0, mg=sell?((sell-c)/sell*100):0;
     return `<tr><td>${prodLabelHtml(p,{noSku:true})}</td><td class="num">${p.pack_g}</td><td class="num">${fmt(c)}</td><td class="num">${fmt(sell)}</td><td class="num" style="color:${mg<0?'var(--danger)':'var(--ok)'}">${sell?mg.toFixed(0)+'%':'—'}</td></tr>`; };
-  hierGroups(prods,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+  hierGroups(pgRows(prods),{g1:'_g1',g2:'_g2'}).forEach(G=>{
     h+=`<tr style="background:#e7f0e9"><td colspan="5"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
     G.subs.forEach(S=>{ h+=`<tr style="background:#f6f8f4"><td colspan="5" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(rcRow).join(''); });
   });
@@ -18055,7 +18149,7 @@ async function renderMargin(){
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="saveCostModel()">💾 Save cost model</button><button class="btn sec" onclick="cmReset()">↺ Reset to file defaults</button></div></div>`;
 
   const rows=marginRowsFor(prods,boms,ings,_led);
-  rows.forEach(r=>{ r.group_1=r.p.group_1||'Products'; r.group_2=r.p.group_2||r.p.family||'Other'; r.sort_order=r.p.sort_order; r.name=r.p.name; r.variant=r.p.variant; });
+  rows.forEach(r=>{ r.group_1=prodG1(r.p); r.group_2=prodG2(r.p); r.sort_order=r.p.sort_order; r.name=r.p.name; r.variant=r.p.variant; });
   const flagsOf=p=>[p.cost_debone?'<span title="with deboning" style="color:var(--earth,#b5762a)">D</span>':'',p.cost_butcher?'<span title="butcher charge" style="color:var(--earth,#b5762a)">B</span>':'',p.cost_sousvide?'<span title="sous-vide" style="color:var(--berry)">S</span>':'',p.cost_ecobag?'<span title="ecobag">E</span>':'',p.cost_thermal?'<span title="thermal pouch">T</span>':''].filter(Boolean).join(' ')||'<span class="mini">—</span>';
   const mRow=r=>{ const below=r.gp<tgm; const col=r.gp<0?'var(--danger)':(below?'var(--earth,#b5762a)':'var(--ok)');
     return `<tr style="cursor:pointer" onclick="gotoRecord('products','${esc(String(r.p.sku)).replace(/'/g,'&#39;')}')" title="Open product">
@@ -18068,7 +18162,7 @@ async function renderMargin(){
   h+=`<div class="repcard" style="margin-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><h3 style="margin:0">Product gross margin</h3><button class="btn sec sm" onclick="marginWriteCogs()">⬆ Write total cost to products (COGS ref)</button></div>
     <div class="hint" style="margin:6px 0 8px">Grouped Group › Subgroup › Item. Tap a row to open the product and set its cost profile. Flags: <b>D</b> debone · <b>B</b> butcher · <b>S</b> sous-vide · <b>E</b> ecobag · <b>T</b> thermal. <b style="color:var(--earth,#b5762a)">TO ADJUST</b> = below target GM.</div>
     <div style="overflow-x:auto"><table><thead><tr><th>Product</th><th>Profile</th><th class="num">g</th><th class="num">Raw</th><th class="num">Process</th><th class="num">Packaging</th><th class="num">Fees</th><th class="num">Total</th><th class="num">Sell</th><th class="num">GP%</th><th class="num">Suggested @ ${(tgm*100).toFixed(0)}%</th><th>Status</th></tr></thead><tbody>`;
-  hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+  hierGroups(pgRows(rows),{g1:'_g1',g2:'_g2'}).forEach(G=>{
     const priced=G.all.filter(r=>r.sell); const gAvg=priced.length?priced.reduce((s,r)=>s+r.gp,0)/priced.length:null;
     h+=`<tr style="background:#e7f0e9"><td colspan="9"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length} item(s)</span></td><td class="num"${gAvg!=null?` style="color:${gAvg<tgm?'var(--earth,#b5762a)':'var(--ok)'}"`:''}>${gAvg!=null?'<b>'+(gAvg*100).toFixed(1)+'%</b>':''}</td><td colspan="2"></td></tr>`;
     G.subs.forEach(S=>{
@@ -18222,7 +18316,7 @@ async function renderMomentum(){
   const rows = mom.map(r=>{ const sku=r.sku; const p=pm[sku]||{}; const stk=stock[sku]!=null?stock[sku]:( +p.on_hand||0 );
     const met=momMetrics(r, stk); const q=momQuad(met.mom, met.cover, met.hasSales); const mth=momMonthly(r);
     return { sku, product:(p.name||r.product||sku), family:(p.family||'(no family)'),
-      group_1:(p.group_1||'Products'), group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order, matchedProd:!!p.sku,
+      group_1:prodG1(p), group_2:prodG2(p), sort_order:p.sort_order, matchedProd:!!p.sku,
       u30:+r.u30||0,u60:+r.u60||0,u90:+r.u90||0,u120:+r.u120||0, ...mth, stock:stk, matched:stock[sku]!=null||p.sku!=null, ...met, q };
   });
   const active = rows.filter(r=>r.hasSales);
@@ -18464,7 +18558,7 @@ async function lowStockHtml(){
   const ings=await db.list('ingredients',{}), prods=await db.list('products',{});
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ const k=(s.kind||'')+':'+s.ref_sku; stock[k]=(stock[k]||0)+(+s.on_hand||0); }); }catch(e){} }
   const ig=ings.map(i=>{ const oh=stock['ingredient:'+i.sku]||0; const thr=+i.reorder_g||+i.par_g||0; const sup=isSupplyItem(i); return {name:i.name,sku:i.sku,oh,thr,short:thr-oh,unit:sup?(i.uom||'units'):'g'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
-  const pg=prods.map(p=>{ const oh=stock['product:'+p.sku]||0; const thr=+p.par_packs||0; return {name:p.name,variant:p.variant,sku:p.sku,oh,thr,short:thr-oh,unit:'packs',group_1:p.group_1||'Products',group_2:p.group_2||p.family||'Other',sort_order:p.sort_order}; }).filter(r=>r.thr>0&&r.oh<r.thr);
+  const pg=prods.map(p=>{ const oh=stock['product:'+p.sku]||0; const thr=+p.par_packs||0; return {name:p.name,variant:p.variant,sku:p.sku,oh,thr,short:thr-oh,unit:'packs',group_1:prodG1(p),group_2:prodG2(p),sort_order:p.sort_order}; }).filter(r=>r.thr>0&&r.oh<r.thr);
   const lrow=(r,model)=>`<tr style="cursor:pointer" onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open record"><td>${esc(r.name)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(Math.round(r.oh))}</td><td class="num">${num(r.thr)}</td><td class="num"><b style="color:var(--danger)">${num(Math.round(r.short))} ${r.unit}</b></td></tr>`;
   const tbl=(title,rows,model)=>`<div class="repcard" style="margin-bottom:14px"><h3 style="margin:0 0 8px">${title}</h3>
     <table><thead><tr><th>Item</th><th>SKU</th><th class="num">On hand</th><th class="num">Threshold</th><th class="num">Short by</th></tr></thead>
@@ -18868,9 +18962,9 @@ async function _openingSections(uploaded, loc){
     book:_bookIng(i), cost:_costIng(i), g1:'Kitchen Supplies',g2:(i.category||'Supplies'),grank:_grank(i.category||'Supplies')*1000+_so(i),form:'supply'}));
   const prodLines=[],stkLines=[]; prods.slice().sort(cmpItems).forEach(p=>{
     prodLines.push({sku:p.sku,name:prodLabel(p,{noSku:true}),type:'product',unit:'packs',location:loc,qty:q(p.sku),
-      book:_bookProd(p.sku), cost:(+p.tot_cost_ref||0), g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),form:''});
+      book:_bookProd(p.sku), cost:(+p.tot_cost_ref||0), g1:prodG1(p),g2:prodG2(p),grank:_so(p),form:''});
     stkLines.push({sku:'STK-'+p.sku,name:prodLabel(p,{noSku:true})+' — Sticker',type:'sticker',unit:'pcs',location:loc,qty:q('STK-'+p.sku),
-      book:(+p['sticker_'+loc+'_on_hand']||0), cost:0, g1:(p.group_1||'Products'),g2:(p.group_2||p.family||'Other'),grank:_so(p),form:''}); });
+      book:(+p['sticker_'+loc+'_on_hand']||0), cost:0, g1:prodG1(p),g2:prodG2(p),grank:_so(p),form:''}); });
   return {ingredients:ingLines, products:prodLines, supplies:supLines, stickers:stkLines};
 }
 const _OPHDR=['sku','name','type','unit','location','qty','on hand now','cost/unit'];
@@ -19350,7 +19444,7 @@ async function renderStickerReorder(){
     const packs=madeHere?(+planned[p.sku]||0):0;
     const inc=+onOrder[p.sku]||0;                 // already coming, do not buy twice
     return _mk({sku:p.sku, name:p.name||p.sku, variant:p.variant||'',
-      group_1:p.group_1||'Other', group_2:p.group_2||p.family||'Other', note:'',
+      group_1:prodG1(p), group_2:prodG2(p), note:'',
       sort_order:p.sort_order, oh, par, packs, inc, incRefs:(onOrderRefs[p.sku]||[]),
       forProd:Math.max(0,packs-oh-inc), forPar:Math.max(0,par-oh-inc),
       perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0, supplier:(p.sticker_supplier||'').trim(),
@@ -19722,7 +19816,7 @@ function _stkRowsFrom(lines, prods, ings){
     return { sku:l.ingredient_sku,
       name:(p.name||String(ing.name||'').replace(/ — Sticker$/,'')||l.ingredient_sku),
       variant:(p.variant||''),
-      fam:(p.family||p.feeding_style||'Other'), group_1:(p.group_1||'Other'), group_2:(p.group_2||p.family||'Other'),
+      fam:(p.family||p.feeding_style||'Other'), group_1:prodG1(p), group_2:prodG2(p),
       net:(p.sticker_net||''), dim:(p.sticker_dimension||''), link:(p.sticker_art_url||''),
       par:(+p['sticker_'+(window._stkPoLoc||'bulacan')+'_par']||+p.sticker_bulacan_par||0),
       oh:(+p['sticker_'+(window._stkPoLoc||'bulacan')+'_on_hand']||+p.sticker_bulacan_on_hand||0),
@@ -19732,7 +19826,7 @@ function _stkRowsFrom(lines, prods, ings){
 function _stkTableHTML(rows){
   let n=0, totO=0, totR=0, linked=0;
   let h=`<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th><th class="num">PAR</th><th class="num">On hand</th><th class="num">Qty Ordered</th><th class="num">Sheets</th><th class="num">Qty Received</th></tr></thead><tbody>`;
-  hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+  hierGroups(pgRows(rows),{g1:'_g1',g2:'_g2'}).forEach(G=>{
     h+=`<tr style="background:#d7e7db"><td colspan="11"><b style="font-size:13.5px">${esc(G.g1)}</b></td></tr>`;
     G.subs.forEach(S=>{
       h+=`<tr style="background:#eef3ea"><td colspan="11" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
@@ -19756,7 +19850,7 @@ function _isStickerPO(rec){ return !!rec && /\[STICKERS\]/i.test(String(rec.po_r
 function _stkPrintLines(children, prods, ings){
   const rows=_stkRowsFrom(children, prods||{}, ings||{});
   let n=0, totO=0, totR=0, body='';
-  hierGroups(rows,{g1:'group_1',g2:'group_2'}).forEach(G=>{
+  hierGroups(pgRows(rows),{g1:'_g1',g2:'_g2'}).forEach(G=>{
     body+=`<tr class="grp"><td colspan="8"><b>${esc(G.g1)}</b></td></tr>`;
     G.subs.forEach(S=>{
       body+=`<tr class="cat"><td colspan="8">&nbsp;&nbsp;▸ <b>${esc(S.g2)}</b></td></tr>`;
@@ -20075,7 +20169,7 @@ async function trPick(kind){
   let rows=[];
   if(kind==='product'){
     let ps=[]; try{ ps=await db.list('products',{}); }catch(e){}
-    rows=ps.map(p=>({sku:p.sku,name:prodLabel(p,{noSku:true})||p.sku,cat:p.group_1||p.family||'Products',oh:+oh[p.sku]||0,div:1,unit:'packs'}));
+    rows=ps.map(p=>({sku:p.sku,name:prodLabel(p,{noSku:true})||p.sku,cat:prodG1(p),oh:+oh[p.sku]||0,div:1,unit:'packs'}));
   } else if(kind==='sticker'){
     /* A sticker is named by the PRODUCT it goes on, and its stock is counted on
        that product's row. Listing the sticker ingredients instead showed 22
@@ -20090,7 +20184,7 @@ async function trPick(kind){
     rows=ps.filter(p=>!isArchivedProd(p) && !(p.is_custom||/^CUST-/.test(p.sku)))
       .filter(p=>!isArchivedSticker(p) || (+oh[p.sku]||0)>0)
       .map(p=>({sku:p.sku,name:(prodLabel(p,{noSku:true})||p.sku)+' — label'+(isArchivedSticker(p)?' (retired)':''),
-                cat:isArchivedSticker(p)?'Retired labels':(p.group_1||p.family||'Labels'),
+                cat:isArchivedSticker(p)?'Retired labels':prodG1(p),
                 oh:+oh[p.sku]||0,div:1,unit:'pcs',led:'sticker'}));
     /* THE SHARED LABELS, from the ledger. They post as ordinary ingredient
        movements, not as a product-column adjustment, so each row carries the
