@@ -517,7 +517,7 @@
   <div class="crumb" id="crumb"></div>
   <div class="sp"></div>
   <span id="userBox" style="display:flex;align-items:center;gap:6px;font-size:12px"></span>
-  <span class="mode demo" id="modeTag">DEMO</span><span id="buildTag" class="buildtag"></span>
+  <span class="mode demo" id="modeTag">DEMO</span><span id="buildTag" class="buildtag"></span><span id="netTag" class="buildtag" style="cursor:pointer" onclick="showNetPanel()"></span>
   <button id="mbell" class="mbell" title="Mentions" onclick="openMentions()">🔔</button>
   <button class="guidebtn" onclick="openKB()">❔ <span class="bfull">Guide</span></button>
 </div>
@@ -918,6 +918,16 @@ let DEMO = window.__DEMO__ || {suppliers:[],ingredients:[],products:[],bom_lines
 const isLive = ()=> !!(SUPA && SUPA.url && SUPA.key);
 
 async function sb(path, opts={}){
+  if(_echoable(opts)){ const hit=_echoGet('sb:'+(SUPA.url||'')+'|'+path); if(hit) return await hit; }
+  if(_echoable(opts)) return await _echoPut('sb:'+(SUPA.url||'')+'|'+path, _sbRaw(path,opts));
+  return await _sbRaw(path,opts);
+}
+async function _sbRaw(path, opts={}){
+  /* A CATCH-ALL, because not every write goes through db.*. The opening-upload
+     replace deletes movements with a raw sb() call, and a cache that outlived
+     that would have shown the rows it had just removed. Anything that is not a
+     read invalidates, whichever door it came through. */
+  if(!_echoable(opts)) sbWrote(path, (opts||{}).method);
   const bearer = (SUPA.token||SUPA.key);   // signed-in user's token when available, else anon key
   const r = await fetch(SUPA.url.replace(/\/$/,'')+'/rest/v1/'+path, {
     ...opts, headers:{ apikey:SUPA.key, Authorization:'Bearer '+bearer,
@@ -925,7 +935,7 @@ async function sb(path, opts={}){
   if(!r.ok){ const t=await r.text();
     if(r.status===401 && REQUIRE_AUTH && SUPA && SUPA.token){ delete SUPA.token; delete SUPA.role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); updateMode(); showGate('Your session expired — please sign in again.'); }
     throw new Error(r.status+' '+t.slice(0,180)); }
-  const txt = await r.text(); return txt? JSON.parse(txt):[];
+  const txt = await r.text(); netNote(path, (txt||'').length); return txt? JSON.parse(txt):[];
 }
 /* ---- READING A TABLE THAT HAS OUTGROWN ONE PAGE -------------------------
    PostgREST caps a response at its configured maximum — 1000 rows on Supabase —
@@ -950,6 +960,11 @@ async function sb(path, opts={}){
    fix. */
 const SB_PAGE=1000, SB_MAX_PAGES=200;
 async function sbAll(path, opts={}){
+  if(_echoable(opts)){ const hit=_echoGet('all:'+(SUPA.url||'')+'|'+path); if(hit) return await hit; }
+  if(_echoable(opts)) return await _echoPut('all:'+(SUPA.url||'')+'|'+path, _sbAllRaw(path,opts));
+  return await _sbAllRaw(path,opts);
+}
+async function _sbAllRaw(path, opts={}){
   const sep = path.indexOf('?')>=0 ? '&' : '?';
   let out=[], from=0, pages=0, total=null;
   for(;;){
@@ -962,7 +977,7 @@ async function sbAll(path, opts={}){
       throw new Error(r.status+' '+t.slice(0,180)); }
     const cr=r.headers.get('content-range')||'';
     const m=/\/(\d+|\*)\s*$/.exec(cr); if(m && m[1]!=='*') total=+m[1];
-    const txt=await r.text(); const rows=txt?JSON.parse(txt):[];
+    const txt=await r.text(); netNote(path, (txt||'').length); const rows=txt?JSON.parse(txt):[];
     out=out.concat(rows);
     pages++;
     if(rows.length<SB_PAGE) break;
@@ -973,6 +988,361 @@ async function sbAll(path, opts={}){
   }
   out._total=total; out._pages=pages;
   return out;
+}
+
+/* ===================================================================
+   READING LESS — the egress work, 2026-09-07
+   ===================================================================
+
+   THE PROBLEM WAS NOT SIZE, IT WAS REPETITION AND GROWTH.
+
+   Thirteen screens each downloaded the WHOLE stock ledger, `select=*`, on
+   every single render. Nothing was cached, so opening the dashboard, then
+   Regular Packs, then the count sheet read the same 1,671 rows three times.
+   And `inventory_movements` is a perpetual ledger: it only ever grows. So the
+   cost of one click grew with the age of the business, for ever, whether or
+   not anybody used the app more.
+
+   Three changes, none of which may alter a single number on screen:
+
+   1. ONE READ PER SESSION instead of thirteen. Every analytic caller now
+      shares one array through ledgerAll().
+
+   2. THE CACHE PROVES ITSELF instead of expiring. A time-based cache would
+      have been a guess about staleness, and a guess is exactly what an
+      inventory system cannot afford. Instead the ledger is revalidated with a
+      ~120-byte probe that asks two questions: what is the highest id, and how
+      many rows are there. `id` is a bigserial, so an append always raises it —
+      even for a movement filed under a back-dated created_at, which is why the
+      probe cannot be a date. If BOTH answers match what we hold, the cached
+      array is provably identical to the table and is returned untouched. If
+      only the id moved, we fetch just `id=gt.<what we hold>`. If the count
+      fell, something was deleted and we re-read the lot. There is no window in
+      which this returns a stale ledger.
+
+   3. NINE COLUMNS, NOT FOURTEEN. Audited against every reader: id, created_by,
+      lot_no, source_table and source_ref are never consulted by any of them.
+      The Inventory Movements MODULE and the backup still read `select=*` and
+      are untouched, because those two do want the whole row.
+
+   DEMO MODE DELIBERATELY DOES NOT CACHE. Fixtures rewrite
+   DEMO.inventory_movements between assertions and expect the next render to
+   see it. Caching there would make the test suite lie.
+   =================================================================== */
+
+/* what this session has actually pulled — so the bill is never a surprise
+   arriving a day late on somebody else's dashboard */
+const WR_NET={ raw:0, calls:0, saved:0, hits:0, since:Date.now(), by:{} };
+/* Supabase bills the COMPRESSED bytes on the wire. Measured over this app's
+   own payloads the JSON gzips about 12.8×; 10 is used here so the figure shown
+   errs high rather than flattering us. */
+const WR_GZ=10;
+function netNote(path, bytes){
+  WR_NET.raw+=bytes; WR_NET.calls++;
+  const k=String(path).split('?')[0];
+  WR_NET.by[k]=(WR_NET.by[k]||0)+bytes;
+}
+function netHit(path, bytesSaved){ WR_NET.hits++; WR_NET.saved+=bytesSaved||0; }
+function netFmt(b){ return b>=1048576 ? (b/1048576).toFixed(2)+' MB' : (b/1024).toFixed(0)+' KB'; }
+
+/* THE BILL, WHERE THE WORK HAPPENS. The Supabase dashboard reports egress a
+   day late, by which time nobody can say which screen did it. This counts the
+   same bytes as they leave, so a screen that suddenly costs ten times what it
+   used to is visible the moment somebody opens it — not at the end of the
+   month. */
+function netTick(){
+  const t=$('netTag'); if(!t) return;
+  if(!isLive()){ t.textContent=''; t.title=''; return; }
+  const wire=WR_NET.raw/WR_GZ;
+  t.textContent='↓ '+netFmt(wire);
+  t.title='About '+netFmt(wire)+' pulled from Supabase since this page was opened'
+    +' ('+netFmt(WR_NET.raw)+' of JSON, which gzips roughly '+WR_GZ+'× on the wire).'
+    +'\n'+WR_NET.calls+' request(s); '+WR_NET.hits+' read(s) served from cache, saving about '
+    +netFmt(WR_NET.saved/WR_GZ)+'.\nClick for the breakdown.';
+}
+async function ledgerReread(){
+  ledgerBust(); echoBust(); stockPicInvalidate();
+  try{ const r=await ledgerAll(); toast('Ledger re-read — '+r.length.toLocaleString('en-PH')+' movement(s)'); }
+  catch(e){ toast('Could not re-read the ledger: '+e.message, true); }
+  closeModal(); route();
+}
+function showNetPanel(){
+  const rows=Object.entries(WR_NET.by).sort((a,b)=>b[1]-a[1]);
+  const mins=Math.max(1,Math.round((Date.now()-WR_NET.since)/60000));
+  const wire=WR_NET.raw/WR_GZ;
+  $('modal').innerHTML=`<div style="min-width:340px;max-width:720px"><h3>📶 Data pulled from Supabase</h3>
+    <div class="hint" style="margin:0 0 10px">Counted as it arrives, in this tab, since the page was opened
+      <b>${mins} minute(s)</b> ago. Supabase bills the <b>compressed</b> bytes; the figures below divide the
+      JSON by ${WR_GZ}, which is a little pessimistic — measured on this app's own payloads it compresses about 12.8×.</div>
+    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:12px">
+      <div><div class="mini" style="color:var(--muted)">Pulled (est. on the wire)</div><div style="font-size:22px;font-weight:700">${netFmt(wire)}</div></div>
+      <div><div class="mini" style="color:var(--muted)">Requests</div><div style="font-size:22px;font-weight:700">${WR_NET.calls}</div></div>
+      <div><div class="mini" style="color:var(--muted)">Served from cache</div><div style="font-size:22px;font-weight:700">${WR_NET.hits}</div></div>
+      <div><div class="mini" style="color:var(--muted)">Not pulled again</div><div style="font-size:22px;font-weight:700;color:#2f5d33">${netFmt(WR_NET.saved/WR_GZ)}</div></div>
+    </div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Table</th><th class="num">JSON</th><th class="num">Est. on the wire</th></tr></thead><tbody>
+    ${rows.map(([k,v])=>`<tr><td><code>${esc(k)}</code></td><td class="num">${netFmt(v)}</td><td class="num">${netFmt(v/WR_GZ)}</td></tr>`).join('')
+      ||'<tr><td colspan="3" class="empty">Nothing pulled yet.</td></tr>'}
+    </tbody></table></div>
+    <div class="hint" style="margin-top:10px">The free plan allows <b>5 GB a month</b>. If one table dominates this list on a
+      screen you open often, that is the one worth narrowing — not the app as a whole.</div>
+    <div class="hint" style="margin-top:8px">The stock ledger is kept in this browser between visits and checked against the
+      database on every screen, so only movements posted since your last visit are fetched. If somebody has edited a movement
+      <b>row in place</b> in the SQL editor — the one change that check cannot see, because neither the row count nor the
+      highest id moves — read it again from scratch here.</div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn sec" onclick="ledgerReread()">↻ Re-read the ledger from scratch</button>
+      <div class="sp"></div><button class="btn" onclick="closeModal()">Close</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
+}
+
+/* ---- the ledger, read once ---------------------------------------------- */
+/* Every column any reader actually consults. Audited reader by reader; adding
+   a reader that needs another column means adding it HERE, or it will read
+   undefined and be quietly wrong. */
+const LED_COLS='created_at,kind,ref_sku,location_code,qty,unit_cost,movement_type,expiry_date,note';
+let _LED=null;   // {rows, maxId, count}
+
+/* ---- and it survives the reload ----------------------------------------
+   Caching for the life of a tab turned thirteen pulls into one. This turns
+   one-per-tab into one-per-BROWSER, and that is the part that answers "will it
+   catch up some day". A perpetual ledger only grows, so a full pull gets more
+   expensive every week whether or not anybody uses the app more. Kept across
+   reloads, the daily cost stops being "the whole ledger" and becomes "the
+   movements posted since you last had this open" — a few kilobytes, and it
+   stays a few kilobytes when the ledger is fifty thousand rows.
+
+   Nothing about correctness changes: what comes back out is put through the
+   exact same probe as the in-memory cache, so it is either proven identical to
+   the table, topped up, or thrown away and re-read. The key carries the column
+   list, so changing what we select retires every stored copy automatically.
+
+   If it will not fit, or storage is unavailable (private window, quota, an
+   admin policy), the app quietly falls back to one pull per session — which is
+   what it did before, so the worst case is no worse than today. */
+const LED_KEY='wr_led_v2';
+const LED_CAP=4194304;              // 4 MB of the 5–10 MB localStorage allows
+
+/* STORED COLUMN BY COLUMN, NOT ROW BY ROW. A ledger row as JSON repeats all
+   ten field names on every line and writes 'batch_output' out in full forty
+   thousand times: 240 bytes a row, which fills a browser's storage at about
+   nine thousand movements — roughly seven months of trading, after which the
+   app would quietly fall back to re-reading the whole ledger every session and
+   the problem would come back without anybody noticing.
+
+   Held as one array per column, with the repeating strings replaced by an
+   index into a list of the distinct values, the same row costs 44 bytes. That
+   is around 95,000 movements inside 4 MB — five years at the rate this ledger
+   grows. It is a storage format and nothing else: unpacking returns exactly
+   the rows that went in, which _b99 checks. */
+const LED_COL_LIST=(LED_COLS+',id').split(',');
+const LED_DICT=['created_at','kind','ref_sku','location_code','movement_type','expiry_date','note'];
+function _ledPack(rows){
+  const cols={}, dict={}, idx={};
+  LED_COL_LIST.forEach(c=>cols[c]=[]);
+  LED_DICT.forEach(c=>{ dict[c]=[]; idx[c]=new Map(); });
+  for(const r of rows) for(const c of LED_COL_LIST){
+    const v=r[c];
+    if(idx[c]){
+      if(v==null){ cols[c].push(-1); continue; }
+      const k=String(v); let i=idx[c].get(k);
+      if(i===undefined){ i=dict[c].push(k)-1; idx[c].set(k,i); }
+      cols[c].push(i);
+    } else cols[c].push(v==null?null:v);
+  }
+  return JSON.stringify({ v:2, cols:LED_COLS, url:SUPA.url||'', n:rows.length, c:cols, d:dict });
+}
+function _ledUnpack(j){
+  const o=JSON.parse(j);
+  if(!o || o.v!==2 || o.cols!==LED_COLS || o.url!==(SUPA.url||'')) return null;
+  const out=new Array(o.n);
+  for(let i=0;i<o.n;i++){
+    const r={};
+    for(const c of LED_COL_LIST){
+      const v=o.c[c][i];
+      r[c] = o.d[c] ? (v<0?null:o.d[c][v]) : (v===undefined?null:v);
+    }
+    out[i]=r;
+  }
+  return out;
+}
+function ledgerBust(){ _LED=null; try{ localStorage.removeItem(LED_KEY); }catch(e){} }
+function _ledSave(){
+  if(!_LED) return;
+  try{
+    const j=_ledPack(_LED.rows);
+    /* Too big to keep is not an error — the app simply goes back to one read
+       per session, which is what it did before any of this. */
+    if(j.length>LED_CAP){ localStorage.removeItem(LED_KEY); return; }
+    localStorage.setItem(LED_KEY, j);
+  }catch(e){ try{ localStorage.removeItem(LED_KEY); }catch(_){} }
+}
+function _ledLoad(){
+  try{
+    const j=localStorage.getItem(LED_KEY); if(!j) return null;
+    const rows=_ledUnpack(j); if(!rows) return null;
+    return { rows, maxId:rows.reduce((n,r)=>Math.max(n,+r.id||0),0), count:rows.length };
+  }catch(e){ return null; }
+}
+
+/* THE ~120-BYTE QUESTION: what is the highest id, and how many rows are
+   there. `Range: 0-0` with `Prefer: count=exact` returns one id in the body
+   and the exact total in the content-range header, so both answers cost one
+   request and almost no bytes. */
+async function _ledProbe(){
+  const r=await fetch(SUPA.url.replace(/\/$/,'')+'/rest/v1/inventory_movements'
+    +'?select=id&order=id.desc&limit=1',
+    { headers:{ apikey:SUPA.key, Authorization:'Bearer '+(SUPA.token||SUPA.key),
+                'Content-Type':'application/json', Prefer:'count=exact', Range:'0-0' } });
+  if(!r.ok) throw new Error('probe '+r.status);
+  const cr=r.headers.get('content-range')||'';
+  const m=/\/(\d+|\*)\s*$/.exec(cr);
+  const txt=await r.text(); netNote('inventory_movements/probe', (txt||'').length+(cr.length||0));
+  const rows=txt?JSON.parse(txt):[];
+  return { maxId:(rows[0]&&+rows[0].id)||0, count:(m&&m[1]!=='*')?+m[1]:null };
+}
+
+/* A CACHE MUST NEVER HAND OUT ITS OWN ARRAY. Callers sort in place, splice,
+   and set fields on rows — all harmless today because every caller gets a
+   fresh fetch, and all of which would corrupt the next caller's answer if they
+   shared one array. Every read gets its own array of its own row objects.
+   Ledger rows are flat database columns, so a shallow copy is a complete one. */
+function _ledOut(){ return (_LED&&_LED.rows||[]).map(r=>({...r})); }
+
+async function ledgerAll(){
+  /* DEMO is the fixtures' own array and must stay live — see the note above. */
+  /* .slice() because db.list's DEMO branch hands back `[...(DEMO[T]||[])]`,
+     and a caller that sorts its result in place must not reorder the fixture
+     the next assertion reads. Same array contents, same protection. */
+  if(!isLive()) return (DEMO.inventory_movements||[]).slice();
+  const rel='inventory_movements?select='+LED_COLS+',id';
+  if(!_LED) _LED=_ledLoad();          // whatever this browser already holds
+  if(!_LED){
+    const rows=await sbAll(rel);
+    _LED={ rows, maxId:rows.reduce((n,r)=>Math.max(n,+r.id||0),0), count:rows.length };
+    _ledSave();
+    return _ledOut();
+  }
+  /* IF THE PROBE CANNOT BE TRUSTED, DO NOT TRUST THE CACHE. It is read again
+     from the table — once, not by calling back into this function, which with
+     a stored copy to reload would have been a loop with no bottom. */
+  let p=null;
+  try{ p=await _ledProbe(); }catch(e){ p=null; }
+  if(p===null){
+    ledgerBust();
+    const rows=await sbAll(rel);
+    _LED={ rows, maxId:rows.reduce((n,r)=>Math.max(n,+r.id||0),0), count:rows.length };
+    _ledSave();
+    return _ledOut();
+  }
+  /* provably identical: nothing appended AND nothing removed */
+  if(p.count!=null && p.count===_LED.count && p.maxId===_LED.maxId){
+    netHit('inventory_movements', JSON.stringify(_LED.rows).length);
+    return _ledOut();
+  }
+  /* appended only: the count rose by exactly what the ids say is new */
+  if(p.maxId>_LED.maxId && (p.count==null || p.count>=_LED.count)){
+    const add=await sbAll(rel+'&id=gt.'+_LED.maxId);
+    const rows=_LED.rows.concat(add);
+    if(p.count==null || rows.length===p.count){
+      _LED={ rows, maxId:rows.reduce((n,r)=>Math.max(n,+r.id||0),_LED.maxId), count:rows.length };
+      _ledSave();
+      return _ledOut();
+    }
+  }
+  /* anything else — a delete, a restore, a row edited in the SQL editor —
+     is not something a top-up can express. Read it again. */
+  _LED=null;
+  const rows=await sbAll(rel);
+  _LED={ rows, maxId:rows.reduce((n,r)=>Math.max(n,+r.id||0),0), count:rows.length };
+  _ledSave();
+  return _ledOut();
+}
+
+/* ---- master data, read once a minute ------------------------------------ */
+/* products / ingredients / bom_lines are pulled by nearly every screen and
+   change a few times a week. They are not append-only, so there is no cheap
+   proof like the ledger's; a short window plus write-invalidation is the
+   honest trade. Every write through db goes past mastersBust(), so your own
+   edits are never stale — the window only ever applies to somebody ELSE's
+   edit, and 60s matches the stock picture's existing one. */
+
+/* ---- the same question, asked eight times in one render ------------------
+   Opening the dashboard pulled `production_batches` EIGHT times and
+   `sales_momentum` five, because eight independent helpers each wanted it and
+   none of them knew about the others. That is not staleness, it is an echo.
+
+   Two things happen here, and only for reads:
+
+     · an identical request already IN FLIGHT returns the same promise. Two
+       callers asking the same question at the same moment get one answer and
+       one request. There is no staleness in this at all — it is the same
+       response, handed to both.
+
+     · an identical request that finished less than SB_ECHO ms ago is answered
+       from what came back. Three seconds is shorter than a render pass and
+       far shorter than a person, so nothing that could have changed in the
+       window is anything a caller could have acted on. Any write clears it
+       outright, so your own change is never behind the echo.
+
+   This is deliberately NOT the ledger's cache. The ledger has its own, which
+   proves itself against the table on every read rather than trusting a clock.
+   This one is only here to stop the app asking the same question twice in the
+   same breath. */
+const SB_ECHO=3000;
+const _ECHO=new Map();      // path -> {at, rows, inflight}
+function echoBust(){ _ECHO.clear(); }
+function _echoGet(path){
+  const e=_ECHO.get(path); if(!e) return null;
+  if(e.inflight) return e.inflight;
+  if((Date.now()-e.at)<SB_ECHO){ netHit(path, e.bytes||0); return Promise.resolve(_echoCopy(e.rows)); }
+  _ECHO.delete(path); return null;
+}
+/* sbAll hangs `_total` and `_pages` ON THE ARRAY ITSELF, and callers read
+   them — batch 81 exists precisely to prove a short read is never mistaken for
+   a complete one. A plain .map() would have silently dropped both and turned
+   that guarantee into `undefined`, which is the shape of bug this whole change
+   set is supposed to avoid. Copy the rows AND whatever the array carries. */
+function _echoCopy(rows){
+  if(!Array.isArray(rows)) return rows;
+  const out=rows.map(r=>(r&&typeof r==='object')?{...r}:r);
+  Object.keys(rows).forEach(k=>{ if(!/^\d+$/.test(k)) out[k]=rows[k]; });
+  return out;
+}
+function _echoPut(path, promise){
+  const e={ at:0, rows:null, inflight:promise };
+  _ECHO.set(path, e);
+  promise.then(rows=>{ e.inflight=null; e.at=Date.now(); e.rows=rows;
+                       try{ e.bytes=JSON.stringify(rows||[]).length; }catch(_){ e.bytes=0; }
+                       return rows; },
+              ()=>{ _ECHO.delete(path); });
+  return promise.then(_echoCopy);
+}
+function _echoable(opts){ const m=(opts||{}).method; return !m || m==='GET'; }
+function sbWrote(path, method){
+  const t=String(path||'').split('?')[0].replace(/_secure$/,'');
+  dbWrote(t, String(method||'').toUpperCase()==='POST' ? 'insert' : 'write');
+}
+
+const MASTER_TTL=60000;
+/* Reference data only. Anything whose staleness could move a NUMBER — the
+   ledger, stock_balance, demand, plans, orders, batches — is absent on
+   purpose. */
+const MASTER_TABLES={ products:1, ingredients:1, bom_lines:1, suppliers:1, locations:1 };
+const _MST={};
+function mastersBust(t){
+  if(!t){ Object.keys(_MST).forEach(k=>delete _MST[k]); return; }
+  /* keys are REST relations ('products', 'products_secure', 'ingredients'…),
+     so a write to `products` must clear the masked view of it too */
+  Object.keys(_MST).forEach(k=>{ if(k===t || k.indexOf(t)===0) delete _MST[k]; });
+}
+async function cachedList(model, fetcher){
+  if(!isLive()) return await fetcher();
+  const c=_MST[model];
+  if(c && (Date.now()-c.at)<MASTER_TTL){ netHit(model, c.bytes||0); return _echoCopy(c.rows); }
+  const rows=await fetcher();
+  _MST[model]={ at:Date.now(), rows, bytes:JSON.stringify(rows||[]).length };
+  return _echoCopy(rows);
 }
 async function sbAuth(email,password){
   const r=await fetch(SUPA.url.replace(/\/$/,'')+'/auth/v1/token?grant_type=password',{method:'POST',
@@ -1010,6 +1380,25 @@ function _localSearch(rows, cols, term){
   return (rows||[]).filter(r=>{ const t=cols.map(c=>r[c]).filter(v=>v!=null&&v!=='').join(' ').toLowerCase();
     return words.every(w=>t.includes(w)); });
 }
+/* EVERY write goes through here. A cache that outlives the write that
+   contradicts it is worse than no cache at all, so this is deliberately
+   blunt: touch the ledger and the ledger cache is gone; touch anything else
+   and that table's cache is gone. Cheap, because the next read either proves
+   itself with a 120-byte probe or is one small table. */
+function dbWrote(table, op){
+  echoBust();
+  /* POSTING A MOVEMENT DOES NOT THROW THE LEDGER AWAY. An insert raises the
+     serial, and the probe on the next read sees that and fetches exactly the
+     new rows — which is both cheaper and every bit as correct as re-reading
+     forty thousand rows to find the one we just wrote. Only a change the probe
+     CANNOT see (a row edited in place, where neither the highest id nor the
+     count moves) needs the stored copy thrown away. A delete moves the count,
+     so that one the probe catches by itself. */
+  if(table==='inventory_movements' && op!=='insert') ledgerBust();
+  mastersBust(table);
+  if(table==='products'||table==='ingredients') stockPicInvalidate();
+}
+
 const db = {
   async list(model, {search,groupBy,page,per}={}){
     const m=MODELS[model]||{};   // child models (bom_lines, po_lines) have no top-level entry
@@ -1035,6 +1424,16 @@ const db = {
           : '&or=('+cols.map(c=>c+'.ilike.*'+encodeURIComponent(term)+'*').join(',')+')';
       }
       const rel=await _readRel(T);
+      /* THE PLAIN "GIVE ME THE TABLE" READ — the one 77 call sites make and the
+         one every screen repeats. Only this exact shape is cached: no search,
+         no page, no groupBy, and only for master data that changes a few times
+         a week. A filtered or paged read is never served from here. The ledger
+         has its own, stricter cache (ledgerAll) and is deliberately not in
+         this list — it is the one table where a minute of staleness could
+         change a stock figure. */
+      if(all && !filt && !page && !groupBy && MASTER_TABLES[T]){
+        return await cachedList(rel, ()=>sbAll(rel+'?select=*'));
+      }
       try{ return all ? await sbAll(rel+'?select=*'+filt) : await sb(rel+'?select=*'+filt+lim); }
       catch(e){
         // A declared column may not exist on this database yet (older schema, or a
@@ -1059,6 +1458,7 @@ const db = {
   },
   async create(model, rec){
     const T=(MODELS[model]&&MODELS[model].srcTable)||model;
+    dbWrote(T,'insert');
     if(isLive()){
       if(await _maskedWrite(T)){ await sb(T,{method:'POST',prefer:'return=minimal',body:JSON.stringify(rec)}); return {...rec}; }
       return (await sb(T, {method:'POST', body:JSON.stringify(rec)}))[0];
@@ -1067,6 +1467,7 @@ const db = {
   },
   async update(model, pk, pkval, rec){
     const T=(MODELS[model]&&MODELS[model].srcTable)||model;
+    dbWrote(T);
     if(isLive()){
       if(await _maskedWrite(T)){ await sb(T+'?'+pk+'=eq.'+encodeURIComponent(pkval),{method:'PATCH',prefer:'return=minimal',body:JSON.stringify(rec)}); return {...rec}; }
       return (await sb(T+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'PATCH', body:JSON.stringify(rec)}))[0];
@@ -1075,6 +1476,7 @@ const db = {
   },
   async del(model, pk, pkval){
     const T=(MODELS[model]&&MODELS[model].srcTable)||model;
+    dbWrote(T);
     if(isLive()) return await sb(T+'?'+pk+'=eq.'+encodeURIComponent(pkval), {method:'DELETE', prefer:'return=minimal'});
     DEMO[T]=(DEMO[T]||[]).filter(r=>r[pk]!==pkval);
   },
@@ -1100,6 +1502,7 @@ const db = {
      deleting the parent record itself. */
   async replaceChildren(o2m, parentVal, rows, allowEmpty){
     rows=rows||[];
+    dbWrote((MODELS[o2m.model]&&MODELS[o2m.model].srcTable)||o2m.model);
     const existing=await this.children(o2m, parentVal).catch(()=>[]);
     if(existing.length && !rows.length && !allowEmpty){
       throw new Error('Refusing to clear the '+existing.length+' line(s) on this record. '
@@ -2220,7 +2623,7 @@ async function pbLoad(){
   if(!_pbRef) return;
   let iss=[], mv=[], ings=[], bom=[];
   try{ iss=(await db.list('batch_issues',{})).filter(x=>String(x.batch_ref)===String(_pbRef)); }catch(e){}
-  try{ mv=(await db.list('inventory_movements',{})).filter(x=>String(x.note||'')==='Production '+_pbRef); }catch(e){}
+  try{ mv=(await ledgerAll()).filter(x=>String(x.note||'')==='Production '+_pbRef); }catch(e){}
   try{ ings=await listIngredients(); }catch(e){}
   _pbIngs=(ings||[]).filter(i=>!isSupplyItem(i)).sort((a,b)=>String(a.name||a.sku).localeCompare(String(b.name||b.sku)));
   try{ bom=(await db.list('bom_lines',{})).filter(b=>b.product_sku===formRec.product_sku); }catch(e){}
@@ -2510,7 +2913,7 @@ async function pbRunSheet(){
   if(!bs.length) bs=[formRec];
   const refs=new Set(bs.map(b=>b.batch_ref));
   try{ iss=(await db.list('batch_issues',{})).filter(x=>refs.has(x.batch_ref)); }catch(e){}
-  try{ mv=(await db.list('inventory_movements',{})).filter(x=>refs.has(String(x.note||'').replace(/^Production /,''))); }catch(e){}
+  try{ mv=(await ledgerAll()).filter(x=>refs.has(String(x.note||'').replace(/^Production /,''))); }catch(e){}
   try{ ings=await listIngredients(); }catch(e){}
   try{ prods=await db.list('products',{}); }catch(e){}
   const im={}; ings.forEach(i=>im[i.sku]=i); const pm={}; prods.forEach(p=>pm[p.sku]=p);
@@ -3319,7 +3722,7 @@ async function pqBuildRows(){
   let prods=[], mom=[], movs=[], trs=[], tls=[];
   try{ prods=await db.list('products',{}); }catch(e){}
   try{ mom=await momLoad(); }catch(e){}
-  try{ movs=await db.list('inventory_movements',{}); }catch(e){}
+  try{ movs=await ledgerAll(); }catch(e){}
   try{ trs=await db.list('transfers',{}); }catch(e){}
   try{ tls=await db.list('transfer_lines',{}); }catch(e){}
   const sellLoc=planSellLoc(), makeLoc=planProduceLoc()||'bulacan';
@@ -3959,7 +4362,7 @@ async function renderProdSched(){
 
   const days=_psDays();
   let mov=[], ings=[], prods=[];
-  try{ mov=await db.list('inventory_movements',{}); }catch(e){}
+  try{ mov=await ledgerAll(); }catch(e){}
   try{ ings=await listIngredients(); }catch(e){}
   try{ prods=await db.list('products',{}); }catch(e){}
   const im={}; ings.forEach(i=>im[i.sku]=i); const pm={}; prods.forEach(p=>pm[p.sku]=p);
@@ -4177,7 +4580,7 @@ async function renderLiveStock(){
     ${(LS_FROM||LS_TO)?`<button class="btn sec sm" onclick="LS_FROM='';LS_TO='';renderLiveStock()">↺ Live</button>`
       :`<span class="tagf" style="background:#e2f0e4;color:#2d5c22">LIVE · as at now</span>`}
     <div class="sp"></div><span style="color:var(--muted)">begin + in + produced − used − sold ± moves = ending</span>`;
-  let mov=[],ings=[],prods=[]; try{mov=await db.list('inventory_movements',{per:100000});}catch(e){}
+  let mov=[],ings=[],prods=[]; try{mov=await ledgerAll();}catch(e){}
   /* A date window, not a filter on the ROW — an inventory balance is a running
      total, so hiding early movements would not narrow the view, it would give
      a wrong number. FROM only affects which movements are called "opening";
@@ -4451,8 +4854,9 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-07 10:40Z';
+const WR_BUILD='2026-09-07 13:20Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
+  netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
 
@@ -5829,7 +6233,7 @@ async function wdtSheetLoad(){
      the sheet says: it is what the business holds, not what one shop sells. */
   const beg={}, sold={}, other={}, onHand={};
   try{
-    const movs = isLive() ? await db.list('inventory_movements',{}) : (DEMO.inventory_movements||[]);
+    const movs = await ledgerAll();
     (movs||[]).forEach(m=>{
       if((m.kind||'')!=='product') return;
       const d=String(m.created_at||m.production_date||'').slice(0,10);
@@ -6299,7 +6703,7 @@ async function wdtLoad(){
     /* As-of stock has to come off the LEDGER — stock_balance only ever knows
        today. Reading a past Friday off today's balance would quietly answer a
        different question than the one asked. */
-    if(histor){ (await db.list('inventory_movements',{})).forEach(m=>{
+    if(histor){ (await ledgerAll()).forEach(m=>{
         if(m.kind!=='product') return;
         const d=String(m.created_at||m.production_date||'').slice(0,10);
         if(d && d>asOf) return;
@@ -7299,7 +7703,7 @@ async function renderShopify(){
      screen opens. */
   const _momAll=await momLoad().catch(()=>[]);
   const _soldBy={}, _lastSold={};
-  try{ (await db.list('inventory_movements',{})).forEach(v=>{
+  try{ (await ledgerAll()).forEach(v=>{
     const t=String(v.movement_type||''); if(t!=='sale'&&t!=='refund'&&t!=='return') return;
     _soldBy[v.ref_sku]=(_soldBy[v.ref_sku]||0)+1;
     const at=String(v.created_at||''); if(at>(_lastSold[v.ref_sku]||'')) _lastSold[v.ref_sku]=at;
@@ -8988,8 +9392,25 @@ let _secureViews;                                     // undefined = not yet pro
 async function useSecure(){ if(!isLive())return false;
   if(_secureViews===undefined){ try{ await sb('ingredients_secure?select=sku&limit=1'); _secureViews=true; }catch(e){ _secureViews=false; } }
   return _secureViews; }
-async function listIngredients(){ if(await useSecure()){ try{ return await sb('ingredients_secure?select=*&limit=2000'); }catch(e){} } return await db.list('ingredients',{}); }
-async function listForModel(model){ if(await useSecure()){ if(model==='ingredients'){ try{ return await sb('ingredients_secure?select=*&limit=2000'); }catch(e){} } if(model==='products'){ try{ return await sb('products_secure?select=*&limit=2000'); }catch(e){} } } return await db.list(model,{}); }
+/* THE SECOND HALF OF THE BILL. Products, ingredients and recipe lines are
+   read by nearly every screen and change a few times a week; three screens in
+   a row used to fetch all three, three times. They are cached for a minute and
+   any write through db drops them at once, so the window can only ever hide
+   somebody ELSE's edit — never your own — and a minute matches the stock
+   picture's existing one. The secure views are cached under their own key so a
+   change of role cannot serve masked rows to an unmasked screen or vice
+   versa. */
+async function listIngredients(){
+  if(await useSecure()) { try{ return await cachedList('ingredients_secure', ()=>sb('ingredients_secure?select=*&limit=2000')); }catch(e){} }
+  return await cachedList('ingredients', ()=>db.list('ingredients',{}));
+}
+async function listForModel(model){
+  if(await useSecure()){
+    if(model==='ingredients'){ try{ return await cachedList('ingredients_secure', ()=>sb('ingredients_secure?select=*&limit=2000')); }catch(e){} }
+    if(model==='products'){    try{ return await cachedList('products_secure',    ()=>sb('products_secure?select=*&limit=2000')); }catch(e){} }
+  }
+  return await cachedList(model, ()=>db.list(model,{}));
+}
 // Receiving a PO adds raw stock at Bulacan and updates moving-average cost.
 async function postReceipt(po){ try{
   if(await movementExists('PO '+po.po_ref)){ toast('This PO was already received — stock not posted again.',true); return; }
@@ -9815,7 +10236,7 @@ async function renderDashboard(){
   let po=[],boms=[],mov=[],vars=[],stockRows=[];
   try{ po=await db.list('purchase_orders',{}); }catch(e){}
   try{ boms=await db.list('bom_lines',{}); }catch(e){}
-  try{ mov=await db.list('inventory_movements',{}); }catch(e){}
+  try{ mov=await ledgerAll(); }catch(e){}
   try{ vars=await db.list('variance_log',{}); }catch(e){}
   try{ stockRows=await db.list('stock_balance',{}); }catch(e){}
   const active=r=>r.active!==false;
@@ -11716,7 +12137,7 @@ async function coHandover(){
   showBusy('Finding the packs…');
   let rows=[], err='';
   try{
-    const movs = isLive() ? await db.list('inventory_movements',{}) : (DEMO.inventory_movements||[]);
+    const movs = await ledgerAll();
     const at={};
     (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
       const sku=v.ref_sku; if(!sku) return;
@@ -17020,7 +17441,7 @@ async function countLoad(){
         _shopMeta.field=(snap&&snap.onhand&&Object.keys(snap.onhand).length)?'on_hand':'available';
         const wl=snap.at?new Date(snap.at).getTime():NaN;
         const after={};
-        try{ (await db.list('inventory_movements',{})).forEach(v=>{
+        try{ (await ledgerAll()).forEach(v=>{
           if((v.kind||'')!=='product') return;
           if(String(v.location_code||'')!==loc) return;
           const t=v.created_at?new Date(v.created_at).getTime():NaN;
@@ -17990,7 +18411,7 @@ async function cogsReconHtml(){
 async function rptExpiring(){
   const days=+(window._expDays||7);
   await loadBins();
-  let mov=[],ings=[],prods=[]; try{mov=await db.list('inventory_movements',{});}catch(e){} try{ings=await listIngredients();}catch(e){} try{prods=await db.list('products',{});}catch(e){}
+  let mov=[],ings=[],prods=[]; try{mov=await ledgerAll();}catch(e){} try{ings=await listIngredients();}catch(e){} try{prods=await db.list('products',{});}catch(e){}
   const im={}; ings.forEach(i=>im[i.sku]=i); const pm={}; prods.forEach(p=>pm[p.sku]=p); const today=todayISO();
   const dbetween=(a,b)=>{ try{ return Math.round((new Date(b+'T00:00:00')-new Date(a+'T00:00:00'))/86400000); }catch(e){ return null; } };
   const rows=mov.filter(m=>m.expiry_date && ((m.movement_type==='receipt'&&m.kind==='ingredient')||(m.movement_type==='batch_output'&&m.kind==='product'))).map(m=>{
@@ -19948,7 +20369,7 @@ async function renderSelfTest(){
   });
   T('Every stock receipt belongs to a live order', async()=>{
     const po=new Set((await db.list('purchase_orders',{})).map(o=>o.po_ref));
-    const mv=(await db.list('inventory_movements',{})).filter(m=>m.movement_type==='receipt');
+    const mv=(await ledgerAll()).filter(m=>m.movement_type==='receipt');
     const orph=mv.filter(m=>{ const n=String(m.note||''); if(n.indexOf('PO ')!==0) return false; return !po.has(n.slice(3).replace(/ R\d+$/,'')); });
     return [orph.length===0, orph.length?(orph.length+' receipt movement(s) from a deleted order — stock is on the books with no order behind it'):mv.length+' receipts OK'];
   });
@@ -19999,12 +20420,12 @@ async function renderSelfTest(){
   T('Every confirmed batch reached stock', async()=>{
     const bs=(await db.list('production_batches',{})).filter(b=>b.status==='confirmed'&&b.kind!=='output'&&(+b.good_packs||0)>0);
     if(!bs.length) return [true,'no confirmed product batches yet'];
-    const mv=(await db.list('inventory_movements',{})).filter(m=>m.movement_type==='batch_output');
+    const mv=(await ledgerAll()).filter(m=>m.movement_type==='batch_output');
     const bad=bs.filter(b=>!mv.some(m=>m.note==='Production '+b.batch_ref && String(m.ref_sku)===String(b.product_sku)));
     return [bad.length===0, bad.length?(bad.length+' batch(es) never posted: '+bad.map(b=>b.batch_ref+' · '+b.good_packs+' packs of '+ingName(b.product_sku)).slice(0,3).join('; ')):bs.length+' batches OK'];
   });
   T('No batch reference used by two items', async()=>{
-    const mv=(await db.list('inventory_movements',{})).filter(m=>m.movement_type==='batch_output'&&String(m.note||'').indexOf('Production ')===0);
+    const mv=(await ledgerAll()).filter(m=>m.movement_type==='batch_output'&&String(m.note||'').indexOf('Production ')===0);
     const by={}; mv.forEach(m=>{ (by[m.note]=by[m.note]||new Set()).add(String(m.ref_sku)); });
     const clash=Object.keys(by).filter(k=>by[k].size>1);
     return [clash.length===0, clash.length?(clash.length+' reference(s) held by two items: '+clash.slice(0,3).join('; ')):Object.keys(by).length+' references unique'];
