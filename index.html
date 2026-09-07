@@ -4912,7 +4912,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-07 16:40Z';
+const WR_BUILD='2026-09-07 20:05Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -6334,7 +6334,8 @@ async function wdtSheetLoad(){
       (plot[r.sku]=plot[r.sku]||weeks.map(()=>0))[i]=Math.max(plot[r.sku][i], q); });
   }catch(e){}
   const co=await coOpenDemand().catch(()=>({}));
-  Object.keys(co).forEach(sku=>{ cust[sku]=+co[sku].packs||0; });
+  const custBy={};
+  Object.keys(co).forEach(sku=>{ cust[sku]=+co[sku].packs||0; custBy[sku]=co[sku]; });
 
   const skus={};
   [plot,made,cust].forEach(o=>Object.keys(o).forEach(k=>skus[k]=1));
@@ -6376,13 +6377,23 @@ async function wdtSheetLoad(){
     const end=b+madeAll+sl+ot;
     const oh=+onHand[sku]||0;
     const p=pBy[sku]||{sku,name:sku};
-    return {sku, name:prodLabel(p,{noSku:true}), g1:prodG1(p),
-            g2:prodG2(p),
+    /* A CUST- SKU IS A CUSTOM ORDER even when there is no product row behind
+       it — prodG1 would call that one "Products" and file somebody's promised
+       order in with the catalogue. */
+    const _isC=/^CUST-/i.test(String(sku));
+    return {sku, name:prodLabel(p,{noSku:true}),
+            g1:_isC?'Custom Orders':prodG1(p),
+            g2:_isC?((custBy[sku]&&(custBy[sku].orders||[])[0]||{}).customer||prodG2(p)):prodG2(p),
             target, madeAll, madeAfter, still, oh,
             beg:b, made:M, sold:sl, other:ot, end,
             drift:Math.round((oh-end)*1000)/1000,
             plots:P, restated, custom:+cust[sku]||0,
             sort_order:p.sort_order,
+            /* what a custom line is actually judged on: the promised date and
+               whose order it is. Neither reached this sheet before. */
+            coNeeded:(custBy[sku]||{}).needed||'',
+            coWho:[...new Set(((custBy[sku]||{}).orders||[]).map(o=>o.customer).filter(Boolean))].join(', '),
+            coRefs:[...new Set(((custBy[sku]||{}).orders||[]).map(o=>o.ref).filter(Boolean))].join(', '),
             isCustom:/^CUST-/.test(sku)};
   });
   await _wdtVelocity(rows);
@@ -6468,7 +6479,8 @@ function _wdtSheetHtml(){
     return `<tr style="background:${r.ready===false?'#fdf3f0':'var(--card,#fff)'}">
       <td class="mini stk1"><code>${esc(r.sku)}</code></td>
       <td class="stk2" title="${esc(r.name)}"><b>${esc(r.name)}</b>${r.isCustom?' <span class="tagf" style="background:#f3e8f7;color:#6b3f7a">CUSTOM</span>':''}
-        <div class="mini" style="color:var(--muted);overflow:hidden;text-overflow:ellipsis">${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div></td>
+        <div class="mini" style="color:var(--muted);overflow:hidden;text-overflow:ellipsis">${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div>
+        ${r.isCustom&&r.coNeeded?`<div class="mini" style="color:${r.coNeeded<todayISO()?'var(--danger)':'#6b3f7a'};font-weight:700" title="${esc(r.coRefs||'')}">make by ${esc(r.coNeeded)}${r.coNeeded<todayISO()?' · OVERDUE':''}</div>`:''}</td>
       <td class="num"><b>${r.target||'—'}</b>${r.custom?`<div class="mini" style="color:#6b3f7a">${r.custom} committed</div>`:''}</td>
       <td class="num mini" style="color:var(--muted)">${r.madeAll||'—'}</td>
       <td class="num"><b style="color:${r.still?'var(--berry)':'#4e7a3e'}">${r.still}</b></td>
@@ -6499,21 +6511,39 @@ function _wdtSheetHtml(){
   const _wowed=list=>list.reduce((a,r)=>a+(+r.still||0),0);
   const _g1s={};
   rows.forEach(r=>{ const k=r.g1||'Products'; (_g1s[k]=_g1s[k]||[]).push(r); });
+  /* CUSTOM ORDERS FIRST. Everything else on this sheet is stock we choose to
+     hold; a custom order is a person waiting on a date they were promised, and
+     it was sorting into the middle of the list by master-data position like any
+     other product. It leads, whatever its sort order, and its own block is
+     ordered by the make-by date rather than by cover — the question on a custom
+     line is not "what runs out first", it is "what is due first". */
+  const _isCoGroup=g=>/^custom/i.test(String(g||''));
+  const _wkey=g=>(_isCoGroup(g)?-1:0);
   h+= (rows.length ? Object.keys(_g1s)
-        .sort((a,b)=>_wmin(_g1s[a])-_wmin(_g1s[b])||String(a).localeCompare(b))
+        .sort((a,b)=>_wkey(a)-_wkey(b)||_wmin(_g1s[a])-_wmin(_g1s[b])||String(a).localeCompare(b))
         .map(g1=>{
     const G=_g1s[g1];
-    let out=`<tr class="grp grp1"><td colspan="${_wspan}" style="background:#e7f0e9;color:#2f5d33;font-weight:700;padding:6px 8px">${esc(g1)}
-      <span style="opacity:.55;font-weight:400">· ${G.length} · ${_wowed(G)} pack(s) still owed</span></td></tr>`;
+    const _co=_isCoGroup(g1);
+    const _late=_co?G.filter(r=>r.still>0 && r.coNeeded && r.coNeeded<todayISO()).length:0;
+    let out=`<tr class="grp grp1"><td colspan="${_wspan}" style="background:${_co?'#f3e8f7':'#e7f0e9'};color:${_co?'#6b3f7a':'#2f5d33'};font-weight:700;padding:6px 8px">${_co?'🧑‍🍳 ':''}${esc(g1)}
+      <span style="opacity:.55;font-weight:400">· ${G.length} · ${_wowed(G)} pack(s) still owed${
+        _co?' · soonest first, by the date the customer was promised':''}</span>${
+        _late?`<span style="color:var(--danger);font-weight:700"> · ${_late} past the make-by date</span>`:''}</td></tr>`;
     const _g2s={};
     G.forEach(r=>{ const k=r.g2||'Other'; (_g2s[k]=_g2s[k]||[]).push(r); });
     out+=Object.keys(_g2s)
       .sort((a,b)=>_wmin(_g2s[a])-_wmin(_g2s[b])||String(a).localeCompare(b))
       .map(g2=>{
         const S2=_g2s[g2];
+        /* a custom line is ranked by WHEN IT WAS PROMISED, never by cover —
+           "what runs out first" is not the question on somebody's order */
+        const ordered = _isCoGroup(g1)
+          ? S2.slice().sort((a,b)=>String(a.coNeeded||'9999-99-99').localeCompare(String(b.coNeeded||'9999-99-99'))
+                                   ||String(a.name||'').localeCompare(String(b.name||'')))
+          : S2;
         return `<tr class="grp"><td colspan="${_wspan}" style="background:#f6f8f4;color:#4e7a3e;font-weight:600;padding:4px 8px 4px 22px">▸ <b>${esc(g2)}</b>
           <span style="opacity:.6;font-weight:400">· ${S2.length} · ${_wowed(S2)} owed</span></td></tr>`
-          + S2.map(_wrow).join('');
+          + ordered.map(_wrow).join('');
       }).join('');
     return out;
   }).join('')
@@ -12124,7 +12154,7 @@ async function coLock(){
         const key=_coRecipeKey(rows.map(r=>({ingredient_sku:r.ingredient_sku, grams:+r.usable_g||0})), +p.pack_g||0);
         if(!byRecipe[key]) byRecipe[key]=p.sku; });
     }catch(e){}
-    let made=0; const demErrs=[];
+    let made=0; const demErrs=[], prodErrs=[];
     for(const l of coLines){
       if(l.line_type==='custom'){
         const recipe=(l.recipe||[]).filter(r=>r.ingredient_sku&&+r.grams>0);
@@ -12148,10 +12178,15 @@ async function coLock(){
           const prec={sku, group_1:'Custom Orders', group_2:(coRec.customer_name||'Custom'), family:'Custom', variant:(l.description||'Custom meal'),
             name:(l.description||'Custom meal')+' · '+(l.pack_size_g||0)+'g', pack_g:+l.pack_size_g||0, box_size:1, status:'Active',
             animal:'Dog', sell_price:+l.unit_price||0, shelf_life_days:4, is_custom:true, feeding_style:'Mix'};
+          /* THIS CATCH USED TO BE EMPTY, and that is how an order reached
+             "Added in Demand" with no product behind it: the demand row and the
+             order line were written, the product was not, and NOTHING said so.
+             The kitchen then could not find it in the production picker and had
+             no way to learn why. A write that fails here is reported. */
           try{ await db.create('products',prec); existProd.add(sku); made++;
             const bom=recipe.map(r=>({product_sku:sku, ingredient_sku:r.ingredient_sku, usable_g:+r.grams||0}));
             await db.replaceChildren({model:'bom_lines',fk:'product_sku'}, sku, bom);
-          }catch(e){}
+          }catch(e){ prodErrs.push(sku+': '+String((e&&e.message)||e).slice(0,120)); }
         }
         if(!_coProd[sku]) _coProd[sku]={sku,name:prec2Name(l),group_1:'Custom Orders',group_2:coRec.customer_name||'Custom',pack_g:+l.pack_size_g||0,is_custom:true};
       }
@@ -12165,6 +12200,15 @@ async function coLock(){
     sysLog('custom_orders',coRec.order_ref,'🔒 Order locked — '+made+' new custom SKU(s), demand '+(demErrs.length?('FAILED for '+demErrs.length+' line(s): '+demErrs.join('; ')):('pushed for '+(coRec.needed_date||coRec.order_date)))+' by '+CURRENT_USER);
     hideBusy();
     if(demErrs.length) toast('Order locked, but the demand write failed for '+demErrs.length+' line(s) — Demand/MRP will still pick it up from the order itself. '+demErrs[0],true);
+    /* Loud, because the consequence is invisible: the order looks planned and
+       the kitchen cannot produce it. The picker offers to rebuild the record. */
+    if(prodErrs.length){
+      sysLog('custom_orders',coRec.order_ref,'⚠ product record NOT created for '+prodErrs.length+' SKU(s): '+prodErrs.join('; '));
+      alert('The order is locked and the demand is in, but the PRODUCT RECORD could not be created for '
+        +prodErrs.length+' line(s):\n\n'+prodErrs.join('\n')
+        +'\n\nUntil that exists the kitchen cannot add it to a production plan. Open the production plan and press '
+        +'"🔎 Search & add products" — the order is listed there with a button to build the missing record from it.');
+    }
     else toast('Order locked · '+made+' custom SKU(s) created · demand pushed'+(isLive()?' · saved to Supabase':' · local only'));
     drawCOForm();
   }catch(e){ hideBusy(); toast(_coErr(e),true); }
@@ -13019,7 +13063,16 @@ async function prodLoadTargets(){
   }catch(e){}
   // locked custom orders always count towards the target, whatever week they name
   let coCount=0;
-  try{ const co=await coOpenDemandMap(); Object.keys(co).forEach(s=>{ if(!(+dm[s]>0)){ dm[s]=co[s]; coCount++; } }); }catch(e){}
+  /* KEEP THE WHOLE ANSWER, NOT JUST THE NUMBER. coOpenDemand knows the
+     customer, the order reference and the date each SKU is needed by; flattening
+     it to {sku:packs} threw all of that away, and the production plan then had
+     no way to say WHOSE order it was or when it was due. The picker needs it. */
+  window._prodCoDue={};
+  try{
+    const full=await coOpenDemand();
+    window._prodCoDue=full;
+    Object.keys(full).forEach(s=>{ if(!(+dm[s]>0)){ dm[s]=full[s].packs; coCount++; } });
+  }catch(e){}
   window._prodTargetLocked=locked||coCount>0; window._prodTargetRef=ref; window._prodTargetCo=coCount;
   prodTargetMap=dm; window._prodTargetDate=planDate;
   prodProducedMap={};
@@ -13617,15 +13670,129 @@ function prodKitchenCart(){
     <div class="mfoot"><button class="btn" onclick="prodCartApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on'); drawKitchenCartBody();
 }
+/* ---- CUSTOM ORDERS COME FROM THE ORDERS, NOT FROM THE PRODUCT TABLE -------
+   A custom order that is locked writes three things: a CUST- product row, a
+   demand row, and the order line. The product row is created inside a silent
+   try/catch, so if that one write failed — a column the database does not have,
+   a permission, a clash — the order still reads "Added in Demand", still shows
+   a target, and yet CANNOT BE FOUND ANYWHERE IN THE PRODUCTION PICKER, because
+   the picker only ever listed rows from `products`. That is not a hypothetical:
+   it is exactly what "I can't add it to my production plan" looks like from the
+   outside, and there was nothing on screen to explain it.
+
+   So the picker now asks the ORDERS what is owed. Anything owed is listed
+   whether or not a product row exists, soonest-needed first, and a missing
+   product row is named as the problem with the button that fixes it rather than
+   being an empty search box. */
+function _coDueRows(){
+  const due=window._prodCoDue||{};
+  const have={}; (window._prodAllProducts||[]).forEach(p=>have[p.sku]=p);
+  const today=todayISO();
+  return Object.keys(due).map(sku=>{
+    const d=due[sku]||{};
+    const os=(d.orders||[]);
+    const made=+prodProducedMap[sku]||0;
+    return { sku, packs:+d.packs||0, needed:d.needed||'', made,
+             orphan:!have[sku], prod:have[sku]||null,
+             customers:[...new Set(os.map(o=>o.customer).filter(Boolean))].join(', '),
+             refs:[...new Set(os.map(o=>o.ref).filter(Boolean))].join(', '),
+             late:!!(d.needed && d.needed<today),
+             soon:!!(d.needed && d.needed>=today && d.needed<=isoLocal(new Date(Date.now()+3*864e5))) };
+  }).filter(r=>r.packs>0)
+    .sort((a,b)=>String(a.needed||'9999-99-99').localeCompare(String(b.needed||'9999-99-99'))
+                 ||String(a.customers).localeCompare(b.customers));
+}
+/* The order line carries everything the product row needed. If that row never
+   made it, this writes it from the order rather than asking somebody to unpick
+   a lock by hand. */
+async function coRepairProduct(sku){
+  try{
+    const lines=await db.list('custom_order_lines',{});
+    const l=(lines||[]).find(x=>x.product_sku===sku);
+    if(!l){ toast('No order line carries '+sku+' — nothing to rebuild it from',true); return; }
+    const orders=await db.list('custom_orders',{});
+    const o=(orders||[]).find(x=>x.order_ref===l.order_ref)||{};
+    const rec={ sku, group_1:'Custom Orders', group_2:(o.customer_name||'Custom'), family:'Custom',
+      variant:(l.description||'Custom meal'),
+      name:(l.description||'Custom meal')+' · '+(l.pack_size_g||0)+'g',
+      pack_g:+l.pack_size_g||0, box_size:1, status:'Active', animal:'Dog',
+      sell_price:+l.unit_price||0, shelf_life_days:4, is_custom:true, feeding_style:'Mix' };
+    await db.create('products',rec);
+    /* THE RECIPE TRAVELS WITH IT, or the run cannot be costed and no ingredient
+       is ever issued against it. It lives on the order line itself, the same
+       place coLock reads it from. */
+    try{
+      const recipe=(l.recipe||[]).filter(r=>r&&r.ingredient_sku&&+r.grams>0);
+      if(recipe.length) await db.replaceChildren({model:'bom_lines',fk:'product_sku'}, sku,
+        recipe.map(r=>({product_sku:sku, ingredient_sku:r.ingredient_sku, usable_g:+r.grams||0})));
+      else toast('Created '+sku+', but the order line carries no recipe — open the order and check it before producing', true);
+    }catch(e){}
+    toast('Created '+sku+' from '+(l.order_ref||'the order')+' — it is in the picker now');
+    await renderProdPlan();
+    try{ prodKitchenCart(); }catch(e){}
+  }catch(e){ toast('Could not create the product: '+(e&&e.message||e), true); }
+}
+
 function drawKitchenCartBody(){
   const prods=(window._prodAllProducts||[]); const q=(window._kcQ||'').toLowerCase().split(/\s+/).filter(Boolean); const gf=window._kcG||'';
+  /* SEARCHABLE BY WHAT SOMEBODY ACTUALLY REMEMBERS. A kitchen looking for an
+     urgent custom order knows the customer and the order reference; it does not
+     know the minted CUST- code. Neither the reference nor the needed-by date was
+     in the haystack, so typing either found nothing at all. */
+  const due=window._prodCoDue||{};
+  const _hay=p=>{ const d=due[p.sku]||{}; const os=d.orders||[];
+    return [p.name,p.sku,prodG1(p),prodG2(p),p.group_1,p.group_2,p.variant,p.family,
+            d.needed, ...os.map(o=>o.ref), ...os.map(o=>o.customer)]
+      .filter(Boolean).join(' ').toLowerCase(); };
   const match=p=>{ if(gf && prodG1(p)!==gf) return false; if(!q.length) return true;
-    const t=[p.name,p.sku,prodG1(p),prodG2(p),p.group_1,p.group_2,p.variant,p.family].filter(Boolean).join(' ').toLowerCase(); return q.every(w=>t.includes(w)); };
+    const t=_hay(p); return q.every(w=>t.includes(w)); };
   /* Grouped and headed exactly as Live Stock heads it — same helper, so the
      two lists cannot disagree about which shelf a pack lives on. */
   const shown=prods.filter(match).map(p=>{ const G=prodGroup(p); return {...p, _g1:G.g1, _g2:G.g2}; });
   let body='';
-  hierGroups(shown,{g1:'_g1',g2:'_g2'}).forEach(G=>G.subs.forEach(S=>{
+
+  /* ---- what somebody is waiting for, pinned above everything else -------- */
+  const co=_coDueRows().filter(r=>{
+    if(!q.length) return true;
+    const t=[r.sku,r.customers,r.refs,r.needed,(r.prod&&r.prod.name)||''].join(' ').toLowerCase();
+    return q.every(w=>t.includes(w));
+  });
+  if(co.length){
+    const nLate=co.filter(r=>r.late).length;
+    body+=`<tr><td colspan="6" style="background:#f3e8f7;color:#6b3f7a;font-weight:700;padding:7px 10px">
+      🧑‍🍳 Custom orders owed · ${co.length} · ${co.reduce((a,r)=>a+Math.max(0,r.packs-r.made),0)} pack(s)
+      ${nLate?`<span style="color:var(--danger)"> · ${nLate} past the make-by date</span>`:''}
+      <div class="mini" style="font-weight:400;opacity:.8">Somebody is waiting for these. Soonest first — read from the ORDERS, so a line appears here even if its product record is missing.</div></td></tr>`;
+    co.forEach(r=>{
+      const rem=Math.max(0, r.packs-r.made);
+      const v=(window._kcQty&&window._kcQty[r.sku]!=null)?window._kcQty[r.sku]:'';
+      const when=r.needed
+        ? `<span style="color:${r.late?'var(--danger)':(r.soon?'var(--earth,#b5762a)':'var(--muted)')};font-weight:${r.late||r.soon?'700':'400'}">${esc(r.needed)}${r.late?' · OVERDUE':(r.soon?' · due soon':'')}</span>`
+        : '<span style="color:var(--muted)">no date</span>';
+      if(r.orphan){
+        /* the case that had no explanation on screen at all */
+        body+=`<tr style="background:#fdf3f0"><td colspan="6" style="padding:8px 10px">
+          <b>${esc(r.customers||'Custom order')}</b> · <code>${esc(r.sku)}</code>
+          <span class="mini" style="color:var(--muted)"> · ${esc(r.refs)} · make by ${when} · ${rem} pack(s) owed</span>
+          <div class="mini" style="color:var(--danger);margin-top:3px"><b>This order has no product record</b>, which is why it cannot be found or added anywhere. The order and its demand exist; the product row did not get written when the order was locked.</div>
+          <div style="margin-top:5px"><button class="btn sm" onclick="coRepairProduct('${esc(r.sku)}')">🛠 Create the product from this order</button></div></td></tr>`;
+        return;
+      }
+      const pic=stockPicFor(r.sku);
+      body+=`<tr style="background:#fbf7fd">
+        <td>${prodLabelHtml(r.prod,{noSku:true})}<div class="mini"><code>${esc(r.sku)}</code></div>
+          <div class="mini" style="color:#6b3f7a">${esc(r.customers||'Custom order')}${r.refs?' · '+esc(r.refs):''}</div>
+          <div class="mini">make by ${when}</div></td>
+        <td class="num">${spStockCell(pic)}</td><td class="num">${spCoverCell(pic)}</td>
+        <td class="num mini">${r.packs}</td>
+        <td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem||'—'}</td>
+        <td><input type="number" step="any" inputmode="decimal" value="${v}" placeholder="${rem||0}"
+          oninput="window._kcQty['${esc(r.sku)}']=this.value===''?'':(+this.value||0)"
+          style="width:70px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`;
+    });
+  }
+  const _coSkus=new Set(_coDueRows().map(r=>r.sku));   // already listed above
+  hierGroups(shown.filter(p=>!_coSkus.has(p.sku)),{g1:'_g1',g2:'_g2'}).forEach(G=>G.subs.forEach(S=>{
     body+=`<tr style="background:#f6f8f4"><td colspan="6" style="padding-left:10px">▸ <b>${esc(G.g1+' › '+(S.g2||''))}</b></td></tr>`;
     S.items.forEach(p=>{ const hasT=+prodTargetMap[p.sku]>0; const rem=hasT?_prodRemain(p.sku,0):0; const v=(window._kcQty&&window._kcQty[p.sku]!=null)?window._kcQty[p.sku]:'';
       const pic=stockPicFor(p.sku);
@@ -19322,6 +19489,37 @@ async function rcvOpen(ref){
   setTimeout(()=>{ try{ openPOReceive(); }catch(e){} }, 350);
 }
 
+/* ---- THE LABEL PAR FOLLOWS THE PRODUCT ----------------------------------
+   Every label at the kitchen carried a PAR of 100 — the same 100, on all 96 of
+   them, whether the product sells three hundred packs a month or nine. That is
+   not a par level, it is a placeholder, and it made the reorder screen ask for
+   the same quantity of every label regardless of what is actually being made.
+
+   A label is applied to a pack, so the number of labels to hold is the number
+   of packs we intend to hold: `target` from the stock picture, which is New Par
+   + safety — the same figure Regular Packs and the Production Plan already use
+   to decide what a full shelf looks like. It is derived on the spot rather than
+   written down, so it moves as sales move and there is no second copy to go
+   stale. Then it is rounded UP to the printer's pack, because ordering 137 of
+   something sold in twenties is not a thing anybody can do.
+
+   Two deliberate limits:
+     · only at the site that MAKES the packs. Labels are applied in the kitchen;
+       another site's stored figure is its own business and is left alone, or
+       both sites would ask for the same labels and we would buy them twice.
+     · a product with no sales history has no computed par, so its stored figure
+       stands rather than collapsing to zero. */
+function stkParFor(p, loc){
+  const stored=Math.max(0, +p['sticker_'+loc+'_par']||0);
+  if(String(loc||'')!==String(planProduceLoc()||'bulacan')) return {par:stored, src:'stored'};
+  const pic=stockPicFor(p.sku);
+  const t=pic&&+pic.target;
+  if(!(t>0)) return {par:stored, src:'nosales'};
+  const raw=Math.ceil(t);
+  const div=Math.max(0, +p.sticker_per_sheet||0);
+  return {par:(div>0?Math.ceil(raw/div)*div:raw), src:'derived', raw, div};
+}
+
 async function renderStickerReorder(){
   $('cp').innerHTML=`<div class="title">Sticker Reorder <span onclick="openKB('sticker_reorder')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <select onchange="_stkRoLoc=this.value;_stkRoQty={};renderStickerReorder()">
@@ -19440,13 +19638,15 @@ async function renderStickerReorder(){
     return false;
   }).map(p=>{
     const oh=+p['sticker_'+_stkRoLoc+'_on_hand']||0;
-    const par=+p['sticker_'+_stkRoLoc+'_par']||0;
+    const _pf=stkParFor(p,_stkRoLoc);
+    const par=_pf.par;
     const packs=madeHere?(+planned[p.sku]||0):0;
     const inc=+onOrder[p.sku]||0;                 // already coming, do not buy twice
     return _mk({sku:p.sku, name:p.name||p.sku, variant:p.variant||'',
       group_1:prodG1(p), group_2:prodG2(p), note:'',
       sort_order:p.sort_order, oh, par, packs, inc, incRefs:(onOrderRefs[p.sku]||[]),
       forProd:Math.max(0,packs-oh-inc), forPar:Math.max(0,par-oh-inc),
+      parSrc:_pf.src, parRaw:_pf.raw, parDiv:_pf.div, parStored:Math.max(0,+p['sticker_'+_stkRoLoc+'_par']||0),
       perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0, supplier:(p.sticker_supplier||'').trim(),
       link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'', net:p.sticker_net||'', kind:'product'});
   });
@@ -19677,7 +19877,7 @@ function drawStickerReorder(){
       Set them on the product's <b>🏷️ Stickers</b> tab — a PO with no price still generates, it just cannot be valued.</div>`:''}
     <div style="overflow-x:auto" class="stickyhead"><table><thead><tr>
       <th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th>
-      <th class="num">PAR</th><th class="num">On hand</th><th class="num" title="pieces on a confirmed sticker PO that have not been received yet — subtracted so a label already coming is not bought twice">On order</th><th class="num">Packs</th><th class="num">PAR top-up</th>
+      <th class="num" title="How many labels to hold. At ${esc(locName(planProduceLoc()||'bulacan'))} this follows the PRODUCT — New Par + safety, the same figure Regular Packs uses — rounded up to the printer's pack. Every label used to carry a flat 100 whatever the product sold.">PAR</th><th class="num">On hand</th><th class="num" title="pieces on a confirmed sticker PO that have not been received yet — subtracted so a label already coming is not bought twice">On order</th><th class="num">Packs</th><th class="num">PAR top-up</th>
       <th class="num">Need</th><th class="num">Order</th><th class="num" title="the printer's minimum pack for this size">Packs</th><th class="num">₱/pc</th><th>Supplier</th>
     </tr></thead><tbody>`;
   /* WHICH PRINTER. The sticker file is two order sheets — Supplier 1 takes the
@@ -19710,7 +19910,12 @@ function drawStickerReorder(){
           <td><code>${esc(bare)}</code></td>
           <td>${r.link&&safeUrl(r.link)!=='#'?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener noreferrer">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>
           <td class="mini">${esc(r.dim||'')||'—'}</td>
-          <td class="num"><b>${r.par||'—'}</b></td>
+          <td class="num"><b>${r.par||'—'}</b>${
+            r.parSrc==='derived'
+              ? `<div class="mini" style="color:var(--muted)" title="Follows the product: New Par + safety is ${r.parRaw}${r.parDiv>0?`, rounded up to the printer's pack of ${r.parDiv}`:''}. It moves as sales move — there is no stored figure to keep up to date.${r.parStored&&r.parStored!==r.par?` The old stored figure was ${r.parStored}.`:''}">from the product${r.parDiv>0?' · ×'+r.parDiv:''}</div>`
+              : (r.parSrc==='nosales'
+                 ? `<div class="mini" style="color:var(--earth,#b5762a)" title="No sales history, so there is no computed par for this product — the figure typed on the product is used instead.">typed · no sales yet</div>`
+                 : `<div class="mini" style="color:var(--muted)" title="Labels are applied where the packs are made, so only ${esc(locName(planProduceLoc()||'bulacan'))} follows the product. This site keeps its own figure.">typed</div>`)}</td>
           <td class="num mini" style="color:var(--muted)">${r.oh||'—'}</td>
           <td class="num mini" style="${r.inc>0?'color:var(--earth,#b5762a);font-weight:600':'color:var(--muted)'}"${r.inc>0?` title="on ${esc((r.incRefs||[]).join(', '))}"`:''}>${r.inc||'—'}${(r.incRefs&&r.incRefs.length>1)?'<div class="mini" style="color:var(--danger)" title="this label is on more than one open sticker PO">on '+r.incRefs.length+' POs</div>':''}</td>
           <td class="num mini" style="${r.forProd>0?'color:var(--berry);font-weight:600':'color:var(--muted)'}">${r.packs||'—'}</td>
