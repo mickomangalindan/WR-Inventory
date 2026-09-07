@@ -758,6 +758,8 @@ const MODELS = {
       {n:'sticker_per_sheet',l:'Stickers per sheet/page',t:'number'},
       {n:'sticker_bulacan_on_hand',l:'Labels — Bulacan on hand',t:'number'},{n:'sticker_bulacan_par',l:'Labels — Bulacan PAR',t:'number'},
       {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'},
+      {n:'sticker_par_mode',l:'Label PAR',t:'select',o:['follow','static'],
+       h:'follow = the label PAR is the product\'s New Par, worked out from sales every time · static = the number typed below stands'},
       {n:'sticker_archived',l:'Sticker retired (stop ordering & counting this label)',t:'bool'},
       {n:'supply_led',l:'Supply-led (skip demand planning & POs — we make whatever arrives)',t:'bool'},
       {n:'replaced_by',l:'Phasing out — demand moves to',t:'rel',rel:'products'},
@@ -765,7 +767,7 @@ const MODELS = {
     list:['name','status','family','variant','pack_g','sell_price'],
     groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','group_1','group_2','animal','status','supply_led','replaced_by'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
             ['cost_debone','cost_butcher','cost_sousvide','cost_ecobag','cost_thermal'],
-            ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_per_sheet','sticker_price','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par','sticker_archived']],
+            ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_per_sheet','sticker_price','sticker_par_mode','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par','sticker_archived']],
     tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'💰 Cost profile', groups:[3]},{l:'🏷️ Stickers', groups:[4]}],
     o2m:{ field:'bom', model:'bom_lines', fk:'product_sku', label:'Recipe (BOM)',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ingredient_category',l:'Category',t:'text'},{n:'usable_g',l:'Grams/pack',t:'number'},{n:'pct_of_pack',l:'% of pack',t:'number'},{n:'has_bones',l:'Bones',t:'text'},{n:'method_override',l:'Method',t:'text'}] } },
@@ -3994,6 +3996,11 @@ async function stockPicture(force){
       consigned:Math.max(0,+r.consigned||0), consSites:(r.consSites||[]),
       shopQ:(r.snapQ==null?null:+r.snapQ), postG:+r.postG||0, drift:r.drift,
       sold:+r.sold||0, perDay:c.perDay, coverDays:c.cover,
+      /* newPar is the "NEW PAR" column on Regular Packs — average daily sale ×
+         cycle, rounded up to a case. target is that PLUS safety stock. They are
+         different numbers and the label par follows the first, because that is
+         the one the screen calls the product's par. */
+      newPar:c.newPar, safety:c.safety, par:c.par,
       target:c.target, covPct:c.covPct, shelfPct:c.shelfPct,
       toMove:c.toMove, toMake:c.toMake, produce:c.produce, rop:c.rop, alert:c.alert,
       padded:c.padded, coverAfter:c.coverAfter };
@@ -4912,7 +4919,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-07 20:05Z';
+const WR_BUILD='2026-09-08 00:30Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -19409,6 +19416,42 @@ async function generateSuppliesPO(){
    printers charge by the sheet, so ordering 61 of a 10-up label costs the same
    as ordering 70.                                                              */
 let _stkRoLoc='bulacan', _stkRoQty={}, _stkRoRows=[], _stkRoView='order', _stkRoSup='', _stkRoShowArch=false;
+
+/* ---- THE TWO LEVERS A LABEL HAS THAT A PACK DOES NOT ----------------------
+   COVER. How many days of labels to hold. Left at 0 it means "whatever the
+   product holds" — the New Par on Regular Packs, case rounding and all — so out
+   of the box a label carries exactly its product's par and nothing has to be
+   decided. Set a number and it becomes days × average daily sale instead.
+
+   Worth knowing before setting it: 21 days is a FOOD number. It is short
+   because meat spoils. A label does not spoil, costs a few pesos, and running
+   out stops packing altogether — so the cheap mistake with labels is holding
+   too many, which is the opposite of the cheap mistake with meat. Sixty days of
+   labels is a defensible thing to want; sixty days of rabbit is not.
+
+   LEAD. How long the printer takes. It does not change how many to order — that
+   is the par's job — it decides WHEN a label is urgent: once what we hold plus
+   what is coming will not last until a new print could arrive, the row is
+   flagged, because at that point ordering next week is already too late. The
+   two printers are separate businesses and can be set separately. */
+const STK_DEF={ cover:0, lead:7 };
+let STK=Object.assign({},STK_DEF);
+try{ STK=Object.assign({},STK_DEF,JSON.parse(localStorage.getItem('wr_stkro')||'{}')); }catch(e){}
+let STK_LEAD_SUP={};
+try{ STK_LEAD_SUP=JSON.parse(localStorage.getItem('wr_stkro_lead')||'{}')||{}; }catch(e){}
+function stkSave(){ try{ localStorage.setItem('wr_stkro',JSON.stringify(STK));
+  localStorage.setItem('wr_stkro_lead',JSON.stringify(STK_LEAD_SUP)); }catch(e){} }
+function stkSet(k,v){ STK[k]=(v===''||v==null)?STK_DEF[k]:Math.max(0,parseFloat(v)||0); stkSave(); renderStickerReorder(); }
+function stkSetLead(sup,v){
+  const n=(v===''||v==null)?null:Math.max(0,parseFloat(v)||0);
+  if(n==null) delete STK_LEAD_SUP[sup]; else STK_LEAD_SUP[sup]=n;
+  stkSave(); renderStickerReorder();
+}
+function stkReset(){ STK=Object.assign({},STK_DEF); STK_LEAD_SUP={}; stkSave(); renderStickerReorder(); }
+/* 0 means "follow the product" — not "zero days" */
+function stkCoverDays(){ return Math.max(0, +STK.cover||0); }
+function stkLeadFor(sup){ const k=String(sup||'').trim();
+  return (k && STK_LEAD_SUP[k]!=null) ? +STK_LEAD_SUP[k] : Math.max(0,+STK.lead||0); }
 /* ============ Receiving — goods in, without the money =====================
    The warehouse has to book a delivery in. Until now the only way to do that
    was to open the purchase order, which is a commercial document: unit prices,
@@ -19495,29 +19538,77 @@ async function rcvOpen(ref){
    not a par level, it is a placeholder, and it made the reorder screen ask for
    the same quantity of every label regardless of what is actually being made.
 
-   A label is applied to a pack, so the number of labels to hold is the number
-   of packs we intend to hold: `target` from the stock picture, which is New Par
-   + safety — the same figure Regular Packs and the Production Plan already use
-   to decide what a full shelf looks like. It is derived on the spot rather than
-   written down, so it moves as sales move and there is no second copy to go
-   stale. Then it is rounded UP to the printer's pack, because ordering 137 of
-   something sold in twenties is not a thing anybody can do.
+   A label is applied to a pack, so the labels to hold is the packs to hold:
+   the product's NEW PAR — the column of that name on Regular Packs, average
+   daily sale × the cycle, rounded up to a case. Not New Par + safety: safety
+   stock is a buffer against a bad week, and the screen calls the first figure
+   the product's par, so that is the one the label follows.
 
-   Two deliberate limits:
-     · only at the site that MAKES the packs. Labels are applied in the kitchen;
-       another site's stored figure is its own business and is left alone, or
-       both sites would ask for the same labels and we would buy them twice.
-     · a product with no sales history has no computed par, so its stored figure
-       stands rather than collapsing to zero. */
+   It is worked out on the spot rather than written down, so it moves as sales
+   move and there is no second copy to go stale. Then it is rounded UP again, to
+   the printer's pack, because ordering 137 of something sold in twenties is not
+   a thing anybody can do.
+
+   A product with no sales history has no computed par, so its typed figure
+   stands rather than collapsing to zero. */
+/* MOVING OR STATIC, PER LABEL.
+     moving (the default) — the label PAR is the product's own par, worked out
+       fresh every time the screen is drawn. Sales rise, the label par rises
+       with them, and there is no second number to remember to update.
+     static — the figure typed against the label stands and nothing recomputes
+       it. For a label that is being run down, one bought in a batch for a
+       reason, or any case where a person has decided the number.
+
+   The mode lives on the product, so it is the same for everybody rather than a
+   setting on one person's browser. Null means moving: a label nobody has made a
+   decision about follows its product, which is the behaviour that is right far
+   more often than not. */
+function stkParMode(p){ return (String((p&&p.sticker_par_mode)||'').toLowerCase()==='static') ? 'static' : 'follow'; }
 function stkParFor(p, loc){
   const stored=Math.max(0, +p['sticker_'+loc+'_par']||0);
-  if(String(loc||'')!==String(planProduceLoc()||'bulacan')) return {par:stored, src:'stored'};
+  if(stkParMode(p)==='static') return {par:stored, src:'static', mode:'static'};
   const pic=stockPicFor(p.sku);
-  const t=pic&&+pic.target;
-  if(!(t>0)) return {par:stored, src:'nosales'};
+  const cov=stkCoverDays();
+  /* cover 0 = follow the product's own New Par, case rounding and all.
+     cover N = N days of sales instead, which is the label's own decision. */
+  const t=pic && (cov>0 ? (+pic.perDay||0)*cov : +pic.newPar);
+  /* No sales history means there is no computed par to follow. The typed figure
+     stands for now — it is not a decision, so the mode is left alone and the
+     label starts following the moment it has sold something. */
+  if(!(t>0)) return {par:stored, src:'nosales', mode:'follow'};
   const raw=Math.ceil(t);
   const div=Math.max(0, +p.sticker_per_sheet||0);
-  return {par:(div>0?Math.ceil(raw/div)*div:raw), src:'derived', raw, div};
+  return {par:(div>0?Math.ceil(raw/div)*div:raw), src:'derived', mode:'follow', raw, div,
+          cover:cov, perDay:(pic&&+pic.perDay)||0};
+}
+/* Switching a label to static must not move the number underneath somebody.
+   Whatever it reads right now is what gets written down. */
+async function stkParSetMode(sku, mode){
+  const p=(window._stkRoProds||[]).find(x=>x.sku===sku); if(!p) return;
+  const rec={sticker_par_mode:(mode==='static'?'static':'follow')};
+  if(mode==='static'){
+    const now=stkParFor(p,_stkRoLoc);
+    if(now.par>0) rec['sticker_'+_stkRoLoc+'_par']=now.par;
+  }
+  try{
+    await db.update('products','sku',sku,rec);
+    Object.assign(p,rec);
+    toast(mode==='static'
+      ? 'Pinned at '+(rec['sticker_'+_stkRoLoc+'_par']!=null?rec['sticker_'+_stkRoLoc+'_par']:'its current figure')+' — it will not move with sales any more'
+      : 'Following the product again — the par is worked out from sales each time');
+    await renderStickerReorder();
+  }catch(e){ toast('Could not change it: '+((e&&e.message)||e), true); }
+}
+async function stkParModeAll(mode){
+  const rows=(_stkRoRows||[]).filter(r=>r.kind==='product');
+  if(!rows.length){ toast('Nothing on screen to change',true); return; }
+  if(!confirm((mode==='static'?'Pin':'Un-pin')+' all '+rows.length+' label(s) shown?\n\n'
+    +(mode==='static'
+      ? 'Each keeps the figure it reads right now and stops moving with sales.'
+      : 'Each goes back to following its product — the typed figures are left in place but stop being used.'))) return;
+  let n=0;
+  for(const r of rows){ try{ await stkParSetMode(r.sku, mode); n++; }catch(e){} }
+  toast(n+' label(s) changed');
 }
 
 async function renderStickerReorder(){
@@ -19529,12 +19620,33 @@ async function renderStickerReorder(){
       <option value="1"${_stkRoSup==='1'?' selected':''}>Supplier 1 — Main</option>
       <option value="2"${_stkRoSup==='2'?' selected':''}>Supplier 2 — Gently Cooked</option></select>
     <label class="mini" style="margin-left:6px"><input type="checkbox" ${_stkRoShowArch?'checked':''} onchange="_stkRoShowArch=this.checked;_stkRoQty={};renderStickerReorder()"> retired stickers${window._stkRoArchN?(' ('+window._stkRoArchN+')'):''}</label>
+    <span class="mini" style="margin-left:10px;color:var(--muted)">PAR:</span>
+    <span class="btn link sm" style="color:var(--muted)" onclick="stkParModeAll('follow')" title="Every label shown goes back to following its product's New Par">↻ all follow</span>
+    <span class="btn link sm" style="color:var(--muted)" onclick="stkParModeAll('static')" title="Every label shown keeps the figure it reads right now and stops moving with sales">📌 pin all</span>
+    </div>
+    <div class="repbar" style="flex-wrap:wrap">
+      <span title="Days of labels to hold. Leave it blank and every label carries its own product's New Par — the figure on Regular Packs, case rounding and all. Put a number in and it becomes that many days of sales instead.&#10;&#10;Worth knowing: 21 days is a FOOD number, short because meat spoils. A label does not spoil and running out stops packing, so holding more of them is the cheaper mistake.">Label cover (days)</span>
+      <input type="number" min="0" step="1" style="width:76px" value="${STK.cover||''}" placeholder="same as product"
+        onchange="stkSet('cover',this.value)">
+      <span class="mini" style="color:var(--muted)">${stkCoverDays()>0
+        ? stkCoverDays()+' days of sales'
+        : 'following each product ('+(PQ.cycle||21)+'-day cycle + case rounding)'}</span>
+      <span class="sp" style="width:14px"></span>
+      <span title="How long the printer takes. It does not change how many to order — the par decides that — it decides when a label is URGENT: once what we hold plus what is coming will not outlast a new print, ordering next week is already too late.">Printer lead (days)</span>
+      <input type="number" min="0" step="1" style="width:60px" value="${STK.lead}" title="used for any supplier without its own figure" onchange="stkSet('lead',this.value)">
+      ${['Supplier 1 — Main','Supplier 2 — Gently Cooked'].map(sup=>`
+        <span class="mini" style="color:var(--muted)">${esc(sup.replace(/^Supplier \d+ — /,''))}</span>
+        <input type="number" min="0" step="1" style="width:56px" value="${STK_LEAD_SUP[sup]!=null?STK_LEAD_SUP[sup]:''}"
+          placeholder="${STK.lead}" title="${esc(sup)} — blank uses the default of ${STK.lead} day(s)"
+          onchange="stkSetLead('${esc(sup)}',this.value)">`).join('')}
+      <button class="btn sm sec" onclick="stkReset()">↺ Defaults</button>
     <button class="btn sec" onclick="_stkRoFill('need')">↺ Reset to suggested</button>
     <button class="btn sec" onclick="_stkRoFill('zero')">✕ Clear all</button>
     <button class="wfbtn" onclick="generateStickerPO()">🧾 Generate Sticker PO</button>
     <div class="sp"></div><span style="color:var(--muted)">demand + custom orders + PAR → labels to order → PO</span>`;
 
   const _allProdsStk=(await db.list('products',{})).filter(p=>p.active!==false);
+  window._stkRoProds=_allProdsStk;      // stkParSetMode needs the row it is changing
   const _nArch=_allProdsStk.filter(isArchivedSticker).length;
   window._stkRoArchN=_nArch;
   const prods=_stkRoShowArch?_allProdsStk:_allProdsStk.filter(p=>!isArchivedSticker(p));
@@ -19618,7 +19730,19 @@ async function renderStickerReorder(){
     const price=(+o.price||0) || ((t&&t.price)||0);
     const need=Math.max(o.forProd||0, o.forPar||0);
     const sheets=perSheet>0?Math.ceil(need/perSheet):0;
+    /* URGENT IS NOT THE SAME AS SHORT. A label can be under its par and still be
+       fine — there are weeks of stock left and the printer only needs one. What
+       matters is whether what we hold, plus what is already on its way, lasts
+       long enough for a new print to arrive. Once it does not, ordering next
+       week is already too late, and that is worth saying on the row. */
+    const leadD=stkLeadFor(o.supplier);
+    const perDay=+o.perDay||0;
+    const leadNeed=perDay*leadD;
+    const cushion=(+o.oh||0)+(+o.inc||0);
+    const daysLeft=perDay>0 ? cushion/perDay : null;
     return {...o, perSheet, price, tier:(t?t.dim:''), tierExact:!!(t&&t.exact),
+      leadDays:leadD, leadNeed, daysLeft,
+      urgent:(perDay>0 && leadD>0 && cushion<leadNeed),
       need, sheets, order:(perSheet>0?sheets*perSheet:need)};   // printers charge by the pack
   };
   _stkRoRows=prods.filter(p=>{
@@ -19646,7 +19770,9 @@ async function renderStickerReorder(){
       group_1:prodG1(p), group_2:prodG2(p), note:'',
       sort_order:p.sort_order, oh, par, packs, inc, incRefs:(onOrderRefs[p.sku]||[]),
       forProd:Math.max(0,packs-oh-inc), forPar:Math.max(0,par-oh-inc),
-      parSrc:_pf.src, parRaw:_pf.raw, parDiv:_pf.div, parStored:Math.max(0,+p['sticker_'+_stkRoLoc+'_par']||0),
+      parSrc:_pf.src, parMode:_pf.mode, parRaw:_pf.raw, parDiv:_pf.div, parCover:_pf.cover,
+      perDay:(stockPicFor(p.sku)||{}).perDay||0,
+      parStored:Math.max(0,+p['sticker_'+_stkRoLoc+'_par']||0),
       perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0, supplier:(p.sticker_supplier||'').trim(),
       link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'', net:p.sticker_net||'', kind:'product'});
   });
@@ -19877,7 +20003,7 @@ function drawStickerReorder(){
       Set them on the product's <b>🏷️ Stickers</b> tab — a PO with no price still generates, it just cannot be valued.</div>`:''}
     <div style="overflow-x:auto" class="stickyhead"><table><thead><tr>
       <th>#</th><th>Variant / Mix</th><th>Net Wt</th><th>Variant SKU</th><th>Artwork (Drive)</th><th>Dimension</th>
-      <th class="num" title="How many labels to hold. At ${esc(locName(planProduceLoc()||'bulacan'))} this follows the PRODUCT — New Par + safety, the same figure Regular Packs uses — rounded up to the printer's pack. Every label used to carry a flat 100 whatever the product sold.">PAR</th><th class="num">On hand</th><th class="num" title="pieces on a confirmed sticker PO that have not been received yet — subtracted so a label already coming is not bought twice">On order</th><th class="num">Packs</th><th class="num">PAR top-up</th>
+      <th class="num" title="How many labels to hold. By default it FOLLOWS the product — the New Par column on Regular Packs, rounded up to the printer's pack — so it moves as sales move. Pin a label to freeze the number instead. Every label used to carry a flat 100 whatever the product sold.">PAR</th><th class="num">On hand</th><th class="num" title="pieces on a confirmed sticker PO that have not been received yet — subtracted so a label already coming is not bought twice">On order</th><th class="num">Packs</th><th class="num">PAR top-up</th>
       <th class="num">Need</th><th class="num">Order</th><th class="num" title="the printer's minimum pack for this size">Packs</th><th class="num">₱/pc</th><th>Supplier</th>
     </tr></thead><tbody>`;
   /* WHICH PRINTER. The sticker file is two order sheets — Supplier 1 takes the
@@ -19910,12 +20036,14 @@ function drawStickerReorder(){
           <td><code>${esc(bare)}</code></td>
           <td>${r.link&&safeUrl(r.link)!=='#'?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener noreferrer">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>
           <td class="mini">${esc(r.dim||'')||'—'}</td>
-          <td class="num"><b>${r.par||'—'}</b>${
+          <td class="num">${r.urgent?`<div class="mini" style="color:var(--danger);font-weight:700" title="What is on hand plus what is already on order (${_spN((+r.oh||0)+(+r.inc||0))}) is less than the ${_spN(r.leadNeed)} this label will get through while the printer takes its ${r.leadDays} day(s).${r.daysLeft!=null?` About ${Math.round(r.daysLeft*10)/10} day(s) of labels left.`:''} Ordering next week is already too late.">⚠ inside the print lead time</div>`:''}<b>${r.par||'—'}</b>${
             r.parSrc==='derived'
-              ? `<div class="mini" style="color:var(--muted)" title="Follows the product: New Par + safety is ${r.parRaw}${r.parDiv>0?`, rounded up to the printer's pack of ${r.parDiv}`:''}. It moves as sales move — there is no stored figure to keep up to date.${r.parStored&&r.parStored!==r.par?` The old stored figure was ${r.parStored}.`:''}">from the product${r.parDiv>0?' · ×'+r.parDiv:''}</div>`
+              ? `<div class="mini" style="color:var(--muted)" title="Moving. ${r.parCover>0?`${r.parCover} days of labels at ${Math.round((r.perDay||0)*100)/100}/day is ${r.parRaw}`:`The product's New Par is ${r.parRaw}`}${r.parDiv>0?`, rounded up to the printer's pack of ${r.parDiv}`:''}. It follows sales — there is no stored figure to keep up to date.${r.parStored&&r.parStored!==r.par?` The number typed against the label is ${r.parStored}; it is not being used.`:''}">↻ ${r.parCover>0?r.parCover+'-day cover':'follows the product'}${r.parDiv>0?' · ×'+r.parDiv:''}</div>
+                 <div class="mini"><span class="btn link" style="color:var(--muted)" onclick="stkParSetMode('${esc(r.sku)}','static')" title="Keep ${r.par} and stop it moving with sales">📌 pin at ${r.par}</span></div>`
               : (r.parSrc==='nosales'
-                 ? `<div class="mini" style="color:var(--earth,#b5762a)" title="No sales history, so there is no computed par for this product — the figure typed on the product is used instead.">typed · no sales yet</div>`
-                 : `<div class="mini" style="color:var(--muted)" title="Labels are applied where the packs are made, so only ${esc(locName(planProduceLoc()||'bulacan'))} follows the product. This site keeps its own figure.">typed</div>`)}</td>
+                 ? `<div class="mini" style="color:var(--earth,#b5762a)" title="No sales history yet, so there is no New Par to follow. The number typed against the label is used until it has sold something, then it follows on its own.">typed · no sales yet</div>`
+                 : `<div class="mini" style="color:#6b3f7a" title="Pinned. This figure was decided by a person and does not move with sales.">📌 pinned</div>
+                    <div class="mini"><span class="btn link" style="color:var(--muted)" onclick="stkParSetMode('${esc(r.sku)}','follow')" title="Go back to following the product's New Par">↻ follow the product</span></div>`)}</td>
           <td class="num mini" style="color:var(--muted)">${r.oh||'—'}</td>
           <td class="num mini" style="${r.inc>0?'color:var(--earth,#b5762a);font-weight:600':'color:var(--muted)'}"${r.inc>0?` title="on ${esc((r.incRefs||[]).join(', '))}"`:''}>${r.inc||'—'}${(r.incRefs&&r.incRefs.length>1)?'<div class="mini" style="color:var(--danger)" title="this label is on more than one open sticker PO">on '+r.incRefs.length+' POs</div>':''}</td>
           <td class="num mini" style="${r.forProd>0?'color:var(--berry);font-weight:600':'color:var(--muted)'}">${r.packs||'—'}</td>
