@@ -757,9 +757,10 @@ const MODELS = {
       {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'},
       {n:'sticker_archived',l:'Sticker retired (stop ordering & counting this label)',t:'bool'},
       {n:'supply_led',l:'Supply-led (skip demand planning & POs — we make whatever arrives)',t:'bool'},
+      {n:'replaced_by',l:'Phasing out — demand moves to',t:'rel',rel:'products'},
       {n:'is_custom',l:'Custom order product',t:'bool'}],
     list:['name','status','family','variant','pack_g','sell_price'],
-    groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status','supply_led'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
+    groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','animal','status','supply_led','replaced_by'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
             ['cost_debone','cost_butcher','cost_sousvide','cost_ecobag','cost_thermal'],
             ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_per_sheet','sticker_price','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par','sticker_archived']],
     tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'💰 Cost profile', groups:[3]},{l:'🏷️ Stickers', groups:[4]}],
@@ -3376,8 +3377,8 @@ async function pqBuildRows(){
   const ohBy={};
   (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
     const L=String(v.location_code||''); const q=+v.qty||0;
-    const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{sellAt:0, sellAfter:0, other:0, cons:0, all:0, sites:{}, consSites:{}};
-    o.all+=q;
+    const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{sellAt:0, sellAfter:0, other:0, cons:0, all:0, sites:{}, consSites:{}, at:{}};
+    o.all+=q; o.at[L]=(o.at[L]||0)+q;
     if(L===sellLoc){
       const t=v.created_at?new Date(v.created_at).getTime():NaN;
       /* No timestamp, or no water line, means it cannot be placed — count it as
@@ -3404,11 +3405,20 @@ async function pqBuildRows(){
     soldBy[r.sku] = (w<=30?(+r.u30||0):(w<=60?(+r.u60||0):(w<=90?(+r.u90||0):(+r.u120||0)))); });
   const rows=(prods||[]).filter(p=>!isArchivedProd(p) && !/sticker/i.test(String(p.group_1||'')))
     .map(p=>{
-      const oh=ohBy[p.sku]||{sellAt:0, sellAfter:0, other:0, cons:0, all:0, sites:{}, consSites:{}};
+      const oh=ohBy[p.sku]||{sellAt:0, sellAfter:0, other:0, cons:0, all:0, sites:{}, consSites:{}, at:{}};
       const ledAtCount=oh.sellAt;                       // ledger at the sell site when the count was taken
       const ledSell=oh.sellAt+oh.sellAfter;             // ledger at the sell site right now
       const hasSnap=(shopBy[p.sku]!=null);
-      const shop=hasSnap ? Math.max(0, shopBy[p.sku]+oh.sellAfter) : Math.max(0,ledSell);
+      const isCust=!!(p.is_custom || /^CUST-/i.test(String(p.sku||'')));
+      /* Custom orders are never on the shop's shelf. Everything else takes its
+         shelf figure from Shopify or reports that it has none — it never
+         quietly substitutes our own ledger and lets it read like a shelf. */
+      const shop = (isCust || !hasSnap) ? 0 : Math.max(0, shopBy[p.sku]+oh.sellAfter);
+      const noRead = !isCust && !hasSnap;
+      /* A custom pack is ours wherever it is standing, including at the shop,
+         because nothing at the shop will ever sell it. It is owed to one named
+         person and it stays on our books until they have it. */
+      const awaiting = isCust ? Math.max(0, oh.all - (transit[p.sku]||{qty:0}).qty) : 0;
       /* The pipeline is what we can actually fetch from a site we hold. Packs
          already on a van are not that, and if the shop has uploaded them they
          are on the shelf as well — so they come out of the pipeline and are
@@ -3427,7 +3437,8 @@ async function pqBuildRows(){
       const onHandAt =(snapOn && snapOn[p.sku]!=null) ? +snapOn[p.sku] : null;
       return {sku:p.sku, name:prodLabel({...p},{noSku:true}), group_1:(p.group_1||'Products'),
         group_2:(p.group_2||p.family||'Other'), sort_order:p.sort_order, box:(+p.box_size||0),
-        shop, snapQ:hasSnap?shopBy[p.sku]:null, postG:hasSnap?oh.sellAfter:0,
+        shop, isCust, noRead, awaiting,
+        snapQ:(hasSnap&&!isCust)?shopBy[p.sku]:null, postG:(hasSnap&&!isCust)?oh.sellAfter:0,
         ledSell, drift:(physAtCount!=null)?(physAtCount-ledAtCount):null, physAtCount,
         committed, onHandAt,
         /* WHICH sites the off-shelf packs are at, not just how many.
@@ -3441,6 +3452,9 @@ async function pqBuildRows(){
                      .sort((a,b)=>(+oh.sites[b]||0)-(+oh.sites[a]||0))
                      .map(k=>({code:k, qty:Math.max(0,+oh.sites[k]||0)})),
         consigned:Math.max(0,+oh.cons||0),
+        awaitSites:Object.keys(oh.at||{}).filter(k=>(+oh.at[k]||0)>0.0001)
+                     .sort((a,b)=>(+oh.at[b]||0)-(+oh.at[a]||0))
+                     .map(k=>({code:k, qty:Math.max(0,+oh.at[k]||0)})),
         consSites:Object.keys(oh.consSites||{}).filter(k=>(+oh.consSites[k]||0)>0.0001)
                      .sort((a,b)=>(+oh.consSites[b]||0)-(+oh.consSites[a]||0))
                      .map(k=>({code:k, qty:Math.max(0,+oh.consSites[k]||0)})),
@@ -3533,7 +3547,16 @@ async function stockPicture(force){
   (built.rows||[]).forEach(r=>{
     const c=pqCalc(r);
     const sellable=Math.max(0,+r.shop||0), pipeline=Math.max(0,+r.other||0);
-    by[r.sku]={ sku:r.sku, name:r.name, sellable, pipeline, current:sellable+pipeline,
+    /* A CUSTOM ORDER'S STOCK IS NOT A SHELF FIGURE. It is packs made for one
+       named person that have not reached them yet — never sellable, never
+       pipeline for anything else to draw on, and still ours until handover.
+       Current stock IS that number, said in those words. */
+    const awaiting=Math.max(0,+r.awaiting||0);
+    const isCust=!!r.isCust;
+    by[r.sku]={ sku:r.sku, name:r.name,
+      sellable:isCust?0:sellable, pipeline:isCust?0:pipeline,
+      current:isCust?awaiting:(sellable+pipeline),
+      isCust, noRead:!!r.noRead, awaiting, awaitSites:(r.awaitSites||[]),
       otherSites:(r.otherSites||[]),
       inTransit:Math.max(0,+r.inTransit||0), transitRefs:(r.transitRefs||[]),
       consigned:Math.max(0,+r.consigned||0), consSites:(r.consSites||[]),
@@ -3580,13 +3603,28 @@ function spStockCell(s,opt){
      "33 sellable" — the same figure twice, which is noise on every row. The
      movements posted since the reading are the only part worth a second line,
      and they are only shown when there are any. */
+  /* ---- A CUSTOM ORDER HAS NO SHELF ---------------------------------------
+     It is made for one named person and it is ours until they have it, so it
+     gets its own sentence rather than being squeezed into "sellable + not yet
+     sellable". Where it is standing still matters — that is a real box on a
+     real shelf somebody has to find on delivery day — so the sites are named. */
+  if(s.isCust){
+    const aw=(s.awaitSites||[]);
+    const whereA = aw.length===1 ? locName(aw[0].code)
+                 : aw.length>1   ? aw.map(x=>locName(x.code)+' '+_spN(x.qty)).join(' · ') : '';
+    return '<b>'+_spN(s.current)+'</b>'
+      +'<div class="mini" style="color:var(--muted)" title="Made for a named customer and not yet handed over. Never sellable — the shop does not carry it — and not stock anything else can draw on. It clears when the order is handed over.">made, awaiting handover'
+      +(whereA?(' · '+esc(whereA)):'')+'</div>';
+  }
   const fromShop=(s.shopQ!=null);
-  const sellLabel = fromShop ? 'Shopify' : ('at '+locName((_stockPic&&_stockPic.sellLoc)||'pasig'));
-  const sellTitle = fromShop
-    ? ('Shopify\'s available at '+locName((_stockPic&&_stockPic.sellLoc)||'pasig')
+  /* NO READING IS NOT A QUANTITY. The shop's shelf is Shopify's to state; when
+     Shopify has not stated it, saying so is the only honest answer. Printing
+     our own Pasig ledger here made a guess look exactly like a fact. */
+  const sellLabel = 'Shopify';
+
+  const sellTitle = 'Shopify\'s available at '+locName((_stockPic&&_stockPic.sellLoc)||'pasig')
        +' — what a customer can actually buy, with packs committed to unfulfilled orders already taken out.'
-       +(s.postG?(' The reading itself was '+_spN(s.shopQ)+'; '+_spN(Math.abs(s.postG))+' have '+(s.postG>0?'arrived':'left')+' since it was taken.'):''))
-    : ('our own ledger at '+locName((_stockPic&&_stockPic.sellLoc)||'pasig')+' — the Shopify inventory feed is not running, so this is our figure, not the shop\'s.');
+       +(s.postG?(' The reading itself was '+_spN(s.shopQ)+'; '+_spN(Math.abs(s.postG))+' have '+(s.postG>0?'arrived':'left')+' since it was taken.'):'');
   const sinceBit=(fromShop && s.postG)
     ? `<div class="mini" style="color:var(--muted)" title="${esc(sellTitle)}">Shopify read ${_spN(s.shopQ)}, ${s.postG>0?'+':''}${_spN(s.postG)} since</div>` : '';
   /* Shown, never added. A consignee's shelf and a breeder colony are stock that
@@ -3603,8 +3641,15 @@ function spStockCell(s,opt){
         sites.length===1 ? 'at '+esc(where)
         : sites.length>1 ? `<b style="color:var(--earth,#b5762a)" title="${esc(pipeTitle)}">at ${sites.length} sites</b>`
         : 'off the shelf'}` : '';
+  /* NO READING IS NOT A QUANTITY, and it is not a different cell either — the
+     pipeline half is the same fact whether or not the shop has reported, so
+     only the sellable half changes. Forking the whole cell here is exactly how
+     the multi-site pipeline summary got lost the first time. */
+  const sellBit = s.noRead
+    ? `<span style="color:var(--earth,#b5762a)" title="Shopify is the record of what is on the shop&#39;s shelf and it has no reading for this product, so the shelf is unknown — not zero. Our own ledger at ${esc(locName((_stockPic&&_stockPic.sellLoc)||'pasig'))} is deliberately not shown here: it would read like a shelf figure and it is not one. Check the product exists in Shopify and that the inventory feed is running.">no Shopify reading</span>`
+    : `<span style="color:#2f5d33" title="${esc(sellTitle)}">${_spN(s.sellable)}</span> ${esc(sellLabel)}`;
   return `<b>${_spN(s.current)}</b>
-    <div class="mini" style="color:var(--muted)"><span style="color:#2f5d33" title="${esc(sellTitle)}">${_spN(s.sellable)}</span> ${esc(sellLabel)}${pipeBit}</div>${sinceBit}${transitBit}${consBit}`;
+    <div class="mini" style="color:var(--muted)">${sellBit}${pipeBit}</div>${sinceBit}${transitBit}${consBit}`;
 }
 function spCoverCell(s){
   if(!s) return '<span class="mini" style="color:var(--muted)">—</span>';
@@ -4406,7 +4451,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-05 08:35Z';
+const WR_BUILD='2026-09-07 10:40Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
   t.title='build '+WR_BUILD; }
@@ -7940,13 +7985,19 @@ async function renderMRP(){
                   : (inD>=c.packs ? '<span class="badge b-received">in this run</span>'
                   : (inD>0 ? '<span class="badge b-invoiced">part in this run</span>'
                            : '<span class="badge b-open">not planned yet</span>'));
+      const unlocked=(window._mrpCoUnlock||{})[sku];
+      const qtyCell = (planned && !unlocked)
+        ? `<td class="num" title="already on a plan — adding it here would buy the ingredients a second time">
+             <span style="color:var(--muted)">🔒 ${inD||0}</span>
+             <div class="mini"><span class="btn link" style="color:var(--muted)" onclick="mrpCoUnlock('${esc(sku)}')">plan it again…</span></div></td>`
+        : `<td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${mrpDemand[sku]||''}" onchange="mrpSetDem('${sku}',this.value)" title="a customer's own quantity — never rounded"${(planned&&unlocked)?' style="width:84px;text-align:right;border-color:var(--danger)"':''}>${(planned&&unlocked)?'<div class="mini" style="color:var(--danger)">counted twice unless the other plan is dropped</div>':''}</td>`;
       return `<tr>
         <td>${esc(c.orders.map(o=>o.customer).filter((v,i,a)=>a.indexOf(v)===i).join(', ')||'—')}
           <div class="mini" style="color:var(--muted)">${esc(c.orders.map(o=>o.ref).join(', '))}</div></td>
         <td>${esc(_pName[sku]||sku)}<div class="mini"><code>${esc(sku)}</code></div></td>
         <td class="mini" style="white-space:nowrap;${late?'color:var(--danger);font-weight:700':''}">${esc(c.needed||'—')}${late?' · overdue':''}</td>
         <td class="num"><b>${c.packs}</b></td>
-        <td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${mrpDemand[sku]||''}" onchange="mrpSetDem('${sku}',this.value)" title="a customer's own quantity — never rounded"></td>
+        ${qtyCell}
         <td>${state}</td></tr>`; };
     const _cohead=`<thead><tr><th>Customer / order</th><th>Product</th><th>Needed</th><th class="num">Ordered</th><th class="num">In this run</th><th>Where it stands</th></tr></thead>`;
     dh+=`<div class="repcard" style="border-left:4px solid var(--berry)">
@@ -7965,9 +8016,9 @@ async function renderMRP(){
         ? `<div style="overflow-x:auto"><table>${_cohead}<tbody>${freshSkus.map(k=>_corow(k,false)).join('')}</tbody></table></div>
            <div class="pager">${freshSkus.length} custom SKU(s) need planning · ${freshSkus.reduce((n,k)=>n+coAll[k].packs,0)} pack(s)</div>`
         : `<div class="hint" style="background:#eef5ee;border-color:#cfe0cf;margin:0"><b>✅ Nothing new to plan.</b> All ${coSkus.length} custom SKU(s), ${totPacks} pack(s), are already on a demand plot or a production plan — listed below.</div>`}
-      ${doneSkus.length?`<details style="margin-top:10px"${freshSkus.length?'':' open'}>
-        <summary style="cursor:pointer;font-weight:700;font-size:13px">Already planned — ${doneSkus.length} custom SKU(s), ${doneSkus.reduce((n,k)=>n+coAll[k].packs,0)} pack(s) still owed</summary>
-        <div class="hint" style="margin:8px 0">These are counted already. Adding them again here would buy the ingredients twice. They clear when the production run is <b>confirmed</b>.</div>
+      ${doneSkus.length?`<details style="margin-top:10px">
+        <summary style="cursor:pointer;font-weight:700;font-size:13px;color:var(--muted)">Already planned — ${doneSkus.length} custom SKU(s), ${doneSkus.reduce((n,k)=>n+coAll[k].packs,0)} pack(s) still owed · nothing to do here</summary>
+        <div class="hint" style="margin:8px 0">Each of these is already on a demand plot or a production plan, so the ingredients have been counted once. There is <b>no quantity box</b> on these rows for that reason — putting a figure against one would order the same packs a second time. They drop off this list for good when the production run is <b>confirmed</b>.</div>
         <div style="overflow-x:auto"><table>${_cohead}<tbody>${doneSkus.map(k=>_corow(k,true)).join('')}</tbody></table></div>
       </details>`:''}
       </div>`;
@@ -8065,6 +8116,13 @@ async function renderMRP(){
         <b>☁ Sync demand</b> to pull those rows in and save a plot. Was it a trial? <b>🗑 Clear</b> takes the rows back out —
         it never deletes the order that wrote them.</div></div>`;
   }
+  /* ---- PHASING OUT ------------------------------------------------------
+     Retiring lines are shown ABOVE the demand table, not inside it, because
+     the decision is a different one: not "how many", but "does this week's
+     demand for it belong on the replacement instead". Stock left still sells,
+     so the product stays in the table below and still takes a figure. */
+  try{ await stockPicture(); }catch(e){}
+  dh+=mrpPhaseHtml(prods, _allP);
   // demand card
   dh+=`<div class="repcard"${(coSkus.length||1)?' style="margin-top:14px"':''}>
     <div class="repbar"><span>Plan (week of)</span><input type="date" value="${MRPDATE}" onchange="MRPDATE=this.value">
@@ -8080,7 +8138,15 @@ async function renderMRP(){
   /* Name + Variant, then the code beneath. "Rabbit Meat (GC)" exists at 250 g
      and 500 g and they are different rows to plan — the variant is the only
      thing that tells them apart. */
-  const _demRow=p=>`<tr><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div></td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="1" inputmode="numeric" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpSetDem('${p.sku}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}"></td></tr>`;
+  /* A RETIRING LINE IS STILL A LINE. It keeps its input — there is stock on
+     the shelf and somebody may well want more of it while it lasts — but it is
+     flagged where the planner is typing, with the replacement named, so the
+     choice is visible at the moment it is being made rather than in a card
+     further up the page that has scrolled away. */
+  const _demRow=p=>{
+    const _to=(window._mrpPhase||{})[p.sku];
+    return `<tr${_to?' style="background:#fff8e1"':''}><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div>${_to?`<div class="mini" style="color:var(--earth,#b5762a)">🔻 phasing out → <b>${esc(_to.toName)}</b>${Math.abs(phaseRatio(_to.from,_to.to)-1)>1e-9?` · <span title="pack sizes differ — diverting converts by grams">1 : ${Math.round(phaseRatio(_to.from,_to.to)*100)/100}</span>`:''}</div>`:''}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="1" inputmode="numeric" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpSetDem('${p.sku}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}">${_to?`<div class="mini"><span class="btn link" onclick="mrpDivert('${esc(p.sku)}')" title="move this figure onto ${esc(_to.toName)}">→ divert</span></div>`:''}</td></tr>`;
+  };
   // custom-order SKUs are planned in the card above, not here
   /* SUPPLY-LED PRODUCTS ARE NOT PLANNED HERE. Lamb and rabbit arrive when a
      supplier has them and the whole delivery gets made; asking the plot for a
@@ -10686,7 +10752,7 @@ async function renderCustomOrders(){
      the answer — which draft run put it there — belongs on the row, not in my head. */
   const _why=window._coWhy||{};
   let rows=orders.map(o=>{ const mk=coProduceBy(o), late=mk&&mk<todayISO()&&coIsOpen(o.status);
-    return `<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.delivery_date||'—')}</td><td${late?' style="color:var(--danger);font-weight:700"':''}>${esc(mk||'—')}${late?'<div class="mini">make-by passed</div>':''}</td><td>${coStatBadge(o.status)}${fbadge(o)}${_why[o.order_ref]?`<div class="mini" style="color:var(--muted)">${esc(_why[o.order_ref])}</div>`:''}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td><td class="num"><button class="btn sm sec" title="Copy to a new quote — lines and recipes come with it" onclick="event.stopPropagation();coDuplicate('${encodeURIComponent(o.order_ref)}')">⧉</button></td></tr>`; }).join('');
+    return `<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.delivery_date||'—')}</td><td${late?' style="color:var(--danger);font-weight:700"':''}>${esc(mk||'—')}${late?'<div class="mini">make-by passed</div>':''}</td><td>${coStatBadge(o.status)}${fbadge(o)}${_why[o.order_ref]?`<div class="mini" style="color:var(--muted)">${esc(_why[o.order_ref])}</div>`:''}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td><td class="num"><button class="btn sm sec" title="Copy to a new quote — lines and recipes come with it" onclick="event.stopPropagation();coDuplicateAsk('${encodeURIComponent(o.order_ref)}')">⧉</button></td></tr>`; }).join('');
   // Board counts, in flow order — the answer to "where is everything right now".
   const tally={}; orders.forEach(o=>{ const k=coStat(o.status); tally[k]=(tally[k]||0)+1; });
   const flowStrip=CO_FLOW.filter(f=>tally[f.k]).map(f=>`<span class="badge b-${f.b}" title="${esc(f.d)}" style="margin-right:6px">${esc(f.l)} · ${tally[f.k]}</span>`).join('');
@@ -11137,12 +11203,13 @@ function drawCOForm(){
   $('cp').innerHTML=`<div class="title">Custom Orders</div>
     ${!locked?`<button class="btn sec" onclick="coSave()">💾 Save quote</button><button class="wfbtn" onclick="coLock()">🔒 Lock order</button>`:''}
     ${coIsOpen(coRec.status)?`<button class="btn sec" onclick="coFulfil()">✓ Mark completed</button>`:''}
+    ${(coIsLocked(coRec.status)&&coRec.order_ref)?`<button class="btn sec" onclick="coHandover()" title="the customer has it — take the packs out of stock where they are standing. Nothing goes to the shop; a custom mix is never sold there.">🚚 Hand over</button>`:''}
     ${(coIsLocked(coRec.status)&&coIsOpen(coRec.status)&&coRec.order_ref)?`<button class="btn sec" onclick="coCloseOut()" title="stop it asking for packs that are never going to be made — records what was produced and writes off the rest">📕 Close out</button>`:''}
     ${!locked&&coRec.order_ref?`<button class="btn sec" onclick="coCancel()">✕ Cancel</button>`:''}
     ${(locked&&coIsOpen(coRec.status)&&coRec.order_ref)?`<button class="btn sec" style="color:var(--danger)" onclick="coCancelLocked()" title="the customer pulled out, or this was locked by mistake — takes the packs back out of demand, if nothing has planned them yet">✕ Cancel order</button>`:''}
     ${(coStat(coRec.status)==='cancelled'&&coRec.order_ref)?`<button class="btn sec" style="color:var(--danger)" onclick="coDeleteOrder()" title="remove the record entirely — only possible while nothing points at it">🗑 Delete</button>`:''}
     <button class="btn sec" onclick="coKitchenBatch()" title="the Fresh Food Calculator's Kitchen Batch sheet, from this order">🍳 Kitchen Batch</button>
-    ${coRec.order_ref?`<button class="btn sec" onclick="coDuplicate()" title="start a new quote holding this order's lines and recipes">⧉ Duplicate</button>`:''}
+    ${coRec.order_ref?`<button class="btn sec" onclick="coDuplicateAsk()" title="repeat the same product, or fork a new one from this order">⧉ Duplicate…</button>`:''}
     ${!locked?`<button class="btn sec" onclick="coImportSheet()" title="a Production Request CSV — one mix per line">📥 Import sheet</button>`:''}
     <button class="btn sec" onclick="coBackToList()">← Orders</button>
     <div class="sp"></div>${coStatBadge(coRec.status)} <span style="color:var(--muted)">${esc(coStatDef(coRec.status).d)}</span>`;
@@ -11156,7 +11223,9 @@ function drawCOForm(){
     const nameCell = isCustom
       ? `<input value="${esc(l.description||'')}" ${dis} placeholder="recipe name" oninput="coLines[${i}].description=this.value" style="width:150px">
          <div class="mini">${recipeN} ingredient(s) · ${Math.round(recipeG)} g/pack
-           <a onclick="coEditRecipe(${i})" style="cursor:pointer;color:#4e7a3e" title="${locked?'locked — open to read it':'open to change it'}">🧪 ${locked?'view recipe':'edit recipe'}</a>${l.product_sku?` · <code>${esc(l.product_sku)}</code>`:''}</div>`
+           <a onclick="coEditRecipe(${i})" style="cursor:pointer;color:#4e7a3e" title="${(locked||l.locked_recipe)?'read-only — open to read it':'open to change it'}">🧪 ${(locked||l.locked_recipe)?'view recipe':'edit recipe'}</a>${l.product_sku?` · <code>${esc(l.product_sku)}</code>`:''}
+           ${l.locked_recipe?'<div class="mini" style="color:var(--muted)">shared with the order this was copied from — changing it would change that one too</div>':''}
+</div>`
       : `<select ${dis} onchange="coSetProduct(${i},this.value)" style="width:200px"><option value="">— pick product —</option>${_coProdOptions(l.product_sku)}</select>${l.product_sku?`<div class="mini"><code>${esc(l.product_sku)}</code></div>`:''}`;
     return `<tr><td>${isCustom?'🧪 custom':'📦 product'}</td><td>${nameCell}</td>
       <td><input type="number" step="any" inputmode="decimal" ${dis} value="${l.pack_size_g||''}" oninput="coLines[${i}].pack_size_g=+this.value||0" style="width:74px;text-align:right" ${isCustom?'':'title="from product"'}></td>
@@ -11226,8 +11295,30 @@ let _coEditIdx=-1, _coEditRows=[], _coEditBase=0;
    the link, and "why can't I open the recipe" is the only thing that can mean.
    The recipe opens either way now; when locked the fields are read-only and it
    says so, instead of pretending there is nothing to see. */
+/* EDITING A SHARED RECIPE EDITS SOMEBODY ELSE'S ORDER TOO.
+   After "Duplicate order" both quotes point at one SKU with one BOM — that is
+   what makes it a repeat rather than a new product. So the recipe opens
+   read-only, and the way out is offered right there rather than left for
+   somebody to work out: fork it, and this line gets its own SKU on Lock while
+   the original is left exactly as it was. */
+async function coForkRecipe(i){
+  const l=coLines[i]; if(!l) return;
+  const was=l.product_sku||'';
+  if(!confirm('Give this line its own product?\n\n'
+    +'It currently shares '+(was||'a product')+' with the order it was copied from, so a change here would change that order too.\n\n'
+    +'Forking it mints a new SKU when this quote is locked. The original is untouched — and there will be two products to make, count and label instead of one.')) return;
+  let taken=new Set();
+  try{ taken=new Set((await db.list('products',{})).map(p=>p.sku)); }catch(e){}
+  (coLines||[]).forEach(x=>{ if(x!==l && x.product_sku) taken.add(x.product_sku); });
+  l.product_sku=coCustSku(coRec.customer_name, l.description, l.pack_size_g, taken);
+  l.locked_recipe=false;
+  toast('Forked — this line is now '+l.product_sku);
+  drawCOForm(); coEditRecipe(i);
+}
 function coEditRecipe(i){ _coEditIdx=i; const l=coLines[i]; _coEditRows=(l.recipe||[]).map(r=>({...r}));
-  window._coRecipeRO=coIsLocked(coRec&&coRec.status);
+  window._coRecipeRO=coIsLocked(coRec&&coRec.status) || !!(l&&l.locked_recipe);
+  window._coRecipeShared=!!(l&&l.locked_recipe) && !coIsLocked(coRec&&coRec.status);
+  window._coRecipeIdx=i;
   // No blank starter row any more — each PMR section carries its own "＋ Add".
   _coEditBase=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; drawCoRecipe(); }
 /* Was grouped by `ingredient_group`, which is not a field on ingredients — so every
@@ -11369,8 +11460,11 @@ function drawCoRecipe(){
       <input type="checkbox" ${window._coAllIng?'checked':''} onchange="window._coAllIng=this.checked;drawCoRecipe()" style="margin:0">
       ⚙ show every ingredient in each picker <span style="opacity:.7">— only needed when something is filed under the wrong category</span></label>`}
     <div id="coRecSum" style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:13px">${_coRecipeSummaryHtml()}</div>
+    ${window._coRecipeShared?`<div style="margin-top:10px;padding:9px 11px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
+      🔗 <b>Shared recipe.</b> This line was copied as a <b>repeat of the same product</b>, so it points at the SKU the original order uses — one product, one BOM, one row on the production sheet. Changing it here would change that order too, which is why it is read-only.
+      If this order genuinely needs a different mix, fork it: a new SKU is minted on Lock and the original is left alone.</div>`:''}
     <div style="display:flex;gap:8px;margin-top:14px">${RO
-      ? `<button class="btn sec" onclick="closeModal()">Close</button>`
+      ? `${window._coRecipeShared?`<button class="btn" onclick="coForkRecipe(${window._coRecipeIdx})">⑂ Give this line its own product</button>`:''}<button class="btn sec" onclick="closeModal()">Close</button>`
       : `<button class="btn" id="coRecSaveBtn" onclick="coSaveRecipe()">💾 Save recipe (${now})</button><button class="btn sec" onclick="closeModal()">Cancel</button>`}</div></div>`;
   modalWide(true); $('overlay').classList.add('on');
 }
@@ -11408,7 +11502,27 @@ function coSaveRecipe(){ const clean=_coEditRows.filter(r=>r.ingredient_sku&&+r.
    overwritten. Clearing it costs nothing (Lock mints it again) and cannot lie.
    The delivery date goes for a duller reason: inherited, it is already in the
    past, and the list would open the copy flagged "make-by passed". */
-async function coDuplicate(refEnc){
+async function coDuplicateAsk(refEnc){
+  const ref = refEnc ? decodeURIComponent(refEnc) : ((coRec&&coRec.order_ref)||'');
+  if(!ref){ toast('Save this quote first, then duplicate it',true); return; }
+  let n=0, nCust=0;
+  try{ const ls=await db.children({model:'custom_order_lines',fk:'order_ref'}, ref);
+    n=ls.length; nCust=ls.filter(l=>l.line_type==='custom').length; }catch(e){}
+  const e=encodeURIComponent(ref);
+  $('modal').innerHTML='<div><h3>⧉ Duplicate '+esc(ref)+'</h3>'
+    +'<p class="mini">'+n+' line(s)'+(nCust?(', '+nCust+' custom recipe'+(nCust>1?'s':'')):'')+'. '
+    +(nCust?'What happens to the recipes is the whole question:':'No custom recipes here, so both options do the same thing.')+'</p>'
+    +'<div style="display:flex;flex-direction:column;gap:10px;margin-top:10px">'
+    +'<button class="btn" style="text-align:left;padding:10px 12px;height:auto" onclick="coDuplicate(\''+e+'\',\'order\')">'
+      +'<b>⧉ Duplicate order</b><div class="mini" style="font-weight:400;margin-top:2px">A repeat of the same thing. It keeps the SKUs this order already uses — one product, one recipe, one row on the production sheet, and two orders claiming it. Editing a recipe afterwards would change it for <b>both</b>, so the recipe is carried read-only.</div></button>'
+    +'<button class="btn sec" style="text-align:left;padding:10px 12px;height:auto" onclick="coDuplicate(\''+e+'\',\'order+product\')">'
+      +'<b>⧉ Duplicate order + product</b><div class="mini" style="font-weight:400;margin-top:2px">This order as a starting point for something new. It mints its own SKU on Lock even if you change nothing, so tweaking the recipe touches only this order. Two SKUs to make, count and label.</div></button>'
+    +'</div><div class="mfoot" style="margin-top:12px"><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>';
+  modalWide(false); $('overlay').classList.add('on');
+}
+async function coDuplicate(refEnc, mode){
+  mode=mode||'order+product';
+  closeModal();
   const ref = refEnc ? decodeURIComponent(refEnc) : ((coRec&&coRec.order_ref)||'');
   if(!ref){ toast('Save this quote first, then duplicate it',true); return; }
   let src=null, lines=[];
@@ -11423,11 +11537,27 @@ async function coDuplicate(refEnc){
     needed_date:todayISO(), status:'draft',
     notes:src.notes||'', discount:+src.discount||0, delivery_fee:+src.delivery_fee||0,
     personalized_sticker:!!src.personalized_sticker, created_by:CURRENT_USER, _copied_from:ref };
+  const keepSku=(mode==='order');
+  /* THE INTENT HAS TO SURVIVE A SAVE. A flag on the line would not: the lines
+     table has no column for it, so "give this one its own product" would be
+     forgotten the moment somebody saved the draft and came back, and the recipe
+     fingerprint would quietly hand back the original SKU — the option doing
+     nothing, silently, which is the worst way for it to fail. So a fork is
+     given its real code here and now. The SKU on the line IS the decision. */
+  let _taken=new Set();
+  if(!keepSku){ try{ _taken=new Set((await db.list('products',{})).map(p=>p.sku)); }catch(e){} }
   coLines=lines.map(l=>{
     const isCustom=(l.line_type==='custom');
     const rec=(typeof l.recipe==='string'?_coParse(l.recipe):(l.recipe||[]));
     return { line_type:l.line_type||'product',
-      product_sku: isCustom ? '' : (l.product_sku||''),
+      /* Duplicate ORDER keeps the SKU, so the lock has nothing to mint and the
+         two orders are two claims on one product. Duplicate ORDER + PRODUCT
+         clears it and asks for a fresh one outright — see force_new_sku, which
+         is what stops the recipe fingerprint quietly handing back the original. */
+      product_sku: (isCustom && !keepSku)
+        ? (()=>{ const nu=coCustSku(src.customer_name, l.description, l.pack_size_g, _taken); _taken.add(nu); return nu; })()
+        : (l.product_sku||''),
+      locked_recipe: (isCustom && keepSku) ? true : false,
       description: l.description||'',
       recipe: isCustom ? (rec||[]).map(r=>({...r})) : [],
       pack_size_g:+l.pack_size_g||0, packs:+l.packs||0, unit_price:+l.unit_price||0 };
@@ -11436,6 +11566,7 @@ async function coDuplicate(refEnc){
   _coView='form'; state.model='custom_orders'; state.view='special'; renderSide(); drawCOForm();
   const nCustom=coLines.filter(l=>l.line_type==='custom').length;
   toast('Copied '+ref+' — '+coLines.length+' line(s)'+(nCustom?(', '+nCustom+' recipe(s)'):'')
+       +(nCustom?(keepSku?' · same product(s), recipe locked':' · new SKU(s) on Lock'):'')
        +'. Set the delivery date, edit what changed, then Save.');
 }
 async function coSave(){
@@ -11486,8 +11617,17 @@ async function coLock(){
         /* the same mix at the same pack size is the same product, however it
            happens to be spelled — that check has not changed, only where the
            answer is kept */
-        const sku=byRecipe[rkey] || coCustSku(coRec.customer_name, l.description, l.pack_size_g, existProd);
-        byRecipe[rkey]=sku;
+        /* force_new_sku is set by "Duplicate order + product". Without it the
+           fingerprint would hand back the very SKU the copy was meant to fork
+           away from, and the whole option would do nothing. */
+        /* A SKU ALREADY ON THE LINE IS A DECISION SOMEBODY MADE — a repeat
+           pointing at the original product, or a fork that was given its own
+           code when it was copied. Either way it is not this function's to
+           second-guess, so the fingerprint is only consulted when the line
+           carries no SKU at all. */
+        const sku = l.product_sku || byRecipe[rkey]
+                 || coCustSku(coRec.customer_name, l.description, l.pack_size_g, existProd);
+        byRecipe[rkey]=byRecipe[rkey]||sku;
         l.product_sku=sku;
         if(!existProd.has(sku)){
           const prec={sku, group_1:'Custom Orders', group_2:(coRec.customer_name||'Custom'), family:'Custom', variant:(l.description||'Custom meal'),
@@ -11553,6 +11693,85 @@ async function coCloseOut(){
     toast(owed>0?('Closed · '+owed+' pack(s) written off'):'Closed');
     coBackToList();
   }catch(e){ toast(_coErr(e),true); }
+}
+/* ---- HANDING A CUSTOM ORDER TO THE CUSTOMER -------------------------------
+   This step did not exist, and its absence is visible in the ledger: across
+   every custom SKU ever made there are exactly three kinds of movement —
+   batch_output at the kitchen, transfer_out at the kitchen, transfer_in at the
+   shop. Not one sale. Nothing has ever taken a bespoke pack OUT of stock,
+   because the shop's sales feed only knows catalogue SKUs and a custom mix is
+   not one.
+
+   So two hundred packs of other people's dogs' dinners sit on the books
+   forever, counted as stock on every planning screen, and the team invented a
+   workaround: transfer them to Pasig so at least they leave the kitchen. That
+   is how a bespoke order for one named customer ended up filed as shop stock.
+
+   Handover is the missing movement. It takes the packs out where they actually
+   are — which for an order driven straight from Bulacan is Bulacan, and the
+   packs never need to touch Pasig at all. */
+async function coHandover(){
+  if(!coRec.order_ref){ toast('Save the order first',true); return; }
+  if(!coIsLocked(coRec.status)){ toast('Lock the order first — there is nothing made yet',true); return; }
+  showBusy('Finding the packs…');
+  let rows=[], err='';
+  try{
+    const movs = isLive() ? await db.list('inventory_movements',{}) : (DEMO.inventory_movements||[]);
+    const at={};
+    (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
+      const sku=v.ref_sku; if(!sku) return;
+      (at[sku]=at[sku]||{})[v.location_code||'bulacan']=((at[sku]||{})[v.location_code||'bulacan']||0)+(+v.qty||0); });
+    const want={};
+    (coLines||[]).forEach(l=>{ if(l.product_sku) want[l.product_sku]=(want[l.product_sku]||0)+(+l.packs||0); });
+    Object.keys(want).forEach(sku=>{
+      const sites=at[sku]||{};
+      Object.keys(sites).forEach(loc=>{ const have=Math.round((+sites[loc]||0)*1000)/1000;
+        if(have>0.0001) rows.push({sku, loc, have, take:Math.min(have, want[sku])}); });
+    });
+  }catch(e){ err=String(e&&e.message||e); }
+  hideBusy();
+  if(err){ toast(err,true); return; }
+  if(!rows.length){
+    alert('Nothing to hand over.\n\nNo packs for this order are sitting in stock — either they were never produced, or a previous handover already took them out.');
+    return;
+  }
+  window._coHo=rows;
+  const nm=sku=>{ const l=(coLines||[]).find(x=>x.product_sku===sku); return (l&&l.description)||sku; };
+  $('modal').innerHTML='<div><h3>🚚 Hand over '+esc(coRec.order_ref)+'</h3>'
+    +'<p class="mini">These packs are made and still on our books. Handing the order over takes them OUT of stock, where they are — nothing is transferred to the shop, because a custom mix is never sold there. '
+    +'This is the step that has been missing: without it a bespoke order stays counted as stock for ever.</p>'
+    +'<div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Recipe</th><th>Where</th><th class="num">In stock</th><th class="num">Hand over</th></tr></thead><tbody>'
+    +rows.map((r,i)=>'<tr><td><b>'+esc(nm(r.sku))+'</b><div class="mini" style="color:var(--muted)"><code>'+esc(r.sku)+'</code></div></td>'
+      +'<td>'+esc(locName(r.loc))+'</td><td class="num mini">'+r.have+'</td>'
+      +'<td class="num"><input type="number" step="1" min="0" value="'+r.take+'" oninput="(window._coHo['+i+']||{}).take=Math.max(0,+this.value||0)" style="width:80px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>').join('')
+    +'</tbody></table></div>'
+    +'<div class="mfoot" style="margin-top:12px"><button class="btn" onclick="coHandoverPost()">✅ Hand over &amp; take out of stock</button>'
+    +'<button class="btn sec" onclick="closeModal()">Cancel</button></div></div>';
+  modalWide(true); $('overlay').classList.add('on');
+}
+async function coHandoverPost(){
+  const rows=(window._coHo||[]).filter(r=>(+r.take||0)>0);
+  if(!rows.length){ toast('Nothing typed to hand over',true); return; }
+  const tot=rows.reduce((a,r)=>a+(+r.take||0),0);
+  if(!confirm('Hand over '+tot+' pack(s) for '+coRec.order_ref+'?\n\n'
+    +'They come out of stock at the site they are standing in. This is a stock movement, not a sale to the shop — the money side of a custom order lives on the order itself.')) return;
+  showBusy('Posting the handover…');
+  let done=0, failed=0;
+  const cm=await prodCostMap().catch(()=>({}));
+  for(const r of rows){
+    try{
+      await db.create('inventory_movements',{kind:'product', ref_sku:r.sku, location_code:r.loc,
+        qty:-Math.abs(+r.take||0), unit_cost:(+cm[r.sku]||0),
+        movement_type:'sale', note:'Custom order handover '+coRec.order_ref});
+      done++;
+    }catch(e){ failed++; }
+  }
+  hideBusy();
+  sysLog('custom_orders',coRec.order_ref,'🚚 Handed over by '+CURRENT_USER+' — '+
+    rows.map(r=>r.take+' × '+r.sku+' out of '+r.loc).join(', ')+(failed?(' · '+failed+' failed'):''));
+  window._coHo=null; closeModal();
+  toast(failed?('Handed over '+done+' line(s), '+failed+' failed'):('Handed over — '+tot+' pack(s) out of stock'), failed>0);
+  drawCOForm();
 }
 async function coFulfil(){ if(!confirm('Mark this order fulfilled?')) return; try{ await db.update('custom_orders','order_ref',coRec.order_ref,{status:'completed'}); coRec.status='completed'; sysLog('custom_orders',coRec.order_ref,'✓ Fulfilled by '+CURRENT_USER); toast('Marked fulfilled'); drawCOForm(); }catch(e){ toast(e.message,true); } }
 async function coCancel(){ if(!confirm('Cancel this quote?')) return; try{ if(coRec.order_ref&&(await db.list('custom_orders',{})).some(o=>o.order_ref===coRec.order_ref)){ await db.update('custom_orders','order_ref',coRec.order_ref,{status:'cancelled'}); } coRec.status='cancelled'; toast('Cancelled'); coBackToList(); }catch(e){ toast(e.message,true); } }
@@ -17927,6 +18146,120 @@ let MRPDATE=todayISO();
 function parseDemandCSV(text){ const map={}; text.split(/\r?\n/).forEach(line=>{ const p=line.split(/[,\t]/); if(p.length>=2){ const s=(p[0]||'').trim(); if(s&&s.toLowerCase()!=='sku') map[s]=+p[1]||0; } }); return map; }
 function applyDemandMap(map){ Object.keys(map).forEach(sku=>{ mrpDemand[sku]=+map[sku]||0; }); renderMRP(); }
 // One click for the banner: put the locked custom orders' packs into the demand boxes.
+/* THE ONE CASE THAT NEEDS A WAY THROUGH. A plot can be made and then never
+   produced — the week was abandoned, the run was cancelled — and those packs
+   are genuinely still to plan. That is a real situation and it needs a real
+   answer, but it is not the situation anybody is in nine times out of ten, so
+   it costs a deliberate press and names the plan it is about to duplicate. */
+function mrpCoUnlock(sku){
+  const where=(window._mrpCoDone||{})[sku]||'another plan';
+  const c=(window._mrpCoAll||{})[sku]||{};
+  if(!confirm('Plan '+(sku)+' again?\n\n'
+    +'It is already '+where+'.\n\n'
+    +'If that plan is still standing, putting a figure here orders the same '+(c.packs||'')+' pack(s) a second time and buys the ingredients twice. '
+    +'Only do this if that plan was abandoned or the run was cancelled.')) return;
+  window._mrpCoUnlock=window._mrpCoUnlock||{}; window._mrpCoUnlock[sku]=1;
+  renderMRP();
+}
+/* ---- PHASING A PRODUCT OUT INTO ANOTHER ONE ------------------------------
+   Retiring a line is not archiving it. The cookable range still has stock on
+   the shelf and customers still buying it, so it has to stay sellable while
+   that lasts — but its demand belongs to the gently cooked product that
+   replaces it, and every week somebody has to decide how much of it to move
+   across. That decision is a judgement (some lines are still being studied),
+   so it is offered, never taken automatically.
+
+   THE RATIO IS THE PART THAT BITES. Duck Cookable is a 500 g pack and the
+   gently cooked Duck that replaces it is 250 g. Moving the demand one pack for
+   one pack would halve the food, quietly, and nobody would find it until the
+   week came up short. So the diversion is worked out in GRAMS and the
+   arithmetic is printed on the button before anybody presses it. */
+function prodSuccessor(p){ return String((p&&p.replaced_by)||'').trim(); }
+function isPhasingOut(p){ return !!prodSuccessor(p); }
+/* packs of the successor that carry the same food as one pack of the original */
+function phaseRatio(from, to){
+  const a=+((from||{}).pack_g)||0, b=+((to||{}).pack_g)||0;
+  if(!(a>0) || !(b>0)) return 1;
+  return a/b;
+}
+function phaseConvert(packs, from, to){
+  const r=phaseRatio(from,to);
+  return Math.ceil(((+packs||0)*r) - 1e-9);   // never round a customer's food down
+}
+async function mrpDivert(sku){
+  const P=(window._mrpPhase||{})[sku]; if(!P) return;
+  const have=+mrpDemand[sku]||0;
+  if(!(have>0)){ toast('Type the demand on the retiring line first — there is nothing to move',true); return; }
+  const move=phaseConvert(have, P.from, P.to);
+  const r=phaseRatio(P.from,P.to);
+  const sameSize=Math.abs(r-1)<1e-9;
+  if(!confirm('Divert '+have+' pack(s) of '+(P.fromName||sku)+' to '+(P.toName||P.toSku)+'?\n\n'
+    +(sameSize
+      ? ('Same pack size, so it moves across one for one: '+have+' → '+move+'.')
+      : ('THE PACK SIZES DIFFER. '+(P.from.pack_g||'?')+' g becomes '+(P.to.pack_g||'?')+' g, so '
+         +have+' pack(s) of food is '+move+' pack(s) of the replacement — not '+have+'. '
+         +'Moving it one for one would send out half the food.'))
+    +'\n\nThe retiring line goes to zero. Its remaining stock still sells; this is about what to MAKE.')) return;
+  mrpDemand[P.toSku]=(+mrpDemand[P.toSku]||0)+move;
+  delete mrpDemand[sku];
+  renderMRP();
+  toast('Diverted '+have+' → '+move+' '+(sameSize?'':'(pack sizes differ) ')+'onto '+P.toSku);
+}
+function mrpDivertAll(){
+  const M=window._mrpPhase||{};
+  const list=Object.keys(M).filter(s=>(+mrpDemand[s]||0)>0);
+  if(!list.length){ toast('Nothing typed on any retiring line',true); return; }
+  const lines=list.map(s=>{ const P=M[s]; const h=+mrpDemand[s]||0;
+    return '• '+(P.fromName||s)+' '+h+' → '+phaseConvert(h,P.from,P.to)+' '+(P.toName||P.toSku); });
+  if(!confirm('Divert every retiring line onto its replacement?\n\n'+lines.join('\n')
+    +'\n\nPack sizes are converted by grams, so a 500 g line moving to a 250 g one doubles.')) return;
+  list.forEach(s=>{ const P=M[s]; const h=+mrpDemand[s]||0;
+    mrpDemand[P.toSku]=(+mrpDemand[P.toSku]||0)+phaseConvert(h,P.from,P.to); delete mrpDemand[s]; });
+  renderMRP(); toast('Diverted '+list.length+' line(s)');
+}
+function mrpPhaseHtml(prods, all){
+  /* the successor is looked up in the WHOLE catalogue: a replacement that has
+     itself been archived must still be named, or the card silently drops the
+     line and the retiring product looks like an ordinary one. */
+  const bySku={}; (all&&all.length?all:(prods||[])).forEach(p=>bySku[p.sku]=p);
+  const M={};
+  (prods||[]).forEach(p=>{
+    const to=prodSuccessor(p); if(!to) return;
+    const t=bySku[to]; if(!t) return;
+    M[p.sku]={from:p, to:t, toSku:to, fromName:prodLabel(p,{noSku:true}), toName:prodLabel(t,{noSku:true})};
+  });
+  window._mrpPhase=M;
+  const skus=Object.keys(M);
+  if(!skus.length) return '';
+  const pic=(_stockPic&&_stockPic.by)||{};
+  const rows=skus.sort((a,b)=>String(M[a].fromName).localeCompare(String(M[b].fromName))).map(s=>{
+    const P=M[s]; const r=phaseRatio(P.from,P.to); const same=Math.abs(r-1)<1e-9;
+    const left=(pic[s]||{}).current;
+    const have=+mrpDemand[s]||0;
+    return `<tr>
+      <td><b>${esc(P.fromName)}</b><div class="mini" style="color:var(--muted)"><code>${esc(s)}</code> · ${(+P.from.pack_g||0)} g</div></td>
+      <td class="mini" style="color:var(--muted)">${left==null?'—':(_spN(left)+' left')}</td>
+      <td><b>${esc(P.toName)}</b><div class="mini" style="color:var(--muted)"><code>${esc(P.toSku)}</code> · ${(+P.to.pack_g||0)} g</div></td>
+      <td class="num">${same?'<span class="mini" style="color:var(--muted)">1 : 1</span>'
+        :`<b style="color:var(--berry)" title="One ${(+P.from.pack_g||0)} g pack is ${Math.round(r*100)/100} packs of ${(+P.to.pack_g||0)} g. Moving it one for one would send out ${Math.round(100/r)}% of the food.">1 : ${Math.round(r*100)/100}</b>`}</td>
+      <td class="num">${have||'<span class="mini" style="color:var(--muted)">—</span>'}</td>
+      <td class="num">${have?('<b>'+phaseConvert(have,P.from,P.to)+'</b>'):'<span class="mini" style="color:var(--muted)">—</span>'}</td>
+      <td>${have?`<button class="btn sm" onclick="mrpDivert('${esc(s)}')">→ Divert</button>`:''}</td></tr>`;
+  }).join('');
+  const anyTyped=skus.some(s=>(+mrpDemand[s]||0)>0);
+  const anyRatio=skus.some(s=>Math.abs(phaseRatio(M[s].from,M[s].to)-1)>1e-9);
+  return `<div class="repcard" style="border-left:4px solid var(--earth,#b5762a)">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <h3 style="margin:0">🔻 Phasing out — ${skus.length} line(s)</h3>
+      ${anyTyped?`<button class="btn sm" onclick="mrpDivertAll()">→ Divert every typed line</button>`:''}
+    </div>
+    <div class="hint" style="margin:6px 0 8px">These are being retired into the product beside them. They are <b>not archived</b>: stock on the shelf still sells, and they still take a demand figure while it lasts.
+      Plan the retiring line as usual, then <b>Divert</b> to move that demand onto the replacement — it is a judgement each week, so it is never done for you.
+      ${anyRatio?'<br><b style="color:var(--berry)">Read the ratio column.</b> Where the pack sizes differ the diversion is worked out in <b>grams</b>: a 500 g line moving onto a 250 g one doubles. One for one would send out half the food, and nobody would find it until the week came up short.':''}</div>
+    <div style="overflow-x:auto"><table><thead><tr>
+      <th>Retiring</th><th class="num">Stock left</th><th>Replaced by</th><th class="num">Packs ratio</th>
+      <th class="num">Planned</th><th class="num">Becomes</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
 async function mrpPullCustom(){ const m=window._mrpCoPend||{}; const n=Object.keys(m).length;
   if(!n){ toast('Nothing to pull — every locked custom order is already on a demand plot or a production plan'); return; }
   /* A LOCKED WEEK DOES NOT TAKE NEW WORK. Refused rather than warned: the plot
