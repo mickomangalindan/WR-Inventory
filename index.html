@@ -4919,7 +4919,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-08 05:40Z';
+const WR_BUILD='2026-09-08 10:45Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -6317,9 +6317,16 @@ async function wdtSheetLoad(){
   try{ let rows;
     if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,production_date,kind&status=eq.confirmed&production_date=gte.'+encodeURIComponent(start));
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed'&&String(b.production_date||'')>=start);
+    /* THE WEEK, NOT THE DAY — the same edge the demand rows and the plots use.
+       Cutting production off at `asOf` while counting the PLOT for the whole
+       current week meant a run confirmed for later this week was invisible: the
+       plot said 36 owed, the 20 already made did not come off, and the
+       production plan asked the kitchen to make packs that were in the freezer.
+       All three sources now describe the same period. */
+    const madeEnd=_wdtWeekEnd(_wdtMonday(asOf));
     (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{
       const d=String(b.production_date||'').slice(0,10);
-      if(d>asOf) return;
+      if(d>madeEnd) return;
       const i=wIdx(d); if(i<0) return;
       (made[b.product_sku]=made[b.product_sku]||weeks.map(()=>0))[i]+=(+b.good_packs||0);
     });
@@ -12995,7 +13002,7 @@ if(!window.__wrFFListen){ window.__wrFFListen=1; window.addEventListener('messag
 let prodPlanDate=todayISO();
 let prodPlanLines=[]; let prodRunRef='';
 let prodOutLines=[];   // standalone output (processed) ingredients to make to stock: {ingredient_sku,name,needed_kg}
-let prodTargetMap={}, prodProducedMap={};
+let prodTargetMap={}, prodProducedMap={}, prodMadeMap={};
 async function renderProdPlan(){
   const _nSub=Object.keys(window._prodSub||{}).length;
   $('cp').innerHTML=`<div class="title">Production Plan <span onclick="openKB('production_batches')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
@@ -13066,96 +13073,87 @@ async function prodLoadDraft(){
    saved plot regardless of date, which meant planning an older date showed next
    week's numbers. */
 async function prodLoadTargets(){
-  /* THREE SOURCES, THE LARGEST OF THEM — the same rule the Weekly Demand Target
-     and the sticker reorder already use, and the reason this screen disagreed
-     with both of them.
+  /* THE TARGET IS THE REGULAR PACKS FIGURE — the same one, not a second copy.
+     ---------------------------------------------------------------------
+     The kitchen's own spreadsheet has a column called "New to Produce" and that
+     is what they work to. Its formula is
 
-       · a saved demand PLOT             — locked, the strongest claim
-       · the DEMAND TABLE for that week  — where sheet imports, the Shopify pull
-                                           and coAddDemand land. Committed rows,
-                                           not somebody's half-typed draft.
-       · locked CUSTOM ORDERS            — whatever week they name
+         (New Par − current stock) + lead-time demand,  when a reorder is needed
 
-     It used to read only the first and the third. So a week whose demand had
-     been synced but never SAVED as a plot showed every target on the Weekly
-     Demand Target and not one on the production plan — the same question, two
-     screens, two answers, and no way to tell which was lying.
+     which is, term for term, what pqCalc already computes as `produce`:
+     newPar + safety − cur, with safety = lead-time demand × movement. Checked
+     against their sheet row by row, the two agree on 46 of the 47 products
+     asking for a run; the one exception is a stale New Par typed over the
+     formula in the sheet, not a difference of method.
 
-     The largest, never the sum: all three describe the same week, they do not
-     stack. What is being typed into the MRP screen right this second is still
-     excluded — that lives in memory and has been committed to nothing. And the
-     screen says which source supplied the number, so "locked" keeps meaning
-     locked. */
-  let dm={}, planDate='', ref='', locked=false;
-  try{ mrpPlanCache=await mrpPlans();
-    const cands=(mrpPlanCache||[]).map(p=>({p, d:String(p.plan_date||p.date||'')})).filter(x=>x.d);
-    // the most recent saved plot on or before this production date — the week we are in
-    /* YOU PLAN PRODUCTION BEFORE THE DEADLINE, NOT AFTER IT.
-       This took the newest plot dated ON OR BEFORE the production date, which
-       assumes the plot comes first and the run follows. It does not: the plot is
-       dated by when the packs are NEEDED, and the kitchen makes them the day or
-       two before. So a run on the 8th feeding a plot dated the 9th found
-       nothing, and every catalogue target on the production plan and in the
-       picker read "—" while the custom orders — which are read from the orders
-       and ignore dates entirely — still showed theirs. It looked like the
-       targets had vanished.
+     So there is nothing to invent. This reads `produce` off the same stock
+     picture Regular Packs prints, which means:
 
-       So: the newest plot on or before this date, and failing that the SOONEST
-       plot after it, within a fortnight. A run always belongs to a demand week;
-       this finds the one it belongs to whichever side of it the date falls. */
-    let pick=cands.filter(x=>x.d<=prodPlanDate).sort((a,b)=>b.d.localeCompare(a.d))[0];
-    let ahead=false;
-    if(!pick){
-      const horizon=isoLocal(new Date(new Date(prodPlanDate+'T00:00:00').getTime()+14*864e5));
-      pick=cands.filter(x=>x.d>prodPlanDate && x.d<=horizon).sort((a,b)=>a.d.localeCompare(b.d))[0];
-      ahead=!!pick;
-    }
-    if(pick){ const d=pick.p.data||pick.p; dm={...(d.demand||{})}; planDate=pick.d; ref=(d&&d.ref)||pick.p.ref||''; locked=true; window._prodTargetAhead=ahead; }
-  }catch(e){}
-  // locked custom orders always count towards the target, whatever week they name
-  let coCount=0;
-  /* KEEP THE WHOLE ANSWER, NOT JUST THE NUMBER. coOpenDemand knows the
-     customer, the order reference and the date each SKU is needed by; flattening
-     it to {sku:packs} threw all of that away, and the production plan then had
-     no way to say WHOSE order it was or when it was due. The picker needs it. */
+       · the 24 / 12 ladder is already applied — pqCalc rounds up to a case of
+         12 and lifts to a floor of 24, the same ladder demand planning uses
+       · it is self-updating. Production already made is inside `cur`, so the
+         target falls as packs land, with no plot to re-save
+       · stock at BOTH sites counts. Their sheet reads Shopify only, which is
+         why it needs columns V–AB to track what is made but not yet sent to
+         Pasig; here that is already in `cur` and needs no column
+
+     THE TRAP, and why nothing is subtracted below. Because production already
+     confirmed is inside `cur`, it has ALREADY reduced the target. Subtracting a
+     separate "produced" figure on top would take it off twice and send the
+     kitchen home early. Remaining is therefore target − what this run adds, and
+     the Produced column is there to be read, not to be deducted.
+
+     Custom orders are not par-driven — nobody holds a shelf of one customer's
+     recipe — so those keep their own figure: the packs the order still owes. */
+  let dm={}, made={}, coCount=0, ref='', planDate='';
+  try{ await stockPicture(); }catch(e){}
+  (window._prodAllProducts||[]).forEach(p=>{
+    if(p.is_custom||/^CUST-/i.test(String(p.sku||''))) return;
+    const pic=stockPicFor(p.sku); const q=pic&&+pic.produce||0;
+    if(q>0) dm[p.sku]=q;
+  });
   window._prodCoDue={};
   try{
     const full=await coOpenDemand();
     window._prodCoDue=full;
-    Object.keys(full).forEach(s=>{ if(!(+dm[s]>0)){ dm[s]=full[s].packs; coCount++; } });
+    Object.keys(full).forEach(s=>{ const q=+full[s].packs||0;
+      if(q>0){ dm[s]=Math.max(+dm[s]||0, q); coCount++; } });
   }catch(e){}
-  /* ---- the demand table, for the week this run is feeding ---------------- */
-  let demRows=0;
-  try{
-    const anchor=planDate||prodPlanDate;
-    let from=_wdtMonday(anchor), to=_wdtWeekEnd(from);
-    /* if the run itself sits in a different week from the plot, cover both */
-    const rMon=_wdtMonday(prodPlanDate);
-    if(rMon<from) from=rMon;
-    if(_wdtWeekEnd(rMon)>to) to=_wdtWeekEnd(rMon);
-    let rows=[];
-    if(isLive()) rows=await sb('demand?select=sku,qty,plan_date&plan_date=gte.'+encodeURIComponent(from)+'&plan_date=lte.'+encodeURIComponent(to));
-    else rows=(DEMO.demand||[]).filter(r=>{ const d=String(r.plan_date||'').slice(0,10); return d>=from && d<=to; });
-    (rows||[]).forEach(r=>{ const q=+r.qty||0; if(!(q>0)) return;
-      if(q>(+dm[r.sku]||0)){ if(!(+dm[r.sku]>0)) demRows++; dm[r.sku]=q; } });
-    window._prodTargetDemWin=from+' → '+to;
-  }catch(e){}
-  window._prodTargetDemN=demRows;
 
-  if(!locked) window._prodTargetAhead=false;
-  /* A plot was found or it was not. Custom orders alone are NOT a locked plot —
-     saying they were is what hid the "no demand plot for this week" warning at
-     the very moment it was needed. */
-  window._prodTargetPlot=locked;
-  window._prodTargetLocked=locked||coCount>0||demRows>0; window._prodTargetRef=ref; window._prodTargetCo=coCount;
-  prodTargetMap=dm; window._prodTargetDate=planDate;
-  prodProducedMap={};
-  try{ let rows;
-    if(isLive()){ rows=await sb('production_batches?select=product_sku,good_packs,status,production_date,kind&status=eq.confirmed&production_date=gte.'+encodeURIComponent(planDate)); }
-    else { rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed' && String(b.production_date||'')>=String(planDate)); }
-    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ prodProducedMap[b.product_sku]=(prodProducedMap[b.product_sku]||0)+(+b.good_packs||0); });
+  /* What has already been made this week — shown beside the target so the
+     kitchen can see the run taking shape, never subtracted from it. */
+  try{
+    const _p=_wdtPeriod, _a=_wdtAsOf;
+    _wdtPeriod='2w'; _wdtAsOf='';
+    let S=null;
+    try{ S=await wdtSheetLoad(); } finally{ _wdtPeriod=_p; _wdtAsOf=_a; }
+    ((S&&S.rows)||[]).forEach(r=>{ const m=+r.madeAll||0; if(m>0) made[r.sku]=m; });
   }catch(e){}
+
+  /* the newest plot, for the line under the date — so a week that WAS locked
+     against a different number is still visible rather than silently replaced */
+  let plotDm={};
+  try{
+    mrpPlanCache=await mrpPlans();
+    const newest=(mrpPlanCache||[]).map(x=>({p:x,d:String(x.plan_date||x.date||'')}))
+      .filter(x=>x.d).sort((a,b)=>b.d.localeCompare(a.d))[0];
+    if(newest){ const d=newest.p.data||newest.p; ref=(d&&d.ref)||newest.p.ref||''; planDate=newest.d; plotDm={...(d.demand||{})}; }
+  }catch(e){}
+  window._prodPlotDm=plotDm;
+
+  prodTargetMap=dm;
+  prodMadeMap=made;
+  prodProducedMap={};                 // deliberately empty — see the trap above
+  window._prodTargetN=Object.keys(dm).length;
+  window._prodTargetCo=coCount;
+  window._prodTargetPlot=Object.keys(dm).length>0;
+  window._prodTargetLocked=window._prodTargetPlot;
+  window._prodTargetRef=ref;
+  window._prodTargetDate=planDate;
+  window._prodTargetAhead=false;
+  window._prodTargetDemN=0;
 }
+
 /* ============ WHAT THIS RUN NEEDS, ONE CALCULATION ==========================
    The daily sheet and the masterlist disagreed because they answer different
    questions and neither said which: the sheet totals the PROCESSED grams the
@@ -13369,23 +13367,23 @@ function drawProdPlan(){
   let h=`<div class="repcard"><div class="repbar"><span>Production date</span>
     <input type="date" value="${prodPlanDate}" onchange="prodPlanDate=this.value;renderProdPlan()">
     ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
+    <span class="mini" style="color:var(--muted)">the day this run was actually made — it does not choose which demand is shown</span>
     ${window._prodTargetPlot
-      ? `<span style="color:var(--muted);font-size:12px">Running target from <b>locked demand</b>${window._prodTargetRef?' · '+esc(window._prodTargetRef):''}${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''}${window._prodTargetAhead?' — <b>the week this run is feeding</b>':''}${window._prodTargetCo?' + '+window._prodTargetCo+' custom order SKU(s)':''}${window._prodTargetDemN?' + '+window._prodTargetDemN+' from the demand table':''}. <b>Remaining</b> = target − confirmed production since that date − this run.</span>`
-      : (window._prodTargetDemN
-        ? `<span style="color:var(--earth,#b5762a);font-size:12px"><b>No saved demand plot</b> within a fortnight of ${esc(prodPlanDate)} — targets below come from the <b>demand table</b> for ${esc(window._prodTargetDemWin||'this week')} (${window._prodTargetDemN} product(s)), which is the same demand the Weekly Demand Target reads. It is committed, but it is <b>not locked</b>: press 💾 Save plan in Demand/MRP to lock the week.</span>`
-        : `<span style="color:var(--earth,#b5762a);font-size:12px"><b>No demand plot and no demand rows</b> for the week of ${esc(prodPlanDate)}, so catalogue targets are blank — that is the reason, not a fault.${window._prodTargetCo?' The '+window._prodTargetCo+' custom order SKU(s) below still carry their own targets, because those are read from the orders.':''} You can build and post this run without one.</span>`)}</div>
+      ? `<span style="color:var(--muted);font-size:12px"><b>Running target</b> — the <b>To Produce</b> figure from Regular Packs, for ${window._prodTargetN} product(s)${window._prodTargetCo?' including '+window._prodTargetCo+' custom order SKU(s)':''}. Minimum 24, in steps of 12. It counts stock at <b>both sites</b>, so it falls on its own as packs are made and there is no plot to re-save.${window._prodTargetRef?' Newest saved plot: '+esc(window._prodTargetRef)+(window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':'')+' — shown per row where it differs.':''} <b>Remaining</b> = target − what this run adds.</span>`
+      : `<span style="color:var(--earth,#b5762a);font-size:12px"><b>Nothing needs producing</b> — every product is at or above its New Par and no custom order is owed, so every target is blank. That is the reason, not a fault. You can still build and post a run without one.</span>`}</div>
     <div class="smart" style="margin:8px 0"><div class="stile"><div class="v">${totTarget}</div><div class="l">Target packs</div></div><div class="stile"><div class="v">${totGood}</div><div class="l">This run (good)</div></div><div class="stile"><div class="v" style="color:${totRemain>0?'var(--berry)':'#4e7a3e'}">${totRemain}</div><div class="l">Remaining to make</div></div></div>
     <div style="overflow-x:auto"><table style="min-width:1060px"><thead><tr><th>Product</th>
       <th class="num" title="Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. The first figure already IS the Shopify reading, water-line adjusted — it is not added a second time.">Current<br>stock</th>
       <th class="num" title="Days = how long the sellable shelf lasts. % = everything we own against New Par + safety. High % with low days means the packs exist but are at the wrong site — send a van, not a butchery day.">Cover<br>d · %</th>
-      <th class="num">Target</th><th class="num">Produced (wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
-    ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodProducedMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
+      <th class="num" title="The To Produce figure from Regular Packs — (New Par − stock at both sites) + lead-time demand, rounded up to a case of 12 with a floor of 24. It falls on its own as packs are made, because what is made is already inside the stock it subtracts.">Target</th><th class="num" title="Packs confirmed in the last fortnight, for information. It is NOT taken off the target — production already made is inside the stock the target subtracts, so deducting it again would take it off twice.">Made (2wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
+    ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodMadeMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
+      const _plot=+((window._prodPlotDm||{})[l.product_sku])||0;
       const _pic=stockPicFor(l.product_sku);
       return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${t?'':'<div class="mini" style="color:var(--muted)">no target — made to order</div>'}
         ${(_pic&&_pic.toMove>0&&_pic.toMake<=0)?`<div class="mini" style="color:var(--earth,#b5762a)" title="the packs already exist at ${esc(locName(planProduceLoc()))} — this line needs a transfer, not a run">↦ ${_spN(_pic.toMove)} already made — transfer, don't produce</div>`:''}</td>
       <td class="num">${spStockCell(_pic)}</td>
       <td class="num">${spCoverCell(_pic)}</td>
-      <td class="num">${t||'—'}</td><td class="num" style="color:var(--muted)">${p||'—'}</td>
+      <td class="num">${t||'—'}${(_plot>0&&_plot!==t)?`<div class="mini" style="color:var(--muted)" title="the locked demand plot for this product asked for ${_plot}. The target beside it is the live replenishment figure, which has moved since — because packs have sold, or because some have been made.">plot said ${_plot}</div>`:''}</td><td class="num" style="color:var(--muted)">${p||'—'}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:74px;text-align:right" value="${l.good_packs||''}" oninput="prodPlanLines[${i}].good_packs=+this.value||0;prodRemainCell(${i})" onchange="prodPackTouch()"></td>
       <td class="num" id="prem${i}">${t?`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:60px;text-align:right" value="${l.reject_packs||''}" oninput="prodPlanLines[${i}].reject_packs=+this.value||0"></td>
