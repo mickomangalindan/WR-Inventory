@@ -1437,15 +1437,67 @@ function dbWrote(table, op){
    The one thing NOT done here is inventing a value. A NULL that a NOT NULL
    column rejects is still an error — but it is an error that names the column,
    which is the whole difference. */
+/* ---- Why a corrected recipe would not save ---------------------------------
+   PostgREST inserts an array of rows as ONE statement, so every object in it
+   has to carry the SAME KEYS. It does not fill the gaps; it refuses the whole
+   batch with
+
+       400 {"code":"PGRST102","message":"All object keys must match"}
+
+   which names nothing and points at nothing. A BOM hits this the moment you
+   edit one: the lines that came back from the database carry every column
+   (ingredient_category, pct_of_pack, has_bones, method_override, bom_version,
+   updated_at...), and a line you add by hand carries only the two or three
+   boxes you actually filled. Five lines in, four shapes, one refusal — and the
+   correction is lost. It is not a permission problem and no migration fixes it.
+
+   Squaring the batch off is the fix, but HOW a gap is squared matters, and the
+   obvious answer is wrong. Sending every missing key as NULL earns a second
+   refusal from the same save —
+
+       400 {"code":"23502","message":"null value in column \"updated_at\" of
+            relation \"bom_lines\""}
+
+   — because a column the database fills for itself is NOT NULL with a default,
+   and NULL is not the absence of a value to it. So the two kinds of column are
+   treated as what they are:
+
+     · A column THE FORM OWNS — one of the o2m's own cols, or the foreign key —
+       is squared with NULL, because a person emptying that box means no value,
+       and that is exactly what the row would have got had it been inserted on
+       its own.
+     · Any other column is the database's business. If every row carries it, it
+       goes through untouched; if only some do, it is dropped from the batch
+       entirely and the column's own default applies. Never NULL — the whole
+       point of a default is that the row does not have to say.
+
+   Dropped outright, always: `id`, a generated identity whose re-send either
+   collides with the row that owns it or hands the delete pass below the id of
+   the row it just inserted; `created_at` / `updated_at`, which belong to the
+   database and would otherwise be re-sent stale; screen-state keys like the
+   `_sbx` / `_slo` box-and-loose boxes on a transfer line, which earned their
+   own 400 ("Could not find the '_sbx' column") on a screen nobody had
+   connected to this one; and `undefined`, so an untouched box does not become
+   the literal string "undefined".
+
+   The one thing NOT done here is inventing a value. A NULL that a NOT NULL
+   column rejects is still an error — but it is an error that names the column,
+   which is the whole difference. */
+const O2M_SKIP={created_at:1, updated_at:1, inserted_at:1, modified_at:1};
 function _o2mNormalise(rows, o2m, parentVal){
   rows=(rows||[]).filter(r=>r&&typeof r==='object');
   const fk=o2m&&o2m.fk;
-  const keys=[];
+  /* what the FORM owns — the boxes a person can fill and therefore clear */
+  const owned={}; if(fk) owned[fk]=1;
+  ((o2m&&o2m.cols)||[]).forEach(c=>{ if(c&&c.n) owned[c.n]=1; });
+  const seen={}, order=[];
   rows.forEach(r=>Object.keys(r).forEach(k=>{
-    if(k==='id'||k.charAt(0)==='_') return;
+    if(k==='id'||k.charAt(0)==='_'||O2M_SKIP[k]) return;
     if(r[k]===undefined) return;
-    if(keys.indexOf(k)<0) keys.push(k);
+    if(!seen[k]){ seen[k]=0; order.push(k); }
+    seen[k]++;
   }));
+  const keys=order.filter(k=>owned[k] || seen[k]===rows.length);
   if(fk && keys.indexOf(fk)<0 && parentVal!==undefined) keys.push(fk);
   return rows.map(r=>{
     const o={};
@@ -1454,7 +1506,6 @@ function _o2mNormalise(rows, o2m, parentVal){
     return o;
   });
 }
-
 const db = {
   async list(model, {search,groupBy,page,per}={}){
     const m=MODELS[model]||{};   // child models (bom_lines, po_lines) have no top-level entry
@@ -4975,7 +5026,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-08 14:20Z';
+const WR_BUILD='2026-09-08 15:05Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
