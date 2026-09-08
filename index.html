@@ -1404,6 +1404,57 @@ function dbWrote(table, op){
   if(table==='products'||table==='ingredients') stockPicInvalidate();
 }
 
+/* ---- Why a corrected recipe would not save ---------------------------------
+   PostgREST inserts an array of rows as ONE statement, so every object in it
+   has to carry the SAME KEYS. It does not fill the gaps; it refuses the whole
+   batch with
+
+       400 {"code":"PGRST102","message":"All object keys must match"}
+
+   which names nothing and points at nothing. A BOM hits this the moment you
+   edit one: the lines that came back from the database carry every column
+   (ingredient_category, pct_of_pack, has_bones, method_override...), and a
+   line you add by hand carries only the two or three boxes you actually
+   filled. Five lines in, four shapes, one refusal — and the correction is
+   lost. It is not a permission problem and no migration fixes it.
+
+   So every child write is squared off here, once, for every o2m form in the
+   app rather than in the BOM screen alone:
+
+     · the union of the keys across the batch, with whatever a row is missing
+       sent explicitly as NULL — which is what "no value" means in a column,
+       and what the row would have got had it been inserted on its own;
+     · `id` dropped. It is a generated identity: re-sending one either collides
+       with the row that already owns it or, worse, hands the delete pass below
+       the id of the row it just inserted;
+     · scratch keys dropped — the `_sbx` / `_slo` box-and-loose boxes on a
+       transfer line are screen state, and sending them earned a different 400
+       ("Could not find the '_sbx' column") on a screen nobody had connected to
+       this one;
+     · `undefined` dropped, so an untouched box does not become the literal
+       string "undefined".
+
+   The one thing NOT done here is inventing a value. A NULL that a NOT NULL
+   column rejects is still an error — but it is an error that names the column,
+   which is the whole difference. */
+function _o2mNormalise(rows, o2m, parentVal){
+  rows=(rows||[]).filter(r=>r&&typeof r==='object');
+  const fk=o2m&&o2m.fk;
+  const keys=[];
+  rows.forEach(r=>Object.keys(r).forEach(k=>{
+    if(k==='id'||k.charAt(0)==='_') return;
+    if(r[k]===undefined) return;
+    if(keys.indexOf(k)<0) keys.push(k);
+  }));
+  if(fk && keys.indexOf(fk)<0 && parentVal!==undefined) keys.push(fk);
+  return rows.map(r=>{
+    const o={};
+    keys.forEach(k=>{ const v=r[k]; o[k]=(v===undefined)?null:v; });
+    if(fk && parentVal!==undefined && (o[fk]===null||o[fk]===undefined)) o[fk]=parentVal;
+    return o;
+  });
+}
+
 const db = {
   async list(model, {search,groupBy,page,per}={}){
     const m=MODELS[model]||{};   // child models (bom_lines, po_lines) have no top-level entry
@@ -1506,7 +1557,7 @@ const db = {
      `allowEmpty` exists for the one caller that legitimately clears a document:
      deleting the parent record itself. */
   async replaceChildren(o2m, parentVal, rows, allowEmpty){
-    rows=rows||[];
+    rows=_o2mNormalise(rows, o2m, parentVal);
     dbWrote((MODELS[o2m.model]&&MODELS[o2m.model].srcTable)||o2m.model);
     const existing=await this.children(o2m, parentVal).catch(()=>[]);
     if(existing.length && !rows.length && !allowEmpty){
@@ -3146,7 +3197,12 @@ async function saveForm(){
     if(m.o2m){
       const clean=formChildren.filter(l=>Object.values(l).some(x=>x!=='' && x!=null)).map(l=>{
         const row={...l, [m.o2m.fk]:pkval}; delete row.id;   // id is a generated identity — never re-insert it (live save would 400)
-        m.o2m.cols.forEach(c=>{if(c.t==='number'&&row[c.n]!=='')row[c.n]=+row[c.n];}); return row;});
+        /* An emptied number box is NOT the string "" to a numeric column — that
+           is a 400 of its own. It is no value, which is NULL. */
+        m.o2m.cols.forEach(c=>{ if(c.t!=='number') return;
+          row[c.n]=(row[c.n]===''||row[c.n]==null)?null:+row[c.n]; });
+        Object.keys(row).forEach(k=>{ if(k.charAt(0)==='_') delete row[k]; });
+        return row;});
       /* A form whose lines are empty is only ever ONE of two things: a record
          that genuinely has none, or a screen that saved before its lines
          arrived. The second is what emptied a live purchase order, so an empty
@@ -4919,7 +4975,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-08 10:45Z';
+const WR_BUILD='2026-09-08 14:20Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -14573,7 +14629,8 @@ async function prodKitchenSheet(){
        when it says something the name does not. */
     const _c=custOf[l.product_sku];
     return {sku:l.product_sku, packs, packG, perPack,
-      customer:(_c&&_c.name)||'', orderRef:(_c&&_c.ref)||'', seq:(_c&&_c.seq!=null)?_c.seq:9e9,
+      customer:(_c&&_c.name)||'', orderRef:(_c&&_c.ref)||'', due:(_c&&_c.d)||'',
+      seq:(_c&&_c.seq!=null)?_c.seq:9e9,
       fmt:prodG1(p), mixCat:prodG2(p),
       name:prodLabel({...p, sku:l.product_sku, name:(p.name||l.name||l.product_sku)},{noSku:true}),
       animal:p.animal||'Dog', ings:bom};
@@ -14649,14 +14706,28 @@ async function prodKitchenSheet(){
   const _isCust=x=>!!(x.customer) || /^CUST-/i.test(String(x.sku||''));
   const custItems=items.filter(_isCust);
   const plainItems=items.filter(x=>!_isCust(x));
-  /* ONE BLOCK PER ORDER, NOT PER CUSTOMER NAME.
-     Keyed on the customer's name, two separate orders from the same regular
-     collapsed into a single block — with one ref badge, the first one's, printed
-     over both. The kitchen then had a sheet whose header named an order that
-     only half the mixes belonged to. An order is the unit the kitchen packs and
-     the unit CS chases; make it the unit that prints. */
+  /* ONE BLOCK PER CUSTOMER.
+     This was keyed on the ORDER REFERENCE, which is how the office files the
+     work — but not how the kitchen does it. The kitchen pulls stock for a
+     person: everything Teps is owed comes out of the freezer together, gets
+     weighed together and goes into one box. Splitting by reference printed her
+     duck on a page of its own while her duck and pork shared another, so the
+     same batch was pulled twice and the combined ingredient list understated
+     what to take out. Jairus never showed it because his mixes happen to sit on
+     one reference.
+
+     The reason it was split in the first place is real and is kept: a block used
+     to carry ONE ref badge — the first one's — over mixes that belonged to two
+     different orders, which is a sheet that names the wrong order. So now the
+     header names EVERY reference in the block and each mix row carries its own,
+     printed only when there is more than one to tell apart.
+
+     Different recipes across the merged mixes are already handled below: the
+     block prints each mix's own ingredient list and says, in Tagalog, not to
+     divide the combined batch. Different pack sizes and quantities were never a
+     problem — they are columns in the matrix. */
   const byCustomer={};
-  custItems.forEach(x=>{ const k=(x.orderRef||'')+'\u0000'+(x.customer||'Custom orders');
+  custItems.forEach(x=>{ const k=String(x.customer||'Custom orders').trim().toLowerCase()||'custom orders';
     (byCustomer[k]=byCustomer[k]||[]).push(x); });
   /* DO THE MIXES IN THIS BATCH SHARE ONE RECIPE?
      The block prints mixes against CATEGORIES, then one combined ingredient
@@ -14675,12 +14746,19 @@ async function prodKitchenSheet(){
       if(!combined.has(key)) combined.set(key,{cat:i.cat, grams:0, bones:i.bones, sku:i.sku});
       combined.get(key).grams+=i.grams*x.packs; }); };
 
-  const custBlocks=Object.keys(byCustomer).sort((a,b)=>
-      String(a.split('\u0000')[1]).localeCompare(String(b.split('\u0000')[1]))
-      || String(a).localeCompare(String(b))
-    ).map(_key=>{
-    const cust=_key.split('\u0000')[1]||'Custom orders';
-    const list=byCustomer[_key].slice().sort((a,b)=>(a.seq-b.seq)||String(a.name).localeCompare(String(b.name)));
+  const custBlocks=Object.keys(byCustomer).sort((a,b)=>{
+      /* soonest promise first — a kitchen reads the sheet top down */
+      const da=byCustomer[a].map(x=>x.due).filter(Boolean).sort()[0]||'9999';
+      const db_=byCustomer[b].map(x=>x.due).filter(Boolean).sort()[0]||'9999';
+      return da.localeCompare(db_) || String(a).localeCompare(String(b));
+    }).map(_key=>{
+    const cust=(byCustomer[_key][0]||{}).customer||'Custom orders';
+    const list=byCustomer[_key].slice().sort((a,b)=>
+      String(a.due||'9999').localeCompare(String(b.due||'9999'))
+      || String(a.orderRef||'').localeCompare(String(b.orderRef||''))
+      || (a.seq-b.seq) || String(a.name).localeCompare(String(b.name)));
+    const refs=[...new Set(list.map(x=>x.orderRef).filter(Boolean))];
+    const multiRef=refs.length>1;
     list.forEach(_mergeRow);
     // which categories this customer's batch actually touches — no empty columns
     const cats=KSHEET_ORDER.filter(k=>list.some(x=>x.ings.some(i=>i.cat===k)));
@@ -14718,12 +14796,12 @@ async function prodKitchenSheet(){
     return `<div class="mix-block">
       <div class="mix-title">🍳 Kitchen Batch — ${esc2(cust)}</div>
       ${fmts?`<div class="mix-prot">${esc2(fmts)}</div>`:''}
-      <div class="mix-sub"><b>${totPacks} packs</b> across ${list.length} mix${list.length===1?'':'es'} · ${_ksKg(totKg)}${list[0].orderRef?`<span class="sku-badge">${esc2(list[0].orderRef)}</span>`:''}</div>
+      <div class="mix-sub"><b>${totPacks} packs</b> across ${list.length} mix${list.length===1?'':'es'}${multiRef?` from ${refs.length} orders`:''} · ${_ksKg(totKg)}${refs.map(r=>`<span class="sku-badge">${esc2(r)}</span>`).join('')}</div>
       <table class="ksmx">
         <thead><tr><th>Mix</th><th class="num">Pack size</th><th class="num">Packs</th>
           ${cats.map(k=>`<th class="num" style="color:${(KSHEET_CATS.find(z=>z.k===k)||{}).c}">${esc2(catLbl(k))}</th>`).join('')}
           <th class="num">Total kg</th></tr></thead>
-        <tbody>${list.map(x=>`<tr><td><b>${esc2(x.name)}</b><div class="ingred-note"><code>${esc2(x.sku)}</code></div></td>
+        <tbody>${list.map(x=>`<tr><td><b>${esc2(x.name)}</b><div class="ingred-note"><code>${esc2(x.sku)}</code>${(multiRef&&x.orderRef)?' · '+esc2(x.orderRef):''}</div></td>
           <td class="num">${Math.round(x.packG)}g</td><td class="num">${x.packs}</td>
           ${cats.map(k=>{ const g=catCol(x,k); return `<td class="num"${g?'':' style="color:#b9b7ae"'}>${g?Math.round(g)+'g':'—'}</td>`; }).join('')}
           <td class="num"><b>${_ksKg(x.perPack*x.packs)}</b></td></tr>`).join('')}</tbody>
@@ -14739,7 +14817,7 @@ async function prodKitchenSheet(){
           <div class="ingred-note" style="margin:0 0 6px">Timbangin ang bawat mix nang hiwalay — huwag hatiin ang combined batch. Weigh each mix on its own; the combined list below is only for pulling stock.</div>
           <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start">`
         + list.map(x=>`<div style="flex:1 1 320px;min-width:290px;break-inside:avoid;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:8px 10px">
-            <div><b>${esc2(x.name)}</b> <span class="ingred-note">· ${x.packs} × ${Math.round(x.packG)}g</span></div>
+            <div><b>${esc2(x.name)}</b> <span class="ingred-note">· ${x.packs} × ${Math.round(x.packG)}g${(multiRef&&x.orderRef)?' · '+esc2(x.orderRef):''}</span></div>
             <table class="ingred"><thead><tr><th>Ingredient</th><th class="num">Per pack</th><th class="num">Total</th></tr></thead>
               <tbody>${x.ings.map(i=>`<tr><td><span class="ingred-name">${_ksDot(i.cat)}${esc2(i.name)}${i.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span></td>
                 <td class="num">${Math.round(i.grams)}g</td><td class="num">${_ksKg(i.grams*x.packs)}</td></tr>`).join('')}</tbody>
