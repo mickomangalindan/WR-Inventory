@@ -4919,7 +4919,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-08 00:30Z';
+const WR_BUILD='2026-09-08 03:15Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -6335,8 +6335,15 @@ async function wdtSheetLoad(){
       (plot[sku]=plot[sku]||weeks.map(()=>0))[i]=Math.max(plot[sku][i], q); });
   });
   try{ let rows;
-    if(isLive()) rows=await sb('demand?select=sku,qty,plan_date&plan_date=gte.'+encodeURIComponent(start)+'&plan_date=lte.'+encodeURIComponent(asOf));
-    else rows=(DEMO.demand||[]).filter(r=>String(r.plan_date||'')>=start&&String(r.plan_date||'')<=asOf);
+    /* THE WEEK, NOT THE DAY. Rows were cut off at `asOf` — today — while the
+       PLOTS were already being counted for the whole of the current week. So
+       demand dated later this week (a custom order needed on Wednesday, read on
+       Monday) was invisible in the one column that is supposed to show what is
+       owed. The sheet's last week runs to its Sunday; read demand to the same
+       edge and the two sources finally describe the same period. */
+    const demEnd=_wdtWeekEnd(_wdtMonday(asOf));
+    if(isLive()) rows=await sb('demand?select=sku,qty,plan_date&plan_date=gte.'+encodeURIComponent(start)+'&plan_date=lte.'+encodeURIComponent(demEnd));
+    else rows=(DEMO.demand||[]).filter(r=>String(r.plan_date||'')>=start&&String(r.plan_date||'')<=demEnd);
     (rows||[]).forEach(r=>{ const i=wIdx(r.plan_date); if(i<0) return; const q=+r.qty||0; if(!(q>0)) return;
       (plot[r.sku]=plot[r.sku]||weeks.map(()=>0))[i]=Math.max(plot[r.sku][i], q); });
   }catch(e){}
@@ -12998,7 +13005,10 @@ async function renderProdPlan(){
     <button class="btn sec" onclick="prodSaveDraft()">💾 Save draft</button>
     <button class="wfbtn" onclick="prodConfirm()">✅ Confirm production</button>
     <div class="sp"></div><span style="color:var(--muted)">plan &amp; print → come back → confirm actuals → post</span>`;
-  try{ window._prodAllProducts=(await db.list('products',{})).filter(p=>!isArchivedProd(p)); }catch(e){ window._prodAllProducts=[]; }
+  try{ const _all=await db.list('products',{});
+       window._prodAllProdsAny=_all;                                     // including retired
+       window._prodAllProducts=_all.filter(p=>!isArchivedProd(p));
+  }catch(e){ window._prodAllProducts=[]; window._prodAllProdsAny=[]; }
   /* What the kitchen is short of is not the same question as what the kitchen
      should make first, and until now this screen answered neither: it showed a
      target and a remainder and no stock at all. The same picture the demand
@@ -13065,8 +13075,27 @@ async function prodLoadTargets(){
   try{ mrpPlanCache=await mrpPlans();
     const cands=(mrpPlanCache||[]).map(p=>({p, d:String(p.plan_date||p.date||'')})).filter(x=>x.d);
     // the most recent saved plot on or before this production date — the week we are in
-    const pick=cands.filter(x=>x.d<=prodPlanDate).sort((a,b)=>b.d.localeCompare(a.d))[0];
-    if(pick){ const d=pick.p.data||pick.p; dm={...(d.demand||{})}; planDate=pick.d; ref=(d&&d.ref)||pick.p.ref||''; locked=true; }
+    /* YOU PLAN PRODUCTION BEFORE THE DEADLINE, NOT AFTER IT.
+       This took the newest plot dated ON OR BEFORE the production date, which
+       assumes the plot comes first and the run follows. It does not: the plot is
+       dated by when the packs are NEEDED, and the kitchen makes them the day or
+       two before. So a run on the 8th feeding a plot dated the 9th found
+       nothing, and every catalogue target on the production plan and in the
+       picker read "—" while the custom orders — which are read from the orders
+       and ignore dates entirely — still showed theirs. It looked like the
+       targets had vanished.
+
+       So: the newest plot on or before this date, and failing that the SOONEST
+       plot after it, within a fortnight. A run always belongs to a demand week;
+       this finds the one it belongs to whichever side of it the date falls. */
+    let pick=cands.filter(x=>x.d<=prodPlanDate).sort((a,b)=>b.d.localeCompare(a.d))[0];
+    let ahead=false;
+    if(!pick){
+      const horizon=isoLocal(new Date(new Date(prodPlanDate+'T00:00:00').getTime()+14*864e5));
+      pick=cands.filter(x=>x.d>prodPlanDate && x.d<=horizon).sort((a,b)=>a.d.localeCompare(b.d))[0];
+      ahead=!!pick;
+    }
+    if(pick){ const d=pick.p.data||pick.p; dm={...(d.demand||{})}; planDate=pick.d; ref=(d&&d.ref)||pick.p.ref||''; locked=true; window._prodTargetAhead=ahead; }
   }catch(e){}
   // locked custom orders always count towards the target, whatever week they name
   let coCount=0;
@@ -13080,6 +13109,11 @@ async function prodLoadTargets(){
     window._prodCoDue=full;
     Object.keys(full).forEach(s=>{ if(!(+dm[s]>0)){ dm[s]=full[s].packs; coCount++; } });
   }catch(e){}
+  if(!locked) window._prodTargetAhead=false;
+  /* A plot was found or it was not. Custom orders alone are NOT a locked plot —
+     saying they were is what hid the "no demand plot for this week" warning at
+     the very moment it was needed. */
+  window._prodTargetPlot=locked;
   window._prodTargetLocked=locked||coCount>0; window._prodTargetRef=ref; window._prodTargetCo=coCount;
   prodTargetMap=dm; window._prodTargetDate=planDate;
   prodProducedMap={};
@@ -13302,9 +13336,9 @@ function drawProdPlan(){
   let h=`<div class="repcard"><div class="repbar"><span>Production date</span>
     <input type="date" value="${prodPlanDate}" onchange="prodPlanDate=this.value;renderProdPlan()">
     ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
-    ${window._prodTargetLocked
-      ? `<span style="color:var(--muted);font-size:12px">Running target from <b>locked demand</b>${window._prodTargetRef?' · '+esc(window._prodTargetRef):''}${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''}${window._prodTargetCo?' + '+window._prodTargetCo+' custom order SKU(s)':''}. <b>Remaining</b> = target − confirmed production since that date − this run.</span>`
-      : `<span style="color:var(--earth,#b5762a);font-size:12px">No locked demand for this week — <b>targets are blank on purpose</b>. Save a plan in Demand/MRP to lock it. You can still build and post this run without one.</span>`}</div>
+    ${window._prodTargetPlot
+      ? `<span style="color:var(--muted);font-size:12px">Running target from <b>locked demand</b>${window._prodTargetRef?' · '+esc(window._prodTargetRef):''}${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''}${window._prodTargetAhead?' — <b>the week this run is feeding</b>':''}${window._prodTargetCo?' + '+window._prodTargetCo+' custom order SKU(s)':''}. <b>Remaining</b> = target − confirmed production since that date − this run.</span>`
+      : `<span style="color:var(--earth,#b5762a);font-size:12px"><b>No demand plot within a fortnight of ${esc(prodPlanDate)}</b>, so catalogue targets are blank — that is the reason, not a fault. Save a plan in Demand/MRP to lock one.${window._prodTargetCo?' The '+window._prodTargetCo+' custom order SKU(s) below still carry their own targets, because those are read from the orders.':''} You can build and post this run without a plot.</span>`}</div>
     <div class="smart" style="margin:8px 0"><div class="stile"><div class="v">${totTarget}</div><div class="l">Target packs</div></div><div class="stile"><div class="v">${totGood}</div><div class="l">This run (good)</div></div><div class="stile"><div class="v" style="color:${totRemain>0?'var(--berry)':'#4e7a3e'}">${totRemain}</div><div class="l">Remaining to make</div></div></div>
     <div style="overflow-x:auto"><table style="min-width:1060px"><thead><tr><th>Product</th>
       <th class="num" title="Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. The first figure already IS the Shopify reading, water-line adjusted — it is not added a second time.">Current<br>stock</th>
@@ -13693,14 +13727,22 @@ function prodKitchenCart(){
    being an empty search box. */
 function _coDueRows(){
   const due=window._prodCoDue||{};
+  /* MISSING AND ARCHIVED ARE NOT THE SAME THING, and treating them alike is how
+     "this order has no product record" appeared over a product that was sitting
+     right there — after which Create the product came back with a duplicate key,
+     because of course it did. _prodAllProducts has the archived ones filtered
+     out; existence has to be judged against the whole table. */
   const have={}; (window._prodAllProducts||[]).forEach(p=>have[p.sku]=p);
+  const any={};  (window._prodAllProdsAny||window._prodAllProducts||[]).forEach(p=>any[p.sku]=p);
   const today=todayISO();
   return Object.keys(due).map(sku=>{
     const d=due[sku]||{};
     const os=(d.orders||[]);
     const made=+prodProducedMap[sku]||0;
     return { sku, packs:+d.packs||0, needed:d.needed||'', made,
-             orphan:!have[sku], prod:have[sku]||null,
+             orphan:!any[sku],                       // genuinely no row anywhere
+             archived:(!have[sku] && !!any[sku]),    // there, but retired
+             prod:have[sku]||any[sku]||null,
              customers:[...new Set(os.map(o=>o.customer).filter(Boolean))].join(', '),
              refs:[...new Set(os.map(o=>o.ref).filter(Boolean))].join(', '),
              late:!!(d.needed && d.needed<today),
@@ -13712,6 +13754,17 @@ function _coDueRows(){
 /* The order line carries everything the product row needed. If that row never
    made it, this writes it from the order rather than asking somebody to unpick
    a lock by hand. */
+/* Retiring a custom product is how a cancelled order tidies up after itself.
+   When a later order needs the same recipe again, the row is still there and
+   simply has to come back. */
+async function coUnarchiveProduct(sku){
+  try{
+    await db.update('products','sku',sku,{active:true});
+    toast(sku+' is active again — it is in the picker now');
+    await renderProdPlan();
+    try{ prodKitchenCart(); }catch(e){}
+  }catch(e){ toast('Could not bring it back: '+((e&&e.message)||e), true); }
+}
 async function coRepairProduct(sku){
   try{
     const lines=await db.list('custom_order_lines',{});
@@ -13724,7 +13777,18 @@ async function coRepairProduct(sku){
       name:(l.description||'Custom meal')+' · '+(l.pack_size_g||0)+'g',
       pack_g:+l.pack_size_g||0, box_size:1, status:'Active', animal:'Dog',
       sell_price:+l.unit_price||0, shelf_life_days:4, is_custom:true, feeding_style:'Mix' };
-    await db.create('products',rec);
+    /* If the row turns out to exist after all — archived, or written by somebody
+       else a moment ago — creating it returns a duplicate key, which is a
+       confusing thing to show for "the product is missing". Update it instead. */
+    const existing=(window._prodAllProdsAny||[]).find(x=>x.sku===sku);
+    if(existing) await db.update('products','sku',sku,{...rec, active:true});
+    else{
+      try{ await db.create('products',rec); }
+      catch(e){
+        if(/duplicate|23505|already exists/i.test(String((e&&e.message)||e))) await db.update('products','sku',sku,{...rec, active:true});
+        else throw e;
+      }
+    }
     /* THE RECIPE TRAVELS WITH IT, or the run cannot be costed and no ingredient
        is ever issued against it. It lives on the order line itself, the same
        place coLock reads it from. */
@@ -13776,13 +13840,15 @@ function drawKitchenCartBody(){
       const when=r.needed
         ? `<span style="color:${r.late?'var(--danger)':(r.soon?'var(--earth,#b5762a)':'var(--muted)')};font-weight:${r.late||r.soon?'700':'400'}">${esc(r.needed)}${r.late?' · OVERDUE':(r.soon?' · due soon':'')}</span>`
         : '<span style="color:var(--muted)">no date</span>';
-      if(r.orphan){
-        /* the case that had no explanation on screen at all */
+      if(r.orphan || r.archived){
+        const arch=r.archived;
         body+=`<tr style="background:#fdf3f0"><td colspan="6" style="padding:8px 10px">
           <b>${esc(r.customers||'Custom order')}</b> · <code>${esc(r.sku)}</code>
           <span class="mini" style="color:var(--muted)"> · ${esc(r.refs)} · make by ${when} · ${rem} pack(s) owed</span>
-          <div class="mini" style="color:var(--danger);margin-top:3px"><b>This order has no product record</b>, which is why it cannot be found or added anywhere. The order and its demand exist; the product row did not get written when the order was locked.</div>
-          <div style="margin-top:5px"><button class="btn sm" onclick="coRepairProduct('${esc(r.sku)}')">🛠 Create the product from this order</button></div></td></tr>`;
+          <div class="mini" style="color:var(--danger);margin-top:3px">${arch
+            ? `<b>This product is archived</b>, which is why it cannot be found or added. The record exists — it was retired, most likely when an earlier order using it was cancelled — so it needs bringing back, not creating.`
+            : `<b>This order has no product record</b>, which is why it cannot be found or added anywhere. The order and its demand exist; the product row did not get written when the order was locked.`}</div>
+          <div style="margin-top:5px"><button class="btn sm" onclick="${arch?`coUnarchiveProduct('${esc(r.sku)}')`:`coRepairProduct('${esc(r.sku)}')`}">${arch?'♻ Bring this product back':'🛠 Create the product from this order'}</button></div></td></tr>`;
         return;
       }
       const pic=stockPicFor(r.sku);
