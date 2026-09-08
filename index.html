@@ -4919,7 +4919,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-08 03:15Z';
+const WR_BUILD='2026-09-08 05:40Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -13066,11 +13066,26 @@ async function prodLoadDraft(){
    saved plot regardless of date, which meant planning an older date showed next
    week's numbers. */
 async function prodLoadTargets(){
-  /* A TARGET only comes from LOCKED demand — a saved demand plot, or a locked
-     custom order. Whatever is being typed into the MRP screen right now is a
-     draft; letting it set targets meant the kitchen chased a number nobody had
-     committed to, and it changed under them as someone edited. Nothing here
-     stops you adding products or output ingredients that have no target at all. */
+  /* THREE SOURCES, THE LARGEST OF THEM — the same rule the Weekly Demand Target
+     and the sticker reorder already use, and the reason this screen disagreed
+     with both of them.
+
+       · a saved demand PLOT             — locked, the strongest claim
+       · the DEMAND TABLE for that week  — where sheet imports, the Shopify pull
+                                           and coAddDemand land. Committed rows,
+                                           not somebody's half-typed draft.
+       · locked CUSTOM ORDERS            — whatever week they name
+
+     It used to read only the first and the third. So a week whose demand had
+     been synced but never SAVED as a plot showed every target on the Weekly
+     Demand Target and not one on the production plan — the same question, two
+     screens, two answers, and no way to tell which was lying.
+
+     The largest, never the sum: all three describe the same week, they do not
+     stack. What is being typed into the MRP screen right this second is still
+     excluded — that lives in memory and has been committed to nothing. And the
+     screen says which source supplied the number, so "locked" keeps meaning
+     locked. */
   let dm={}, planDate='', ref='', locked=false;
   try{ mrpPlanCache=await mrpPlans();
     const cands=(mrpPlanCache||[]).map(p=>({p, d:String(p.plan_date||p.date||'')})).filter(x=>x.d);
@@ -13109,12 +13124,30 @@ async function prodLoadTargets(){
     window._prodCoDue=full;
     Object.keys(full).forEach(s=>{ if(!(+dm[s]>0)){ dm[s]=full[s].packs; coCount++; } });
   }catch(e){}
+  /* ---- the demand table, for the week this run is feeding ---------------- */
+  let demRows=0;
+  try{
+    const anchor=planDate||prodPlanDate;
+    let from=_wdtMonday(anchor), to=_wdtWeekEnd(from);
+    /* if the run itself sits in a different week from the plot, cover both */
+    const rMon=_wdtMonday(prodPlanDate);
+    if(rMon<from) from=rMon;
+    if(_wdtWeekEnd(rMon)>to) to=_wdtWeekEnd(rMon);
+    let rows=[];
+    if(isLive()) rows=await sb('demand?select=sku,qty,plan_date&plan_date=gte.'+encodeURIComponent(from)+'&plan_date=lte.'+encodeURIComponent(to));
+    else rows=(DEMO.demand||[]).filter(r=>{ const d=String(r.plan_date||'').slice(0,10); return d>=from && d<=to; });
+    (rows||[]).forEach(r=>{ const q=+r.qty||0; if(!(q>0)) return;
+      if(q>(+dm[r.sku]||0)){ if(!(+dm[r.sku]>0)) demRows++; dm[r.sku]=q; } });
+    window._prodTargetDemWin=from+' → '+to;
+  }catch(e){}
+  window._prodTargetDemN=demRows;
+
   if(!locked) window._prodTargetAhead=false;
   /* A plot was found or it was not. Custom orders alone are NOT a locked plot —
      saying they were is what hid the "no demand plot for this week" warning at
      the very moment it was needed. */
   window._prodTargetPlot=locked;
-  window._prodTargetLocked=locked||coCount>0; window._prodTargetRef=ref; window._prodTargetCo=coCount;
+  window._prodTargetLocked=locked||coCount>0||demRows>0; window._prodTargetRef=ref; window._prodTargetCo=coCount;
   prodTargetMap=dm; window._prodTargetDate=planDate;
   prodProducedMap={};
   try{ let rows;
@@ -13337,8 +13370,10 @@ function drawProdPlan(){
     <input type="date" value="${prodPlanDate}" onchange="prodPlanDate=this.value;renderProdPlan()">
     ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
     ${window._prodTargetPlot
-      ? `<span style="color:var(--muted);font-size:12px">Running target from <b>locked demand</b>${window._prodTargetRef?' · '+esc(window._prodTargetRef):''}${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''}${window._prodTargetAhead?' — <b>the week this run is feeding</b>':''}${window._prodTargetCo?' + '+window._prodTargetCo+' custom order SKU(s)':''}. <b>Remaining</b> = target − confirmed production since that date − this run.</span>`
-      : `<span style="color:var(--earth,#b5762a);font-size:12px"><b>No demand plot within a fortnight of ${esc(prodPlanDate)}</b>, so catalogue targets are blank — that is the reason, not a fault. Save a plan in Demand/MRP to lock one.${window._prodTargetCo?' The '+window._prodTargetCo+' custom order SKU(s) below still carry their own targets, because those are read from the orders.':''} You can build and post this run without a plot.</span>`}</div>
+      ? `<span style="color:var(--muted);font-size:12px">Running target from <b>locked demand</b>${window._prodTargetRef?' · '+esc(window._prodTargetRef):''}${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''}${window._prodTargetAhead?' — <b>the week this run is feeding</b>':''}${window._prodTargetCo?' + '+window._prodTargetCo+' custom order SKU(s)':''}${window._prodTargetDemN?' + '+window._prodTargetDemN+' from the demand table':''}. <b>Remaining</b> = target − confirmed production since that date − this run.</span>`
+      : (window._prodTargetDemN
+        ? `<span style="color:var(--earth,#b5762a);font-size:12px"><b>No saved demand plot</b> within a fortnight of ${esc(prodPlanDate)} — targets below come from the <b>demand table</b> for ${esc(window._prodTargetDemWin||'this week')} (${window._prodTargetDemN} product(s)), which is the same demand the Weekly Demand Target reads. It is committed, but it is <b>not locked</b>: press 💾 Save plan in Demand/MRP to lock the week.</span>`
+        : `<span style="color:var(--earth,#b5762a);font-size:12px"><b>No demand plot and no demand rows</b> for the week of ${esc(prodPlanDate)}, so catalogue targets are blank — that is the reason, not a fault.${window._prodTargetCo?' The '+window._prodTargetCo+' custom order SKU(s) below still carry their own targets, because those are read from the orders.':''} You can build and post this run without one.</span>`)}</div>
     <div class="smart" style="margin:8px 0"><div class="stile"><div class="v">${totTarget}</div><div class="l">Target packs</div></div><div class="stile"><div class="v">${totGood}</div><div class="l">This run (good)</div></div><div class="stile"><div class="v" style="color:${totRemain>0?'var(--berry)':'#4e7a3e'}">${totRemain}</div><div class="l">Remaining to make</div></div></div>
     <div style="overflow-x:auto"><table style="min-width:1060px"><thead><tr><th>Product</th>
       <th class="num" title="Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. The first figure already IS the Shopify reading, water-line adjusted — it is not added a second time.">Current<br>stock</th>
