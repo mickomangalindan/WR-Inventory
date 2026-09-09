@@ -5026,7 +5026,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-09 15:30Z';
+const WR_BUILD='2026-09-09 17:10Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -8593,9 +8593,13 @@ async function renderMRP(){
      plan. Everything else is still to plan and belongs in the open list. */
   const coDone={}, coFresh={};
   Object.keys(coAll).forEach(k=>{
-    const p=(coEv.planned||{})[k], d=(coEv.inDemand||{})[k];
+    /* Only a plot made after the newest order owing this SKU can have planned
+       what is outstanding on it. Without that, a duplicate of a finished order
+       folded straight into "already planned" behind its predecessor's plot. */
+    const _e=coEvAt(coEv, ((coAll[k]||{}).since)||'', ((coAll[k]||{}).needed)||'');
+    const p=(_e.planned||{})[k], d=(_e.inDemand||{})[k];
     const reallyPlanned = !!p || !!(d && d.ref);
-    if(reallyPlanned) coDone[k]=coWhyText(coEv,k)||'already planned'; else coFresh[k]=true;
+    if(reallyPlanned) coDone[k]=coWhyText(_e,k)||'already planned'; else coFresh[k]=true;
   });
   window._mrpCoEv=coEv; window._mrpCoDone=coDone;
   /* ---- A LOCKED WEEK IS CLOSED ------------------------------------------
@@ -11238,9 +11242,17 @@ async function coOpenDemand(){
     const cut=k.indexOf('|'); const ref=k.slice(0,cut), sku=k.slice(cut+1);
     const o=keep[ref]; if(!o) return;
     const needed=String(o.needed_date||o.order_date||'').slice(0,10);
-    const e=map[sku]=map[sku]||{packs:0,needed:'',orders:[]};
+    const e=map[sku]=map[sku]||{packs:0,needed:'',since:'',orders:[]};
     e.packs+=q;
     if(needed && (!e.needed || needed<e.needed)) e.needed=needed;       // soonest need drives urgency
+    /* `since` is the NEWEST order still owing this SKU. A plot older than that
+       cannot have planned everything now outstanding, so the planning screen
+       must treat the SKU as still to plan — see coEvAt. Taking the newest
+       rather than the oldest is deliberate: being asked to plan a week that
+       turns out to be planned costs a glance, and the other way round is how a
+       real customer's packs stopped being asked for. */
+    const raised=String(o.order_date||'').slice(0,10);
+    if(raised && (!e.since || raised>e.since)) e.since=raised;
     e.orders.push({ref, customer:o.customer_name||'', packs:q, needed});
   });
   return map; }
@@ -11261,24 +11273,25 @@ async function coDemandDiag(){
      is sitting inside a LOCKED demand plot is in the run — leaving it on the
      list made the list untrustworthy, and a list nobody trusts gets ignored
      exactly when it matters. Plotted orders drop off. */
-  let plotted={};
-  try{ const ev=await coPlanEvidence(); plotted=ev.inDemand||{}; }catch(e){}
+  let _ev=null;
+  try{ _ev=await coPlanEvidence(); }catch(e){ _ev=null; }
   /* Already planned means EITHER a locked plot OR a row sitting in the demand
      table — both are "this week owes it". Only checking plots left orders that
      had been loaded straight into demand still sitting on the to-plan list,
      which is how the same order gets added twice. A DRAFT plot does not count;
      that week is still being argued about. */
-  const _isPlotted=ls=>ls.some(l=>{
-    const ev=l.product_sku && plotted[l.product_sku];
-    return !!ev && (ev.locked || ev.src==='row');
-  });
+  const _isPlotted=(ls,since)=>{
+    const plotted=(coEvAt(_ev||{}, since)||{}).inDemand||{};
+    return ls.some(l=>{ const e=l.product_sku && plotted[l.product_sku];
+      return !!e && (e.locked || e.src==='row'); });
+  };
   const rows=(orders||[]).map(o=>{
     const ls=byOrder[o.order_ref]||[];
     const withSku=ls.filter(l=>l.product_sku);
     const packs=withSku.reduce((s,l)=>s+(+l.packs||0),0);
     const st=coStat(o.status);
     let reason='';
-    if(_isPlotted(ls))        return null;          // already on a locked plot
+    if(_isPlotted(ls, o.order_date||'')) return null;   // already on a locked plot OF ITS OWN
     if(st==='draft')          reason='Still a Draft — open it and press 🔒 Lock.';
     else if(st==='cancelled') reason='Cancelled.';
     else if(st==='completed') reason='Completed — every pack already produced.';
@@ -11307,29 +11320,30 @@ async function coDemandDiag(){
    if it actually plans packs.                                                  */
 async function coPlanEvidence(){
   const _today=todayISO();
-  const planned={}, inDemand={};
+  const plannedAll={}, demandAll={};
+  const push=(m,sku,rec)=>{ (m[sku]=m[sku]||[]).push(rec); };
   try{ let rows;
-    if(isLive()) rows=await sb('production_batches?select=product_sku,status,planned_packs,good_packs,production_date,run_ref,batch_ref,kind&status=eq.draft');
+    if(isLive()) rows=await sb('production_batches?select=product_sku,status,planned_packs,good_packs,production_date,run_ref,batch_ref,kind,created_at&status=eq.draft');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='draft');
     (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{
       if(!((+b.planned_packs||0)>0 || (+b.good_packs||0)>0)) return;     // a zero line plans nothing
       const d=String(b.production_date||'').slice(0,10);
       if(d && d<_today) return;                                          // abandoned draft — not "in production"
-      const cur=planned[b.product_sku];
-      if(!cur || (d && (!cur.date || d<cur.date))) planned[b.product_sku]={ref:b.run_ref||b.batch_ref||'', date:d};
+      push(plannedAll, b.product_sku, {ref:b.run_ref||b.batch_ref||'', date:d,
+        at:String(b.created_at||b.updated_at||'').slice(0,10)});
     });
   }catch(e){}
   try{ let rows;
-    if(isLive()) rows=await sb('demand?select=sku,qty,plan_date');
+    if(isLive()) rows=await sb('demand?select=sku,qty,plan_date,source,updated_at');
     else rows=(DEMO.demand||[]);
     (rows||[]).forEach(r=>{ if(!((+r.qty||0)>0)) return;
-      const d=String(r.plan_date||'').slice(0,10); const cur=inDemand[r.sku];
       /* WHERE the evidence lives matters, because the two stores are read by
          different screens. A demand ROW makes the order say "Added in Demand";
          a saved PLOT is what the Demand/MRP screen draws. An order can be
          truthfully in demand while that screen looks empty — which reads as a
          bug unless the badge says which one it found. */
-      if(!cur || (d && (!cur.date || d>cur.date))) inDemand[r.sku]={date:d, qty:+r.qty||0, src:'row', from:String(r.source||'').trim()};
+      push(demandAll, r.sku, {date:String(r.plan_date||'').slice(0,10), qty:+r.qty||0,
+        src:'row', from:String(r.source||'').trim(), at:String(r.updated_at||'').slice(0,10)});
     });
   }catch(e){}
   /* THE SAVED DEMAND PLOT. This is where the first version went wrong: a plot
@@ -11344,14 +11358,68 @@ async function coPlanEvidence(){
       const d=(pl&&pl.data)||{}; const dem=d.demand||{};
       const date=String(pl.plan_date||pl.date||'').slice(0,10);
       const ref=d.ref||pl.ref||'';
+      const at=String(pl.saved_at||pl.created_at||'').slice(0,10);
       Object.keys(dem).forEach(sku=>{ if(!((+dem[sku]||0)>0)) return;
-        const cur=inDemand[sku];
-        // the most recent plot wins, and a plot is better evidence than a bare
-        // demand row because it carries the DP reference the kitchen works from
-        if(!cur || !cur.ref || (date && cur.date && date>cur.date)) inDemand[sku]={date, qty:+dem[sku]||0, ref, locked:!!d.locked};
+        push(demandAll, sku, {date, qty:+dem[sku]||0, ref, locked:!!d.locked, at});
       });
     });
   }catch(e){}
+  const ev=coEvAt({plannedAll, demandAll}, '');
+  ev.plannedAll=plannedAll; ev.demandAll=demandAll;
+  return ev;
+}
+/* ---- EVIDENCE HAS TO BE YOUNGER THAN THE ORDER IT IS EVIDENCE FOR -----------
+   Every candidate above is keyed by SKU and nothing else, which is fine right
+   up until two orders share one. ⧉ Duplicate order is BUILT to make that
+   happen: the copy keeps the SKU on purpose.
+
+   So a duplicate of a finished order opened reading "Added in Demand · in
+   locked demand DP-08292026 [RAW] V02 for 2026-08-29 · 15 pack(s)" — a plot
+   saved on 29 August, eleven days before the order existed, for a quantity
+   belonging to somebody else's order. Nobody had planned the new packs. The
+   badge said they were handled, so nothing asked for them.
+
+   A plot, a demand row or a draft run can only be evidence for an order that
+   already existed when it was made. `since` is the day the order was RAISED —
+   never the day it is needed, because production is planned in the week BEFORE
+   delivery and a plot for the earlier week is exactly what a correctly handled
+   order looks like. A candidate qualifies if the week it covers, or the day it
+   was written, is on or after the order was raised; either is enough, so a plot
+   saved today for a week already under way still counts.
+
+   An order with no raised date filters nothing. Undated evidence is allowed
+   through rather than assumed old. Both defaults lean the same way on purpose:
+   a false "not planned yet" sends somebody to look at a week that turns out to
+   be planned, which costs a glance; the other way round is what stopped anyone
+   asking for a real customer's packs.
+
+   Passing '' asks for the unfiltered best, which is what the SKU-level screens
+   want when no particular order is in question.                               */
+function coEvAt(ev, since, want){
+  since=String(since||'').slice(0,10);
+  want=String(want||'').slice(0,10);
+  const fits=c=>!since || (c.date && c.date>=since) || (c.at && c.at>=since)
+                       || (!c.date && !c.at);
+  /* Which of several eligible candidates gets quoted on the badge. A plot beats
+     a bare demand row, because it carries the DP reference the kitchen works
+     from. After that, the one for the week this order is actually due beats one
+     for a different week — without that, an order due on the 9th was quoting a
+     row for the 20th, which is the next order's. Everything else being equal,
+     the most recent. */
+  const score=(c)=>[ c.ref?1:0, (want && c.date===want)?1:0, c.date||'' ];
+  const better=(a,b)=>{ const x=score(a), y=score(b);
+    for(let i=0;i<x.length;i++){ if(x[i]>y[i]) return true; if(x[i]<y[i]) return false; }
+    return false; };
+  const planned={}, inDemand={};
+  Object.keys((ev&&ev.plannedAll)||{}).forEach(sku=>{
+    ev.plannedAll[sku].filter(fits).forEach(c=>{ const cur=planned[sku];
+      // soonest draft run wins — it is the one about to happen
+      if(!cur || (c.date && (!cur.date || c.date<cur.date))) planned[sku]=c; });
+  });
+  Object.keys((ev&&ev.demandAll)||{}).forEach(sku=>{
+    ev.demandAll[sku].filter(fits).forEach(c=>{ const cur=inDemand[sku];
+      if(!cur || better(c,cur)) inDemand[sku]=c; });
+  });
   return {planned, inDemand};
 }
 // Plain-English "why is it at this status", for the card and the demand run.
@@ -11392,11 +11460,11 @@ async function coSyncStatuses(){
   }catch(e){}
   // one shared reading of what is planned where — see coPlanEvidence
   const ev=await coPlanEvidence();
-  const planned=ev.planned, inDemand=ev.inDemand;
-  // plus whatever is typed into the demand run on screen right now
-  Object.keys(mrpDemand||{}).forEach(s=>{ if((+mrpDemand[s]||0)>0 && !inDemand[s])
-    inDemand[s]={date:(typeof MRPDATE!=='undefined'?MRPDATE:''), qty:+mrpDemand[s]||0,
-                 src:'row', from:'the demand screen, not saved yet'}; });
+  /* Whatever is typed into the demand run on screen right now is evidence too,
+     and it is by definition being typed TODAY, so it qualifies for every order. */
+  Object.keys(mrpDemand||{}).forEach(k=>{ if(!((+mrpDemand[k]||0)>0)) return;
+    (ev.demandAll[k]=ev.demandAll[k]||[]).push({date:(typeof MRPDATE!=='undefined'?MRPDATE:''),
+      qty:+mrpDemand[k]||0, src:'row', from:'the demand screen, not saved yet', at:todayISO()}); });
 
   const byOrder={}; (lines||[]).forEach(l=>{ if(l.product_sku) (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
   /* Attribute produced packs soonest-needed-first across every LOCKED order, so
@@ -11410,6 +11478,10 @@ async function coSyncStatuses(){
     // finished must not be reopened just because the batch history was cleared.
     const cur=coStat(o.status); if(cur==='draft'||cur==='cancelled'||cur==='completed') continue;
     const ls=byOrder[o.order_ref]||[]; const f=fulfilled[o.order_ref]||{ord:0,got:0};
+    /* Only evidence that post-dates this order counts for it — see coEvAt. A
+       plot saved before the order was raised planned somebody else's packs. */
+    const evO=coEvAt(ev, o.order_date||'', o.needed_date||'');
+    const planned=evO.planned, inDemand=evO.inDemand;
     let next;
     if(f.ord>0 && f.got>=f.ord){ next='completed'; why[o.order_ref]=f.got+' of '+f.ord+' pack(s) produced'; }
     else if(f.got>0){             next='partial';   why[o.order_ref]=f.got+' of '+f.ord+' pack(s) produced'; }
@@ -11791,7 +11863,11 @@ async function coCancelCheck(){
   const out={blocked:[], demandRows:[], skus:[], packs:0};
   const lines=(coLines||[]).filter(l=>l.product_sku && (+l.packs||0)>0);
   if(!lines.length) return out;
-  const ev=await coPlanEvidence().catch(()=>({planned:{},inDemand:{}}));
+  /* Read against THIS order's own date: a plot that predates it was never
+     planning these packs, and refusing the cancel because of it is a block
+     nobody can act on. */
+  const _evAll=await coPlanEvidence().catch(()=>({plannedAll:{},demandAll:{}}));
+  const ev=coEvAt(_evAll, (coRec&&coRec.order_date)||'', (coRec&&coRec.needed_date)||'');
   /* Packs already made against these SKUs. A partly produced order is not a
      mistake to be erased — it is stock that exists. */
   const made={};
