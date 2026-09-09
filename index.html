@@ -5026,7 +5026,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-09 18:40Z';
+const WR_BUILD='2026-09-10 00:20Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -11529,6 +11529,7 @@ async function renderCustomOrders(){
   $('cp').innerHTML=`<div class="title">Custom Orders <span onclick="openKB('custom_orders')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="coNew()">＋ New quote</button>
     <button class="btn sec" onclick="coImportOpen()">📥 Import from sheet</button>
+    <button class="btn sec" onclick="coCalcImportOpen()" title="paste the Kitchen Batch from calc.wholesomerabbit.ph — the computed pack, not the profile">🧮 From calculator</button>
     <div class="sp"></div><span style="color:var(--muted)">CS quotes → lock → sellable SKU + BOM + demand</span>`;
   let orders=[]; let _tblErr=''; try{ orders=await db.list('custom_orders',{}); }catch(e){ _tblErr=String(e&&e.message||e); }
   let lc={}, lt={}, byOrder={}; try{ (await db.list('custom_order_lines',{})).forEach(l=>{ lc[l.order_ref]=(lc[l.order_ref]||0)+1; lt[l.order_ref]=(lt[l.order_ref]||0)+(+l.packs||0)*(+l.unit_price||0); if(l.product_sku){ (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); } }); }catch(e){ _tblErr=_tblErr||String(e&&e.message||e); }
@@ -11679,7 +11680,8 @@ async function coImpRun(){
   const packs=r.mixes.reduce((s,m)=>s+(+m.packs||0),0);
   const kg=r.mixes.reduce((s,m)=>s+m.total*(+m.packs||0),0)/1000;
   let map={recipe:[],unmatched:[]};
-  try{ map=await _ffMapItems(r.mixes.flatMap(m=>m.items)); }catch(e){}
+  /* a preview, not an order — a best effort is what it is for */
+  try{ map=await _ffMapItems(r.mixes.flatMap(m=>m.items), {loose:true}); }catch(e){}
   const un=[...new Set(map.unmatched||[])];
   el.innerHTML=`<b>${r.mixes.length} mix(es)</b> · ${packs} packs · ${Math.round(kg*1000)/1000} kg<br>
     <div style="max-height:150px;overflow:auto;margin:6px 0"><table><thead><tr><th>Mix</th><th class="num">Pack</th><th class="num">Packs</th><th class="num">Items</th></tr></thead><tbody>
@@ -12025,6 +12027,7 @@ function drawCOForm(){
     <button class="btn sec" onclick="coKitchenBatch()" title="the Fresh Food Calculator's Kitchen Batch sheet, from this order">🍳 Kitchen Batch</button>
     ${coRec.order_ref?`<button class="btn sec" onclick="coDuplicateAsk()" title="repeat the same product, or fork a new one from this order">⧉ Duplicate…</button>`:''}
     ${!locked?`<button class="btn sec" onclick="coImportSheet()" title="a Production Request CSV — one mix per line">📥 Import sheet</button>`:''}
+    ${!locked?`<button class="btn sec" onclick="coCalcImportOpen()" title="paste the Kitchen Batch from calc.wholesomerabbit.ph">🧮 From calculator</button>`:''}
     <button class="btn sec" onclick="coBackToList()">← Orders</button>
     <div class="sp"></div>${coStatBadge(coRec.status)} <span style="color:var(--muted)">${esc(coStatDef(coRec.status).d)}</span>`;
   const st=coRec.status||'quote';
@@ -12137,6 +12140,15 @@ function coEditRecipe(i){ _coEditIdx=i; const l=coLines[i]; _coEditRows=(l.recip
   _coEditBase=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; drawCoRecipe(); }
 /* Was grouped by `ingredient_group`, which is not a field on ingredients — so every
    ingredient landed in one "Other" bucket. Now category › base material, like the count. */
+/* Accept the resolver's near match on one row. The pick is a decision, so it
+   is learned the moment it is made rather than only on save — the same name
+   will not be asked about again. */
+function _coUseGuess(j){
+  const r=_coEditRows[j]; if(!r||!r.guess_sku) return;
+  r.ingredient_sku=r.guess_sku;
+  try{ ffLearnAlias(r.src_name, r.guess_sku); }catch(e){}
+  drawCoRecipe();
+}
 function _coIngOptions(sel){ return _ingGroupOptions(_coIng, _coIng, {selected:sel, showKind:true}); }
 
 /* ---- PMR sections, the same eight the Fresh Food Calculator uses ------------
@@ -12234,7 +12246,15 @@ function drawCoRecipe(){
   _coEditRows.forEach((r,j)=>{ const k=_coRowCat(r); (byCat[k]=byCat[k]||[]).push({r,j}); });
   const RO=!!window._coRecipeRO;
   const rowHtml=({r,j},cat)=>{ const unm=r.src_name&&!r.ingredient_sku;
-    const srcHint=r.src_name?`<div class="mini" style="color:${unm?'var(--danger)':'var(--muted)'}">calculator: <b>${esc(r.src_name)}</b>${unm?' — pick a match':''}</div>`:'';
+    /* A NEAR MATCH IS OFFERED, NEVER APPLIED. The resolver can see that
+       "Beef Green Tripe" looks like "Beef green tripe (precooked)" — but those
+       are two different things in the pan, and so are "Beef Lung (Precooked)"
+       and raw beef lungs, or "Duck meat with bones" and the no-skin version.
+       Taking the guess silently is how the wrong food gets cooked and nobody
+       is ever asked. So the guess is shown, with the name spelled out, and one
+       press accepts it — and that press is remembered for ever. */
+    const sug=(unm&&r.guess_sku)?`<div class="mini" style="margin-top:2px"><span class="addrow" style="color:var(--earth,#b5762a)" title="the master list has no ingredient by that exact name — this is the closest, check it is the same thing" onclick="_coUseGuess(${j})">≈ Use “${esc(r.guess_name||r.guess_sku)}”</span></div>`:'';
+    const srcHint=r.src_name?`<div class="mini" style="color:${unm?'var(--danger)':'var(--muted)'}">calculator: <b>${esc(r.src_name)}</b>${unm?' — pick a match':''}</div>`+sug:'';
     if(RO){ const it=(_coIng||[]).find(x=>x.sku===r.ingredient_sku)||{};
       return `<tr><td>${esc(it.name||r.ingredient_sku||r.src_name||'—')}<div class="mini" style="color:var(--muted)"><code>${esc(r.ingredient_sku||'')}</code></div></td>
         <td class="num"><b>${Math.round((+r.grams||0)*10)/10}</b> g</td><td style="width:24px"></td></tr>`; }
@@ -12608,7 +12628,16 @@ async function coCancel(){ if(!confirm('Cancel this quote?')) return; try{ if(co
 // The full calculator runs isolated in an iframe; its "📤 Send order to ERP" button posts the
 // computed pack (recipe items + grams, pack size, packs, customer, price) to this window, which
 // maps ingredient names → SKUs and pre-fills a Custom Order for review + Lock.
-const FFCALC_SRC='freshfoodcalculator.html';
+/* ---- The calculator is not ours, and no longer lives here ------------------
+   The ERP used to ship its own copy of the Fresh Food Calculator — 688 KB of
+   it — with two hooks bolted on that the live site never had. Two calculators,
+   maintained by different people, and the customer-facing one was the one
+   getting the improvements. The fork is gone.
+
+   calc.wholesomerabbit.ph keeps its own development path, driven by what
+   customers ask for, and the ERP takes one thing from it: the COMPUTED PACK.
+   This screen is the hand-off, not a host. */
+const FFCALC_URL='https://calc.wholesomerabbit.ph/';
 // In-app user guides — embedded like the calculator (iframe to files deployed alongside the app,
 // in a /guides folder). Add more entries here as you write more manuals.
 const GUIDES=[
@@ -12630,11 +12659,37 @@ function renderGuides(){
 function renderFFCalc(){
   $('crumb').innerHTML='<b>Fresh Food Calculator</b>';
   $('cp').innerHTML=`<div class="title">Fresh Food Calculator <span onclick="openKB('ffcalc')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
-    <button class="btn sec" onclick="renderFFCalc()">↻ Reload</button>
-    <div class="sp"></div><span style="color:var(--muted)">design a custom pack → 📤 Send order to ERP</span>`;
-  $('content').innerHTML=`<div style="height:80vh;min-height:560px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff">
-      <iframe id="ffcalcFrame" src="${FFCALC_SRC}" style="width:100%;height:100%;border:0;display:block" title="Fresh Food Calculator"></iframe></div>
-    <div class="mini" style="margin-top:6px;color:var(--muted)">The calculator runs in-app. Build a pack, then click <b>📤 Send order to ERP</b> (top-right of the calculator) — it becomes a Custom Order with its recipe, ready to review &amp; Lock. If the calculator doesn't appear, make sure <code>${esc(FFCALC_SRC)}</code> is deployed alongside the app.</div>`;
+    <a class="btn" href="${esc(FFCALC_URL)}" target="_blank" rel="noopener noreferrer">🧮 Open the calculator ↗</a>
+    <button class="btn sec" onclick="openModel('custom_orders')">🧑‍🍳 Custom Orders</button>
+    <div class="sp"></div><span style="color:var(--muted)">design the pack there → bring the Kitchen Batch here</span>`;
+  $('content').innerHTML=`<div class="repcard">
+    <h3 style="margin:.1em 0 .5em;color:var(--g2,#2f5d33)">The calculator lives at calc.wholesomerabbit.ph</h3>
+    <p class="hint" style="margin:0 0 12px">It is its own tool, on its own release path, and it changes with what
+      customers ask for — which is right. The ERP does not host it or read from it. It takes one thing across, and
+      owns it from then on: the <b>computed pack</b>.</p>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:0 0 14px">
+      <div style="flex:1 1 260px;border:1px solid var(--line);border-radius:10px;padding:12px 14px">
+        <div style="font-weight:800;color:var(--g2,#2f5d33);margin-bottom:6px">A NEW customer</div>
+        <ol style="margin:.2em 0 0;padding-left:18px;font-size:13.5px;line-height:1.6">
+          <li><a href="${esc(FFCALC_URL)}" target="_blank" rel="noopener noreferrer">Open the calculator ↗</a> and work out the pack.</li>
+          <li>Select the <b>Kitchen Batch table</b> and copy it.</li>
+          <li>Come back here → <span class="chip2">🧑‍🍳 Custom Orders</span> → <b>🧮 From calculator</b> → paste.</li>
+          <li>Confirm anything it asks about, then <b>🔒 Lock</b>.</li>
+        </ol>
+      </div>
+      <div style="flex:1 1 260px;border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:#f6f8f4">
+        <div style="font-weight:800;color:var(--g2,#2f5d33);margin-bottom:6px">A customer who has ordered before</div>
+        <p style="margin:.2em 0 0;font-size:13.5px;line-height:1.6">Do <b>not</b> go back to the calculator. Their current
+          formulation is <b>their last locked order</b> — it is what was actually made, costed and delivered.
+          Open it, press <b>⧉ Duplicate</b>, change the quantity or the recipe, and Lock.</p>
+      </div>
+    </div>
+    <div class="hint"><b>Why not just embed it?</b> Because then every change they ship lands here unreviewed, and a
+      renamed field breaks the order import silently. The paste is the seam: it is visible, it is checked, and it
+      keeps working whatever the calculator does next.</div>
+    <div style="margin-top:12px"><button class="btn" onclick="openModel('custom_orders')">🧑‍🍳 Go to Custom Orders</button>
+      <a class="btn sec" href="${esc(FFCALC_URL)}" target="_blank" rel="noopener noreferrer">🧮 Open the calculator ↗</a></div>
+  </div>`;
 }
 // Native browser for the shared Fresh Food Calculator profiles (ffcalc_profiles), so CS can
 // find a repeat customer without opening the calculator. Read-only; jump into the calculator to edit.
@@ -12645,10 +12700,10 @@ async function renderFFProfiles(){
     <button class="btn sec" onclick="renderFFProfiles()">↻ Refresh</button>
     <button class="btn sec" onclick="ffImportPick()">📥 Import backup (JSON)</button>
     <button class="btn sec" onclick="openModel('ffcalc')">🧮 Open calculator</button>
-    <div class="sp"></div><span style="color:var(--muted)">saved calculator customers · shared across devices</span>`;
+    <div class="sp"></div><span style="color:var(--muted)">an <b>archive</b> — the in-app calculator that filled it has been retired; nothing writes here now</span>`;
   let rows=[]; window._ffProfErr='';
   if(isLive()){ try{ rows=await sb('ffcalc_profiles?select=key,kind,cust,dog,payload,updated_at&order=updated_at.desc&limit=2000'); }catch(e){ window._ffProfErr=String(e&&e.message||e); } }
-  else { window._ffProfErr='Connect to Supabase to see shared calculator profiles.'; }
+  else { window._ffProfErr='Connect to Supabase to read this archive. It is a historical list: it was filled by the ERP\'s own copy of the calculator, which has been retired, and it was never a view of calc.wholesomerabbit.ph.'; }
   window._ffProf=(rows||[]).map(r=>{ const p=r.payload||{}; return {key:r.key, kind:r.kind||(String(r.key).indexOf('wr_md_')===0?'md':'nc'), cust:r.cust||p.custName||'', dog:r.dog||p.dogName||'',
     ft:_FT_LBL[p.feedingType]||p.feedingType||'', pack:(p.packSize||p.customPackGrams||''), packs:(p.numPacks||p.customNumPacks||''), updated:r.updated_at||p.savedAt||'', payload:p}; });
   _ffProfDraw();
@@ -12665,7 +12720,12 @@ function _ffProfDraw(){
       <input id="ffpq" value="${esc(q.join(' '))}" placeholder="🔎 search customer / dog / feeding type…" oninput="_ffProfDraw()" style="flex:1;min-width:200px;padding:7px 9px;border:1px solid var(--line);border-radius:6px">
       <span class="mini" style="color:var(--muted)">${all.length} saved profile(s)</span>
     </div>
-    <div class="hint" style="margin:0 0 8px">These are the calculator's saved customers, shared through Supabase. To build a pack for one, open the <b>🧮 Fresh Food Calculator</b> and pick them from its <i>Load saved profile</i> list, then 📤 Send order to ERP.</div>
+    <div class="hint" style="margin:0 0 8px"><b>This list is an archive.</b> It was filled by the ERP's own copy of the
+      calculator, which has been retired — nothing writes to it any more, and it was never a view of
+      calc.wholesomerabbit.ph, whose profiles never leave the browser they were saved in. Keep it for looking things up.
+      To build a pack, work it out in <a href="https://calc.wholesomerabbit.ph/" target="_blank" rel="noopener noreferrer">the
+      calculator ↗</a> and bring the Kitchen Batch into <b>Custom Orders → 🧮 From calculator</b>. For a returning customer,
+      duplicate their last order instead — that is the formulation that was actually made.</div>
     <div style="overflow-x:auto"><table><thead><tr><th>Customer</th><th>Pet</th><th>Type</th><th>Feeding</th><th class="num">Pack</th><th>Updated</th></tr></thead>
     <tbody>${body||'<tr><td colspan="6" class="empty">No profiles yet — have the team click ☁ Sync in the calculator to seed them.</td></tr>'}</tbody></table></div>
     <div class="pager">${rows.length} shown</div></div>`;
@@ -12845,7 +12905,7 @@ function prLoadRead(f){
 }
 function _prStatusHtml(){
   const bk=window._prBook;
-  if(!bk) return '<span class="mini" style="color:var(--muted)">No workbook loaded — recipes will come from the saved calculator profiles only.</span>';
+  if(!bk) return '<span class="mini" style="color:var(--muted)">No workbook loaded — orders will come in without recipes. Load the Production Request workbook, or paste each Kitchen Batch into its order.</span>';
   const tabs=Object.keys(bk); const mixes=tabs.reduce((s,t)=>s+bk[t].length,0);
   const sus=tabs.reduce((s,t)=>s+bk[t].filter(m=>m.suspect).length,0);
   const bad=tabs.reduce((s,t)=>s+bk[t].filter(m=>!m.balances&&!m.suspect).length,0);
@@ -13017,18 +13077,10 @@ async function _coImpResolve(){
         continue;
       }
     }
-    // --- fallback: derive from the saved calculator profile ---
-    const m=(r.sel>=0)?r.matches[r.sel]:null;
-    if(!m){ continue; }
-    const pay=m.p.payload || (m.p.raw&&m.p.raw.payload) || null;
-    if(!pay){ r.recipeErr='profile payload not loaded'; continue; }
-    const packG=+r.pack_size_g||+pay.packSize||+pay.customPackGrams||0;
-    if(!(packG>0)){ r.recipeErr='no pack size to scale the recipe to'; continue; }
-    const items=_ffProfileRecipe(pay, packG);
-    if(!items.length){ r.recipeErr='profile has no ingredients'; continue; }
-    const mapped=await _ffMapItems(items);
-    r.recipe=mapped.recipe; r.unmatched=mapped.unmatched;
-    r.src='profile'; r.srcLabel=m.p.cust+(m.p.dog?' · '+m.p.dog:'');
+    /* No workbook mix for this order. The ERP used to guess the recipe from the
+       saved profile by re-running a copy of the calculator's ratio maths; that
+       copy is gone, and the honest answer is to say what is missing. */
+    r.recipeErr='no recipe for this order — load the Production Request workbook, or paste its Kitchen Batch into the order (Custom Orders → 🧮 From calculator)';
   }
 }
 function coImpPickMix(i,v){ const r=(window._coImp||[])[i]; if(!r) return; r.prSel=+v;
@@ -13093,7 +13145,7 @@ async function coImportRun(){
       let ref=''; try{ ref=(await genRef('CO',{date:todayISO()})).ref; }catch(e){ ref='CO-'+_mmddyyyy(todayISO())+'-'+String(Date.now()).slice(-4)+made.length; }
       const best=(r.sel>=0)?r.matches[r.sel]:null;
       const srcNote = r.src==='workbook' ? ('Recipe from the Production Request workbook: '+r.srcLabel)
-                    : (r.src==='profile' ? ('Recipe from saved calculator profile: '+r.srcLabel+(best?' ('+best.why+')':''))
+                    : (r.src==='profile' ? ('Recipe from saved calculator profile: '+r.srcLabel+(best?' ('+best.why+')':''))   // legacy rows only
                     : 'No recipe source matched — build the recipe here');
       const note=['Imported from the order sheet'+(r.date?(' · entry '+r.date):''),
                   srcNote,
@@ -13124,65 +13176,100 @@ function _coDueISO(s){
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 }
 
-/* ===== Expand a saved calculator profile into an ERP recipe =====
-   A profile stores the chosen ingredient NAMES per category plus dailyGrams — not grams per
-   ingredient. The calculator derives grams from the BARF ratios at load time, so we mirror that
-   here exactly (freshfoodcalculator.html → BASE_RATIOS / computeRatios / the per-category split),
-   then scale to the ORDER's pack size, because bom_lines.usable_g is grams per pack. */
-const FF_BASE_RATIOS={
-  raw:     {muscle:.45,bones:.10,organ:.25,liver:.05,secreting:.05,veggies:.07,seeds:.02,fruit:.01},
-  cookable:{muscle:.55,organ:.25,liver:.05,secreting:.05,veggies:.07,seeds:.02,fruit:.01},
-  sousVide:{muscle:.55,organ:.25,liver:.05,secreting:.05,veggies:.07,seeds:.02,fruit:.01}
-};
-function _ffRatios(feedingType, excludedCats){
-  const base=FF_BASE_RATIOS[feedingType]||FF_BASE_RATIOS.cookable;
-  const r={...base}; const ex=excludedCats||{}; let muscleBonus=0;
-  const lv=!!ex.liver, sc=!!ex.secreting;
-  if(lv&&!sc){ r.secreting=(r.secreting||0)+(r.liver||0); r.liver=0; }
-  else if(!lv&&sc){ r.liver=(r.liver||0)+(r.secreting||0); r.secreting=0; }
-  else if(lv&&sc){ muscleBonus+=(r.liver||0)+(r.secreting||0); r.liver=0; r.secreting=0; }
-  ['organ','veggies','seeds','fruit'].forEach(c=>{ if(ex[c]&&r[c]!==undefined){ muscleBonus+=r[c]; r[c]=0; } });
-  if(ex.bones&&r.bones!==undefined){ muscleBonus+=r.bones; r.bones=0; }
-  r.muscle=(r.muscle||0)+muscleBonus;
-  return r;
-}
-/* Returns [{name,cat,grams}] for ONE pack of `packG` grams. Mirrors the calculator's
-   "split the category % evenly across the chosen items", including its two redistribution
-   rules: an empty secreting list gives its % to liver and vice versa; every other empty
-   category gives its % to muscle. */
-function _ffProfileRecipe(payload, packG){
-  const p=payload||{}; const total=+packG||0; if(!(total>0)) return [];
-  const pick=(p.ingredients&&typeof p.ingredients==='object')?p.ingredients:p;   // multi-pet nests them
-  const ratios=_ffRatios(p.feedingType, p.excludedCats);
-  const rows=[]; let toMuscle=0, toLiver=0, toSecreting=0;
-  const CATS=['bones','organ','liver','secreting','veggies','seeds','fruit'];
-  CATS.forEach(cat=>{
-    const pct=ratios[cat]||0; if(!pct) return;
-    const sel=(pick[cat]||[]).filter(Boolean);
-    if(!sel.length){ if(cat==='secreting') toLiver+=pct; else if(cat==='liver') toSecreting+=pct; else toMuscle+=pct; return; }
-    const per=(total*pct)/sel.length;
-    sel.forEach(item=>rows.push({name:item, cat, grams:per}));
-  });
-  if(toLiver>0){ const lr=rows.filter(r=>r.cat==='liver'); if(lr.length){ const e=(total*toLiver)/lr.length; lr.forEach(r=>r.grams+=e); } else toMuscle+=toLiver; }
-  if(toSecreting>0){ const sr=rows.filter(r=>r.cat==='secreting'); if(sr.length){ const e=(total*toSecreting)/sr.length; sr.forEach(r=>r.grams+=e); } else toMuscle+=toSecreting; }
-  const mus=(pick.muscle||[]).filter(Boolean);
-  const mpct=(ratios.muscle||0)+toMuscle;
-  if(mus.length && mpct>0){ const per=(total*mpct)/mus.length; mus.forEach(item=>rows.unshift({name:item, cat:'muscle', grams:per})); }
-  return rows.filter(r=>r.grams>0).map(r=>({...r, grams:Math.round(r.grams*10)/10}));
-}
-/* Map calculator ingredient NAMES to ERP SKUs. Same resolution order the calculator import
-   uses: learned alias → exact name → fuzzy contains. Returns {recipe, unmatched}. */
-async function _ffMapItems(items){
+/* ---- THE RATIO ENGINE IS NOT OURS TO KEEP ----------------------------------
+   `FF_BASE_RATIOS` and `_ffProfileRecipe()` lived here: a copy of the
+   calculator's BARF maths, used to turn a saved profile into a recipe when the
+   bulk importer had no workbook. Hardcoded percentages — muscle .55, organ .25,
+   liver .05, secreting .05, veg .07, seeds .02, fruit .01 — that ignored the
+   calculator's ingredient overrides, ratio overrides, eggshell ratio, fish
+   percentage, bone percentage and puppy rules.
+
+   It was a promise to chase somebody else's release path for ever, and quietly
+   produce a different recipe from theirs whenever it fell behind. Deleted with
+   the bundled calculator. A recipe now comes from a Production Request workbook
+   or from a pasted Kitchen Batch — both of which are figures somebody computed,
+   not figures we re-derived. */
+/* Map calculator ingredient NAMES to ERP SKUs.
+   Resolution order: learned alias → exact name → fuzzy contains.
+
+   A GUESS IS NOT A MATCH, and treating it as one is the quiet way to cook the
+   wrong food. The two masters are maintained by different people for different
+   purposes and they do not agree — that is expected and it is fine. What is not
+   fine is a fuzzy `includes` silently picking a neighbour and nobody being
+   asked. Run against the calculator's whole vocabulary, that is what it did:
+
+     Beef Green Tripe           → Beef green tripe (PRECOOKED)
+     Beef Lung (Precooked)      → Beef lungs (RAW)
+     Broccoli (gently cooked)   → Broccoli (RAW)
+     Carrots (gently cooked)    → Carrots (RAW)
+     Duck meat with bones       → Duck meat with bones (NO SKIN)
+     Mackerel (ground not deboned) → Mackerel (DEBONED)
+
+   Every one of those reads clean on the order and is a different ingredient in
+   the pan. An unmatched name is harmless by comparison — it is blank, somebody
+   fills it in. So the fuzzy hits are now returned SEPARATELY, as proposals: the
+   grams and the guess are carried, and the import refuses to be quiet about
+   them until a person has said yes. Confirming one teaches the alias, so the
+   whole question is asked once per name, for ever.
+
+   Returns {recipe, unmatched, fuzzy:[{name,sku,erp}], exact:n}. */
+async function _ffMapItems(items, opt){
+  opt=opt||{};
   let ings=[]; try{ ings=await listIngredients(); }catch(e){}
   await loadFFAliases(); const valid=new Set(ings.map(i=>i.sku));
   const norm=s=>String(s||'').trim().toLowerCase();
-  const idx={}; ings.forEach(it=>{ [it.name,it.raw_input,it.approved_alt].forEach(nm=>{ const k=norm(nm); if(k&&!idx[k]) idx[k]=it.sku; }); });
-  const recipe=[], unmatched=[];
+  const nameOf={}; ings.forEach(it=>{ nameOf[it.sku]=it.name||it.sku; });
+  /* ---- THE SAME NAME BELONGS TO SEVERAL SKUs ------------------------------
+     This index used to be "first row wins": `if(!idx[k]) idx[k]=it.sku`. That is
+     not a rule, it is whatever order the database happened to return — and 49
+     names in the master are ambiguous, because nearly every ingredient exists
+     twice by design, once as RAW-x (what you buy) and once as OUT-x (what the
+     kitchen weighs), under one name.
+
+     So "Beef green tripe" had three claimants — RAW-BEEF-GREEN-TRIPE,
+     OUT-BEEF-GREEN-TRIPE and OUT-BEEF-GREEN-TRIPE-PRECOOKED — and the row that
+     came back first was the PRECOOKED one. Every imported recipe asking for
+     green tripe got precooked tripe, silently, on an exact name match. The live
+     orders say what it should have been: OUT-BEEF-GREEN-TRIPE, 14 lines against
+     precooked's 1.
+
+     A recipe wants the PROCESSED form, because that is what production draws.
+     Between two processed forms, the one whose own NAME is what was asked for
+     beats one that answers to it as an alias — "Beef green tripe" is the tripe,
+     "Beef green tripe (precooked)" is a different thing that shares a raw
+     input. Ties are broken by SKU only so the answer is at least stable.
+
+     And where that still leaves two equal claimants — "Broccoli" is honestly
+     both the raw and the precooked one — it is AMBIGUOUS, and ambiguous is a
+     question, not a coin toss. It comes back like a fuzzy guess: offered, with
+     the name spelled out, never applied. */
+  const _rawish=it=>(/^RAW-/i.test(it.sku||'') || /raw\s*material/i.test(it.category||''))?1:0;
+  const cand={};
+  ings.forEach(it=>{ [['name',it.name],['alias',it.raw_input],['alias',it.approved_alt]].forEach(pair=>{
+    const k=norm(pair[1]); if(!k) return;
+    (cand[k]=cand[k]||[]).push({sku:it.sku, name:it.name||it.sku,
+      r:[_rawish(it), pair[0]==='name'?0:1, /\(/.test(String(it.name||''))?1:0]});
+  }); });
+  const _cmp=(a,b)=>{ for(let i=0;i<3;i++){ if(a.r[i]!==b.r[i]) return a.r[i]-b.r[i]; }
+    return String(a.sku).localeCompare(String(b.sku)); };
+  const idx={}, idxAmb={};
+  Object.keys(cand).forEach(k=>{
+    const seen={}, list=[];
+    cand[k].forEach(c=>{ if(!seen[c.sku]){ seen[c.sku]=1; list.push(c); } });
+    list.sort(_cmp);
+    idx[k]=list[0].sku;
+    /* a real tie: two different SKUs with nothing to choose between them */
+    if(list.length>1 && list[0].r.join()===list[1].r.join()) idxAmb[k]=list.slice(0,4);
+  });
+  const recipe=[], unmatched=[], fuzzy=[]; let exact=0;
   (items||[]).forEach(x=>{
-    const q=norm(x.name); let sku='';
-    if(FFCALC_ALIASES[q] && valid.has(FFCALC_ALIASES[q])) sku=FFCALC_ALIASES[q];
-    if(!sku) sku=idx[q]||'';
-    if(!sku){ const bare=q.replace(/\([^)]*\)/g,' ').replace(/\s+/g,' ').trim();   // "Broccoli (Precooked)" → "broccoli"
+    const q=norm(x.name); let sku='', guess='';
+    if(FFCALC_ALIASES[q] && valid.has(FFCALC_ALIASES[q])) sku=FFCALC_ALIASES[q];   // a decision beats every rule
+    if(!sku && idx[q] && !idxAmb[q]) sku=idx[q];
+    if(sku) exact++;
+    /* an exact name that two different ingredients both answer to */
+    if(!sku && idxAmb[q]) guess=idx[q];
+    if(!sku && !guess){ const bare=q.replace(/\([^)]*\)/g,' ').replace(/\s+/g,' ').trim();   // "Broccoli (Precooked)" → "broccoli"
       // Fold plurals so the calculator's "Strawberry" finds the master's "Strawberries".
       const sing=w=>String(w||'').replace(/ies\b/g,'y').replace(/([^s])s\b/g,'$1');
       const bs=sing(bare);
@@ -13190,13 +13277,17 @@ async function _ffMapItems(items){
         return (a&&(a===bare||a.includes(bare)||bare.includes(a))) || (b&&(b===bare||b.includes(bare))); })
         || ings.find(it=>{ const a=sing(norm(it.name)), b=sing(norm(it.raw_input));
         return (a&&(a===bs||a.includes(bs)||bs.includes(a))) || (b&&(b===bs||b.includes(bs))); });
-      if(hit) sku=hit.sku; }
-    if(!sku) unmatched.push(x.name);
-    recipe.push({ingredient_sku:sku, grams:+x.grams||0, src_name:x.name});
+      if(hit) guess=hit.sku; }
+    /* `loose` is for the screens that only want a best effort and say so.
+       The order import never passes it: an order becomes food. */
+    if(!sku && guess && opt.loose) sku=guess;
+    else if(!sku && guess) fuzzy.push({name:x.name, sku:guess, erp:nameOf[guess]||guess});
+    if(!sku && !guess) unmatched.push(x.name);
+    recipe.push({ingredient_sku:sku, grams:+x.grams||0, src_name:x.name,
+                 guess_sku:(sku?'':guess), guess_name:(sku?'':(nameOf[guess]||''))});
   });
-  return {recipe, unmatched};
+  return {recipe, unmatched, fuzzy, exact};
 }
-
 // Learned calculator-name → SKU aliases (so a mapping done once sticks forever).
 let FFCALC_ALIASES=null;
 async function loadFFAliases(){ if(FFCALC_ALIASES) return FFCALC_ALIASES; FFCALC_ALIASES={};
@@ -13216,15 +13307,203 @@ async function ffLearnAlias(name, sku){ if(!name||!sku) return; await loadFFAlia
    both callers use it. Second, a multi-dog batch has no single pack — it is
    several recipes at several pack sizes cooked together — so it arrives as
    payload.dogs and becomes one order with a line per dog. */
+/* ============ Bring a pack in from calc.wholesomerabbit.ph ==================
+   The calculator is not ours and never will be — it changes with what customers
+   ask for, and that is the right way round. So the ERP does not host it, mirror
+   it, or reach into it. It accepts ONE thing, on paper terms, and owns what it
+   is given from that moment on.
+
+   WHAT IS WORTH TAKING, and it is not the saved profile. A saved profile stores
+   the customer's INPUTS — the dog, the weight, which ingredients are ticked in
+   each category, the daily grams. Not one gram per ingredient: those come out
+   of the calculator's own ratio engine when the profile is loaded, and that
+   engine is exactly the part that keeps changing. Re-implementing it here would
+   be signing up to chase it for ever, and a recipe that drifted between the two
+   would be worse than no import at all.
+
+   What is worth taking is the COMPUTED PACK — the Kitchen Batch: this
+   ingredient, this many grams, this pack size, this many packs. It is already
+   final, the customer has been quoted from it, and it does not depend on how
+   the maths got there.
+
+   Three ways in, all landing in the same place:
+     · the computed-order JSON the in-app calculator posts (single or multi-dog)
+     · the Kitchen Batch table, copied off the screen and pasted
+     · any two-column "ingredient, grams" list
+   A saved profile is recognised too, and REFUSED with the reason — it is the
+   one shape that looks right and cannot work.
+
+   After this the ERP is the record. The next order for this customer is a
+   ⧉ Duplicate of the last one, not another trip to the calculator. */
+const _CI_CATS=/^(muscle\s*meat|muscle|organ\s*meat|organs?|raw\s*meaty\s*bones?|bones?|liver|secreting\s*organs?|secreting|vegetables?|veg|veggies|seeds?|fruits?|fruit|oily\s*fish|fish|supplements?|supplement)\b/i;
+const _CI_SKIP=/^(category|ingredient|per\s*pack|total|kitchen\s*batch|grand\s*total|meat:|bone:|batch|summary|packs?$|total\s*batch)/i;
+/* "275.0g" · "2,750 g" · "0.28kg" — the calculator writes all three. */
+function _ciGrams(tok){
+  const t=String(tok||'').replace(/,/g,'').trim();
+  let m=/^([0-9]*\.?[0-9]+)\s*kg$/i.exec(t); if(m) return Math.round(parseFloat(m[1])*1000*10)/10;
+  m=/^([0-9]*\.?[0-9]+)\s*g?$/i.exec(t);     if(m) return Math.round(parseFloat(m[1])*10)/10;
+  return null;
+}
+function _ciParseText(text){
+  const out={items:[], packSize:0, packs:0, customer:'', dog:'', feedingType:'', warn:[]};
+  const lines=String(text||'').replace(/\r\n?/g,'\n').split('\n');
+  let cat='';
+  lines.forEach(raw=>{
+    const line=raw.replace(/ /g,' ').trim();
+    if(!line) return;
+    /* the summary tiles the Kitchen Batch prints above its table */
+    let m=/per\s*pack[^0-9]*([0-9.,]+)\s*g/i.exec(line);  if(m && !out.packSize) out.packSize=_ciGrams(m[1])||0;
+    m=/^(customer|client)\s*[:\-]\s*(.+)$/i.exec(line);   if(m){ out.customer=m[2].trim(); return; }
+    m=/^(dog|pet)\s*[:\-]\s*(.+)$/i.exec(line);           if(m){ out.dog=m[2].trim(); return; }
+    /* "10 packs · 5.00kg · Total batch weight" is the summary tile above the
+       table, and it carries a weight — so it read as an ingredient called
+       "10 packs" weighing five kilos, which then blew the pack total apart.
+       A summary line answers a question and is done with. */
+    m=/^\s*([0-9]+)\s*packs?\b/i.exec(line);
+    if(m){ if(!out.packs) out.packs=+m[1]||0; return; }
+    if(/barf\s*raw/i.test(line)) out.feedingType=out.feedingType||'raw';
+    else if(/gently\s*cooked/i.test(line)) out.feedingType=out.feedingType||'sousVide';
+    else if(/cookable/i.test(line)) out.feedingType=out.feedingType||'cookable';
+    /* a category band carries no numbers — it names the rows under it */
+    const cells=line.split(/\t+|\s{2,}|\s*\|\s*/).map(c=>c.trim()).filter(x=>x!=='');
+    const nums=cells.map(_ciGrams).filter(v=>v!=null);
+    if(!nums.length){
+      if(_CI_CATS.test(line)) cat=line.replace(/[•·]/g,'').trim();
+      return;
+    }
+    if(_CI_SKIP.test(cells[0]||'')) return;
+    /* the name is the first cell that is not a number */
+    /* KEEP THE BRACKET. This used to strip a trailing "(...)" as noise, which
+       turned "Broccoli (Precooked)" into "Broccoli" — and the master holds a
+       raw AND a precooked broccoli under that one word, so a name that said
+       exactly which became one that could not. The resolver already looks past
+       a bracket when it has to; throwing it away here only loses information. */
+    const name=(cells.find(c=>_ciGrams(c)==null)||'').trim();
+    /* a "name" that is only a count or a unit is a summary cell, not an item */
+    if(!name || _CI_SKIP.test(name) || /^[0-9.,]+\s*(g|kg|pcs?|packs?)?$/i.test(name)
+       || /^[0-9.,]+\s*packs?\b/i.test(name)) return;
+    /* PER PACK, not the batch total. The table reads
+       Ingredient · Per pack · Total (g) · Total (kg), so the SMALLEST gram
+       figure on the row is the per-pack one — and taking the total instead
+       would multiply every recipe by the number of packs, silently. */
+    const g=Math.min.apply(null,nums);
+    if(!(g>0)) return;
+    out.items.push({name, grams:g, cat:cat||''});
+  });
+  if(!out.items.length) out.warn.push('no "ingredient + grams" rows found');
+  return out;
+}
+/* A saved profile is the one shape that looks importable and is not. */
+function _ciIsProfile(j){
+  if(!j || typeof j!=='object') return false;
+  if(Array.isArray(j.items) && j.items.length) return false;
+  return ('dailyGrams' in j) || ('feedPct' in j) || ('breedSize' in j)
+      || (('muscle' in j || 'veggies' in j) && !('items' in j));
+}
+function _ciNormalise(text){
+  const t=String(text||'').trim();
+  if(!t) return {err:'Nothing pasted yet.'};
+  if(t.charAt(0)==='{' || t.charAt(0)==='['){
+    let j=null; try{ j=JSON.parse(t); }catch(e){ return {err:'That looks like JSON but it will not parse: '+(e.message||e)}; }
+    if(Array.isArray(j)) j={items:j};
+    if(_ciIsProfile(j)) return {err:'That is a SAVED PROFILE, not a pack. It carries the dog and which ingredients are ticked, but no grams — the calculator works those out when the profile is loaded. Load the profile in the calculator, compute the pack, then copy the Kitchen Batch table.'};
+    if(j.multi && Array.isArray(j.dogs) && j.dogs.length) return {order:j};
+    if(Array.isArray(j.items) && j.items.length){
+      return {order:{customer:j.customer||j.custName||'', dog:j.dog||j.dogName||'',
+        packSize:+j.packSize||+j.customPackGrams||0, packs:+j.packs||+j.numPacks||+j.customNumPacks||0,
+        price:+j.price||0, feedingType:j.feedingType||'',
+        items:j.items.map(x=>({name:x.name||x.item||'', grams:+x.grams||0, cat:x.cat||''}))
+          .filter(x=>x.name && x.grams>0)}};
+    }
+    return {err:'JSON with no ingredient rows in it.'};
+  }
+  const t2=_ciParseText(t);
+  if(!t2.items.length) return {err:'Could not find any "ingredient + grams" rows. Copy the Kitchen Batch TABLE (the one with Per pack and Total columns), or paste two columns: name and grams per pack.'};
+  return {order:{customer:t2.customer, dog:t2.dog, packSize:t2.packSize, packs:t2.packs,
+                 price:0, feedingType:t2.feedingType, items:t2.items}};
+}
+function coCalcImportOpen(){
+  $('modal').innerHTML=`<div><h3>📥 Bring in a pack from the calculator</h3>
+    <p class="mini">The calculator is its own tool and keeps changing — so this takes the one thing that is finished and does not move: the <b>computed pack</b>.
+      In <a href="https://calc.wholesomerabbit.ph" target="_blank" rel="noopener noreferrer">calc.wholesomerabbit.ph</a>, load the customer, work out the pack, then select the <b>Kitchen Batch table</b> and copy it. Paste it here.</p>
+    <p class="mini" style="color:var(--muted)">A saved profile on its own will not do — it holds the dog and the ticked ingredients, not the grams. Compute the pack first.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0;align-items:center">
+      <input type="file" id="ciFile" accept=".json,.csv,.txt,.tsv" style="display:none" onchange="coCalcImportFile(event)">
+      <button class="btn sec" onclick="document.getElementById('ciFile').click()">📄 Choose a file</button>
+      <label class="mini">Customer <input id="ciCust" style="width:150px;padding:5px 7px;border:1px solid var(--line);border-radius:5px"></label>
+      <label class="mini">Pet <input id="ciDog" style="width:110px;padding:5px 7px;border:1px solid var(--line);border-radius:5px"></label>
+      <label class="mini">Pack (g) <input id="ciPack" type="number" step="any" style="width:80px;padding:5px 7px;border:1px solid var(--line);border-radius:5px"></label>
+      <label class="mini">Packs <input id="ciPacks" type="number" step="1" style="width:70px;padding:5px 7px;border:1px solid var(--line);border-radius:5px"></label>
+    </div>
+    <textarea id="ciText" placeholder="Paste the Kitchen Batch table here — or an ingredient/grams list, or the calculator's JSON" style="width:100%;height:150px;padding:8px;border:1px solid var(--line);border-radius:6px;font:12px ui-monospace,Menlo,monospace" oninput="coCalcImportPreview()"></textarea>
+    <div id="ciOut" class="hint" style="margin-top:8px">Nothing pasted yet.</div>
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" onclick="coCalcImportRun()">▶ Build the order</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
+  setTimeout(()=>{ const t=$('ciText'); if(t) t.focus(); },50);
+}
+function coCalcImportFile(ev){ const f=ev.target.files&&ev.target.files[0]; if(!f) return;
+  const r=new FileReader(); r.onload=()=>{ const t=$('ciText'); if(t){ t.value=String(r.result||''); coCalcImportPreview(); } }; r.readAsText(f); }
+function _ciRead(){
+  const res=_ciNormalise((($('ciText')||{}).value)||'');
+  if(res.order){
+    const o=res.order;
+    const cu=(($('ciCust')||{}).value||'').trim(); if(cu) o.customer=cu;
+    const dg=(($('ciDog')||{}).value||'').trim();  if(dg) o.dog=dg;
+    const pk=+(($('ciPack')||{}).value||0);  if(pk>0) o.packSize=pk;
+    const np=+(($('ciPacks')||{}).value||0); if(np>0) o.packs=np;
+  }
+  return res;
+}
+function coCalcImportPreview(){
+  const box=$('ciOut'); if(!box) return;
+  const res=_ciRead();
+  if(res.err){ box.innerHTML=`<span style="color:var(--danger)">${esc(res.err)}</span>`; return; }
+  const o=res.order;
+  if(o.multi){ box.innerHTML=`<b>${o.dogs.length} dog(s)</b> — `+o.dogs.map(d=>esc(d.dog||'?')+' · '+(d.items||[]).length+' ingredient(s)').join(', '); return; }
+  /* fill the boxes the paste already answered, so nobody types them twice */
+  const set=(id,v)=>{ const el=$(id); if(el && !el.value && v) el.value=v; };
+  set('ciCust',o.customer); set('ciDog',o.dog);
+  set('ciPack',o.packSize||''); set('ciPacks',o.packs||'');
+  const g=o.items.reduce((a,x)=>a+(+x.grams||0),0);
+  const miss=[]; if(!(o.packSize>0)) miss.push('pack size'); if(!(o.packs>0)) miss.push('number of packs');
+  box.innerHTML=`<b>${o.items.length} ingredient(s)</b> · ${Math.round(g)} g per pack`
+    +(o.packSize>0?` · pack ${Math.round(o.packSize)} g`:'')+(o.packs>0?` × ${o.packs}`:'')
+    +(o.packSize>0 && Math.abs(g-o.packSize)>Math.max(5,o.packSize*0.02)
+      ? `<div style="color:var(--earth,#b5762a)">the rows add up to ${Math.round(g)} g but the pack says ${Math.round(o.packSize)} g — check you copied the <b>Per pack</b> column and not the batch total</div>`:'')
+    +(miss.length?`<div style="color:var(--danger)">fill in the ${miss.join(' and ')} above</div>`:'')
+    +`<div class="mini" style="color:var(--muted);margin-top:4px">${o.items.slice(0,6).map(x=>esc(x.name)+' '+x.grams+'g').join(' · ')}${o.items.length>6?' …':''}</div>`;
+}
+async function coCalcImportRun(){
+  const res=_ciRead();
+  if(res.err){ toast(res.err,true); coCalcImportPreview(); return; }
+  const o=res.order;
+  if(!o.multi){
+    if(!(o.packSize>0)){ toast('Set the pack size — the recipe is grams per pack, so without it the order means nothing',true); return; }
+    if(!(o.packs>0)){ toast('Set how many packs',true); return; }
+  }
+  closeModal();
+  try{ await ffCreateOrderFromCalc(o); }
+  catch(e){ toast('Could not build the order: '+((e&&e.message)||e),true); return; }
+  /* Say where the recipe came from, on the order, because in a month nobody
+     will remember and the calculator will have moved on. */
+  coRec.notes=(coRec.notes?coRec.notes+' · ':'')+'Pack copied from calc.wholesomerabbit.ph on '+todayISO()
+    +' — the ERP owns it from here; the next order is a ⧉ Duplicate of this one.';
+  drawCOForm();
+}
 async function ffCreateOrderFromCalc(o){
   const multi = !!(o && o.multi && Array.isArray(o.dogs) && o.dogs.length);
   if(!o || (!multi && (!o.items || !o.items.length))){ toast('The calculator sent no ingredients',true); return; }
 
   const groups = multi ? o.dogs : [{dog:o.dog, packSize:o.packSize, packs:o.packs, price:o.price, items:o.items}];
-  const lines=[]; const unmatched=[]; let nIng=0;
+  const lines=[]; const unmatched=[]; let nIng=0, nGuess=0;
   for(const g of groups){
     const m=await _ffMapItems(g.items||[]);
+    /* A NEAR MATCH IS NOT A MATCH — it is a question. Both go into the same
+       list, because both mean the same thing to the person doing this: a row
+       nobody has confirmed yet. */
     m.unmatched.forEach(u=>{ if(unmatched.indexOf(u)<0) unmatched.push(u); });
+    (m.fuzzy||[]).forEach(f=>{ nGuess++; if(unmatched.indexOf(f.name)<0) unmatched.push(f.name); });
     nIng+=m.recipe.length;
     const desc=[o.customer||'Custom', g.dog, o.feedingType].filter(Boolean).join(' · ');
     lines.push({line_type:'custom', product_sku:'', description:desc||'Custom meal',
@@ -13239,7 +13518,8 @@ async function ffCreateOrderFromCalc(o){
                :'From Fresh Food Calculator'};
   coLines=lines;
   _coView='form'; state.model='custom_orders'; state.view='special'; renderSide(); drawCOForm();
-  if(unmatched.length){ toast(unmatched.length+' ingredient(s) need mapping: '+unmatched.slice(0,6).join(', '),true); coEditRecipe(0); }
+  if(unmatched.length){ toast(unmatched.length+' ingredient(s) need a match'
+      +(nGuess?(' — '+nGuess+' have a near match to confirm'):'')+': '+unmatched.slice(0,6).join(', '),true); coEditRecipe(0); }
   else toast((multi?('Multi-pet batch imported — '+lines.length+' dog(s), '):'Calculator order imported (')
     +nIng+' ingredient line(s)'+(multi?'':')')+' — review & Lock');
 }
@@ -19937,14 +20217,19 @@ function stkParFor(p, loc){
   const stored=Math.max(0, +p['sticker_'+loc+'_par']||0);
   if(stkParMode(p)==='static') return {par:stored, src:'static', mode:'static'};
   const pic=stockPicFor(p.sku);
+  /* TWO DIFFERENT SILENCES, and calling them both "no sales yet" is how a real
+     seller was mistaken for a dead one for months. No PICTURE means the sales
+     figures have not been read — nothing is known either way. No SALES means
+     they were read and there were none. */
+  if(!pic) return {par:stored, src:'noread', mode:'follow'};
   const cov=stkCoverDays();
   /* cover 0 = follow the product's own New Par, case rounding and all.
      cover N = N days of sales instead, which is the label's own decision. */
-  const t=pic && (cov>0 ? (+pic.perDay||0)*cov : +pic.newPar);
+  const t=(cov>0 ? (+pic.perDay||0)*cov : +pic.newPar);
   /* No sales history means there is no computed par to follow. The typed figure
      stands for now — it is not a decision, so the mode is left alone and the
      label starts following the moment it has sold something. */
-  if(!(t>0)) return {par:stored, src:'nosales', mode:'follow'};
+  if(!(t>0)) return {par:stored, src:'nosales', mode:'follow', sold:+pic.sold||0};
   const raw=Math.ceil(t);
   const div=Math.max(0, +p.sticker_per_sheet||0);
   return {par:(div>0?Math.ceil(raw/div)*div:raw), src:'derived', mode:'follow', raw, div,
@@ -20014,6 +20299,19 @@ async function renderStickerReorder(){
     <button class="wfbtn" onclick="generateStickerPO()">🧾 Generate Sticker PO</button>
     <div class="sp"></div><span style="color:var(--muted)">demand + custom orders + PAR → labels to order → PO</span>`;
 
+  /* THE MOVING PAR HAD NOTHING TO MOVE ON.
+     A label's par follows its product's New Par, which lives in the shared
+     stock picture — and this screen never built it. `stockPicFor` reads a cache
+     with a 60-second life; on this screen it was almost always empty, so every
+     product looked as though it had never sold, every label quietly fell back
+     to the figure typed against it years ago, and the row said "typed · no
+     sales yet" about a product that had sold a hundred packs in sixty days.
+
+     Crocodile Meat: 104 sold in the window, 1.73 a day, New Par 48, label par
+     60 at twenty to a sheet — against 44 on hand, that is one sheet. The screen
+     read a typed par of 100 and asked for three. The same slip set the urgency
+     flag's sales-per-day to zero, so no label was ever marked urgent either. */
+  try{ await stockPicture(); }catch(e){}
   const _allProdsStk=(await db.list('products',{})).filter(p=>p.active!==false);
   window._stkRoProds=_allProdsStk;      // stkParSetMode needs the row it is changing
   const _nArch=_allProdsStk.filter(isArchivedSticker).length;
@@ -20409,8 +20707,10 @@ function drawStickerReorder(){
             r.parSrc==='derived'
               ? `<div class="mini" style="color:var(--muted)" title="Moving. ${r.parCover>0?`${r.parCover} days of labels at ${Math.round((r.perDay||0)*100)/100}/day is ${r.parRaw}`:`The product's New Par is ${r.parRaw}`}${r.parDiv>0?`, rounded up to the printer's pack of ${r.parDiv}`:''}. It follows sales — there is no stored figure to keep up to date.${r.parStored&&r.parStored!==r.par?` The number typed against the label is ${r.parStored}; it is not being used.`:''}">↻ ${r.parCover>0?r.parCover+'-day cover':'follows the product'}${r.parDiv>0?' · ×'+r.parDiv:''}</div>
                  <div class="mini"><span class="btn link" style="color:var(--muted)" onclick="stkParSetMode('${esc(r.sku)}','static')" title="Keep ${r.par} and stop it moving with sales">📌 pin at ${r.par}</span></div>`
-              : (r.parSrc==='nosales'
-                 ? `<div class="mini" style="color:var(--earth,#b5762a)" title="No sales history yet, so there is no New Par to follow. The number typed against the label is used until it has sold something, then it follows on its own.">typed · no sales yet</div>`
+              : (r.parSrc==='noread'
+                 ? `<div class="mini" style="color:var(--danger)" title="The sales figures could not be read, so there is no New Par to follow and the typed number is standing in. This is not a statement about the product — reload the screen, and check Sales Momentum has been imported.">typed · sales not read</div>`
+              : r.parSrc==='nosales'
+                 ? `<div class="mini" style="color:var(--earth,#b5762a)" title="Read the sales and there were none in the window, so there is no New Par to follow. The number typed against the label is used until it has sold something, then it follows on its own.">typed · no sales in the window</div>`
                  : `<div class="mini" style="color:#6b3f7a" title="Pinned. This figure was decided by a person and does not move with sales.">📌 pinned</div>
                     <div class="mini"><span class="btn link" style="color:var(--muted)" onclick="stkParSetMode('${esc(r.sku)}','follow')" title="Go back to following the product's New Par">↻ follow the product</span></div>`)}</td>
           <td class="num mini" style="color:var(--muted)">${r.oh||'—'}</td>
