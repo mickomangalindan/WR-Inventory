@@ -5026,7 +5026,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-08 15:05Z';
+const WR_BUILD='2026-09-09 15:30Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -10987,6 +10987,49 @@ function coStatBadge(s){ const f=coStatDef(s); return `<span class="badge b-${f.
 // Locked = past Draft and not cancelled. These are the orders that owe production.
 const CO_OPEN=['for_production','in_demand','in_production','partial'];
 function coIsOpen(s){ return CO_OPEN.includes(coStat(s)); }
+/* ---- WHO GETS TO CLAIM A PACK THAT WAS MADE --------------------------------
+   Produced packs are attributed to orders out of a pool: every confirmed
+   product batch for a SKU, drawn down soonest-needed-first so two orders on one
+   recipe cannot both claim the same packs. That pool used to be drained by the
+   OPEN orders only — and a completed order is not open, so it never took its
+   own production out of it.
+
+   The packs therefore stayed in the pool for ever, as credit against a SKU that
+   had already been made, delivered and sold. Duplicate a finished order (which
+   is the whole point of ⧉ Duplicate order — it keeps the SKU) and the copy
+   claimed those stale packs the instant it was locked: marked Completed on the
+   spot, with nothing on the shelf and nothing owed to the kitchen. Because
+   completed is terminal, it never recovered; because completed owes nothing,
+   the order left the Weekly Demand Target, left the production picker, and its
+   demand rows were filed under "settled — nothing to plan". An order nobody
+   could see and nobody was making.
+
+   Homia & Tawke: 15 + 15 packs made on 3 Sep for CO-08282026 V01, transferred,
+   sold, ledger back to zero — then two duplicates on 9 Sep each took 5 + 5 out
+   of that dead pool and closed themselves. Five of each were still sitting
+   there for the next one.
+
+   A LOCKED ORDER OWNS ITS PRODUCTION whether or not it is still open. Draft and
+   cancelled do not — nothing was committed. So the claim runs over locked
+   orders, and only the status of the still-open ones can move. */
+const CO_LOCKED=CO_OPEN.concat(['completed']);
+function coIsLocked(s){ return CO_LOCKED.includes(coStat(s)); }
+/* Attribute produced packs to the orders entitled to them.
+   `orders` and `lines` as loaded; returns {ref:{ord,got}} for the locked ones. */
+function coClaimPacks(orders, lines, made){
+  const pool={...(made||{})}, out={};
+  const byOrder={}; (lines||[]).forEach(l=>{ if(l&&l.product_sku) (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
+  (orders||[]).filter(o=>coIsLocked(o.status))
+    .sort((a,b)=>String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))
+                 ||String(a.order_ref).localeCompare(String(b.order_ref)))
+    .forEach(o=>{ let ord=0, got=0;
+      (byOrder[o.order_ref]||[]).forEach(l=>{ const q=+l.packs||0; if(!(q>0)) return;
+        ord+=q; const take=Math.min(q, pool[l.product_sku]||0);
+        pool[l.product_sku]=(pool[l.product_sku]||0)-take; got+=take; });
+      out[o.order_ref]={ord,got};
+    });
+  return out;
+}
 /* ---- DELIVERY IS NOT THE SAME DAY AS PRODUCTION -----------------------
    custom_orders had one date, needed_date, doing two jobs: what the customer
    was promised, and the week production has to make it. A gently cooked mix
@@ -11167,13 +11210,21 @@ async function coOpenDemand(){
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
     (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
+  /* THE POOL IS DRAINED BY EVERY LOCKED ORDER, NOT ONLY THE OPEN ONES.
+     A completed order's packs were made for that order. Leaving them in the
+     pool made them credit against the SKU for ever, so the next order on the
+     same recipe — a duplicate, which is exactly what ⧉ Duplicate order makes —
+     opened already paid for. The claim therefore runs over locked orders in the
+     same soonest-needed-first order coSyncStatuses uses, and only the OPEN ones
+     are asked what they still owe. */
   const pool={...made}, owed={};
-  const byNeed=Object.values(keep).sort((a,b)=>
+  const byNeed=(orders||[]).filter(o=>coIsLocked(o.status)).sort((a,b)=>
     String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))||String(a.order_ref).localeCompare(b.order_ref));
   byNeed.forEach(o=>{ (lines||[]).forEach(l=>{ if(l.order_ref!==o.order_ref||!l.product_sku) return;
     const q=+l.packs||0; if(!(q>0)) return;
     const take=Math.min(q, pool[l.product_sku]||0);
     pool[l.product_sku]=(pool[l.product_sku]||0)-take;
+    if(!keep[o.order_ref]) return;                       // settled: it drained, it does not owe
     owed[o.order_ref+'|'+l.product_sku]=(owed[o.order_ref+'|'+l.product_sku]||0)+(q-take);
   }); });
   /* ONE ENTRY PER ORDER+SKU, NOT PER LINE.
@@ -11348,16 +11399,10 @@ async function coSyncStatuses(){
                  src:'row', from:'the demand screen, not saved yet'}; });
 
   const byOrder={}; (lines||[]).forEach(l=>{ if(l.product_sku) (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
-  // attribute produced packs soonest-needed-first so a shared SKU cannot complete two orders at once
-  const pool={...made};
-  const open=(orders||[]).filter(o=>coIsOpen(o.status))
-    .sort((a,b)=>String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))||String(a.order_ref).localeCompare(b.order_ref));
-  const fulfilled={};
-  open.forEach(o=>{ let ord=0, got=0;
-    (byOrder[o.order_ref]||[]).forEach(l=>{ const q=+l.packs||0; ord+=q;
-      const take=Math.min(q, pool[l.product_sku]||0); pool[l.product_sku]=(pool[l.product_sku]||0)-take; got+=take; });
-    fulfilled[o.order_ref]={ord,got};
-  });
+  /* Attribute produced packs soonest-needed-first across every LOCKED order, so
+     a finished order takes its own production out of the pool before an open one
+     can claim it — see coClaimPacks. */
+  const fulfilled=coClaimPacks(orders, lines, made);
 
   const moved={}; const why={};
   for(const o of (orders||[])){
