@@ -4257,6 +4257,14 @@ function pqDraw(){
   const calc={}; rows.forEach(r=>calc[r.sku]=pqCalc(r));
   let show=rows;
   if(PQ_ONLY) show=rows.filter(r=>calc[r.sku].produce>0 || calc[r.sku].toMove>0);
+  /* A NEW PRODUCT ASKS FOR NOTHING, and therefore disappears. With no sales
+     the average is zero, so the par is zero, so "to produce" is zero — and the
+     default filter is "only what needs producing". Four BARF Rabbit mixes added
+     on 9 September were on this screen the whole time and could not be seen.
+     That is the filter working, but a filter nobody can see working is
+     indistinguishable from a product that failed to save. */
+  const _pqHidden=rows.length-show.length;
+  const _pqHiddenNew=PQ_ONLY?rows.filter(r=>!(calc[r.sku].produce>0||calc[r.sku].toMove>0)&&!(r.sold>0)).length:0;
   const nAlert=rows.filter(r=>calc[r.sku].alert).length;
   const totProduce=rows.reduce((a,r)=>a+calc[r.sku].produce,0);
   const noSales=rows.filter(r=>!(r.sold>0)).length;
@@ -4350,6 +4358,14 @@ function pqDraw(){
       <th class="num" title="current stock as a share of New Par + safety stock — the same coverage % now shown on Weekly Demand Target, the Production Plan and Live Stock">Coverage<br>%</th>
       <th class="num" title="New Par + safety stock − current stock, rounded up to a case">To<br>produce</th>
       <th title="of the packs owed, how many are a transfer rather than a production run">Move or<br>make</th></tr></thead><tbody>`;
+  /* SAY WHAT IS NOT ON SCREEN. A product with no sales asks for nothing, so
+     the "only what needs producing" filter takes it away — which is right, and
+     invisible, and the two together are why a new product reads as missing. */
+  if(_pqHidden>0){
+    h+=`<div class="hint" style="margin:0 0 8px"><b>${_pqHidden}</b> product(s) are not shown — they are not asking for anything this week`
+      +(_pqHiddenNew?`, and <b>${_pqHiddenNew}</b> of those have <b>no sales in the ${PQ.win}-day window at all</b>, so their par works out at zero. A newly added product looks exactly like this until it sells something.`:'.')
+      +` <a onclick="PQ_ONLY=false;pqDraw()" style="cursor:pointer;color:#4e7a3e;font-weight:700">Show every product</a></div>`;
+  }
   const k0=v=>Math.round(v).toLocaleString('en-PH');
   const k1=v=>(Math.round(v*10)/10).toLocaleString('en-PH',{minimumFractionDigits:1,maximumFractionDigits:1});
   const groups={};
@@ -4812,6 +4828,37 @@ async function renderLiveStock(){
             sold:a.sold, back:a.back, adj:a.adj, end, value:a.val, par, below, neg, sort_order:it.sort_order};
   }).filter(r=> r.begin||r.recv||r.prod||r.cons||r.tf||r.sold||r.back||r.adj);
 
+  /* ---- A PRODUCT NOBODY HAS MOVED YET IS STILL A PRODUCT --------------------
+     Every row above comes out of the ledger, so a product that has never had a
+     movement — no opening, no production, no transfer, no sale — produced no
+     row at all and was simply absent from this screen. Four BARF Rabbit mixes
+     were added on 9 September, correctly, with their recipes, and did not
+     appear here; the master data was fine and the screen had nothing to say.
+
+     "We have none of it" is an ANSWER. Silence is not, and silence is what
+     sends somebody to check whether the product saved properly. So an active
+     sellable product with no history is listed at zero and SAYS it has no
+     history, which is a different statement from a zero arrived at by a week of
+     activity.
+
+     Only finished products, and only when the window is live: a back-dated view
+     is a statement about a period, and "this product did not exist then" is not
+     something a zero row can say honestly. Ingredients are left out — there are
+     169 of them, most are bought to order, and a wall of zeroes would bury the
+     ones that matter. */
+  if(!LS_TO){
+    const seen={}; rows.forEach(r=>{ seen[r.sku]=1; });
+    prods.filter(p=>p.active!==false && !isArchivedProd(p) && !isArchivedSticker(p)
+                 && !(p.is_custom||/^CUST-/i.test(String(p.sku||''))) && !seen[p.sku])
+      .forEach(p=>{
+        const G=prodGroup(p);
+        rows.push({sku:p.sku, name:prodLabel({...p, sku:p.sku},{noSku:true}), variant:(p.variant||''),
+          g1:G.g1, g2:G.g2, grank:G.rank, unit:'packs', div:1, kind:'product',
+          begin:0, recv:0, prod:0, cons:0, tf:0, sold:0, back:0, adj:0, end:0, value:0,
+          par:+p.par_packs||0, below:false, neg:false, sort_order:p.sort_order, virgin:true});
+      });
+  }
+
   /* ---- LABEL STOCK IS NOT IN THE LEDGER ------------------------------------
      This screen is built entirely from inventory_movements, and a product's
      label stock is not a movement — it is a column on the product, one per
@@ -4920,7 +4967,7 @@ function drawLiveStock(){
       const cl=r.below||r.neg?' style="cursor:pointer"':' style="cursor:pointer"';
       const model=pm[r.sku]?'products':'ingredients';
       h+=`<tr${cl} onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open item">
-        <td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${r.noLedger?' · counted, not moved — no ledger history':''}</div></td><td class="mini">${esc(r.unit)}</td>
+        <td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${r.noLedger?' · counted, not moved — no ledger history':''}${r.virgin?' · <span style="color:var(--earth,#b5762a)">nothing has moved yet — never received, made or counted</span>':''}</div></td><td class="mini">${esc(r.unit)}</td>
         <td class="num">${qf(r.begin,r.div)}</td><td class="num">${r.recv?qf(r.recv,r.div):'—'}</td><td class="num">${r.prod?qf(r.prod,r.div):'—'}</td>
         <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td>
         <td class="num"${(r.sold||r.back)?' title="sold '+qf(r.sold,r.div)+(r.back?' · back '+qf(r.back,r.div):'')+'"':''}>${(r.sold||r.back)?qf(r.sold+r.back,r.div):'—'}</td>
@@ -5026,7 +5073,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-10 00:20Z';
+const WR_BUILD='2026-09-10 02:00Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
