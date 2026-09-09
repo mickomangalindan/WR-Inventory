@@ -5026,7 +5026,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-09 17:10Z';
+const WR_BUILD='2026-09-09 18:40Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -11026,11 +11026,12 @@ function coClaimPacks(orders, lines, made){
   (orders||[]).filter(o=>coIsLocked(o.status))
     .sort((a,b)=>String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))
                  ||String(a.order_ref).localeCompare(String(b.order_ref)))
-    .forEach(o=>{ let ord=0, got=0;
+    .forEach(o=>{ let ord=0, got=0; const bySku={};
       (byOrder[o.order_ref]||[]).forEach(l=>{ const q=+l.packs||0; if(!(q>0)) return;
         ord+=q; const take=Math.min(q, pool[l.product_sku]||0);
-        pool[l.product_sku]=(pool[l.product_sku]||0)-take; got+=take; });
-      out[o.order_ref]={ord,got};
+        pool[l.product_sku]=(pool[l.product_sku]||0)-take; got+=take;
+        bySku[l.product_sku]=(bySku[l.product_sku]||0)+take; });
+      out[o.order_ref]={ord,got,bySku};
     });
   return out;
 }
@@ -11868,14 +11869,33 @@ async function coCancelCheck(){
      nobody can act on. */
   const _evAll=await coPlanEvidence().catch(()=>({plannedAll:{},demandAll:{}}));
   const ev=coEvAt(_evAll, (coRec&&coRec.order_date)||'', (coRec&&coRec.needed_date)||'');
-  /* Packs already made against these SKUs. A partly produced order is not a
-     mistake to be erased — it is stock that exists. */
+  /* PACKS ALREADY MADE **FOR THIS ORDER**. A partly produced order is not a
+     mistake to be erased — it is stock that exists, and the cancel is rightly
+     refused. But this counted every confirmed batch for the SKU, all time,
+     which is not the same question at all once two orders share one — and
+     ⧉ Duplicate order makes them share one on purpose.
+
+     So a fresh duplicate of a finished order could not be cancelled: "15
+     pack(s) already produced" — August's fifteen, made for August's order,
+     transferred, sold, and long gone from the ledger. Nothing had been produced
+     for the copy, there was nothing to take it off, and the refusal named no
+     action anybody could take. A dead end on a row that should never have
+     existed.
+
+     coClaimPacks answers the right question: it walks every LOCKED order
+     soonest-needed-first and hands each one the packs it is entitled to, so a
+     finished order keeps its own production and a copy inherits none of it. */
   const made={};
   try{ let rows;
     if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
     (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
+  let mine={};
+  try{
+    const _o=await db.list('custom_orders',{}), _l=await db.list('custom_order_lines',{});
+    mine=((coClaimPacks(_o,_l,made)[(coRec&&coRec.order_ref)||''])||{}).bySku||{};
+  }catch(e){ mine={}; }
   /* A CUST- code means nothing to a person. The order line already carries the
      recipe name that was quoted, and the catalogue carries the product name; a
      refusal that says "CUST-7F3A9C is on a production plan" is not a refusal
@@ -11889,7 +11909,7 @@ async function coCancelCheck(){
     const p=(ev.planned||{})[sku], d=(ev.inDemand||{})[sku];
     if(p) out.blocked.push(nameOf(l)+' — on production plan '+(p.ref||'(draft)')+(p.date?' for '+p.date:''));
     else if(d && d.ref) out.blocked.push(nameOf(l)+' — '+(d.locked?'in locked demand ':'on the demand plot ')+d.ref+(d.date?' for '+d.date:''));
-    else if((made[sku]||0)>0) out.blocked.push(nameOf(l)+' — '+made[sku]+' pack(s) already produced');
+    else if((mine[sku]||0)>0) out.blocked.push(nameOf(l)+' — '+mine[sku]+' pack(s) already produced for this order');
     /* A bare row in the `demand` table is OUR OWN cache, written by the lock.
        That is not somebody else's plan, so it is not a blocker — it is exactly
        what this has to clean up, or the packs stay in the run after the order
