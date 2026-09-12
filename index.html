@@ -3849,14 +3849,11 @@ async function pqToDemand(){
    somebody adjusted stock on one side and not the other, and it is worth more
    than either number on its own. */
 function _pqDrift(rows){
-  const d=(rows||[]).filter(r=>r.drift!=null && Math.abs(r.drift)>=1);
   const s=window._pqSnap||{};
   const age=s.at?Math.round((Date.now()-new Date(s.at).getTime())/36e5):null;
-  return `The count is the <b>water line</b>${(age!=null)?` — taken <b>${age<1?'under an hour':age+' hour(s)'}</b> ago`:''}.
-    Everything the ledger recorded at ${esc(planSellLoc())} <i>after</i> it — the transfers you posted, the packs the shop sold — is added on top,
-    so it does not matter whether the transfer was posted before or after the Shopify upload. Nothing here moves stock or posts anything.
-    ${d.length?`<b style="color:var(--earth,#b5762a)">${d.length} product(s) disagree with what our ledger held at that same moment</b> — shown per row. That is a real gap: an adjustment made on one side only.`
-              :`Compared against our ledger as it stood at that same moment, every product agrees.`}
+  return `<b>${esc(locName(planSellLoc()))} is Shopify. ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')} is the ERP.</b>
+    The shop's figure is Shopify's <b>available</b> as read${(age!=null)?` <b>${age<1?'under an hour':age+' hour(s)'}</b> ago`:''}, and nothing is added to it — warehouse uploads when the van arrives, so an arrival is already in the reading.
+    The commissary's figure is our own ledger. Nothing here moves stock or posts anything.
     ${(()=>{ const c=(rows||[]).reduce((a,r)=>a+(r.committed>0?+r.committed:0),0);
        if(!(c>0)) return '';
        return `<br><b>${num(Math.round(c))} pack(s) are committed to unfulfilled orders</b> and are in none of the figures above.
@@ -3904,7 +3901,7 @@ async function pqBuildRows(){
   try{ tls=await db.list('transfer_lines',{}); }catch(e){}
   const sellLoc=planSellLoc(), makeLoc=planProduceLoc()||'bulacan';
   const snap=await pqSnapLoad();
-  const shopBy={}; let shopSrc='the ledger at '+sellLoc; let waterLine=null;
+  const shopBy={}; let shopSrc='the ledger at '+sellLoc; let waterLine=null;   // waterLine stays only to split the ledger's own history, never to adjust the shelf
   const snapOn=(snap&&snap.onhand)||null;
   const snapCm=(snap&&snap.committed)||null;
   if(snap && snap.qty && Object.keys(snap.qty).length){
@@ -3993,7 +3990,20 @@ async function pqBuildRows(){
       /* Custom orders are never on the shop's shelf. Everything else takes its
          shelf figure from Shopify or reports that it has none — it never
          quietly substitutes our own ledger and lets it read like a shelf. */
-      const shop = (isCust || !hasSnap) ? 0 : Math.max(0, shopBy[p.sku]+oh.sellAfter);
+      /* PASIG IS SHOPIFY. BULACAN IS THE ERP. That is the whole rule.
+         ------------------------------------------------------------------
+         This used to read `Shopify + everything our ledger recorded at Pasig
+         since the snapshot` — the water line — on the reasoning that a transfer
+         posted after the upload would otherwise be missing. It is the wrong
+         reasoning: warehouse uploads to Shopify when the van ARRIVES, so the
+         arrival is already in the reading, and adding our own posting on top
+         counted the same packs twice. The correction it was protecting against
+         is a correction we do not need, because we do not keep a Pasig ledger
+         for sellable stock — and the "−20 vs ledger at the reading" note it
+         produced sent people looking for a discrepancy between a number we
+         trust and a number we have already decided not to.
+         One site, one source. */
+      const shop = (isCust || !hasSnap) ? 0 : Math.max(0, shopBy[p.sku]);
       const noRead = !isCust && !hasSnap;
       /* A custom pack is ours wherever it is standing, including at the shop,
          because nothing at the shop will ever sell it. It is owed to one named
@@ -4018,8 +4028,10 @@ async function pqBuildRows(){
       return {sku:p.sku, name:prodLabel({...p},{noSku:true}), group_1:prodG1(p),
         group_2:prodG2(p), sort_order:p.sort_order, box:(+p.box_size||0),
         shop, isCust, noRead, awaiting,
-        snapQ:(hasSnap&&!isCust)?shopBy[p.sku]:null, postG:(hasSnap&&!isCust)?oh.sellAfter:0,
-        ledSell, drift:(physAtCount!=null)?(physAtCount-ledAtCount):null, physAtCount,
+        snapQ:(hasSnap&&!isCust)?shopBy[p.sku]:null, postG:0,
+        /* drift compared Shopify against our own Pasig ledger. There is no
+           Pasig ledger to compare against any more — see the note above. */
+        ledSell, drift:null, physAtCount,
         committed, onHandAt,
         /* WHICH sites the off-shelf packs are at, not just how many.
            "Not yet sellable" is everywhere that is not the shop — which today
@@ -4213,9 +4225,8 @@ function spStockCell(s,opt){
 
   const sellTitle = 'Shopify\'s available at '+locName((_stockPic&&_stockPic.sellLoc)||'pasig')
        +' — what a customer can actually buy, with packs committed to unfulfilled orders already taken out.'
-       +(s.postG?(' The reading itself was '+_spN(s.shopQ)+'; '+_spN(Math.abs(s.postG))+' have '+(s.postG>0?'arrived':'left')+' since it was taken.'):'');
-  const sinceBit=(fromShop && s.postG)
-    ? `<div class="mini" style="color:var(--muted)" title="${esc(sellTitle)}">Shopify read ${_spN(s.shopQ)}, ${s.postG>0?'+':''}${_spN(s.postG)} since</div>` : '';
+       +' This site is Shopify; nothing from our own ledger is added to it.';
+  const sinceBit='';
   /* Shown, never added. A consignee's shelf and a breeder colony are stock that
      exists and is not ours to plan with. */
   const cons=(s.consSites||[]);
@@ -4378,8 +4389,9 @@ function pqDraw(){
       so counting it would under-produce by exactly the quantity we cannot have.
       <br><b>Sellable now is read from ${esc(window._pqSrc||'the ledger')}.</b>
       ${/^the ledger/.test(String(window._pqSrc||''))
-        ? `No Shopify count is loaded, so this is <b>our own ledger</b> at <b>${esc(planSellLoc())}</b>,
-           kept current by the sales the sync posts. To use the shop's own figure, either run
+        ? `<b style="color:var(--earth,#b5762a)">No Shopify reading is loaded, so ${esc(locName(planSellLoc()))} has no sellable figure at all</b> — the rows say
+           <i>no reading</i> rather than substituting our own ledger, because ${esc(locName(planSellLoc()))} is Shopify and nothing else.
+           To get the figure, either run
            <b>wr-shopify-inventory.gs</b> — a read-only hourly pull, it holds no write scope and cannot change anything
            in Shopify — or load a one-off count with <b>📥 Shopify count</b>.`
         : `${_pqDrift(rows)}`}
@@ -4463,9 +4475,7 @@ function pqDraw(){
       const c=calc[r.sku];
       h+=`<tr>
         <td><b>${esc(r.name)}</b><div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${c.alert?' · <b style="color:var(--danger)">reorder needed</b>':''}</div></td>
-        <td class="num">${k0(r.shop)}${(r.drift!=null&&Math.abs(r.drift)>=1)
-          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="At the moment the reading was taken, Shopify's AVAILABLE said ${k0(r.physAtCount)} and our ledger at ${esc(planSellLoc())} said ${k0(r.physAtCount-r.drift)}. Both drop when an order is placed, so this gap is a real adjustment somebody made on one side only — not the order book.${r.committed!=null?` Shopify also had ${k0(r.committed)} committed to unfulfilled orders${r.onHandAt!=null?` and ${k0(r.onHandAt)} physically on the shelf`:''}; committed packs are not in either figure above.`:''} Movements since then are already added.">${r.drift>0?'+':''}${k0(r.drift)} vs ledger at the reading</div>`:''}${(r.postG||0)!==0
-          ? `<div class="mini" style="color:var(--muted)" title="net movement at ${esc(planSellLoc())} since the count — transfers in, sales out">${r.postG>0?'+':''}${k0(r.postG)} since</div>`:''}</td>
+        <td class="num" title="Shopify's available at ${esc(locName(planSellLoc()))}${r.committed!=null?` — ${k0(r.committed)} pack(s) committed to unfulfilled orders are already out of it`:''}">${k0(r.shop)}</td>
         <td class="num${r.other?'':' mini'}" style="${r.other?'color:var(--earth,#b5762a)':'color:var(--muted)'}">${r.other?k0(r.other):'—'}</td>
         <td class="num"><b>${k0(c.cur)}</b></td>
         <td class="num">${c.cover==null?'<span class="mini" style="color:var(--muted)">—</span>'
@@ -5124,7 +5134,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-13 10:05Z';
+const WR_BUILD='2026-09-13 15:40Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -6757,7 +6767,7 @@ function _wdtSheetHtml(){
         <th class="num" title="What must be MADE, from the shelf as it stands now: New Par + safety − (what the shop can sell + what is made here and not yet shipped), plus any committed custom order. The line underneath says whether the newest demand plot bought ingredients for it — a target above the plot is a quantity nobody ordered raws for, and a supply-led line is never in a plot by design. For a CUSTOM order the target is the ORDER itself and the plot columns are history.">Target<div class="mini" style="font-weight:400;opacity:.75">· in the demand plot?</div></th>
         <th class="num" title="Everything produced inside the window. Shown for the record; it is not the figure subtracted from Target.">Made this period</th>
         <th class="num" title="Target minus what was made AFTER the newest plot.">Still to make</th>
-        <th class="num" title="Current stock = what the shop can sell now + what is made but still off-shelf. The same two numbers Regular Packs shows, read the same way. Sellable already IS the Shopify reading, water-line adjusted — it is printed underneath so you can see it, not added again.">Current<br>stock</th>
+        <th class="num" title="Current stock = what the shop can sell now + what is made but still off-shelf. The same two numbers Regular Packs shows, read the same way. Sellable IS the Shopify reading for ${esc(locName(planSellLoc()))}, unadjusted — nothing from our own ledger is added to it.">Current<br>stock</th>
         <th class="num" title="Days = how long the SELLABLE shelf lasts at the current rate; this sets the row order. % = everything we own against New Par + safety stock. A row can read 140% and still be empty at the shop — that gap is a transfer, not a production run.">Coverage<br>d · %</th>
         <th class="num" title="Stock at both sites the day the window opened.">Beg inventory</th>
         ${wk.map((w,i)=>`<th class="num" title="Confirmed batches ${esc(w.mon)} to ${esc(w.end)}">Produced ${lbl(i)}</th>`).join('')}
@@ -8493,9 +8503,9 @@ function wdtPickPlot(ref){
 }
 async function renderWDT(){
   $('cp').innerHTML=`<div class="title">Weekly Demand Target <span onclick="openKB('wdt')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
-    <button class="btn sec" onclick="wdtPrint('products')">🖨 Product target</button>
+    <button class="btn" onclick="wdtPrint('products')" title="One line per product, grouped and banded exactly like the weekly inventory count sheet — what to make, and whether it can be made.">🖨 Product target</button>
     <button class="btn sec" onclick="wdtPrint('custom')">🖨 Custom orders</button>
-    <button class="btn sec" onclick="wdtPrint('raw')">🖨 Raw ingredients</button>
+    <span class="btn link" style="color:var(--muted);font-size:12px" onclick="wdtPrint('raw')" title="The buying sheet — what the demand plot ordered, with the requirement beside it. Printed when purchasing asks for it, not as part of the production round.">🖨 Raw ingredients…</span>
     <div class="sp"></div><span style="color:var(--muted)">what is owed, what moved, and whether the demand is repeating</span>`;
   $('content').innerHTML='<div class="empty">Loading…</div>';
   await wdtLoad();
@@ -8646,57 +8656,73 @@ function wdtPrint(which){
   let sections=[], landscape=false;
 
   if(which==='products'){
-    landscape=true;
-    const wk=S.weeks||[];
+    /* ---- THE SHEET SOMEBODY CARRIES TO THE FLOOR ---------------------------
+       This printed as a fifteen-column landscape matrix: target, made, still,
+       on hand, cover, beginning, produced per week, sold, ending, and one
+       column per demand plot. Every figure on it is true and the sheet was
+       useless, because a person standing in a kitchen has one question — what
+       do I make, and can I — and had to find it among fourteen answers to
+       questions nobody asked at that moment.
+
+       So it prints like the weekly inventory count sheet, which is the sheet
+       these same people already carry: Group › Subgroup in the same green
+       bands, numbered rows, one line per product, six columns. The movement
+       history has not been deleted — it is on the screen, which is where you
+       read history. Paper is for the run.
+
+       No money on it. It is a production sheet. */
     const all=(S.rows||[]).filter(r=>_wdtOnlyOwed?r.still>0:true);
     const owed=all.reduce((a,r)=>a+r.still,0);
-    const sub=`Production target for ${esc(periodLabel)} · as of <b>${esc(S.asOf||todayISO())}</b> · window ${esc(S.start||'')} → ${esc(S.asOf||'')}`
-      +`<br>${all.length} product(s) · <b>${owed}</b> pack(s) still to make · ordered by days of cover — the top of the list is what runs out first`
-      +`<br><i>Target is what must be made, from the shelf as it stands now: New Par + safety − (sellable + made here, not yet shipped). The plot columns say whether the ingredients were bought — a target above the newest plot is a quantity nobody ordered for. Struck-through figures are older plots restating the same demand; shown, never added.</i>`;
-    /* The shortage detail does NOT go in the cell. Widening the column to fit
-       "Rabbit deboned meat (ground meat, with organs) · need 60.8kg, have 0kg"
-       wrapped it nine lines deep and dropped the page from 22 rows to six —
-       the very problem that was just fixed on screen. The column carries the
-       verdict only; the detail goes to a blockers page at the end, grouped by
-       ingredient, which is the form purchasing can actually act on. */
-    const nCols=13+wk.length*2;
-    /* SKU, product, the coverage tag and the verdict get fixed widths; the
-       numeric columns share what is left. The tag is a phrase, not a figure —
-       given a numeric share it wrapped to three lines and stretched every row. */
-    const numW=Math.max(3.4,(100-5-15-11-7)/(nCols-4));
-    const head=`<colgroup><col style="width:5%"><col style="width:15%"><col style="width:11%">`
-      +Array.from({length:nCols-4},()=>`<col style="width:${numW.toFixed(2)}%">`).join('')
-      +`<col style="width:7%"></colgroup><thead>
-      <tr><th class="gh" colspan="3"></th><th class="gh" colspan="5">Running total</th>
-          <th class="gh" colspan="${3+wk.length}">Movement</th><th class="gh" colspan="${wk.length}">Demand plot</th><th class="gh"></th></tr>
-      <tr><th>SKU</th><th>Product</th><th>In plot?</th>
-        <th class="n">Target</th><th class="n">Made</th><th class="n">Still</th><th class="n">On hand</th><th class="n">Cover</th>
-        <th class="n">Beg</th>${wk.map((x,i)=>`<th class="n">Made Wk-${wk.length-i}</th>`).join('')}
-        <th class="n">Sold</th><th class="n">Ending</th>
-        ${wk.map((x,i)=>`<th class="n">Plot Wk-${wk.length-i}</th>`).join('')}
-        <th>Can make?</th></tr></thead>`;
+    const sub=`Production target for ${esc(periodLabel)} · as of <b>${esc(S.asOf||todayISO())}</b>`
+      +`<br>${all.length} product(s) · <b>${owed}</b> pack(s) still to make`
+      +`<br><i>Target is what must be made, from the shelf as it stands now: New Par + safety − (what ${esc(locName(planSellLoc()))} can sell + what is made here and not yet shipped). "In plot?" says whether the ingredients were bought for it.</i>`
+      +`<br>Current stock is what <b>${esc(locName(planSellLoc()))}</b> can sell (Shopify) plus what is made at <b>${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</b> and not yet shipped. Grouped as the weekly inventory count sheet groups it.`;
+    const head=`<colgroup><col style="width:4%"><col style="width:30%"><col style="width:16%"><col style="width:10%"><col style="width:8%"><col style="width:9%"><col style="width:8%"><col style="width:15%"></colgroup>
+      <thead><tr><th class="n">#</th><th>Product</th><th>SKU</th><th class="n">Current stock</th><th class="n">Cover</th>
+        <th class="n">Target</th><th class="n">Still to make</th><th>In plot? · can make?</th></tr></thead>`;
+    /* the count sheet's own sequence: Group › Subgroup, items in master order */
+    const _seq=(()=>{ const byG={};
+      all.forEach(r=>{ const k=r.g1||'Products'; (byG[k]=byG[k]||[]).push(r); });
+      const gmin=l=>Math.min.apply(null,l.map(x=>_so(x)));
+      const out=[]; let nn=0;
+      Object.keys(byG).sort((a,b)=>gmin(byG[a])-gmin(byG[b])||String(a).localeCompare(b)).forEach(g1=>{
+        const g=byG[g1]; out.push({t:'g1',label:g1,rows:g});
+        const byS={}; g.forEach(r=>{ const k=r.g2||'Other'; (byS[k]=byS[k]||[]).push(r); });
+        Object.keys(byS).sort((a,b)=>gmin(byS[a])-gmin(byS[b])||String(a).localeCompare(b)).forEach(g2=>{
+          const it=byS[g2].slice().sort((a,b)=>_so(a)-_so(b)||String(a.name||'').localeCompare(b.name||''));
+          out.push({t:'g2',label:g2,rows:it});
+          it.forEach(r=>{ nn++; out.push({t:'item', n:nn, r}); }); });
+      });
+      return out; })();
     const n2=v=>v?num(Math.round(v*100)/100):'';
-    const trs=all.map(r=>{
-      let li=-1; for(let i=r.plots.length-1;i>=0;i--){ if(r.plots[i]>0){ li=i; break; } }
-      return `<tr class="${r.ready===false?'urgent':''}">
-        <td>${esc(r.sku)}</td><td class="wrap">${esc(r.name)}${r.isCustom?' (custom)':''}</td>
-        <td style="font-size:8.5px;color:${(r.live!=null&&r.gap>0&&!r.omit&&!r.noT)?'#b5762a':'#666'}">${
-          r.noT?esc(covShort(covTag({kind:r.noT.why})))
-          :(r.live!=null?esc(covShort(covTag({target:r.target,plot:r.plotAsked,kind:r.omit?'omit':''}))):'')}</td>
+    const trs=[];
+    _seq.forEach(x=>{
+      if(x.t==='g1'){ trs.push(`<tr class="g1"><td colspan="8">${esc(x.label)} · ${x.rows.length} product(s) · ${x.rows.reduce((a,r)=>a+r.still,0)} pack(s) still to make</td></tr>`); return; }
+      if(x.t==='g2'){ trs.push(`<tr class="g2"><td colspan="8">&nbsp;&nbsp;▸ ${esc(x.label)} (${x.rows.length})</td></tr>`); return; }
+      const r=x.r;
+      /* the same two numbers every other screen prints — what the shop can sell
+         plus what is made here and not yet shipped. Not the ledger: the ledger
+         does not describe the shop. A back-dated sheet has no live picture and
+         falls back to it, and says so in the subtitle. */
+      const curN = r.pic ? (+r.pic.current||0) : r.oh;
+      const covD = r.pic && r.pic.coverDays!=null ? r.pic.coverDays : r.coverDays;
+      const cov = (covD!=null && covD<9000) ? (Math.round(covD*10)/10)+'d' : '—';
+      const tag=r.noT ? covShort(covTag({kind:r.noT.why}))
+              : (r.live!=null ? covShort(covTag({target:r.target, plot:r.plotAsked, kind:r.omit?'omit':''})) : '');
+      const can=r.still===0?'':(r.ready===true?'ready':(r.ready===false?'SHORT':'no recipe'));
+      trs.push(`<tr class="${r.ready===false&&r.still>0?'urgent':''}">
+        <td class="n">${x.n}</td><td class="wrap">${esc(r.name)}${r.isCustom?' (custom)':''}</td>
+        <td style="font-size:8px">${esc(r.sku)}</td>
+        <td class="n">${n2(curN)}</td><td class="n">${esc(cov)}</td>
         <td class="n"><b>${r.target||''}</b></td>
-        <td class="n">${r.madeAll||''}</td>
-        <td class="n"><b>${r.still}</b></td><td class="n">${n2(r.oh)}</td>
-        <td class="n">${r.velKnown?(Math.round(r.coverDays*10)/10)+'d':'—'}</td>
-        <td class="n">${n2(r.beg)}</td>${r.made.map(v=>`<td class="n">${v||''}</td>`).join('')}
-        <td class="n">${r.sold?n2(-r.sold):''}</td><td class="n">${n2(r.end)}</td>
-        ${r.plots.map((q,i)=>`<td class="n">${q?(i<li?`<span class="old">${q}</span>`:`<b>${q}</b>`):''}</td>`).join('')}
-        <td>${r.still===0?'':(r.ready===true?'ready':(r.ready===false?'<b>SHORT</b>':'no recipe'))}</td></tr>`;
+        <td class="n"><b>${r.still||''}</b></td>
+        <td class="wrap" style="font-size:8.5px">${esc([tag,can].filter(Boolean).join(' · '))}</td></tr>`);
     });
-    const tot=`<tr class="tot"><td colspan="2">Total · ${all.length} product(s)</td>
-      <td></td><td class="n">${all.reduce((a,r)=>a+r.target,0)}</td><td class="n">${all.reduce((a,r)=>a+r.madeAll,0)}</td>
-      <td class="n">${owed}</td><td class="n">${num(Math.round(all.reduce((a,r)=>a+r.oh,0)*100)/100)}</td>
-      <td colspan="${7+wk.length*2}"></td></tr>`;
-    sections.push({title:'Production target', sub, head, rows:trs, perPage:22, totalRow:tot});
+    if(!trs.length) trs.push('<tr><td colspan="8">Nothing to make.</td></tr>');
+    const tot=`<tr class="tot"><td></td><td>Total · ${all.length} product(s)</td><td></td>
+      <td class="n">${num(Math.round(all.reduce((a,r)=>a+(r.pic?(+r.pic.current||0):r.oh),0)*100)/100)}</td><td></td>
+      <td class="n">${all.reduce((a,r)=>a+r.target,0)}</td><td class="n">${owed}</td><td></td></tr>`;
+    sections.push({title:'Production target', sub, head, rows:trs, perPage:30, totalRow:tot});
     /* Grouped by ingredient, because one shortage usually blocks several
        products and the person buying it needs one line per thing to buy. */
     const blocked=all.filter(r=>r.still>0&&r.ready===false);
@@ -14589,7 +14615,7 @@ function drawProdPlan(){
       <span class="mini" style="color:var(--muted)">Supply-led lines and custom orders are excluded from this count — neither is bought against a plot.</span></div>`:''}
     <div class="smart" style="margin:8px 0"><div class="stile"><div class="v">${totTarget}</div><div class="l">Target packs</div></div><div class="stile"><div class="v">${totGood}</div><div class="l">This run (good)</div></div><div class="stile"><div class="v" style="color:${totRemain>0?'var(--berry)':'#4e7a3e'}">${totRemain}</div><div class="l">Remaining to make</div></div></div>
     <div style="overflow-x:auto"><table style="min-width:1060px"><thead><tr><th>Product</th>
-      <th class="num" title="Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. The first figure already IS the Shopify reading, water-line adjusted — it is not added a second time.">Current<br>stock</th>
+      <th class="num" title="Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. The first figure IS the Shopify reading, unadjusted — ${esc(locName(planSellLoc()))} is Shopify, the commissary is the ERP.">Current<br>stock</th>
       <th class="num" title="Days = how long the sellable shelf lasts. % = everything we own against New Par + safety. High % with low days means the packs exist but are at the wrong site — send a van, not a butchery day.">Cover<br>d · %</th>
       <th class="num" title="The To Produce figure from Regular Packs — (New Par − what the shop can sell − what is made here and not yet shipped) + lead-time demand, rounded up to a case of 12 with a floor of 24. It answers a spike as soon as the shelf moves, and falls on its own as packs are made. The note underneath says whether the demand plot bought ingredients for it.">Target</th><th class="num" title="Packs confirmed in the last fortnight, for information. It is NOT taken off the target — production already made is inside the stock the target subtracts, so deducting it again would take it off twice.">Made (2wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
     ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodMadeMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
