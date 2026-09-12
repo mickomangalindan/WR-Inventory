@@ -5073,7 +5073,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-10 02:00Z';
+const WR_BUILD='2026-09-12 16:40Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -8820,7 +8820,7 @@ async function renderMRP(){
       </tbody></table></div>
       <div class="hint" style="margin-top:8px">A custom order goes to <b>Added in Demand</b> the moment a row lands in the demand table,
         which is why one can say it is in demand while this screen shows nothing for that week. Open the date, then
-        <b>☁ Sync demand</b> to pull those rows in and save a plot. Was it a trial? <b>🗑 Clear</b> takes the rows back out —
+        <b>🧮 Pull the week</b> to load it and save a plot. Was it a trial? <b>🗑 Clear</b> takes the rows back out —
         it never deletes the order that wrote them.</div></div>`;
   }
   /* ---- PHASING OUT ------------------------------------------------------
@@ -8833,10 +8833,7 @@ async function renderMRP(){
   // demand card
   dh+=`<div class="repcard"${(coSkus.length||1)?' style="margin-top:14px"':''}>
     <div class="repbar"><span>Plan (week of)</span><input type="date" value="${MRPDATE}" onchange="MRPDATE=this.value">
-      <button class="btn sm sec" onclick="openMRPImport()">📥 Import (xlsx / csv)</button>
-      <button class="btn sm sec" onclick="mrpImport()">⬆ Paste</button>
-      <button class="btn sm sec" onclick="mrpSheetSync()" title="Pulls the demand table for this plan date, plus every locked custom order regardless of its scheduled date">☁ Sync demand (sheets + custom orders)</button>
-      <button class="btn sm sec" onclick="mrpPullPackReq()" title="Work out the catalogue shortfall from par and sales, and load it into the plot below">🧮 Pull from Regular Packs</button>
+      <button class="btn sm" onclick="mrpPullPackReq()" title="Both halves of the week: every locked custom order, and the catalogue shortfall worked out from par and sales">🧮 Pull the week — Regular Packs + custom orders</button>
       <button class="btn sm sec" onclick="mrpClearDemand(MRPDATE)" title="Remove the demand rows recorded against this date — by source, and without deleting the orders">🗑 Clear demand for this date</button>
       <button class="btn sm ${demStepOn()?'':'sec'}" onclick="demStepToggle()" title="round quantities to what the line can actually pack">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button></div>
     <div class="hint" style="margin:6px 0 0">${demStepNote()}</div>`;
@@ -9217,37 +9214,87 @@ async function confirmSaveMRPPlan(hasExisting){
    keeping a second copy of the arithmetic which could drift from it.
    It loads into the plot in front of you and posts nothing — you still review
    it and save the plot, exactly as with a sheet import. */
+/* ---- ONE BUTTON FOR THE WHOLE WEEK ----------------------------------------
+   This screen used to offer four ways to fill the same table: 📥 Import an
+   xlsx, ⬆ Paste some lines, ☁ Sync demand (which fired a Google Apps Script
+   at a spreadsheet and waited eight seconds for it to write rows), and
+   🧮 Pull from Regular Packs. Four doors into one room, three of them typing
+   figures the ERP could already work out for itself, and no way afterwards to
+   tell which door a row came through — every demand row in the database reads
+   `source: 'sheet'`, whatever wrote it.
+
+   The Google Sheet is gone. What it was carrying, Regular Packs computes from
+   par, sales and what is actually on the shelf — with the arithmetic on screen
+   and every lever visible, rather than in a spreadsheet nobody in the ERP can
+   see. Import and Paste are gone with it: a figure typed into a plot without
+   the working behind it cannot be argued with, and an unarguable number in a
+   production plan is how a week gets made wrong.
+
+   So: one button, and it brings the week in as the week actually arrives —
+   in two halves.
+
+     COMMITTED   every locked custom order that still owes packs, whatever week
+                 it is scheduled for. Somebody has already paid for these.
+                 NEVER rounded: a customer ordered 14, and making 24 is ten
+                 packs of a bespoke recipe nobody else will ever buy.
+     CATALOGUE   what nobody ordered — the shortfall against par, rounded up to
+                 what the line can pack. A custom order always wins the SKU;
+                 the par calculation is not allowed to overwrite a commitment.
+
+   Nothing is written to the database until the plot is saved. */
 async function mrpPullPackReq(){
-  showBusy('Working out the catalogue shortfall…');
+  /* A LOCKED WEEK DOES NOT TAKE NEW WORK — the same refusal ＋ Add uses.
+     Ingredients have been bought against a saved plot and the run is scheduled
+     from it, so this cannot quietly add to it. */
+  if(window._mrpLocked){
+    alert(MRPDATE+' is locked ('+((window._mrpLocked||{}).ref||'saved plot')+').\n\n'
+      +'Ingredients have been bought against that plot and the run is scheduled from it, so it cannot take more work now.\n\n'
+      +'Plan into the next run: '+(window._mrpNextRun||'the following week')+'.');
+    return;
+  }
+  showBusy('Reading the orders, then the shelf…');
+  let co={}; let coErr='';
+  try{ co=await coOpenDemandMap(); }catch(e){ coErr=String((e&&e.message)||e); }
   let built;
   try{ built=await pqBuildRows(); }
   catch(e){ hideBusy(); toast('Could not read stock or sales — '+saveErrMsg(e),true); return; }
   hideBusy();
-  const rows=(built.rows||[]).map(r=>({r,c:pqCalc(r)})).filter(x=>x.c.produce>0);
-  if(!rows.length){
-    toast('Nothing short at the current settings — every product is above its par',true);
+
+  const coSkus=Object.keys(co).filter(s=>(+co[s]||0)>0);
+  const coPacks=coSkus.reduce((a,s)=>a+(+co[s]||0),0);
+  /* Skip the SKUs a custom order already owes — see above. */
+  const cat=(built.rows||[]).map(r=>({r,c:pqCalc(r)}))
+    .filter(x=>x.c.produce>0 && co[x.r.sku]==null);
+  const catPacks=cat.reduce((a,x)=>a+x.c.produce,0);
+
+  if(!coSkus.length && !cat.length){
+    toast(coErr ? ('No catalogue shortfall, and the custom orders could not be read — '+coErr)
+      : 'Nothing to plan — no locked custom order owes packs, and every product is above its par', true);
     return; }
-  const tot=rows.reduce((a,x)=>a+x.c.produce,0);
+
   const noSales=(built.rows||[]).filter(r=>!(r.sold>0)).length;
-  if(!confirm('Load '+rows.length+' catalogue product(s) / '+Math.round(tot)+' pack(s) into the plot for '+MRPDATE+'?\n\n'
-    +rows.slice(0,8).map(x=>'• '+x.r.name+' — '+Math.round(x.c.produce)).join('\n')
-    +(rows.length>8?('\n… and '+(rows.length-8)+' more'):'')
+  if(!confirm('Load the week of '+MRPDATE+'?\n\n'
+    +'COMMITTED — '+coSkus.length+' custom-order SKU(s) / '+Math.round(coPacks)+' pack(s), exactly as ordered\n'
+    +'CATALOGUE — '+cat.length+' product(s) / '+Math.round(catPacks)+' pack(s), rounded to '+DEM_MIN+' minimum then steps of '+DEM_INC+'\n\n'
+    +cat.slice(0,8).map(x=>'• '+x.r.name+' — '+Math.round(x.c.produce)).join('\n')
+    +(cat.length>8?('\n… and '+(cat.length-8)+' more'):'')
     +'\n\nWorked out at: lead '+PQ.lead+'d · movement '+PQ.move+'× · cycle '+PQ.cycle+'d · window '+PQ.win+'d · case '+PQ.cs
     +'\nSellable read from '+built.src+'.'
     +(noSales?('\n\n'+noSales+' product(s) have no sales in the window and so ask for nothing.'):'')
-    +'\n\nCustom-order SKUs already on the plot are left alone. Nothing is saved until you save the plot.')) return;
-  /* Custom orders are committed demand and are pulled by ☁ Sync demand — this
-     must never overwrite one with a par calculation. */
-  let co={}; try{ co=await coOpenDemandMap(); }catch(e){}
-  let n=0, skipped=0;
-  rows.forEach(x=>{ if(co[x.r.sku]!=null){ skipped++; return; }
-    mrpDemand[x.r.sku]=demSnap(x.c.produce); n++; });
-  sysLog('mrp',MRPDATE,'🧮 Regular Packs loaded into the plot — '+n+' SKU(s) / '+Math.round(tot)+' pack(s) by '+CURRENT_USER);
+    +(coErr?('\n\n⚠ The custom orders could not be read ('+coErr+') — the catalogue half will load without them.'):'')
+    +'\n\nNothing is saved until you save the plot.')) return;
+
+  let nCo=0, nCat=0;
+  coSkus.forEach(sk=>{ mrpDemand[sk]=Math.max(0,Math.round(+co[sk]||0)); nCo++; });   // never rounded
+  cat.forEach(x=>{ mrpDemand[x.r.sku]=demSnap(x.c.produce); nCat++; });
+  sysLog('mrp',MRPDATE,'🧮 Week pulled into the plot — '+nCo+' custom-order SKU(s) / '+Math.round(coPacks)
+    +' pack(s) committed, '+nCat+' catalogue SKU(s) / '+Math.round(catPacks)+' pack(s) by '+CURRENT_USER);
+  try{ await coSyncStatuses(); }catch(e){}
   await renderMRP();
-  toast('Loaded '+n+' catalogue SKU(s)'+(skipped?(' · '+skipped+' left to their custom orders'):'')+' — review, then 💾 Save the plot');
+  toast('Pulled '+nCo+' custom-order SKU(s) + '+nCat+' catalogue SKU(s) for '+MRPDATE+' — review, then 💾 Save the plot');
 }
 async function mrpGoDate(d){ MRPDATE=d; await renderMRP();
-  toast('Now on '+d+' — press ☁ Sync demand to pull those rows in'); }
+  toast('Now on '+d+' — press 🧮 Pull the week to load it'); }
 
 /* ---- Clearing a trial demand -------------------------------------------
    A demand row is written by whoever synced it — a custom order, a sheet
@@ -9258,7 +9305,7 @@ async function mrpGoDate(d){ MRPDATE=d; await renderMRP();
    So: clear ONE date, and within that date choose WHICH SOURCE to remove.
    What this never does is delete the order that wrote the row. The custom
    order stays exactly where it is — it simply stops saying "Added in Demand"
-   and goes back to "For Demand Planning", and ☁ Sync demand will bring it
+   and goes back to "For Demand Planning", and 🧮 Pull the week will bring it
    back if it was cleared by mistake. */
 /* Remove the cache rows for orders that are finished. Only those: the filter is
    rebuilt here rather than trusting what the screen last rendered, because a
@@ -9317,7 +9364,7 @@ function drawDemandClear(){
     <div class="mbody">
       <div class="hint" style="margin-bottom:10px">These rows live in the <b>demand table</b>. Removing them does <b>not</b> delete the
         custom orders or sheet rows that wrote them — those go back to <b>For Demand Planning</b>, and
-        <b>☁ Sync demand</b> will pull them in again if you clear one by mistake.</div>
+        <b>🧮 Pull the week</b> will bring them back if you clear one by mistake.</div>
       ${g.length?`<table><thead><tr><th style="width:34px"></th><th>Written by</th><th class="num">SKUs</th><th class="num">Packs</th><th>For example</th></tr></thead><tbody>
         ${g.map((x,i)=>`<tr><td><input type="checkbox" ${c.sel[x.key]?'checked':''} onchange="window._dcCtx.sel[window._dcCtx.groups[${i}].key]=this.checked;drawDemandClear()"></td>
           <td>${esc(x.label)}</td><td class="num">${x.skus}</td><td class="num">${x.packs}</td>
@@ -19498,7 +19545,6 @@ async function delReport(i){ const x=reportCache[i]; if(!x)return; try{ if(isLiv
 
 /* ============ Automations (one-stop config hub) ============ */
 let AUTOS = JSON.parse(localStorage.getItem('wr_autos')||'null') || {
-  sheets_demand:{on:false,url:'',label:'Google Sheets — Demand sync (by SKU)',hint:'Clicking “Sync from Google Sheets” triggers this n8n webhook — n8n reads your sheet, upserts the demand table for the plan date, then the app pulls it. Paste the wr-demand-sync webhook URL.'},
   mention_notify:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-mention-notify',label:'Mention / activity notify',hint:'When someone is @mentioned or assigned an activity, the app sends the person + a link here; the handler looks up their Email & Telegram chat ID in profiles and notifies them by name (Telegram + email). Set each person\'s Email / Telegram chat ID in Users & Access (run wr_migration_profile_contacts.sql first).'},
   drive_folder:{on:false,url:'',label:'Google Drive — Attachments folder',hint:'Record attachments live here; uploads route via n8n, links saved on the record.'},
   record_pdf:{on:false,url:'https://mickomangalindan.app.n8n.cloud/webhook/wr-record-done',label:'n8n — Record → PDF → Drive → notify',hint:'When a document is completed, it is sent here: n8n builds a PDF, saves it to the module Drive folder, writes the link back on the record, and notifies Telegram/Email with the Internal Reference.'},
@@ -19528,7 +19574,6 @@ function renderAutomations(){
 
 /* ============ MRP demand import / date ============ */
 let MRPDATE=todayISO();
-function parseDemandCSV(text){ const map={}; text.split(/\r?\n/).forEach(line=>{ const p=line.split(/[,\t]/); if(p.length>=2){ const s=(p[0]||'').trim(); if(s&&s.toLowerCase()!=='sku') map[s]=+p[1]||0; } }); return map; }
 function applyDemandMap(map){ Object.keys(map).forEach(sku=>{ mrpDemand[sku]=+map[sku]||0; }); renderMRP(); }
 // One click for the banner: put the locked custom orders' packs into the demand boxes.
 /* THE ONE CASE THAT NEEDS A WAY THROUGH. A plot can be made and then never
@@ -19658,11 +19703,8 @@ async function mrpPullCustom(){ const m=window._mrpCoPend||{}; const n=Object.ke
   }
   applyDemandMap(m); await coSyncStatuses();
   toast('Pulled '+n+' custom-order SKU(s) into the demand for '+MRPDATE); }
-function mrpImport(){ const t=prompt('Paste demand lines — SKU,qty (one per line):'); if(!t)return; applyDemandMap(parseDemandCSV(t)); toast('Demand imported by SKU'); }
-function mrpFileImport(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader(); rd.onload=()=>{ applyDemandMap(parseDemandCSV(String(rd.result))); toast('Imported from '+f.name); }; rd.readAsText(f); }
 
 /* ---- Import pipeline: download template → test → import ---- */
-let _impRows=null, _impReport=null;
 function dlBlob(content,name,type){ const b=new Blob([content],{type}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u); }
 // Lazy-load a CDN script once (cached). Used for pdfmake (styled PDFs) and ExcelJS (styled xlsx).
 const _scriptCache={};
@@ -21061,86 +21103,6 @@ async function renderStickerPO(){
     <div class="pager">${t.n} sticker(s) · ${t.linked} with artwork link · ${t.n-t.linked} pending</div></div>`;
   $('content').innerHTML=h;
 }
-function openMRPImport(){ _impRows=null; _impReport=null;
-  $('modal').innerHTML=`<h3>Import weekly demand</h3>
-    <p>1) Download the template, fill the <b>QTY</b> column. &nbsp;2) Upload &amp; Test. &nbsp;3) Import the valid rows.</p>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
-      <button class="btn sec" onclick="mrpDownloadTemplate()">⬇ Download template (.${typeof XLSX!=='undefined'?'xlsx':'csv'})</button>
-      <input type="file" id="impFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="mrpStageFile(event)">
-      <button class="btn sec" onclick="document.getElementById('impFile').click()">📄 Choose file</button>
-    </div>
-    <div id="impArea" class="hint" style="margin-top:6px">No file chosen yet.</div>
-    <div style="display:flex;gap:8px;margin-top:14px"><button class="btn sec" onclick="closeModal()">Close</button></div>`;
-  $('overlay').classList.add('on');
-}
-async function mrpDownloadTemplate(){
-  const prods=(await db.list('products',{})).filter(p=>p.active!==false);
-  const aoa=[['SKU','product_name','QTY','plan_date'],...prods.map(p=>[p.sku,p.name,0,MRPDATE])];
-  if(typeof XLSX!=='undefined'){ const ws=XLSX.utils.aoa_to_sheet(aoa); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Demand'); XLSX.writeFile(wb,'WR_demand_'+MRPDATE+'.xlsx'); }
-  else { dlBlob(aoa.map(r=>r.join(',')).join('\n'),'WR_demand_'+MRPDATE+'.csv','text/csv'); }
-  toast('Template downloaded ('+prods.length+' products)');
-}
-function parseImportData(name,data){
-  if(/\.csv$/i.test(name)){ const map=parseDemandCSV(String(data)); return Object.keys(map).map(sku=>({sku,qty:map[sku]})); }
-  if(typeof XLSX==='undefined') throw new Error('Spreadsheet support did not load — please use a .csv file');
-  const wb=XLSX.read(data,{type:'binary'}); const ws=wb.Sheets[wb.SheetNames[0]]; const arr=XLSX.utils.sheet_to_json(ws,{header:1});
-  const hdr=(arr[0]||[]).map(x=>String(x).trim().toLowerCase());
-  const si=hdr.indexOf('sku'), qi=[hdr.indexOf('qty'),hdr.indexOf('demand'),hdr.indexOf('quantity')].find(x=>x>=0), pi=hdr.indexOf('plan_date');
-  if(si<0) throw new Error('No "SKU" column found in the sheet header');
-  const rows=[]; for(let i=1;i<arr.length;i++){ const r=arr[i]; if(!r)continue; const sku=r[si]; if(sku==null||String(sku).trim()==='')continue; rows.push({sku:String(sku).trim(), qty:Number(r[qi]||0), plan_date:pi>=0?r[pi]:undefined}); }
-  return rows;
-}
-function mrpStageFile(e){ const f=e.target.files[0]; if(!f)return; const rd=new FileReader();
-  rd.onload=()=>{ try{ _impRows=parseImportData(f.name,rd.result); _impReport=null;
-      $('impArea').innerHTML=`<b>${esc(f.name)}</b> — ${_impRows.length} row(s) read.<div style="margin-top:8px"><button class="btn sec" onclick="mrpTestImport()">🔍 Test Import</button></div>`; }
-    catch(err){ $('impArea').innerHTML='<span style="color:var(--danger)">Could not read file: '+esc(err.message)+'</span>'; } };
-  if(/\.csv$/i.test(f.name)) rd.readAsText(f); else rd.readAsBinaryString(f);
-}
-async function mrpTestImport(){
-  if(!_impRows){ return; }
-  const prods=await db.list('products',{}); const known=new Set(prods.map(p=>p.sku));
-  let ok=0,unknown=0,bad=0; _impReport=_impRows.map(r=>{ let st='ok'; if(!known.has(r.sku)){st='unknown SKU';unknown++;} else if(isNaN(r.qty)||r.qty<0){st='bad qty';bad++;} else ok++; return {...r,st}; });
-  const issues=_impReport.filter(d=>d.st!=='ok').slice(0,12);
-  $('impArea').innerHTML=`<div style="margin:6px 0"><b style="color:var(--ok)">${ok} valid</b> · <b style="color:var(--danger)">${unknown} unknown SKU</b> · <b style="color:var(--earth)">${bad} bad qty</b> &nbsp;of ${_impRows.length}</div>
-    ${issues.length?`<div style="max-height:180px;overflow:auto"><table style="width:100%;font-size:12px"><thead><tr><th>SKU</th><th class="num">Qty</th><th>Issue</th></tr></thead><tbody>${issues.map(d=>`<tr><td><code>${esc(d.sku)}</code></td><td class="num">${esc(d.qty)}</td><td style="color:var(--danger)">${d.st}</td></tr>`).join('')}</tbody></table></div><div class="hint">Showing first ${issues.length}. Invalid rows are skipped on import.</div>`:'<div class="hint">All rows valid ✅</div>'}
-    <div style="margin-top:12px"><button class="btn" onclick="mrpDoImport()" ${ok?'':'disabled'}>✓ Import ${ok} valid row(s)</button></div>`;
-}
-function mrpDoImport(){ if(!_impReport)return; const valid=_impReport.filter(d=>d.st==='ok');
-  const pd=valid.map(v=>v.plan_date).find(Boolean); if(pd){ const s=String(pd).slice(0,10); if(/^\d{4}-\d\d-\d\d$/.test(s)) MRPDATE=s; }
-  const map={}; valid.forEach(v=>{ map[v.sku]=(map[v.sku]||0)+(+v.qty||0); });
-  closeModal(); applyDemandMap(map); toast('Imported '+valid.length+' demand row(s)'); }
-async function mrpSheetSync(){ const a=AUTOS.sheets_demand;
-  // Every locked custom order that still owes packs — whatever week it is scheduled
-  // for. Merged OVER the demand table (never added to it) so a cached row cannot
-  // double-count, and so a moved needed_date can never strand the packs.
-  const co=await coOpenDemandMap(); const nCo=Object.keys(co).length;
-  if(!isLive()){ // demo: pull locked custom-order demand from the in-memory demand table
-    const rows=(DEMO.demand||[]).filter(r=>String(r.plan_date||'')===String(MRPDATE));
-    const map={}; rows.forEach(r=>{ map[r.sku]=(map[r.sku]||0)+(+r.qty||0); });
-    Object.keys(co).forEach(s=>{ map[s]=co[s]; });
-    if(!Object.keys(map).length){ toast('No demand rows for '+MRPDATE+' — lock a custom order, or use Import / Paste.',true); return; }
-    applyDemandMap(map); await coSyncStatuses(); toast('Pulled '+rows.length+' demand row(s)'+(nCo?' + '+nCo+' custom-order SKU(s)':'')+' for '+MRPDATE); return; }
-  // If the webhook is configured, TRIGGER n8n (reads your Google Sheet → upserts the demand table for this plan date), then pull.
-  if(a&&a.on&&a.url){
-    showBusy('Syncing demand from Google Sheets…');
-    await postWebhook(a.url,{ action:'sync_demand', plan_date:MRPDATE, by:CURRENT_USER });
-    await new Promise(r=>setTimeout(r,8000));   // give n8n time to read the sheet + upsert
-    hideBusy();
-  }
-  let rows=[]; let sheetErr='';
-  try{ rows=await sb('demand?select=sku,qty&plan_date=eq.'+encodeURIComponent(MRPDATE))||[]; }
-  catch(e){ sheetErr=String((e&&e.message)||e); }
-  const map={}; rows.forEach(r=>{ map[r.sku]=+r.qty||0; });
-  Object.keys(co).forEach(s=>{ map[s]=co[s]; });      // the order wins over its cached demand row
-  if(!Object.keys(map).length){
-    toast(sheetErr ? ('Demand read failed — '+sheetErr)
-      : (a&&a.on&&a.url?('Synced, but no demand rows for '+MRPDATE+' — check the sheet & the n8n workflow')
-                       :'No demand for '+MRPDATE+' — lock a custom order, use Import / Paste, or enable the Google Sheets webhook in Automations'),true);
-    return; }
-  applyDemandMap(map);
-  await coSyncStatuses();          // locked orders now counted → "Added in Demand" 
-  toast('Synced '+rows.length+' demand row(s)'+(nCo?' + '+nCo+' custom-order SKU(s)':'')+' for '+MRPDATE+(sheetErr?' (sheet demand unavailable)':''));
-}
 
 /* ============ Internal Transfer — load Bulacan finished stock ============ */
 /* ============ Transfer picker — four doors, one screen ====================
@@ -21661,7 +21623,7 @@ const KB = {
     h:['It lives in SALES, after Custom Orders — the bespoke orders are already committed, this is what is left to decide.',
        'Set the five levers on the toolbar: lead time · movement × · cycle days · sales window · case size. Movement can be overridden per product; leave the cell blank to use the global figure.',
        '📥 Shopify count loads a real count by hand (Shopify → Products → Inventory → Export). ☁ Send to Demand writes the request as demand for a plan date. ▶ Send to Production Plan puts it straight on the run.',
-       'Or pull it from the other end: Demand/MRP → 🧮 Pull from Regular Packs loads the same answer into the plot.'],
+       'Or pull it from the other end: Demand/MRP → 🧮 Pull the week loads the same answer into the plot, alongside the custom orders.'],
     l:['<b>Current stock</b> = <b>what the shop can sell</b> + <b>what is at the kitchen</b> — named by place, because "not yet sellable at Bulacan" reads as if it had failed to arrive there, when it is sitting in the freezer. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here both numbers come out of the ledger, and they are shown apart because the gap between them is a transfer somebody still has to do.',
        '<b>There is no Shopify inventory feed.</b> The Shopify sync is one way and pulls ORDERS — the token carries read_orders and read_products, nothing else. <code>wr_shopify_stock</code> is not a feed either: it is this ledger\'s own balance at the selling site, named for what WOULD be pushed if anything ever pushed. So <b>Sellable</b> is our ledger, kept current by the sales the sync posts.',
        'If you want the shop\'s OWN number, load it by hand: Shopify → Products → Inventory → Export, then <b>📥 Shopify count</b>. It is a snapshot, not a feed — the screen says how old it is, and any product where the count and our ledger disagree is flagged on its row. That gap is the finding: it means somebody adjusted one side and not the other.',
@@ -21745,13 +21707,14 @@ const KB = {
        'Better-than-standard is logged as well as worse. A run that beat its standards by a wide margin is as likely to be a mis-weigh as a triumph.',
        'This is your single source of truth for leaks']},
   mrp:{d:'Weekly replenishment planner: demand + lead time + PAR → order qty, then auto-create POs grouped by supplier.',
-    h:['THE WEEK ARRIVES IN TWO HALVES. ☁ Sync demand pulls what customers have already committed — the demand table for this date plus every locked custom order. 🧮 Pull from Regular Packs works out the catalogue half from par and sales.',
+    h:['THE WEEK ARRIVES IN TWO HALVES, AND ONE BUTTON BRINGS BOTH. 🧮 Pull the week loads every locked custom order — committed, exactly as ordered, never rounded — and then the catalogue shortfall worked out from par, sales and what is on the shelf, rounded up to a minimum of 24 then steps of 12. A custom order always wins its SKU.',
        'Type over anything, or 📥 Import / ⬆ Paste a sheet by SKU. Adjust an ingredient with Manual ±kg.',
        '💾 Save plan writes the plot — and until you do, none of this is planned. 🧾 Generate Draft POs turns the ingredient need into orders.',
        '⚠ “Demand exists on N date(s) you have not plotted” means rows are sitting in the demand table for a week nobody has planned. Open the date, or 🗑 Clear it if it was a trial.',
        '🗑 Clear demand for this date removes rows BY SOURCE — the custom order or sheet import that wrote them is never deleted, and the saved plot is a separate, deliberate tick.'],
     l:['A ROW IS NOT A PLAN. A line in the demand table is a quantity somebody pushed at a date. Only a SAVED PLOT counts as planned, which is why a custom order with a bare row still reads “not planned yet”.',
-       '🧮 Pull from Regular Packs asks the Regular Packs screen for its answer rather than keeping a second copy of the arithmetic — the two can never drift. It skips any SKU a custom order already owes, and saves nothing until you save the plot.',
+       'It asks the Regular Packs screen for its answer rather than keeping a second copy of the arithmetic, so the two can never drift — and it saves nothing until you save the plot.',
+       'IMPORT, PASTE AND THE GOOGLE SHEETS SYNC ARE GONE. They were three more ways to fill the same table with figures the ERP can work out itself, and afterwards nothing could tell which one a row came from. A number typed into a plot without the working behind it cannot be argued with, and an unarguable number in a production plan is how a week gets made wrong.',
        'Order = weekly need + PAR + lead-time buffer − on-hand, ± manual, rounded up to Min Order',
        'Raw need = usable ÷ yield; lead buffer = need × (lead days ÷ 7); order-by = plan date − lead',
        'Auto-PO groups by each ingredient\'s DEFAULT supplier — when 2 suppliers exist, the default wins']},
