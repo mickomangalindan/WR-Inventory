@@ -5073,7 +5073,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-12 19:05Z';
+const WR_BUILD='2026-09-12 23:10Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -6512,8 +6512,28 @@ async function wdtSheetLoad(){
   const custBy={};
   Object.keys(co).forEach(sku=>{ cust[sku]=+co[sku].packs||0; custBy[sku]=co[sku]; });
 
+  /* ---- THE LIVE PICTURE DECIDES WHICH PRODUCTS ARE ON THIS SHEET ---------
+     The row set used to be plots ∪ production ∪ custom orders, which quietly
+     made the sheet blind to the two cases it most needs to show: a product
+     kept OFF the plot on purpose (rabbit and goat are supply-led — they arrive
+     when a supplier has them, so they are never plotted and never bought), and
+     a product whose orders spiked after the plot was saved. Neither is on a
+     plot, so neither was on the sheet, so "1580 packs still to make" was
+     silently a statement about what had been PLANNED rather than what is
+     needed.
+
+     Only when the sheet is showing TODAY. A live Shopify reading cannot
+     describe a sheet as it stood three weeks ago, and back-dating one would be
+     a lie that looks like a fact — a back-dated sheet keeps the plot logic
+     exactly as it was. */
+  let PIC=null;
+  if(!_wdtAsOf){ try{ PIC=await stockPicture(); }catch(e){ PIC=null; } }
+  const liveProduce={};
+  if(PIC&&PIC.by){ Object.keys(PIC.by).forEach(k=>{ const q=+((PIC.by[k]||{}).produce)||0;
+    if(q>0 && !pArch.has(k) && !/^CUST-/i.test(k)) liveProduce[k]=q; }); }
+
   const skus={};
-  [plot,made,cust].forEach(o=>Object.keys(o).forEach(k=>skus[k]=1));
+  [plot,made,cust,liveProduce].forEach(o=>Object.keys(o).forEach(k=>skus[k]=1));
 
   const rows=Object.keys(skus).map(sku=>{
     const P=plot[sku]||weeks.map(()=>0), M=made[sku]||weeks.map(()=>0);
@@ -6545,8 +6565,28 @@ async function wdtSheetLoad(){
        case: the order contributes nothing, so the target falls to zero and its
        old plot row stops looking like something still owed. */
     const isCust = /^CUST-/i.test(String(sku)) || !!(pBy[sku]||{}).is_custom;
-    const target = isCust ? (+cust[sku]||0) : (effPlot + (cust[sku]||0));
-    const still = Math.max(0, target - madeAfter);
+    /* THE TARGET IS WHAT MUST BE MADE, AND THE PLOT CANNOT ANSWER THAT.
+       A plot is frozen the day it is saved, so it is blind to a weekend of
+       orders and to every line deliberately left off it. What must be MADE is
+       New Par + safety − (what the shop can sell + what is made here and not
+       yet shipped) — the same figure Regular Packs and the production screen
+       print, which is the whole point: one number, three screens.
+
+       The plot has not stopped mattering; it has stopped being the target. It
+       answers "were the ingredients bought for this?", and where the target
+       runs ahead of it the difference is exactly what nobody has ordered raws
+       for. That is `gap`, and the plot columns on the right show the workings.
+
+       A back-dated sheet has no live reading, so it keeps the plot arithmetic
+       it always had — see the note where PIC is read. */
+    const _live = (!isCust && liveProduce[sku]!=null) ? (+liveProduce[sku]||0) : null;
+    const plotAsked = effPlot;
+    const target = isCust ? (+cust[sku]||0)
+                 : (_live!=null ? (_live + (cust[sku]||0)) : (effPlot + (cust[sku]||0)));
+    /* Live already has confirmed production inside the stock it subtracts, so
+       nothing comes off it a second time. A plot figure does, and does not. */
+    const still = (_live!=null && !isCust) ? target : Math.max(0, target - madeAfter);
+    const gap = (_live!=null && !isCust) ? Math.max(0, _live - effPlot) : 0;
     const madeAll = M.reduce((a,b)=>a+b,0);
     const b=+beg[sku]||0, sl=+sold[sku]||0, ot=+other[sku]||0;
     const end=b+madeAll+sl+ot;
@@ -6559,7 +6599,7 @@ async function wdtSheetLoad(){
     return {sku, name:prodLabel(p,{noSku:true}),
             g1:_isC?'Custom Orders':prodG1(p),
             g2:_isC?((custBy[sku]&&(custBy[sku].orders||[])[0]||{}).customer||prodG2(p)):prodG2(p),
-            target, madeAll, madeAfter, still, oh,
+            target, madeAll, madeAfter, still, oh, gap, plotAsked, live:_live,
             beg:b, made:M, sold:sl, other:ot, end,
             drift:Math.round((oh-end)*1000)/1000,
             plots:P, restated, custom:+cust[sku]||0,
@@ -6578,11 +6618,7 @@ async function wdtSheetLoad(){
      sheet as it stood three weeks ago, and quietly pasting today's shelf into a
      back-dated column would be a lie that looks like a fact. */
   _wdtPicSrc='';
-  if(!_wdtAsOf){
-    try{ const PIC=await stockPicture();
-      rows.forEach(r=>{ r.pic=PIC.by[r.sku]||null; });
-      _wdtPicSrc=PIC.src||''; }catch(e){}
-  }
+  if(PIC&&PIC.by){ rows.forEach(r=>{ r.pic=PIC.by[r.sku]||null; }); _wdtPicSrc=PIC.src||''; }
   rows.forEach(r=>{ r.coverDays=r.velKnown?(r.oh/r.perDay):(r.oh>0?9998:9997); });
   rows.sort((a,b)=> (b.still>0?1:0)-(a.still>0?1:0) || a.coverDays-b.coverDays || b.still-a.still);
   await _wdtBlockers(rows);
@@ -6611,7 +6647,9 @@ function _wdtSheetHtml(){
       ${restated?`<div class="stile"><div class="v" style="color:var(--muted)">${restated}</div><div class="l">Asked again<div class="mini" style="font-weight:400">not counted twice</div></div></div>`:''}
       <div class="stile"><div class="v">${all.length}</div><div class="l">Products in the window</div></div>
     </div>
-    <div class="hint" style="margin:0 0 8px"><b>Target is what is still owed — not the two plot columns added together.</b> A demand plot is Par + safety <i>minus what is on the shelf</i>, so the newest plot for a product already contains what the older ones asked for. The plot columns on the right show the demand repeating; the Target column refuses to count it twice. Only production <i>after</i> the newest plot reduces it, because the plot was worked out against the shelf as it stood that day.<br>
+    <div class="hint" style="margin:0 0 8px"><b>Target is what must be MADE, worked out from the shelf as it stands right now</b> — New Par + safety − (what ${esc(locName(planSellLoc()))} can sell + what is made here and not yet shipped). The same figure Regular Packs and the Production Schedule print, so the three screens cannot disagree. It answers a spike as soon as the shelf moves and falls on its own as packs are made, which is why nothing is deducted from it a second time.<br>
+      <b>The plot columns answer a different question: were the ingredients bought?</b> A plot is frozen the day it is saved, so it is blind to a weekend of orders and to every line deliberately left off it. Where the Target has run ahead of the newest plot the difference is marked — that is the quantity nobody has ordered raws for, and the fix is to pull the week again in Demand/MRP. The struck-through figures are older plots restating the same demand; they are shown, never added.<br>
+      <span style="color:var(--muted)">A back-dated sheet has no live reading, so it falls back to the plot arithmetic — today's shelf cannot describe a past day.</span><br>
       <b>Priority is by cover</b> — what is on hand divided by how fast it sells, so low stock and fast moving are one question. Rows are in that order.<br>
       <b>Current stock is two places, not three numbers.</b> The first is what <b style="color:#2f5d33">${esc(locName(planSellLoc()))}</b> can sell right now — the Shopify reading plus every movement posted at the shop since it was taken. The second is what is made and sitting <b style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(', ')||'Bulacan')}</b> — real stock, one transfer away. Stock held with a consignee or as breeders is listed as <i>not ours</i> and never added. They add to Current stock; the Shopify figure printed under them is already <i>inside</i> Sellable and is shown so it can be checked, not so it can be added again.
       ${_wdtPicSrc?`<br><span style="color:var(--muted)">Sellable read from ${esc(_wdtPicSrc)}.</span>`
@@ -8483,7 +8521,7 @@ function wdtPrint(which){
     const owed=all.reduce((a,r)=>a+r.still,0);
     const sub=`Production target for ${esc(periodLabel)} · as of <b>${esc(S.asOf||todayISO())}</b> · window ${esc(S.start||'')} → ${esc(S.asOf||'')}`
       +`<br>${all.length} product(s) · <b>${owed}</b> pack(s) still to make · ordered by days of cover — the top of the list is what runs out first`
-      +`<br><i>Target is what is still owed. A plot is Par + safety minus what is on the shelf, so the newest plot already contains what the older ones asked for — the struck-through figures are shown, never added.</i>`;
+      +`<br><i>Target is what must be made, from the shelf as it stands now: New Par + safety − (sellable + made here, not yet shipped). The plot columns say whether the ingredients were bought — a target above the newest plot is a quantity nobody ordered for. Struck-through figures are older plots restating the same demand; shown, never added.</i>`;
     /* The shortage detail does NOT go in the cell. Widening the column to fit
        "Rabbit deboned meat (ground meat, with organs) · need 60.8kg, have 0kg"
        wrapped it nine lines deep and dropped the page from 22 rows to six —
@@ -9419,6 +9457,72 @@ async function mrpClearApply(){
   await renderMRP();
 }
 function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; mrpAdd={...(d.add||{})}; mrpRemarks={...(d.remarks||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
+/* ---- THE REPLENISHMENT LIST IS A WALK ROUND THE FREEZER, TOO ---------------
+   The demand half of a plot has been grouped and named for a while. The
+   replenishment half — the half somebody actually carries to the suppliers —
+   was still a flat alphabet-soup of fourteen rows: no group, no bin, no
+   subtotal, beef liver three lines away from beef kidney. The weekly inventory
+   count settled this shape long ago (animal first, then vegetables and fruit,
+   then the rest, base material underneath, bin on every line), and the two
+   sheets are read by the same people on the same round.
+
+   So this uses the count's OWN classifier, not a copy of it. _countIngClass and
+   _renderRows are the same functions the count sheet calls, which is the only
+   way two sheets stay in one order: not by agreeing today, but by asking the
+   same function. */
+async function _planRepRows(lines){
+  let ings=[];
+  try{ ings=await listIngredients(); }catch(e){ try{ ings=await db.list('ingredients',{}); }catch(e2){ ings=[]; } }
+  const bs={}, bn={};
+  (ings||[]).forEach(i=>{ bs[i.sku]=i; const nm=String(i.name||'').trim().toLowerCase(); if(nm) bn[nm]=i; });
+  const pm=_countProcMaps(ings||[],bs,bn);
+  const ctx={bs,bn,procBases:pm.bases,procCat:pm.catByBase};
+  try{ await loadBins(); }catch(e){}
+  const loc=planProduceLoc()||'bulacan';
+  return (lines||[]).map(l=>{
+    /* An ingredient that has since been deleted still has to print — a plot is
+       a locked snapshot and dropping a line would falsify it. It classifies as
+       whatever the plot itself remembered. */
+    const i=bs[l.sku]||{sku:l.sku, name:l.name, category:'Ingredients'};
+    let cl; try{ cl=_countIngClass(i,ctx); }catch(e){ cl={lsG1:'Other',lsG2:'Other',grank:500000,form:'raw'}; }
+    return {...l, ref_sku:l.sku, name:l.name||i.name||l.sku,
+            lsG1:cl.lsG1, lsG2:cl.lsG2, grank:cl.grank, form:cl.form,
+            bin:binOf(l.sku,loc), _kg:(+l.final||0)/1000,
+            _peso:((+l.final||0)/1000)*(+l.price||0)};
+  });
+}
+/* One column spec, so the modal, the printout and the download cannot drift —
+   the same discipline _cntCols() enforces on the count sheet. */
+function _repCols(){ return [
+  {label:'#',           width:6,  align:'right', val:(l,n)=>n},
+  {label:'Ingredient',  width:40, val:l=>l.name||l.sku},
+  {label:'SKU',         width:28, val:l=>l.sku},
+  {label:'Bin',         width:12, val:l=>l.bin||''},
+  {label:'Order (kg)',  width:12, align:'right', val:l=>kgf(+l.final||0)},
+  {label:'Supplier',    width:22, val:l=>l.supplier||''},
+  {label:'Est ₱',      width:12, align:'right', val:l=>Math.round(l._peso||0)}
+]; }
+/* A group header on an ordering sheet earns its keep by carrying the two
+   figures the buyer is adding up anyway. */
+function _repSecLabel(r, rows){
+  const kg=rows.reduce((a,x)=>a+(x._kg||0),0), pz=rows.reduce((a,x)=>a+(x._peso||0),0);
+  return esc(r.label)+' · '+rows.length+' item'+(rows.length===1?'':'s')
+       +' · '+kg.toFixed(2)+' kg · ₱'+Math.round(pz).toLocaleString('en-PH');
+}
+/* Walk _renderRows once and hand back {sections:[{r,rows}], seq:[...]} so the
+   three renderers below share one traversal instead of three near-copies. */
+function _repSeq(enriched){
+  const seq=_renderRows(enriched||[]); let n=0; const out=[];
+  for(let i=0;i<seq.length;i++){
+    const r=seq[i];
+    if(r.type==='item'){ n++; out.push({t:'item', n, l:r.l}); continue; }
+    const rows=[];
+    for(let j=i+1;j<seq.length;j++){ if(seq[j].type==='item') rows.push(seq[j].l);
+      else if(r.type==='g1'&&seq[j].type==='g1') break; else if(r.type==='g2'&&seq[j].type!=='item') break; }
+    out.push({t:r.type, label:r.label, rows});
+  }
+  return out;
+}
 // A saved demand plot is immutable — VIEW it read-only, then print or download.
 async function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p;
   const date=p.plan_date||p.date||''; const ref=d.ref||p.ref||''; window._viewPlan={date,ref,d};
@@ -9447,14 +9551,24 @@ async function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.
     });
   });
   if(!demRows) demRows='<tr><td colspan="3" class="empty">—</td></tr>';
-  const lineRows=lines.map(l=>`<tr><td>${esc(l.name)}</td><td><code>${esc(l.sku)}</code></td><td class="num">${kgf(l.final)}</td><td>${esc(l.supplier||'')}</td><td class="num">₱${((l.final/1000)*(+l.price||0)).toLocaleString('en-PH',{minimumFractionDigits:2})}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">—</td></tr>';
+  /* the replenishment half, walked the way the freezer is walked — see _planRepRows */
+  const repL=await _planRepRows(lines).catch(()=>lines.map(l=>({...l,ref_sku:l.sku,_kg:(+l.final||0)/1000,_peso:((+l.final||0)/1000)*(+l.price||0)})));
+  window._viewPlanRep=repL;
+  const _rc=_repCols();
+  let lineRows='';
+  _repSeq(repL).forEach(r=>{
+    if(r.t==='g1'){ lineRows+=`<tr style="background:#e7f0e9"><td colspan="${_rc.length}"><b>${_repSecLabel(r,r.rows)}</b></td></tr>`; return; }
+    if(r.t==='g2'){ lineRows+=`<tr style="background:#f6f8f4"><td colspan="${_rc.length}" style="padding-left:22px">▸ ${_repSecLabel(r,r.rows)}</td></tr>`; return; }
+    lineRows+='<tr>'+_rc.map(c=>`<td${c.align==='right'?' class="num"':''}>${c.label==='SKU'?('<code>'+esc(String(c.val(r.l,r.n)))+'</code>'):esc(String(c.val(r.l,r.n)))}</td>`).join('')+'</tr>';
+  });
+  if(!lineRows) lineRows=`<tr><td colspan="${_rc.length}" class="empty">—</td></tr>`;
   $('modal').innerHTML=`<h3>📋 Demand plot ${esc(ref)} <span class="badge b-approved" style="margin-left:6px">locked</span></h3>
     <div class="mini">Plan date ${esc(date)} · ${esc(weekOf(date))} · saved by ${esc(d.by||p.created_by||'—')} — read-only snapshot</div>
     <div style="max-height:50vh;overflow:auto;margin-top:10px">
       <h4 style="margin:6px 0">Demand — ${demItems.length} SKU(s) · ${totPacks} packs${demItems.some(x=>x.cust)?' · includes custom orders':''}</h4>
       <table><thead><tr><th>Product</th><th>SKU</th><th class="num">Packs</th></tr></thead><tbody>${demRows}</tbody></table>
       <h4 style="margin:14px 0 6px">Replenishment (${lines.length} item(s) · est. ₱${Math.round(totVal).toLocaleString('en-PH')})</h4>
-      <table><thead><tr><th>Ingredient</th><th>SKU</th><th class="num">Order (kg)</th><th>Supplier</th><th class="num">Est ₱</th></tr></thead><tbody>${lineRows}</tbody></table>
+      <table><thead><tr>${_rc.map(c=>`<th${c.align==='right'?' class="num"':''}>${esc(c.label)}</th>`).join('')}</tr></thead><tbody>${lineRows}</tbody></table>
     </div>
     <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="printMRPPlan()">🖨 Print</button><button class="btn sec" onclick="downloadMRPPlan()">⬇ Download CSV</button>${p.drive_url?`<a class="btn sec" href="${esc(safeUrl(p.drive_url))}" target="_blank" rel="noopener noreferrer">📄 Open PDF</a>`:''}<span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
   $('overlay').classList.add('on');
@@ -9478,20 +9592,47 @@ function demandPlotHtml(date, ref, d){
   });
   if(!demRows) demRows='<tr><td colspan="3">—</td></tr>';
   const demTot=items.reduce((a,x)=>a+x.qty,0);
-  const body=lines.map(l=>`<tr><td>${esc(l.name)}</td><td>${esc(l.sku)}</td><td style="text-align:right">${kgf(l.final)}</td><td>${esc(l.supplier||'')}</td><td style="text-align:right">${((l.final/1000)*(+l.price||0)).toLocaleString('en-PH',{minimumFractionDigits:2})}</td></tr>`).join('')||'<tr><td colspan="5">—</td></tr>';
+  /* The buying half prints the way the count sheet prints — same classifier,
+     same order, bin on every line. window._viewPlanRep is filled by viewMRPPlan;
+     the automation path has no screen behind it, so it falls back to flat. */
+  const _rc=_repCols();
+  const repL=((window._viewPlanRep||[]).length && (window._viewPlan||{}).ref===ref)
+    ? window._viewPlanRep
+    : lines.map(l=>({...l, ref_sku:l.sku, _kg:(+l.final||0)/1000, _peso:((+l.final||0)/1000)*(+l.price||0)}));
+  let body='';
+  _repSeq(repL).forEach(r=>{
+    if(r.t==='g1'){ body+=`<tr><td colspan="${_rc.length}" style="background:#e7f0e9;font-weight:700">${_repSecLabel(r,r.rows)}</td></tr>`; return; }
+    if(r.t==='g2'){ body+=`<tr><td colspan="${_rc.length}" style="background:#f4f7f2;padding-left:18px">▸ ${_repSecLabel(r,r.rows)}</td></tr>`; return; }
+    body+='<tr>'+_rc.map(c=>`<td${c.align==='right'?' style="text-align:right"':''}>${esc(String(c.val(r.l,r.n)))}</td>`).join('')+'</tr>';
+  });
+  if(!body) body=`<tr><td colspan="${_rc.length}">—</td></tr>`;
   return `<html><head><meta charset="utf-8"><title>${esc(ref)}</title><style>@page{margin:16mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:4px 0 14px}h3{color:#4e7a3e;font-size:13px;margin:16px 0 6px}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #eee}tr.tot td{font-weight:700;border-top:2px solid #4e7a3e}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Demand Plot</h1><h2>${esc(ref)} · ${esc(date)} (${esc(weekOf(date))})</h2>
     <h3>Demand — ${items.length} SKU(s) · ${demTot} packs</h3><table><thead><tr><th>Product</th><th>SKU</th><th style="text-align:right">Packs</th></tr></thead><tbody>${demRows}
     <tr class="tot"><td colspan="2" style="text-align:right">Total packs</td><td style="text-align:right">${demTot}</td></tr></tbody></table>
-    <h3>Replenishment</h3><table><thead><tr><th>Ingredient</th><th>SKU</th><th style="text-align:right">Order (kg)</th><th>Supplier</th><th style="text-align:right">Est ₱</th></tr></thead><tbody>${body}
-    <tr class="tot"><td colspan="4" style="text-align:right">Total</td><td style="text-align:right">₱${Math.round(total).toLocaleString('en-PH')}</td></tr></tbody></table>
+    <h3>Replenishment — ${lines.length} item(s) · ${kgf(lines.reduce((a,l)=>a+(+l.final||0),0))} kg</h3>
+    <table><thead><tr>${_rc.map(c=>`<th${c.align==='right'?' style="text-align:right"':''}>${esc(c.label)}</th>`).join('')}</tr></thead><tbody>${body}
+    <tr class="tot"><td colspan="${_rc.length-1}" style="text-align:right">Total</td><td style="text-align:right">₱${Math.round(total).toLocaleString('en-PH')}</td></tr></tbody></table>
     <p style="margin-top:22px;color:#888;font-size:11px">Locked snapshot · ${new Date().toLocaleString()}</p></body></html>`;
 }
 function printMRPPlan(){ const v=window._viewPlan; if(!v)return;
   const w=window.open('','_pr','width=840,height=920'); if(!w){toast('Allow pop-ups to print',true);return;}
   w.document.write(demandPlotHtml(v.date,v.ref,v.d)); w.document.close(); w.focus(); setTimeout(()=>w.print(),200); }
+/* The download is the printout, line for line. It used to be its own flat list
+   of five hand-written headings, which is precisely how a sheet and its export
+   drift into two different orders — the same mistake _cntCols() was written to
+   stop on the count sheet. Both are built from _repCols() and _repSeq() now. */
 function downloadMRPPlan(){ const v=window._viewPlan; if(!v)return; const lines=_viewPlanRows();
-  const aoa=[['Ingredient','SKU','Order (kg)','Supplier','Est ₱']].concat(lines.map(l=>[l.name,l.sku,kgf(l.final),l.supplier||'',Math.round((l.final/1000)*(+l.price||0))]));
+  const cols=_repCols(); const N=cols.length;
+  const repL=(window._viewPlanRep||[]).length ? window._viewPlanRep
+    : lines.map(l=>({...l, ref_sku:l.sku, _kg:(+l.final||0)/1000, _peso:((+l.final||0)/1000)*(+l.price||0)}));
+  const aoa=[cols.map(c=>c.label)];
+  _repSeq(repL).forEach(r=>{
+    if(r.t==='item'){ aoa.push(cols.map(c=>{ const x=c.val(r.l,r.n); return x==null?'':x; })); return; }
+    const b=Array(N).fill(''); b[1]=(r.t==='g2'?'▸ ':'')+String(r.label)
+      +' ('+r.rows.length+' · '+r.rows.reduce((a,x)=>a+(x._kg||0),0).toFixed(2)+' kg)';
+    aoa.push(b);
+  });
   const csv=aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n');
   dlBlob(csv,'WR_demand_'+(v.date||'plot')+'_'+(v.ref||'').replace(/[^\w.-]+/g,'_')+'.csv','text/csv'); toast('Downloaded'); }
 async function delMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; if(!confirm('Delete this saved demand plan? This cannot be undone.'))return; try{ if(isLive()&&p.id){ await sb('mrp_plans?id=eq.'+p.id,{method:'DELETE',prefer:'return=minimal'}); } else { const a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a.splice(i,1); localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); } }catch(e){ toast(e.message,true); } renderMRP(); }
@@ -13731,20 +13872,91 @@ async function prodLoadTargets(){
 
      Custom orders are not par-driven — nobody holds a shelf of one customer's
      recipe — so those keep their own figure: the packs the order still owes. */
+  /* THE PLOT IS NOT THE TARGET. IT IS THE COVERAGE CHECK.
+     ---------------------------------------------------------------------
+     The plot was briefly made the target here, on the reasoning that a saved
+     plot is a decision the ingredients were bought against. It is — but that is
+     a statement about BUYING, and this screen is about MAKING, and three
+     scenarios show they are not the same question:
+
+       · ORDERS SPIKE. Two hundred packs sell in a weekend the plot never saw.
+         A frozen target says 36 and the kitchen goes home. The live figure
+         catches it the moment the shelf moves; a plot cannot, ever.
+
+       · SUPPLY-LED LINES ARE DELIBERATELY OFF THE PLOT. Rabbit and goat do not
+         arrive because we asked — they arrive when a supplier has them — so
+         they are kept out of demand planning and off purchase orders on
+         purpose. They are still made, and made in quantity, the moment stock
+         lands. A plot-anchored target would peg them to whatever stale figure
+         a plot last happened to carry, or to nothing at all.
+
+       · PACKS MADE YESTERDAY. Production raises the stock the live figure
+         subtracts, so the target falls by itself with no plot to re-save.
+
+     So the target is what it always was and what the kitchen's own sheet
+     computes: New Par + safety − (what the shop can sell + what is made at the
+     commissary and not yet shipped), rounded to a case of 12 with a floor of
+     24. Self-adjusting, by construction.
+
+     WHAT THE PLOT IS FOR, THEN. It answers the other question — were the
+     ingredients bought for this? — and it belongs beside the target, not
+     instead of it. Where the target has run AHEAD of the plot, the difference
+     is the exact quantity nobody has bought raws for. That gap is the spike
+     alarm, and no screen had it before: the plot bought for 36, the shelf now
+     needs 204, so 168 packs' worth of ingredients were never ordered. Go and
+     pull the week again.
+
+     THE TRAP, unchanged and still the reason nothing is subtracted below.
+     Production already confirmed is inside the stock the target subtracts, so
+     it has ALREADY reduced it. Deducting a separate "produced" figure on top
+     would take it off twice and send the kitchen home early. Remaining is
+     target − what this run adds; Made is there to be read. */
   let dm={}, made={}, coCount=0, ref='', planDate='';
+  const src={}, live={}, gap={};
   try{ await stockPicture(); }catch(e){}
   (window._prodAllProducts||[]).forEach(p=>{
     if(p.is_custom||/^CUST-/i.test(String(p.sku||''))) return;
     const pic=stockPicFor(p.sku); const q=pic&&+pic.produce||0;
-    if(q>0) dm[p.sku]=q;
+    if(q>0){ live[p.sku]=q; dm[p.sku]=q; src[p.sku]=isSupplyLed(p)?'supply':'live'; }
   });
+
+  /* THE NEWEST PLOT, AND THE PRODUCTION DATE HAS NO SAY IN IT.
+     The obvious thing is to take the plot for the week the production date
+     falls in. It is also the mistake this screen already made once and was
+     fixed for: the kitchen types the day the packs were actually made, not the
+     week they want to see, so treating that field as a query made every target
+     vanish the moment somebody back-dated a run. The date records; it does not
+     ask. The newest saved plot is what the ingredients were bought against
+     until a newer one replaces it, whatever date is in the box. */
+  let plotDm={};
+  try{
+    mrpPlanCache=await mrpPlans();
+    const cand=(mrpPlanCache||[]).map(x=>({p:x,d:String(x.plan_date||x.date||'').slice(0,10)}))
+      .filter(x=>x.d).sort((a,b)=>b.d.localeCompare(a.d))[0];
+    if(cand){ const d=cand.p.data||cand.p; ref=(d&&d.ref)||cand.p.ref||''; planDate=cand.d; plotDm={...(d.demand||{})}; }
+  }catch(e){}
+  window._prodPlotDm=plotDm;
+  window._prodLiveDm=live;
+
   window._prodCoDue={};
   try{
     const full=await coOpenDemand();
     window._prodCoDue=full;
     Object.keys(full).forEach(s=>{ const q=+full[s].packs||0;
-      if(q>0){ dm[s]=Math.max(+dm[s]||0, q); coCount++; } });
+      if(q>0){ dm[s]=Math.max(+dm[s]||0, q); src[s]='order'; coCount++; } });
   }catch(e){}
+
+  /* THE GAP — what the kitchen is being asked to make beyond what anybody
+     bought raws for. A supply-led line is not counted: it was left off the plot
+     on purpose and there is no purchase to be short of. Neither is a custom
+     order — locking one puts its ingredients into the run of its own accord. */
+  let gapPacks=0, gapN=0;
+  Object.keys(dm).forEach(sku=>{
+    if(src[sku]!=='live') return;
+    const short=Math.max(0, (+dm[sku]||0) - (+plotDm[sku]||0));
+    if(short>0){ gap[sku]=short; gapPacks+=short; gapN++; }
+  });
+  window._prodPlotGap=gap;
 
   /* What has already been made this week — shown beside the target so the
      kitchen can see the run taking shape, never subtracted from it. */
@@ -13756,22 +13968,15 @@ async function prodLoadTargets(){
     ((S&&S.rows)||[]).forEach(r=>{ const m=+r.madeAll||0; if(m>0) made[r.sku]=m; });
   }catch(e){}
 
-  /* the newest plot, for the line under the date — so a week that WAS locked
-     against a different number is still visible rather than silently replaced */
-  let plotDm={};
-  try{
-    mrpPlanCache=await mrpPlans();
-    const newest=(mrpPlanCache||[]).map(x=>({p:x,d:String(x.plan_date||x.date||'')}))
-      .filter(x=>x.d).sort((a,b)=>b.d.localeCompare(a.d))[0];
-    if(newest){ const d=newest.p.data||newest.p; ref=(d&&d.ref)||newest.p.ref||''; planDate=newest.d; plotDm={...(d.demand||{})}; }
-  }catch(e){}
-  window._prodPlotDm=plotDm;
-
   prodTargetMap=dm;
   prodMadeMap=made;
   prodProducedMap={};                 // deliberately empty — see the trap above
+  window._prodTargetSrc=src;
   window._prodTargetN=Object.keys(dm).length;
   window._prodTargetCo=coCount;
+  window._prodTargetSupN=Object.keys(src).filter(k=>src[k]==='supply').length;
+  window._prodTargetGapN=gapN;
+  window._prodTargetGapPacks=gapPacks;
   window._prodTargetPlot=Object.keys(dm).length>0;
   window._prodTargetLocked=window._prodTargetPlot;
   window._prodTargetRef=ref;
@@ -13995,21 +14200,37 @@ function drawProdPlan(){
     ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
     <span class="mini" style="color:var(--muted)">the day this run was actually made — it does not choose which demand is shown</span>
     ${window._prodTargetPlot
-      ? `<span style="color:var(--muted);font-size:12px"><b>Running target</b> — the <b>To Produce</b> figure from Regular Packs, for ${window._prodTargetN} product(s)${window._prodTargetCo?' including '+window._prodTargetCo+' custom order SKU(s)':''}. Minimum 24, in steps of 12. It counts stock at <b>both sites</b>, so it falls on its own as packs are made and there is no plot to re-save.${window._prodTargetRef?' Newest saved plot: '+esc(window._prodTargetRef)+(window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':'')+' — shown per row where it differs.':''} <b>Remaining</b> = target − what this run adds.</span>`
+      ? `<span style="color:var(--muted);font-size:12px"><b>Running target</b> — the <b>To Produce</b> figure from Regular Packs, for ${window._prodTargetN} product(s)${window._prodTargetCo?' including '+window._prodTargetCo+' custom order SKU(s)':''}. New Par + safety − (what the shop can sell + what is made here and not yet shipped). Minimum 24, in steps of 12. It counts stock at <b>both sites</b>, so it answers a spike the moment the shelf moves and falls on its own as packs are made — there is no plot to re-save.${window._prodTargetSupN?' '+window._prodTargetSupN+' supply-led line(s) are here on purpose: they are kept off demand planning because we take what a supplier has, and made in full when it lands.':''} <b>Remaining</b> = target − what this run adds.${window._prodTargetRef?' Ingredients were bought against '+esc(window._prodTargetRef)+(window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':'')+' — the coverage note on each row says whether that plot covers it.':' <b>No demand plot exists</b>, so no ingredients have been ordered against any of this.'}</span>`
       : `<span style="color:var(--earth,#b5762a);font-size:12px"><b>Nothing needs producing</b> — every product is at or above its New Par and no custom order is owed, so every target is blank. That is the reason, not a fault. You can still build and post a run without one.</span>`}</div>
+    ${window._prodTargetGapPacks?`<div style="margin:8px 0;padding:8px 10px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
+      ⚠ <b>${window._prodTargetGapPacks} pack(s) across ${window._prodTargetGapN} product(s) are beyond what the plot bought raws for.</b>
+      The shelf has moved since ${esc(window._prodTargetRef||'the last plot')} — orders came in, or these lines were never plotted. The packs can still be made if the ingredients happen to be in the freezer;
+      what is <i>not</i> true is that anybody ordered for them. Open <b>Demand/MRP</b> and <b>🧮 Pull the week</b> again to buy the difference.
+      <span class="mini" style="color:var(--muted)">Supply-led lines and custom orders are excluded from this count — neither is bought against a plot.</span></div>`:''}
     <div class="smart" style="margin:8px 0"><div class="stile"><div class="v">${totTarget}</div><div class="l">Target packs</div></div><div class="stile"><div class="v">${totGood}</div><div class="l">This run (good)</div></div><div class="stile"><div class="v" style="color:${totRemain>0?'var(--berry)':'#4e7a3e'}">${totRemain}</div><div class="l">Remaining to make</div></div></div>
     <div style="overflow-x:auto"><table style="min-width:1060px"><thead><tr><th>Product</th>
       <th class="num" title="Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. The first figure already IS the Shopify reading, water-line adjusted — it is not added a second time.">Current<br>stock</th>
       <th class="num" title="Days = how long the sellable shelf lasts. % = everything we own against New Par + safety. High % with low days means the packs exist but are at the wrong site — send a van, not a butchery day.">Cover<br>d · %</th>
-      <th class="num" title="The To Produce figure from Regular Packs — (New Par − stock at both sites) + lead-time demand, rounded up to a case of 12 with a floor of 24. It falls on its own as packs are made, because what is made is already inside the stock it subtracts.">Target</th><th class="num" title="Packs confirmed in the last fortnight, for information. It is NOT taken off the target — production already made is inside the stock the target subtracts, so deducting it again would take it off twice.">Made (2wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
+      <th class="num" title="The To Produce figure from Regular Packs — (New Par − what the shop can sell − what is made here and not yet shipped) + lead-time demand, rounded up to a case of 12 with a floor of 24. It answers a spike as soon as the shelf moves, and falls on its own as packs are made. The note underneath says whether the demand plot bought ingredients for it.">Target</th><th class="num" title="Packs confirmed in the last fortnight, for information. It is NOT taken off the target — production already made is inside the stock the target subtracts, so deducting it again would take it off twice.">Made (2wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
     ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodMadeMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
       const _plot=+((window._prodPlotDm||{})[l.product_sku])||0;
+      const _src=(window._prodTargetSrc||{})[l.product_sku]||'';
+      const _gap=+((window._prodPlotGap||{})[l.product_sku])||0;
+      /* THE NOTE ANSWERS "DID ANYBODY BUY FOR THIS?", which is a different
+         question from the target beside it and the only one the plot can
+         answer. Four true answers, and none of them is the target. */
+      const _tnote =
+          (_src==='order')  ? `<div class="mini" style="color:var(--berry)">owed by the order • ingredients go in when it is locked</div>`
+        : (_src==='supply') ? `<div class="mini" style="color:var(--muted)" title="supply-led: it is kept off demand planning and off purchase orders on purpose, because we take whatever a supplier has and make all of it when it lands. Nothing is missing here.">supply-led • never bought against a plot</div>`
+        : (_gap>0)          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="${_plot>0?('the plot bought raws for '+_plot+'. The shelf has moved since, so '+_gap+' more are needed than anybody ordered for.'):'no demand plot asked for this product, so no ingredients were ordered against it.'}">⚠ ${_plot>0?('plot bought '+_plot+' • short '+_gap):'not on the plot • nothing ordered'}</div>`
+        : (_plot>0)         ? `<div class="mini" style="color:var(--muted)">plot bought ${_plot} • covered</div>`
+        : '';
       const _pic=stockPicFor(l.product_sku);
       return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${t?'':'<div class="mini" style="color:var(--muted)">no target — made to order</div>'}
         ${(_pic&&_pic.toMove>0&&_pic.toMake<=0)?`<div class="mini" style="color:var(--earth,#b5762a)" title="the packs already exist at ${esc(locName(planProduceLoc()))} — this line needs a transfer, not a run">↦ ${_spN(_pic.toMove)} already made — transfer, don't produce</div>`:''}</td>
       <td class="num">${spStockCell(_pic)}</td>
       <td class="num">${spCoverCell(_pic)}</td>
-      <td class="num">${t||'—'}${(_plot>0&&_plot!==t)?`<div class="mini" style="color:var(--muted)" title="the locked demand plot for this product asked for ${_plot}. The target beside it is the live replenishment figure, which has moved since — because packs have sold, or because some have been made.">plot said ${_plot}</div>`:''}</td><td class="num" style="color:var(--muted)">${p||'—'}</td>
+      <td class="num">${t||'—'}${t?_tnote:''}</td><td class="num" style="color:var(--muted)">${p||'—'}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:74px;text-align:right" value="${l.good_packs||''}" oninput="prodPlanLines[${i}].good_packs=+this.value||0;prodRemainCell(${i})" onchange="prodPackTouch()"></td>
       <td class="num" id="prem${i}">${t?`<b style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem}</b>`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
       <td class="num"><input type="number" step="any" inputmode="decimal" style="width:60px;text-align:right" value="${l.reject_packs||''}" oninput="prodPlanLines[${i}].reject_packs=+this.value||0"></td>
