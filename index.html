@@ -5073,7 +5073,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-12 16:40Z';
+const WR_BUILD='2026-09-12 19:05Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -8682,9 +8682,7 @@ async function renderMRP(){
     const orders=[]; coSkus.forEach(k=>coAll[k].orders.forEach(o=>{ if(!orders.includes(o.ref)) orders.push(o.ref); }));
     const byNeed=(x,y)=>String(coAll[x].needed||'9999').localeCompare(String(coAll[y].needed||'9999'));
     const freshSkus=coSkus.filter(k=>!coDone[k]).sort(byNeed);
-    const doneSkus =coSkus.filter(k=>coDone[k]).sort(byNeed);
     const nFreshOrders=new Set(); freshSkus.forEach(k=>coAll[k].orders.forEach(o=>nFreshOrders.add(o.ref)));
-    const nDoneOrders =new Set(); doneSkus.forEach(k=>coAll[k].orders.forEach(o=>nDoneOrders.add(o.ref)));
     const _corow=(sku,planned)=>{
       const c=coAll[sku]; const inD=+mrpDemand[sku]||0;
       const late=c.needed && c.needed<todayISO();
@@ -8709,7 +8707,7 @@ async function renderMRP(){
     const _cohead=`<thead><tr><th>Customer / order</th><th>Product</th><th>Needed</th><th class="num">Ordered</th><th class="num">In this run</th><th>Where it stands</th></tr></thead>`;
     dh+=`<div class="repcard" style="border-left:4px solid var(--berry)">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <h3 style="margin:0">🧑‍🍳 Custom orders — ${nFreshOrders.size} to plan${nDoneOrders.size?(', '+nDoneOrders.size+' already planned'):''}</h3>
+        <h3 style="margin:0">🧑‍🍳 Custom orders — ${nFreshOrders.size} to plan</h3>
         ${nCoPend?(_lockedPlot
           ? `<button class="btn sm sec" onclick="mrpGoDate('${esc(_nextMon)}')" title="this week is locked — plan them in the next run">→ Plan the ${nCoPend} new one(s) in the next run (${esc(_nextMon)})</button>`
           : `<button class="btn sm" onclick="mrpPullCustom()">＋ Add the ${nCoPend} unplanned to this run</button>`):''}
@@ -8718,16 +8716,11 @@ async function renderMRP(){
         🔒 <b>${esc(MRPDATE)} is locked</b> (${esc(_lockedPlot.ref||'saved plot')}). Ingredients were bought against it and the run is scheduled from it, so orders that arrived afterwards do <b>not</b> join it —
         adding packs to a document everybody has already acted on is how the kitchen ends up short on the thing it thought was covered.
         New orders go into the next run, <b>${esc(_nextMon)}</b>.</div>`:''}
-      <div class="hint" style="margin:6px 0 8px">Every <b>locked</b> order that still owes packs, <b>whatever week it is scheduled for</b>. An order already on a saved demand plot or a live production plan drops out of the table below — it is not new work — but it stays listed underneath, because <b>the packs are still owed until they are actually produced</b>. Only confirmed production clears an order from here for good.</div>
+      <div class="hint" style="margin:6px 0 8px">Every <b>locked</b> order whose ingredients have <b>not been bought yet</b>, whatever week it is scheduled for. This screen orders ingredients — so once an order is on a saved demand plot or a live production plan it leaves the list, because its ingredients are already on a purchase run and buying them a second time is the one mistake this card exists to prevent. Whether the packs have actually been <b>made</b> is a different question, and the <b>weekly production target</b> answers it.</div>
       ${freshSkus.length
         ? `<div style="overflow-x:auto"><table>${_cohead}<tbody>${freshSkus.map(k=>_corow(k,false)).join('')}</tbody></table></div>
            <div class="pager">${freshSkus.length} custom SKU(s) need planning · ${freshSkus.reduce((n,k)=>n+coAll[k].packs,0)} pack(s)</div>`
-        : `<div class="hint" style="background:#eef5ee;border-color:#cfe0cf;margin:0"><b>✅ Nothing new to plan.</b> All ${coSkus.length} custom SKU(s), ${totPacks} pack(s), are already on a demand plot or a production plan — listed below.</div>`}
-      ${doneSkus.length?`<details style="margin-top:10px">
-        <summary style="cursor:pointer;font-weight:700;font-size:13px;color:var(--muted)">Already planned — ${doneSkus.length} custom SKU(s), ${doneSkus.reduce((n,k)=>n+coAll[k].packs,0)} pack(s) still owed · nothing to do here</summary>
-        <div class="hint" style="margin:8px 0">Each of these is already on a demand plot or a production plan, so the ingredients have been counted once. There is <b>no quantity box</b> on these rows for that reason — putting a figure against one would order the same packs a second time. They drop off this list for good when the production run is <b>confirmed</b>.</div>
-        <div style="overflow-x:auto"><table>${_cohead}<tbody>${doneSkus.map(k=>_corow(k,true)).join('')}</tbody></table></div>
-      </details>`:''}
+        : `<div class="hint" style="background:#eef5ee;border-color:#cfe0cf;margin:0"><b>✅ No custom order needs ingredients in this run.</b> All ${coSkus.length} custom SKU(s), ${totPacks} pack(s), are already covered by a demand plot or a production plan. What is still owed <i>on the floor</i> is a production question — see the <b>weekly production target</b>.</div>`}
       </div>`;
   }
   if(!coSkus.length){
@@ -11112,6 +11105,11 @@ function coIsOpen(s){ return CO_OPEN.includes(coStat(s)); }
    orders, and only the status of the still-open ones can move. */
 const CO_LOCKED=CO_OPEN.concat(['completed']);
 function coIsLocked(s){ return CO_LOCKED.includes(coStat(s)); }
+/* PAST DRAFT is not the same question as LOCKED. A cancelled order is past
+   draft — its SKUs exist, its recipe is frozen, nobody may re-quote it — but it
+   is NOT locked: it owes nothing and must never claim produced packs. The form
+   asks the first question, coOpenDemand asks the second. */
+function coPastDraft(s){ return coStat(s)!=='draft'; }
 /* Attribute produced packs to the orders entitled to them.
    `orders` and `lines` as loaded; returns {ref:{ord,got}} for the locked ones. */
 function coClaimPacks(orders, lines, made){
@@ -11214,7 +11212,13 @@ function coSyncNeeded(){
   const d=coProduceBy(coRec);
   if(d) coRec.needed_date=d;
 }
-function coIsLocked(s){ const k=coStat(s); return k!=='draft'; }
+/* coIsLocked lives with CO_LOCKED, far above. A SECOND declaration used to sit
+   here reading `k!=='draft'`, and because function declarations hoist, THAT one
+   won everywhere — so a CANCELLED order counted as locked and drained the
+   produced-pack pool in coOpenDemand and coClaimPacks before any live order
+   could claim it. Alayne has exactly that shape on file: a cancelled 42-pack
+   quail order and an open 56-pack one on the same SKU. The duplicate is gone;
+   cancelled is not locked. */
 function _coHash(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))|0; } return (h>>>0).toString(36); }
 /* A CODE NOBODY CAN READ IS A CODE NOBODY CAN CHECK.
    CUST-9K8TX3 is a hash of the recipe. That was deliberate — two orders with
@@ -12108,13 +12112,13 @@ async function coDeleteOrder(){
   }catch(e){ hideBusy(); toast(_coErr(e),true); }
 }
 function drawCOForm(){
-  const locked = coIsLocked(coRec.status);
+  const locked = coPastDraft(coRec.status);
   $('crumb').innerHTML=`<b>Custom Orders</b> / ${esc(coRec.order_ref||'New quote')}`;
   $('cp').innerHTML=`<div class="title">Custom Orders</div>
     ${!locked?`<button class="btn sec" onclick="coSave()">💾 Save quote</button><button class="wfbtn" onclick="coLock()">🔒 Lock order</button>`:''}
     ${coIsOpen(coRec.status)?`<button class="btn sec" onclick="coFulfil()">✓ Mark completed</button>`:''}
-    ${(coIsLocked(coRec.status)&&coRec.order_ref)?`<button class="btn sec" onclick="coHandover()" title="the customer has it — take the packs out of stock where they are standing. Nothing goes to the shop; a custom mix is never sold there.">🚚 Hand over</button>`:''}
-    ${(coIsLocked(coRec.status)&&coIsOpen(coRec.status)&&coRec.order_ref)?`<button class="btn sec" onclick="coCloseOut()" title="stop it asking for packs that are never going to be made — records what was produced and writes off the rest">📕 Close out</button>`:''}
+    ${(locked&&coRec.order_ref)?`<button class="btn sec" onclick="coHandover()" title="the customer has it — take the packs out of stock where they are standing. Nothing goes to the shop; a custom mix is never sold there.">🚚 Hand over</button>`:''}
+    ${(locked&&coIsOpen(coRec.status)&&coRec.order_ref)?`<button class="btn sec" onclick="coCloseOut()" title="stop it asking for packs that are never going to be made — records what was produced and writes off the rest">📕 Close out</button>`:''}
     ${!locked&&coRec.order_ref?`<button class="btn sec" onclick="coCancel()">✕ Cancel</button>`:''}
     ${(locked&&coIsOpen(coRec.status)&&coRec.order_ref)?`<button class="btn sec" style="color:var(--danger)" onclick="coCancelLocked()" title="the customer pulled out, or this was locked by mistake — takes the packs back out of demand, if nothing has planned them yet">✕ Cancel order</button>`:''}
     ${(coStat(coRec.status)==='cancelled'&&coRec.order_ref)?`<button class="btn sec" style="color:var(--danger)" onclick="coDeleteOrder()" title="remove the record entirely — only possible while nothing points at it">🗑 Delete</button>`:''}
@@ -12227,8 +12231,8 @@ async function coForkRecipe(i){
   drawCOForm(); coEditRecipe(i);
 }
 function coEditRecipe(i){ _coEditIdx=i; const l=coLines[i]; _coEditRows=(l.recipe||[]).map(r=>({...r}));
-  window._coRecipeRO=coIsLocked(coRec&&coRec.status) || !!(l&&l.locked_recipe);
-  window._coRecipeShared=!!(l&&l.locked_recipe) && !coIsLocked(coRec&&coRec.status);
+  window._coRecipeRO=coPastDraft(coRec&&coRec.status) || !!(l&&l.locked_recipe);
+  window._coRecipeShared=!!(l&&l.locked_recipe) && !coPastDraft(coRec&&coRec.status);
   window._coRecipeIdx=i;
   // No blank starter row any more — each PMR section carries its own "＋ Add".
   _coEditBase=_coEditRows.filter(r=>r.ingredient_sku&&+r.grams>0).length; drawCoRecipe(); }
@@ -12654,7 +12658,7 @@ async function coCloseOut(){
    packs never need to touch Pasig at all. */
 async function coHandover(){
   if(!coRec.order_ref){ toast('Save the order first',true); return; }
-  if(!coIsLocked(coRec.status)){ toast('Lock the order first — there is nothing made yet',true); return; }
+  if(!coPastDraft(coRec.status)){ toast('Lock the order first — there is nothing made yet',true); return; }
   showBusy('Finding the packs…');
   let rows=[], err='';
   try{
