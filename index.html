@@ -5073,7 +5073,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-12 23:10Z';
+const WR_BUILD='2026-09-13 02:40Z';
 function updateMode(){ const t=$('modeTag'); if(isLive()){t.className='mode live';t.textContent=SUPA.token?'LIVE 🔒':'LIVE';} else {t.className='mode demo';t.textContent='DEMO';}
   netTick();
   const b=$('buildTag'); if(b){ b.textContent='build '+WR_BUILD; b.title='This page was built '+WR_BUILD+'. If it does not match the file you just deployed, you are looking at a cached copy — hard-refresh (Ctrl+Shift+R).'; }
@@ -6579,6 +6579,7 @@ async function wdtSheetLoad(){
 
        A back-dated sheet has no live reading, so it keeps the plot arithmetic
        it always had — see the note where PIC is read. */
+    const _sup = !isCust && isSupplyLed(pBy[sku]||{});
     const _live = (!isCust && liveProduce[sku]!=null) ? (+liveProduce[sku]||0) : null;
     const plotAsked = effPlot;
     const target = isCust ? (+cust[sku]||0)
@@ -6599,7 +6600,7 @@ async function wdtSheetLoad(){
     return {sku, name:prodLabel(p,{noSku:true}),
             g1:_isC?'Custom Orders':prodG1(p),
             g2:_isC?((custBy[sku]&&(custBy[sku].orders||[])[0]||{}).customer||prodG2(p)):prodG2(p),
-            target, madeAll, madeAfter, still, oh, gap, plotAsked, live:_live,
+            target, madeAll, madeAfter, still, oh, gap, plotAsked, live:_live, supply:_sup,
             beg:b, made:M, sold:sl, other:ot, end,
             drift:Math.round((oh-end)*1000)/1000,
             plots:P, restated, custom:+cust[sku]||0,
@@ -6664,7 +6665,7 @@ function _wdtSheetHtml(){
       </tr>
       <tr>
         <th class="stk1">SKU</th><th class="stk2">Product name › variant</th>
-        <th class="num" title="What is still owed. For a catalogue product: the newest plot, plus any committed custom order — NOT the plot columns added up. For a CUSTOM order the target is the ORDER itself and the plot columns are history: the same packs reach the plot through the demand sync, so adding both would order them twice.">Target</th>
+        <th class="num" title="What must be MADE, from the shelf as it stands now: New Par + safety − (what the shop can sell + what is made here and not yet shipped), plus any committed custom order. The line underneath says whether the newest demand plot bought ingredients for it — a target above the plot is a quantity nobody ordered raws for, and a supply-led line is never in a plot by design. For a CUSTOM order the target is the ORDER itself and the plot columns are history.">Target<div class="mini" style="font-weight:400;opacity:.75">· in the demand plot?</div></th>
         <th class="num" title="Everything produced inside the window. Shown for the record; it is not the figure subtracted from Target.">Made this period</th>
         <th class="num" title="Target minus what was made AFTER the newest plot.">Still to make</th>
         <th class="num" title="Current stock = what the shop can sell now + what is made but still off-shelf. The same two numbers Regular Packs shows, read the same way. Sellable already IS the Shopify reading, water-line adjusted — it is printed underneath so you can see it, not added again.">Current<br>stock</th>
@@ -6694,7 +6695,8 @@ function _wdtSheetHtml(){
       <td class="stk2" title="${esc(r.name)}"><b>${esc(r.name)}</b>${r.isCustom?' <span class="tagf" style="background:#f3e8f7;color:#6b3f7a">CUSTOM</span>':''}
         <div class="mini" style="color:var(--muted);overflow:hidden;text-overflow:ellipsis">${esc(r.g1)}${r.g2?' › '+esc(r.g2):''}</div>
         ${r.isCustom&&r.coNeeded?`<div class="mini" style="color:${r.coNeeded<todayISO()?'var(--danger)':'#6b3f7a'};font-weight:700" title="${esc(r.coRefs||'')}">make by ${esc(r.coNeeded)}${r.coNeeded<todayISO()?' · OVERDUE':''}</div>`:''}</td>
-      <td class="num"><b>${r.target||'—'}</b>${r.custom?`<div class="mini" style="color:#6b3f7a">${r.custom} committed</div>`:''}</td>
+      <td class="num"><b>${r.target||'—'}</b>${r.custom?`<div class="mini" style="color:#6b3f7a">${r.custom} committed</div>`:''}${
+        r.live!=null?covPill(covTag({target:r.target, plot:r.plotAsked, kind:r.supply?'supply':''})):''}</td>
       <td class="num mini" style="color:var(--muted)">${r.madeAll||'—'}</td>
       <td class="num"><b style="color:${r.still?'var(--berry)':'#4e7a3e'}">${r.still}</b></td>
       <td class="num">${r.pic?spStockCell(r.pic)
@@ -7132,11 +7134,35 @@ async function wdtLoad(){
       if(isLive()) (await db.list('stock_balance',{})).forEach(b=>{ if(b.kind==='ingredient') ohI[b.ref_sku]=(ohI[b.ref_sku]||0)+(+b.on_hand||0); });
       else (DEMO.inventory_movements||[]).forEach(m=>{ if(m.kind==='ingredient') ohI[m.ref_sku]=(ohI[m.ref_sku]||0)+(+m.qty||0); });
     }catch(e){}
-    _wdtRaw=Object.keys(need).map(sku=>{ const it=im[sku]||{}; const cl=_countIngClass(it,ctx)||{};
+    /* ---- THE PLOT'S OWN ORDER IS THE DEFAULT QUANTITY ---------------------
+       This list used to show only what the CURRENT target implies, recomputed
+       every time the screen opened. That is a requirement, not an order: the
+       thing the buyer actually acts on is the quantity the saved demand plot
+       asked for, because that is what was decided and priced. So the plot's
+       line is the leading figure and the requirement sits beside it — where
+       the two disagree, the shelf has moved since the plot was saved and the
+       difference is worth seeing rather than silently resolved.
+
+       An ingredient the plot never ordered still prints, at zero, because a
+       requirement nobody bought for is exactly what has to be visible. */
+    const _pl={}; try{ const _pd=(plot&&(plot.data||plot))||null;
+      ((_pd&&_pd.lines)||[]).forEach(l=>{ if(!l||!l.sku) return;
+        _pl[l.sku]={kg:(+l.final||0)/1000, supplier:l.supplier||'', price:+l.price||0}; }); }catch(e){}
+    window._wdtPlotLines=_pl;
+    try{ await loadBins(); }catch(e){}
+    const _rloc=planProduceLoc()||'bulacan';
+    _wdtRaw=Object.keys(need).concat(Object.keys(_pl).filter(k=>!need[k]))
+      .filter((v,i,a)=>a.indexOf(v)===i)
+      .map(sku=>{ const it=im[sku]||{}; const cl=_countIngClass(it,ctx)||{};
       const cat=_ksCat(cl.g1||it.category||''); const y=((+it.yield_pct||100)/100)||1;
-      const p=_procParent(it,bySku,byName);
+      const p=_procParent(it,bySku,byName); const pl=_pl[sku]||null;
       return {sku, name:_outName(it,cl)||it.name||sku, cat:cat.k, catLabel:cat.l, color:cat.c,
-              procG:need[sku], rawG:need[sku]/y, ohProcG:+ohI[sku]||0,
+              /* grouped and ordered exactly as the weekly inventory count sheet
+                 groups it — same classifier, so the two sheets are one walk */
+              lsG1:cl.lsG1, lsG2:cl.lsG2, grank:cl.grank, form:cl.form,
+              bin:binOf(sku,_rloc),
+              plotKg:pl?pl.kg:0, supplier:(pl&&pl.supplier)||it.supplier||'', onPlot:!!pl,
+              procG:need[sku]||0, rawG:(need[sku]||0)/y, ohProcG:+ohI[sku]||0,
               rawSku:p?p.sku:'', rawName:p?p.name:'', ohRawG:p?(+ohI[p.sku]||0):0, yieldPct:Math.round(y*1000)/10};
     }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat)||b.procG-a.procG);
   }catch(e){}
@@ -7145,6 +7171,10 @@ async function wdtLoad(){
   _wdtMatrix=null;
   if(_wdtMode==='matrix'){ try{ _wdtMatrix=await wdtMatrixLoad(plots, pBy, stock); }catch(e){ _wdtMatrix={weeks:[],rows:[],err:String(e&&e.message||e)}; } }
 }
+/* Screen and printout walk the SAME sequence, grouped by the weekly count's own
+   classifier — animal first, then vegetables and fruit, base material
+   underneath. _renderRows is the count sheet's function, not a copy of it. */
+function _wdtRenderRaw(){ return _repSeq(_wdtRaw||[]); }
 function _wdtCover(r){
   if(!r.remaining) return '<span class="badge b-received">done</span>';
   if(r.oh<=0) return '<span class="badge b-cancelled" style="background:#f7dcd6;color:#8a2b1c">nothing on hand</span>';
@@ -8422,20 +8452,26 @@ async function renderWDT(){
       <td>${c.oh>=c.packs?'<span class="badge b-received">ready</span>':'<span class="badge b-open">to make</span>'}</td></tr>`; }).join('')
       ||'<tr><td colspan="7" class="empty">No custom orders owing packs.</td></tr>'}
     </tbody></table></div><div class="pager">${_wdtCo.length} order line(s)</div></div>`;
-  h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Raw ingredients behind the target</span>
-      <span style="color:var(--muted);font-size:12px">Only what is still to make. Processed = what the kitchen weighs out; raw = the same quantity before yield.</span></div>
-    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr><th>Ingredient</th><th class="num">Processed needed</th><th class="num">Processed on hand</th><th class="num">As-purchased raw</th><th class="num">Raw on hand</th></tr></thead><tbody>
-    ${(()=>{ let out='',last='';
-      _wdtRaw.forEach(r=>{ if(r.cat!==last){ last=r.cat; const c=KSHEET_CATS.find(z=>z.k===r.cat)||{l:r.cat,c:'#5C5C5C'};
-          out+=`<tr class="grp"><td colspan="5" style="background:${c.c};color:#fff;font-weight:800">${esc(c.l)}</td></tr>`; }
-        const short=r.rawSku && r.ohRawG < (r.procG-Math.min(r.ohProcG,r.procG))/((r.yieldPct/100)||1);
-        out+=`<tr style="box-shadow:inset 4px 0 0 ${r.color}"><td><b>${esc(r.name)}</b>${r.rawName?`<div class="mini" style="color:var(--muted)">from ${esc(r.rawName)}</div>`:''}</td>
-          <td class="num"><b>${_kgs(r.procG)}</b></td>
-          <td class="num mini" style="color:${r.ohProcG>0?'#1e6b2e':'var(--muted)'}">${r.ohProcG>0?_kgs(r.ohProcG):'—'}</td>
-          <td class="num mini" style="color:var(--muted)">${_kgs(r.rawG)}</td>
-          <td class="num mini" style="color:${short?'var(--danger)':(r.ohRawG>0?'#7a6432':'var(--muted)')}">${r.rawSku?_kgs(r.ohRawG):'—'}${short?' ⚠':''}</td></tr>`; });
-      return out||'<tr><td colspan="5" class="empty">Nothing outstanding.</td></tr>'; })()}
-    </tbody></table></div><div class="pager">${_wdtRaw.length} ingredient(s)</div></div>`;
+  const _rawRef=(_wdtSrc&&_wdtSrc.plot)||'';
+  h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Raw ingredients — what the demand plot ordered</span>
+      <span style="color:var(--muted);font-size:12px">${_rawRef?('The <b>Order</b> column is what <b>'+esc(_rawRef)+'</b> actually asked for — the decision that was priced and sent. '):'<b>No saved demand plot</b>, so nothing has been ordered. '}Processed / raw beside it is what the current target still <i>requires</i>; where the two disagree the shelf has moved since the plot was saved. Grouped exactly as the weekly inventory count sheet groups it.</span></div>
+    <div style="overflow-x:auto" class="stickyhead"><table><thead><tr><th>Ingredient</th><th>Bin</th><th class="num">Order (kg)</th><th>Supplier</th><th class="num">Processed needed</th><th class="num">Processed on hand</th><th class="num">As-purchased raw</th><th class="num">Raw on hand</th></tr></thead><tbody>
+    ${(()=>{ let out=''; const NC=8;
+      _wdtRenderRaw().forEach(r=>{
+        if(r.t==='g1'){ out+=`<tr><td colspan="${NC}" style="background:#e7f0e9;color:#2f5d33;font-weight:800">${esc(r.label)} <span class="mini" style="font-weight:400">· ${r.rows.length} item(s) · ${_kgs(r.rows.reduce((a,x)=>a+(x.plotKg*1000||0),0))} ordered</span></td></tr>`; return; }
+        if(r.t==='g2'){ out+=`<tr><td colspan="${NC}" style="background:#f2f6ef;color:#4e7a3e;font-weight:700;padding-left:22px">▸ ${esc(r.label)} <span class="mini" style="font-weight:400">(${r.rows.length})</span></td></tr>`; return; }
+        const x=r.l;
+        const short=x.rawSku && x.ohRawG < (x.procG-Math.min(x.ohProcG,x.procG))/((x.yieldPct/100)||1);
+        out+=`<tr style="box-shadow:inset 4px 0 0 ${x.color}"><td><b>${esc(x.name)}</b>${x.rawName?`<div class="mini" style="color:var(--muted)">from ${esc(x.rawName)}</div>`:''}${(!x.onPlot&&x.procG>0)?'<div class="mini" style="color:var(--earth,#b5762a)">not on the plot — needed, never ordered</div>':''}</td>
+          <td class="mini">${esc(x.bin||'')}</td>
+          <td class="num"><b>${x.plotKg?num(Math.round(x.plotKg*100)/100):'—'}</b></td>
+          <td class="mini" style="color:var(--muted)">${esc(x.supplier||'')}</td>
+          <td class="num mini" style="color:var(--muted)">${x.procG?_kgs(x.procG):'—'}</td>
+          <td class="num mini" style="color:${x.ohProcG>0?'#1e6b2e':'var(--muted)'}">${x.ohProcG>0?_kgs(x.ohProcG):'—'}</td>
+          <td class="num mini" style="color:var(--muted)">${x.rawG?_kgs(x.rawG):'—'}</td>
+          <td class="num mini" style="color:${short?'var(--danger)':(x.ohRawG>0?'#7a6432':'var(--muted)')}">${x.rawSku?_kgs(x.ohRawG):'—'}${short?' ⚠':''}</td></tr>`; });
+      return out||'<tr><td colspan="8" class="empty">Nothing outstanding.</td></tr>'; })()}
+    </tbody></table></div><div class="pager">${_wdtRaw.length} ingredient(s) · ${num(Math.round(_wdtRaw.reduce((a,x)=>a+(+x.plotKg||0),0)*100)/100)} kg ordered on ${esc(_rawRef||'no plot')}</div></div>`;
   $('content').innerHTML=h;
 }
 /* ---- PRINTING THE SHEET ------------------------------------------------
@@ -8480,6 +8516,10 @@ function _wdtPrintCss(landscape){
     tr.urgent td{background:#fdf3f0 !important}
     tr.tot td{font-weight:700;border-top:2px solid #4e7a3e;background:#f2f5ef !important}
     tr.grp td{color:#fff !important;font-weight:800}
+    /* the weekly inventory count sheet's own section bands, so the two printouts
+       are one document to the eye as well as one order on the page */
+    tr.g1 td{background:#e7f0e9 !important;color:#2f5d33 !important;font-weight:800}
+    tr.g2 td{background:#f2f6ef !important;color:#4e7a3e !important;font-weight:700}
     .old{color:#888;text-decoration:line-through}
     tr{break-inside:avoid}`;
 }
@@ -8528,14 +8568,17 @@ function wdtPrint(which){
        the very problem that was just fixed on screen. The column carries the
        verdict only; the detail goes to a blockers page at the end, grouped by
        ingredient, which is the form purchasing can actually act on. */
-    const nCols=12+wk.length*2;
-    const numW=Math.max(3.6,(100-5-16-7)/(nCols-3));
-    const head=`<colgroup><col style="width:5%"><col style="width:16%">`
-      +Array.from({length:nCols-3},()=>`<col style="width:${numW.toFixed(2)}%">`).join('')
+    const nCols=13+wk.length*2;
+    /* SKU, product, the coverage tag and the verdict get fixed widths; the
+       numeric columns share what is left. The tag is a phrase, not a figure —
+       given a numeric share it wrapped to three lines and stretched every row. */
+    const numW=Math.max(3.4,(100-5-15-11-7)/(nCols-4));
+    const head=`<colgroup><col style="width:5%"><col style="width:15%"><col style="width:11%">`
+      +Array.from({length:nCols-4},()=>`<col style="width:${numW.toFixed(2)}%">`).join('')
       +`<col style="width:7%"></colgroup><thead>
-      <tr><th class="gh" colspan="2"></th><th class="gh" colspan="5">Running total</th>
+      <tr><th class="gh" colspan="3"></th><th class="gh" colspan="5">Running total</th>
           <th class="gh" colspan="${3+wk.length}">Movement</th><th class="gh" colspan="${wk.length}">Demand plot</th><th class="gh"></th></tr>
-      <tr><th>SKU</th><th>Product</th>
+      <tr><th>SKU</th><th>Product</th><th>In plot?</th>
         <th class="n">Target</th><th class="n">Made</th><th class="n">Still</th><th class="n">On hand</th><th class="n">Cover</th>
         <th class="n">Beg</th>${wk.map((x,i)=>`<th class="n">Made Wk-${wk.length-i}</th>`).join('')}
         <th class="n">Sold</th><th class="n">Ending</th>
@@ -8546,7 +8589,9 @@ function wdtPrint(which){
       let li=-1; for(let i=r.plots.length-1;i>=0;i--){ if(r.plots[i]>0){ li=i; break; } }
       return `<tr class="${r.ready===false?'urgent':''}">
         <td>${esc(r.sku)}</td><td class="wrap">${esc(r.name)}${r.isCustom?' (custom)':''}</td>
-        <td class="n"><b>${r.target||''}</b></td><td class="n">${r.madeAll||''}</td>
+        <td style="font-size:8.5px;color:${(r.live!=null&&r.gap>0)?'#b5762a':'#666'}">${r.live!=null?esc(covShort(covTag({target:r.target,plot:r.plotAsked,kind:r.supply?'supply':''}))):''}</td>
+        <td class="n"><b>${r.target||''}</b></td>
+        <td class="n">${r.madeAll||''}</td>
         <td class="n"><b>${r.still}</b></td><td class="n">${n2(r.oh)}</td>
         <td class="n">${r.velKnown?(Math.round(r.coverDays*10)/10)+'d':'—'}</td>
         <td class="n">${n2(r.beg)}</td>${r.made.map(v=>`<td class="n">${v||''}</td>`).join('')}
@@ -8555,9 +8600,9 @@ function wdtPrint(which){
         <td>${r.still===0?'':(r.ready===true?'ready':(r.ready===false?'<b>SHORT</b>':'no recipe'))}</td></tr>`;
     });
     const tot=`<tr class="tot"><td colspan="2">Total · ${all.length} product(s)</td>
-      <td class="n">${all.reduce((a,r)=>a+r.target,0)}</td><td class="n">${all.reduce((a,r)=>a+r.madeAll,0)}</td>
+      <td></td><td class="n">${all.reduce((a,r)=>a+r.target,0)}</td><td class="n">${all.reduce((a,r)=>a+r.madeAll,0)}</td>
       <td class="n">${owed}</td><td class="n">${num(Math.round(all.reduce((a,r)=>a+r.oh,0)*100)/100)}</td>
-      <td colspan="${6+wk.length*2}"></td></tr>`;
+      <td colspan="${7+wk.length*2}"></td></tr>`;
     sections.push({title:'Production target', sub, head, rows:trs, perPage:22, totalRow:tot});
     /* Grouped by ingredient, because one shortage usually blocks several
        products and the person buying it needs one line per thing to buy. */
@@ -8592,18 +8637,41 @@ function wdtPrint(which){
     sections.push({title:'Custom orders', sub, head, rows:trs, perPage:30, totalRow:null});
 
   } else {
-    const sub=`Only what is still to make. Processed = what the kitchen weighs out of the bin; as-purchased raw = the same quantity before yield, which is the buying figure.<br>As of ${esc(S.asOf||todayISO())}`;
-    const head=`<thead><tr><th>Ingredient</th><th class="n">Processed needed</th><th class="n">Processed on hand</th><th class="n">As-purchased raw</th><th class="n">Raw on hand</th></tr></thead>`;
-    const trs=[]; let last='';
-    (_wdtRaw||[]).forEach(r=>{ if(r.cat!==last){ last=r.cat; const c=KSHEET_CATS.find(z=>z.k===r.cat)||{l:r.cat,c:'#5C5C5C'};
-        trs.push(`<tr class="grp"><td colspan="5" style="background:${c.c} !important">${esc(c.l)}</td></tr>`); }
-      trs.push(`<tr><td class="wrap">${esc(r.name)}${r.rawName?' — from '+esc(r.rawName):''}</td><td class="n">${_kgs(r.procG)}</td>
-        <td class="n">${r.ohProcG>0?_kgs(r.ohProcG):'—'}</td><td class="n">${_kgs(r.rawG)}</td>
-        <td class="n">${r.rawSku?_kgs(r.ohRawG):'—'}</td></tr>`); });
-    if(!trs.length) trs.push('<tr><td colspan="5">Nothing outstanding.</td></tr>');
-    const tot=`<tr class="tot"><td>Total</td><td class="n">${_kgs((_wdtRaw||[]).reduce((s,r)=>s+r.procG,0))}</td><td class="n"></td>
+    /* Ten columns of buying detail do not fit an A4 portrait page without the
+       ingredient name wrapping to three lines, which is the exact failure the
+       product sheet was already fixed for. */
+    landscape=true;
+    /* THE SHEET SOMEBODY CARRIES TO THE SUPPLIERS, so it prints what was
+       ORDERED — the saved plot's own line — with the requirement beside it.
+       Grouped and coloured exactly as the weekly inventory count sheet is,
+       because the same person walks the same freezer with both. */
+    const ref=(_wdtSrc&&_wdtSrc.plot)||'';
+    const sub=(ref?`<b>Order (kg)</b> is what <b>${esc(ref)}</b> asked for — the decision that was priced and sent.`
+                  :`<b>No saved demand plot</b>, so nothing has been ordered — the Order column is empty by design.`)
+      +` Processed / raw beside it is what the target still requires; where the two disagree the shelf has moved since the plot was saved.`
+      +`<br>Processed = what the kitchen weighs out of the bin; as-purchased raw = the same quantity before yield.`
+      +`<br>Grouped as the weekly inventory count sheet groups it. As of ${esc(S.asOf||todayISO())}`;
+    const head=`<colgroup><col style="width:4%"><col style="width:23%"><col style="width:15%"><col style="width:6%"><col style="width:8%"><col style="width:14%">
+        <col style="width:7.5%"><col style="width:7.5%"><col style="width:7.5%"><col style="width:7.5%"></colgroup>
+      <thead><tr><th class="n">#</th><th>Ingredient</th><th>SKU</th><th>Bin</th><th class="n">Order (kg)</th><th>Supplier</th>
+        <th class="n">Processed needed</th><th class="n">Processed on hand</th><th class="n">As-purchased raw</th><th class="n">Raw on hand</th></tr></thead>`;
+    const trs=[];
+    _wdtRenderRaw().forEach(r=>{
+      if(r.t==='g1'){ trs.push(`<tr class="g1"><td colspan="10">${esc(r.label)} · ${r.rows.length} item(s) · ${_kgs(r.rows.reduce((a,x)=>a+((+x.plotKg||0)*1000),0))} ordered</td></tr>`); return; }
+      if(r.t==='g2'){ trs.push(`<tr class="g2"><td colspan="10">&nbsp;&nbsp;▸ ${esc(r.label)} (${r.rows.length})</td></tr>`); return; }
+      const x=r.l;
+      trs.push(`<tr><td class="n">${r.n}</td><td class="wrap">${esc(x.name)}${x.rawName?' — from '+esc(x.rawName):''}${(!x.onPlot&&x.procG>0)?' <b>(not on the plot)</b>':''}</td>
+        <td style="font-size:8px">${esc(x.sku)}</td>
+        <td>${esc(x.bin||'')}</td><td class="n"><b>${x.plotKg?num(Math.round(x.plotKg*100)/100):''}</b></td><td class="wrap">${esc(x.supplier||'')}</td>
+        <td class="n">${x.procG?_kgs(x.procG):''}</td>
+        <td class="n">${x.ohProcG>0?_kgs(x.ohProcG):''}</td><td class="n">${x.rawG?_kgs(x.rawG):''}</td>
+        <td class="n">${x.rawSku?_kgs(x.ohRawG):''}</td></tr>`); });
+    if(!trs.length) trs.push('<tr><td colspan="10">Nothing outstanding.</td></tr>');
+    const tot=`<tr class="tot"><td></td><td>Total</td><td></td><td></td>
+      <td class="n">${num(Math.round((_wdtRaw||[]).reduce((a,r)=>a+(+r.plotKg||0),0)*100)/100)}</td><td></td>
+      <td class="n">${_kgs((_wdtRaw||[]).reduce((s,r)=>s+r.procG,0))}</td><td class="n"></td>
       <td class="n">${_kgs((_wdtRaw||[]).reduce((s,r)=>s+r.rawG,0))}</td><td class="n"></td></tr>`;
-    sections.push({title:'Raw ingredients behind the target', sub, head, rows:trs, perPage:32, totalRow:tot});
+    sections.push({title:'Raw ingredients — what the demand plot ordered', sub, head, rows:trs, perPage:30, totalRow:tot});
   }
 
   w.document.open();
@@ -9570,7 +9638,7 @@ async function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.
       <h4 style="margin:14px 0 6px">Replenishment (${lines.length} item(s) · est. ₱${Math.round(totVal).toLocaleString('en-PH')})</h4>
       <table><thead><tr>${_rc.map(c=>`<th${c.align==='right'?' class="num"':''}>${esc(c.label)}</th>`).join('')}</tr></thead><tbody>${lineRows}</tbody></table>
     </div>
-    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="printMRPPlan()">🖨 Print</button><button class="btn sec" onclick="downloadMRPPlan()">⬇ Download CSV</button>${p.drive_url?`<a class="btn sec" href="${esc(safeUrl(p.drive_url))}" target="_blank" rel="noopener noreferrer">📄 Open PDF</a>`:''}<span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
+    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="printMRPPlan()">🖨 Print</button><button class="btn sec" onclick="downloadMRPPlan()">⬇ Download CSV</button><span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
   $('overlay').classList.add('on');
 }
 function _viewPlanRows(){ const v=window._viewPlan; if(!v)return[]; return (v.d.lines||[]).filter(l=>l.final>0); }
@@ -14188,6 +14256,55 @@ async function prodNeedRefresh(){
   }
 }
 function _prodRemain(sku,thisGood){ const t=+prodTargetMap[sku]||0, p=+prodProducedMap[sku]||0; return Math.max(0, t-p-(+thisGood||0)); }
+/* ---- ONE COVERAGE TAG, WHEREVER A TARGET IS SHOWN ------------------------
+   The target says what to make. It cannot say whether anybody bought raws for
+   it, and the two get confused the moment they are shown apart — which is how
+   a supply-led line reads as an oversight and a spike reads as covered. So the
+   tag travels with the number: the production plan, the search-and-add picker
+   and the Weekly Demand Target all call this, and therefore cannot word the
+   same fact three ways.
+
+   Callable with explicit values (the WDT builds its rows before this map
+   exists) or with a SKU alone (the production screens). */
+function covTag(o){
+  o=o||{};
+  const t=+o.target||0;
+  if(!t) return null;
+  if(o.kind==='order')  return {k:'order', txt:'owed by the order',
+    long:'owed by the order • ingredients go in when it is locked', c:'var(--berry)',
+    title:'A custom order is not par-driven and is not bought against a plot — locking the order puts its ingredients into the run.'};
+  if(o.kind==='supply') return {k:'supply', txt:'not in the demand plot • supply-led',
+    long:'not in the demand plot • supply-led, never bought against one', c:'var(--muted)',
+    title:'Supply-led: kept out of demand planning and off purchase orders on purpose, because we take whatever a supplier has and make all of it when it lands. Nothing is missing here.'};
+  const plot=+o.plot||0, gap=Math.max(0, t-plot);
+  if(gap>0) return {k:'short', txt:(plot>0?('not fully in the plot • short '+gap):'not in the demand plot'),
+    long:(plot>0?('plot bought '+plot+' • short '+gap):'not in the demand plot • nothing ordered'),
+    c:'var(--earth,#b5762a)',
+    title:(plot>0?('The plot bought raws for '+plot+'. The shelf has moved since, so '+gap+' more are needed than anybody ordered for.')
+                 :'No demand plot asked for this product, so no ingredients were ordered against it.')};
+  return {k:'ok', txt:'in the demand plot', long:'plot bought '+plot+' • covered', c:'var(--muted)',
+    title:'The demand plot for this week bought ingredients for at least this many.'};
+}
+function covTagFor(sku){
+  const src=(window._prodTargetSrc||{})[sku]||'';
+  return covTag({target:+prodTargetMap[sku]||0, plot:+((window._prodPlotDm||{})[sku])||0,
+                 kind:(src==='order'?'order':(src==='supply'?'supply':''))});
+}
+/* the small pill the pickers and the sheet use; `long` is the production plan's
+   fuller wording, where there is room for it */
+/* Print has no room for the screen's wording and no tooltip to carry the rest,
+   so the tag has a short form. Same four states, same function. */
+function covShort(tag){
+  if(!tag) return '';
+  if(tag.k==='order')  return 'order';
+  if(tag.k==='supply') return 'supply-led — not planned';
+  if(tag.k==='short')  return '⚠ ' + (/short (\d+)/.test(tag.txt) ? ('short '+tag.txt.match(/short (\d+)/)[1]) : 'not in plot');
+  return 'in plot';
+}
+function covPill(tag, long){
+  if(!tag) return '';
+  return `<div class="mini" style="color:${tag.c}" title="${esc(tag.title)}">${tag.k==='short'?'⚠ ':''}${esc(long?tag.long:tag.txt)}</div>`;
+}
 function drawProdPlan(){
   const totTarget=prodPlanLines.reduce((s,l)=>s+(+prodTargetMap[l.product_sku]||0),0);
   const totGood=prodPlanLines.reduce((s,l)=>s+(+l.good_packs||0),0);
@@ -14213,18 +14330,7 @@ function drawProdPlan(){
       <th class="num" title="Days = how long the sellable shelf lasts. % = everything we own against New Par + safety. High % with low days means the packs exist but are at the wrong site — send a van, not a butchery day.">Cover<br>d · %</th>
       <th class="num" title="The To Produce figure from Regular Packs — (New Par − what the shop can sell − what is made here and not yet shipped) + lead-time demand, rounded up to a case of 12 with a floor of 24. It answers a spike as soon as the shelf moves, and falls on its own as packs are made. The note underneath says whether the demand plot bought ingredients for it.">Target</th><th class="num" title="Packs confirmed in the last fortnight, for information. It is NOT taken off the target — production already made is inside the stock the target subtracts, so deducting it again would take it off twice.">Made (2wk)</th><th class="num">Good packs</th><th class="num">Remaining</th><th class="num">Reject</th><th class="num">Waste g</th><th>Output lot</th><th></th></tr></thead><tbody>
     ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodMadeMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
-      const _plot=+((window._prodPlotDm||{})[l.product_sku])||0;
-      const _src=(window._prodTargetSrc||{})[l.product_sku]||'';
-      const _gap=+((window._prodPlotGap||{})[l.product_sku])||0;
-      /* THE NOTE ANSWERS "DID ANYBODY BUY FOR THIS?", which is a different
-         question from the target beside it and the only one the plot can
-         answer. Four true answers, and none of them is the target. */
-      const _tnote =
-          (_src==='order')  ? `<div class="mini" style="color:var(--berry)">owed by the order • ingredients go in when it is locked</div>`
-        : (_src==='supply') ? `<div class="mini" style="color:var(--muted)" title="supply-led: it is kept off demand planning and off purchase orders on purpose, because we take whatever a supplier has and make all of it when it lands. Nothing is missing here.">supply-led • never bought against a plot</div>`
-        : (_gap>0)          ? `<div class="mini" style="color:var(--earth,#b5762a)" title="${_plot>0?('the plot bought raws for '+_plot+'. The shelf has moved since, so '+_gap+' more are needed than anybody ordered for.'):'no demand plot asked for this product, so no ingredients were ordered against it.'}">⚠ ${_plot>0?('plot bought '+_plot+' • short '+_gap):'not on the plot • nothing ordered'}</div>`
-        : (_plot>0)         ? `<div class="mini" style="color:var(--muted)">plot bought ${_plot} • covered</div>`
-        : '';
+      const _tnote=covPill(covTagFor(l.product_sku), true);
       const _pic=stockPicFor(l.product_sku);
       return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${t?'':'<div class="mini" style="color:var(--muted)">no target — made to order</div>'}
         ${(_pic&&_pic.toMove>0&&_pic.toMake<=0)?`<div class="mini" style="color:var(--earth,#b5762a)" title="the packs already exist at ${esc(locName(planProduceLoc()))} — this line needs a transfer, not a run">↦ ${_spN(_pic.toMove)} already made — transfer, don't produce</div>`:''}</td>
@@ -14587,7 +14693,7 @@ function prodKitchenCart(){
     <div class="mscroll" style="overflow-x:auto"><table style="min-width:640px"><thead><tr><th>Product</th>
       <th class="num" title="what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}">Current<br>stock</th>
       <th class="num" title="days the sellable shelf lasts · everything we own against New Par + safety">Cover<br>d · %</th>
-      <th class="num">Target</th><th class="num">Remaining</th><th class="num">Produce</th></tr></thead><tbody id="kcBody"></tbody></table></div>
+      <th class="num" title="What to make, from the shelf as it stands now. The line underneath says whether this week's demand plot bought ingredients for it — a line that is NOT in the plot can still be made, it simply means nobody ordered raws against it (or, for a supply-led line, never would).">Target<div class="mini" style="font-weight:400;opacity:.75">· in the demand plot?</div></th><th class="num">Remaining</th><th class="num">Produce</th></tr></thead><tbody id="kcBody"></tbody></table></div>
     <div class="mfoot"><button class="btn" onclick="prodCartApply()">✅ Apply to plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on'); drawKitchenCartBody();
 }
@@ -14737,13 +14843,17 @@ function drawKitchenCartBody(){
           <div class="mini" style="color:#6b3f7a">${esc(r.customers||'Custom order')}${r.refs?' · '+esc(r.refs):''}</div>
           <div class="mini">make by ${when}</div></td>
         <td class="num">${spStockCell(pic)}</td><td class="num">${spCoverCell(pic)}</td>
-        <td class="num mini">${r.packs}</td>
+        <td class="num mini">${r.packs}${covPill(covTag({target:r.packs,kind:'order'}))}</td>
         <td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem||'—'}</td>
         <td><input type="number" step="any" inputmode="decimal" value="${v}" placeholder="${rem||0}"
           oninput="window._kcQty['${esc(r.sku)}']=this.value===''?'':(+this.value||0)"
           style="width:70px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`;
     });
   }
+  /* THE PICKER IS WHERE SOMEBODY DECIDES WHAT GOES ON THE RUN, so it is where
+     the coverage question has to be answerable without leaving the popout. A
+     line that is not in the demand plot can still be made — it just means
+     nobody bought raws for it, or it is supply-led and never would. */
   const _coSkus=new Set(_coDueRows().map(r=>r.sku));   // already listed above
   hierGroups(shown.filter(p=>!_coSkus.has(p.sku)),{g1:'_g1',g2:'_g2'}).forEach(G=>G.subs.forEach(S=>{
     body+=`<tr style="background:#f6f8f4"><td colspan="6" style="padding-left:10px">▸ <b>${esc(G.g1+' › '+(S.g2||''))}</b></td></tr>`;
@@ -14751,7 +14861,7 @@ function drawKitchenCartBody(){
       const pic=stockPicFor(p.sku);
       body+=`<tr><td>${prodLabelHtml(p,{noSku:true})}<div class="mini"><code>${esc(p.sku)}</code></div></td>
         <td class="num">${spStockCell(pic)}</td><td class="num">${spCoverCell(pic)}</td>
-        <td class="num mini">${prodTargetMap[p.sku]||'—'}</td><td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${hasT?(rem||'—'):'—'}</td>
+        <td class="num mini">${prodTargetMap[p.sku]||'—'}${covPill(covTagFor(p.sku))}</td><td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${hasT?(rem||'—'):'—'}</td>
         <td><input type="number" step="any" inputmode="decimal" value="${v}" placeholder="${rem||0}" oninput="window._kcQty['${esc(p.sku)}']=this.value===''?'':(+this.value||0)" style="width:70px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`; }); }));
   const el=$('kcBody'); if(el) el.innerHTML=body||'<tr><td colspan="6" class="empty">No products match.</td></tr>';
 }
