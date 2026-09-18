@@ -5134,7 +5134,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-16 04:15Z';
+const WR_BUILD='2026-09-18 06:40Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -11470,6 +11470,18 @@ const CO_FLOW=[
   {k:'cancelled',      l:'Cancelled',            b:'cancelled', d:'Voided.'}
 ];
 const _CO_LEGACY={quote:'draft', confirmed:'for_production', fulfilled:'completed', '':'draft'};
+/* SETTLED = finished with, one way or the other. A completed order has been
+   made and handed over; a cancelled one was voided. Neither owes anybody
+   anything, and neither belongs in a list somebody opens to find out what to do
+   today. They are hidden by default and one click away — hidden, never deleted,
+   because the history is how a repeat order gets duplicated. */
+const CO_SETTLED=['completed','cancelled'];
+function coIsSettled(s){ return CO_SETTLED.includes(coStat(s)); }
+let _coShowDone=false;
+try{ _coShowDone=localStorage.getItem('wr_co_done')==='1'; }catch(e){}
+function coToggleDone(){ _coShowDone=!_coShowDone;
+  try{ localStorage.setItem('wr_co_done', _coShowDone?'1':'0'); }catch(e){}
+  renderCustomOrders(); }
 function coStat(s){ const k=String(s||'').toLowerCase(); return _CO_LEGACY[k]||(CO_FLOW.some(f=>f.k===k)?k:'draft'); }
 function coStatDef(s){ const k=coStat(s); return CO_FLOW.find(f=>f.k===k)||CO_FLOW[0]; }
 function coStatLabel(s){ return coStatDef(s).l; }
@@ -12040,7 +12052,11 @@ async function renderCustomOrders(){
      was derived FROM. "In Production" with nothing produced is a fair question;
      the answer — which draft run put it there — belongs on the row, not in my head. */
   const _why=window._coWhy||{};
-  let rows=orders.map(o=>{ const mk=coProduceBy(o), late=mk&&mk<todayISO()&&coIsOpen(o.status);
+  /* The board counts below are taken from EVERY order, so the strip still says
+     where everything is. Only the table is narrowed. */
+  const settledN=orders.filter(o=>coIsSettled(o.status)).length;
+  const shown=_coShowDone?orders:orders.filter(o=>!coIsSettled(o.status));
+  let rows=shown.map(o=>{ const mk=coProduceBy(o), late=mk&&mk<todayISO()&&coIsOpen(o.status);
     return `<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer"><td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'—')}</td><td>${esc(o.delivery_date||'—')}</td><td${late?' style="color:var(--danger);font-weight:700"':''}>${esc(mk||'—')}${late?'<div class="mini">make-by passed</div>':''}</td><td>${coStatBadge(o.status)}${fbadge(o)}${_why[o.order_ref]?`<div class="mini" style="color:var(--muted)">${esc(_why[o.order_ref])}</div>`:''}</td><td class="num">${lc[o.order_ref]||0}</td><td class="num">${wpeso(_coOrderTotal(o))}</td><td class="num"><button class="btn sm sec" title="Copy to a new quote — lines and recipes come with it" onclick="event.stopPropagation();coDuplicateAsk('${encodeURIComponent(o.order_ref)}')">⧉</button></td></tr>`; }).join('');
   // Board counts, in flow order — the answer to "where is everything right now".
   const tally={}; orders.forEach(o=>{ const k=coStat(o.status); tally[k]=(tally[k]||0)+1; });
@@ -12050,13 +12066,20 @@ async function renderCustomOrders(){
   $('content').innerHTML=`<div class="repcard"><div style="display:flex;justify-content:flex-end">${_liveTag}</div>${_mig}<div class="hint" style="margin:0 0 8px">Create a quote, add standard products and/or custom recipes, edit freely. <b>Lock</b> moves it to <b>For Production</b> — each custom recipe becomes its own sellable SKU + BOM, and the packs enter <b>Demand/MRP</b> <b>whatever week they are scheduled for</b>. Everything after Lock moves by itself: counted in a demand plan → <b>Added in Demand</b>, put on a production plan → <b>In Production</b>, packs confirmed → <b>Partially Fulfilled</b> → <b>Completed</b>.</div>
     ${flowStrip?`<div style="margin:0 0 10px">${flowStrip}</div>`:''}
     <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th title="What the customer was promised">Delivery</th><th title="The production deadline — delivery minus the lead time. This is the demand week.">Make by</th><th>Status</th><th class="num">Lines</th><th class="num">Total</th><th></th></tr></thead>
-    <tbody>${rows||'<tr><td colspan="8" class="empty">No custom orders yet — click ＋ New quote.</td></tr>'}</tbody></table></div>
+    <tbody>${rows||`<tr><td colspan="8" class="empty">${settledN&&!_coShowDone?'Nothing needs action — '+settledN+' settled order(s) are hidden.':'No custom orders yet — click ＋ New quote.'}</td></tr>`}</tbody></table></div>
+    ${settledN?`<div class="mini" style="color:var(--muted);margin-top:8px">
+      ${_coShowDone
+        ? `Showing everything, including <b>${settledN}</b> completed or cancelled order(s). <span class="btn link" onclick="coToggleDone()">Hide the settled ones</span>`
+        : `<b>${settledN}</b> completed or cancelled order(s) are hidden, so this list is what still needs action. <span class="btn link" onclick="coToggleDone()">Show them</span>`}
+      — they are only hidden, never removed; ⧉ Duplicate still works on any of them.</div>`:''}
     <div class="mini" style="color:var(--muted);margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
       <span>Default lead time for new orders</span>
       <input type="number" min="0" max="60" step="1" value="${coLeadDefault()}" style="width:70px" onchange="coSetLeadDefault(this.value)">
       <span>day(s) — how far ahead of the promised delivery the kitchen has to finish. Existing orders keep the lead they were saved with.</span>
     </div>
-    <div class="pager">${orders.length} order(s)</div></div>`;
+    <div class="pager">${_coShowDone
+      ? `${orders.length} order(s) · ${settledN} settled`
+      : `${shown.length} order(s) needing action${settledN?` · ${settledN} settled, hidden`:''}`}</div></div>`;
 }
 function _coOrderTotal(o){ return o&&o._total!=null?o._total:0; }
 function coNew(){ coRec={order_ref:'', customer_name:'', contact:'', order_date:todayISO(),
