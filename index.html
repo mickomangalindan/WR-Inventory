@@ -4778,11 +4778,11 @@ function drawProdSched(){
 }
 async function psPrint(){
   if(PS_CAT==='product'){
-    showBusy('Building the targets sheet…');
-    try{ const T=window._psPlan||await planTargets({to:PS_TO});
-      _ptOpen(planSheetHtml(T,{title:'Production Schedule · '+_ptMD(PS_FROM)+' to '+_ptMD(PS_TO)})); }
-    catch(e){ toast('Could not build the sheet: '+((e&&e.message)||e),true); }
-    finally{ hideBusy(); }
+    const _to=(PS_TO&&PS_TO<todayISO())?PS_TO:todayISO();
+    ptAsk({title:'Production Schedule — targets', to:_to, plotFrom:(window._psPlan&&window._psPlan.plotFrom)||''}, async o=>{
+      const T=await planTargets({to:o.to, from:o.from});
+      _ptOpen(planSheetHtml(T,{title:'Production Schedule · '+_ptMD(PS_FROM)+' to '+_ptMD(PS_TO), only:o.need?_ptNeedOnly:null}), o.w);
+    });
     return;
   }
   const days=window._psDaysList||[], rows=(window._psRows||[]);
@@ -5143,7 +5143,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-20 09:30Z';
+const WR_BUILD='2026-09-20 14:20Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -6634,8 +6634,15 @@ async function wdtSheetLoad(){
   if(PIC&&PIC.by){ Object.keys(PIC.by).forEach(k=>{ const q=+((PIC.by[k]||{}).produce)||0;
     if(q>0 && !pArch.has(k) && !/^CUST-/i.test(k)) liveProduce[k]=q; }); }
 
+  /* THE ONE TARGET — planTargets, the row the Production Plan, the Schedule and
+     every printout read. Back-dated sheets ask for the newest plot up to that
+     day and packs confirmed up to it; only today's sheet carries the live
+     spike warning. Every product planTargets names is on this sheet. */
+  let T=window._wdtT;
+  if(!T){ try{ T=await planTargets({prods:_allProds, to:_wdtAsOf||undefined}); }catch(e){ T=null; } window._wdtT=T; }
   const skus={};
   [plot,made,cust,liveProduce].forEach(o=>Object.keys(o).forEach(k=>skus[k]=1));
+  if(T) T.rows.forEach(r=>{ if(!pArch.has(r.sku)) skus[r.sku]=1; });
 
   const rows=Object.keys(skus).map(sku=>{
     const P=plot[sku]||weeks.map(()=>0), M=made[sku]||weeks.map(()=>0);
@@ -6720,16 +6727,17 @@ async function wdtSheetLoad(){
             coRefs:[...new Set(((custBy[sku]||{}).orders||[]).map(o=>o.ref).filter(Boolean))].join(', '),
             isCustom:/^CUST-/.test(sku)};
   });
-  /* TODAY'S SHEET READS THE ONE TARGET — planTargets, the same row the
-     Production Plan, the Schedule and every printout read. A back-dated sheet
-     keeps the plot arithmetic above; today's shelf cannot describe a past day. */
-  if(PIC){ try{ const T=await planTargets({prods:_allProds});
+  /* Target / Made / Still come from planTargets, for today and back-dated
+     alike. The plot arithmetic above is kept only for the plot columns. */
+  if(T){ const today=!_wdtAsOf;
     rows.forEach(r=>{ const t=T.by[r.sku];
-      if(r.noT){ if(t&&t.supplyPlanned) r.noT=null; else return; }
-      if(!t){ r.target=0; r.still=0; r.gap=0; return; }
+      r.omit=(T.plot&&T.plot.omit&&T.plot.omit[r.sku])||null;
+      if(r.noT){ if(t&&t.supplyPlanned) r.noT=null; else { r.target=0; r.still=0; r.gap=0; return; } }
+      if(!t){ r.target=0; r.still=0; r.gap=0; r.madeAfter=0; r.live=null; return; }
       r.target=+t.target||0; r.still=+t.remaining||0; r.madeAfter=+t.made||0;
-      r.gap=+t.extra||0; r.plotAsked=+t.target||0; if(t.kind!=='order') r.live=+t.live||0; });
-  }catch(e){} }
+      r.gap=today?(+t.extra||0):0; r.plotAsked=+t.target||0; r.par=+t.par||0;
+      r.live=(today && t.kind!=='order')?(+t.live||0):null; });
+  }
   await _wdtVelocity(rows);
   /* The same stock picture Regular Packs reads — sellable at the shop, the
      pipeline everywhere else, and the coverage that follows from both. ONLY
@@ -6750,7 +6758,7 @@ function _wdtSheetHtml(){
   if(!S) return '<div class="empty">Loading…</div>';
   const wk=S.weeks||[];
   const all=S.rows||[];
-  const rows=_wdtOnlyOwed?all.filter(r=>r.still>0):all;
+  const rows=_wdtOnlyOwed?all.filter(r=>r.still>0||(+r.gap||0)>0):all;
   const hidden=all.length-rows.length;
   const owed=all.reduce((a,r)=>a+r.still,0);
   const restated=all.reduce((a,r)=>a+r.restated,0);
@@ -6768,7 +6776,7 @@ function _wdtSheetHtml(){
     </div>
     <div class="hint" style="margin:0 0 8px"><b>Target is what the newest demand plot asked for</b> (custom orders: packs on open orders) — the same figure the Production Plan, the Production Schedule and every targets printout show. <b>Still</b> = Target − packs confirmed since the plot was saved. Supply-led, retiring and unplanned products have no target.<br>
       <b>When the shelf has moved past the plot</b> — a weekend of orders — the row is marked with how many more it needs. Those packs are not in the target because nobody bought raws for them; pull the week again in Demand/MRP and the new plot becomes the target. The struck-through figures are older plots restating the same demand; they are shown, never added.<br>
-      <span style="color:var(--muted)">A back-dated sheet has no live reading, so it falls back to the plot arithmetic — today's shelf cannot describe a past day.</span><br>
+      <span style="color:var(--muted)">A back-dated sheet reads the newest plot up to that day and the packs confirmed up to it; the spike warning needs today's shelf, so it only shows on today's sheet.</span><br>
       <b>Priority is by cover</b> — what is on hand divided by how fast it sells, so low stock and fast moving are one question. Rows are in that order.<br>
       <b>Current stock is two places, not three numbers.</b> The first is what <b style="color:#2f5d33">${esc(locName(planSellLoc()))}</b> can sell right now — the Shopify reading plus every movement posted at the shop since it was taken. The second is what is made and sitting <b style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(', ')||'Bulacan')}</b> — real stock, one transfer away. Stock held with a consignee or as breeders is listed as <i>not ours</i> and never added. They add to Current stock; the Shopify figure printed under them is already <i>inside</i> Sellable and is shown so it can be checked, not so it can be added again.
       ${_wdtPicSrc?`<br><span style="color:var(--muted)">Sellable read from ${esc(_wdtPicSrc)}.</span>`
@@ -6784,8 +6792,8 @@ function _wdtSheetHtml(){
       <tr>
         <th class="stk1">SKU</th><th class="stk2">Product name › variant</th>
         <th class="num" title="What the newest demand plot asked for. For a CUSTOM order the target is the packs on its open orders and the plot columns are history. The line underneath warns when the shelf now needs more than the plot.">Target<div class="mini" style="font-weight:400;opacity:.75">· from the plot</div></th>
-        <th class="num" title="Everything produced inside the window. Shown for the record; it is not the figure subtracted from Target.">Made this period</th>
-        <th class="num" title="Target minus what was made AFTER the newest plot.">Still to make</th>
+        <th class="num" title="Packs confirmed after the plot was saved — the figure taken off Target. The per-week Produced columns further right are the history.">Made<div class="mini" style="font-weight:400;opacity:.75">${esc(_ptMD((window._wdtT||{}).from))}–${esc(_ptMD((window._wdtT||{}).to))}</div></th>
+        <th class="num" title="Target − Made. Custom orders: what the open orders still owe.">Still to make</th>
         <th class="num" title="Current stock = what the shop can sell now + what is made but still off-shelf. The same two numbers Regular Packs shows, read the same way. Sellable IS the Shopify reading for ${esc(locName(planSellLoc()))}, unadjusted — nothing from our own ledger is added to it.">Current<br>stock</th>
         <th class="num" title="Days = how long the SELLABLE shelf lasts at the current rate; this sets the row order. % = everything we own against New Par + safety stock. A row can read 140% and still be empty at the shop — that gap is a transfer, not a production run.">Coverage<br>d · %</th>
         <th class="num" title="Stock at both sites the day the window opened.">Beg inventory</th>
@@ -6817,7 +6825,7 @@ function _wdtSheetHtml(){
         r.noT?covPill(covTag({kind:r.noT.why, would:r.noT.would, to:r.noT.to, toName:r.noT.toName}))
         :(r.live!=null?covPill(covTag({target:r.target+(+r.gap||0), plot:r.plotAsked, ref:window._wdtPlotOmitRef||'',
           offered:(r.omit&&r.omit.offered)||0, kind:r.omit?'omit':''})):'')}</td>
-      <td class="num mini" style="color:var(--muted)">${r.madeAll||'—'}</td>
+      <td class="num mini" style="color:var(--muted)">${r.target?(r.madeAfter||0):'—'}</td>
       <td class="num"><b style="color:${r.still?'var(--berry)':'#4e7a3e'}">${r.still}</b></td>
       <td class="num">${r.pic?spStockCell(r.pic)
           :`<b>${n2(r.oh)}</b><div class="mini" style="color:var(--muted)">ledger, both sites</div>`}</td>
@@ -7248,8 +7256,11 @@ async function wdtLoad(){
     const bySku={},byName={}; ings.forEach(i=>{ bySku[i.sku]=i; const nm=(i.name||'').trim().toLowerCase(); if(nm)byName[nm]=i; });
     const {ctx}=_outIngCtx(ings);
     const need={};
-    boms.forEach(b=>{ const r=_wdtRows.find(x=>x.sku===b.product_sku); if(!r||!r.remaining) return;
-      need[b.ingredient_sku]=(need[b.ingredient_sku]||0)+(+b.usable_g||0)*r.remaining; });
+    /* the requirement is what the ONE target still owes — planTargets */
+    const _T=window._wdtT; const _rem=sku=>{ if(_T&&_T.by){ const t=_T.by[sku]; return t?(+t.remaining||0):0; }
+      const r=_wdtRows.find(x=>x.sku===sku); return r?(+r.remaining||0):0; };
+    boms.forEach(b=>{ const q=_rem(b.product_sku); if(!q) return;
+      need[b.ingredient_sku]=(need[b.ingredient_sku]||0)+(+b.usable_g||0)*q; });
     const ohI={}; try{
       if(isLive()) (await db.list('stock_balance',{})).forEach(b=>{ if(b.kind==='ingredient') ohI[b.ref_sku]=(ohI[b.ref_sku]||0)+(+b.on_hand||0); });
       else (DEMO.inventory_movements||[]).forEach(m=>{ if(m.kind==='ingredient') ohI[m.ref_sku]=(ohI[m.ref_sku]||0)+(+m.qty||0); });
@@ -8522,11 +8533,13 @@ function wdtPickPlot(ref){
 }
 async function renderWDT(){
   $('cp').innerHTML=`<div class="title">Weekly Demand Target <span onclick="openKB('wdt')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
-    <button class="btn" onclick="wdtPrint('products')" title="One line per product, grouped and banded exactly like the weekly inventory count sheet — what to make, and whether it can be made.">🖨 Product target</button>
+    <button class="btn" onclick="wdtPrintAsk()" title="The standard targets sheet — Pasig · Bulacan · Total · Target · Made · Remaining · PAR · Remarks — the same one Production Plan, Schedule and Demand Plot print, plus what is blocking production.">🖨 Product target</button>
     <button class="btn sec" onclick="wdtPrint('custom')">🖨 Custom orders</button>
     <span class="btn link" style="color:var(--muted);font-size:12px" onclick="wdtPrint('raw')" title="The buying sheet — what the demand plot ordered, with the requirement beside it. Printed when purchasing asks for it, not as part of the production round.">🖨 Raw ingredients…</span>
     <div class="sp"></div><span style="color:var(--muted)">what is owed, what moved, and whether the demand is repeating</span>`;
   $('content').innerHTML='<div class="empty">Loading…</div>';
+  window._wdtT=null;
+  try{ window._wdtT=await planTargets({to:_wdtAsOf||undefined}); }catch(e){ window._wdtT=null; }
   await wdtLoad();
   _wdtSheet=null;
   try{ _wdtSheet=await wdtSheetLoad(); }catch(e){ _wdtSheet={weeks:[],rows:[],start:'',asOf:'',err:String(e&&e.message||e)}; }
@@ -8542,6 +8555,9 @@ async function renderWDT(){
              title="Defaults to today. Set it back to read the sheet as it stood on that day — stock and production after it are ignored.">
       ${_wdtAsOf?`<button class="btn sec sm" onclick="_wdtAsOf='';renderWDT()">↺ today</button>`
                :'<span class="mini" style="color:var(--muted)">today</span>'}
+      <span class="mini" style="color:var(--muted)">made from</span>
+      <input type="date" value="${esc((window._wdtT&&window._wdtT.from)||'')}" onchange="ptSetFrom(this.value);renderWDT()" title="The Made / Still window starts here. Defaults to last Saturday (or the day the plot was saved, if later).">
+      ${_ptFrom?`<button class="btn sec sm" onclick="ptSetFrom('');renderWDT()">↺ last Saturday</button>`:''}
       <button class="btn ${_wdtOnlyOwed?'':'sec'} sm" onclick="wdtToggleOwed()">${_wdtOnlyOwed?'Only what is still owed':'Showing everything'}</button>
       <span class="sp" style="flex:1"></span>
       <span class="mini" style="color:var(--muted)">both sites · Bulacan + Pasig</span></div>
@@ -8550,7 +8566,11 @@ async function renderWDT(){
      "Weekly Demand Target" that silently includes a three-week-old order is not
      a weekly number — but shown right underneath it, because the packs are real
      and somebody still has to make them. */
-  if(_wdtCarry.length){
+  /* The "carried over" card is retired: open custom orders are IN the target
+     now (Target = packs on open orders, Still = what they owe), at the top of
+     the sheet, soonest first. Listing them again here as "not counted" was no
+     longer true. */
+  if(false && _wdtCarry.length){
     h+=`<div class="repcard" style="margin-top:14px;border-left:4px solid var(--earth,#b5762a)"><div class="repbar">
         <span>↪ Carried over from earlier weeks</span>
         <span style="color:var(--muted);font-size:12px">Open custom orders still owed. NOT counted in this week's target above — an order does not belong to a week, it is owed until it is made. Switch to <b>Running total</b> to fold them in.</span></div>
@@ -8663,8 +8683,15 @@ function _wdtRender(sections, foot){
   });
   return out;
 }
+/* Product target asks for the Made window first, like every targets print. */
+function wdtPrintAsk(){
+  window._ptNeed=_wdtOnlyOwed;
+  ptAsk({title:'Weekly Demand Target — product target', to:_wdtAsOf||todayISO(), plotFrom:(window._wdtT&&window._wdtT.plotFrom)||''}, async o=>{
+    window._wdtPrintT=await planTargets({from:o.from, to:o.to}); window._wdtPrintOpt=o; wdtPrint('products'); });
+}
 function wdtPrint(which){
-  const w=window.open('','_wdt','width=1100,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  const _po=(which==='products')?window._wdtPrintOpt:null; window._wdtPrintOpt=null;
+  const w=(_po&&_po.w)||window.open('','_wdt','width=1100,height=1000'); if(!w){ toast('Allow pop-ups to print',true); return; }
   const st=_wdtStamp();
   const S=_wdtSheet||{weeks:[],rows:[],start:'',asOf:''};
   const periodLabel=(_wdtPeriod==='month')?'the last month':((_wdtPeriod==='4w')?'the last 4 weeks':'the last 2 weeks');
@@ -8762,6 +8789,24 @@ function wdtPrint(which){
       const bsub=`${blocked.length} product(s) cannot be made from what is on the shelf. Grouped by the ingredient that is short — one line per thing to buy.`
         +`<br>Stock is allocated in priority order, so an ingredient shared by several products is not counted twice.`;
       sections.push({title:'What is blocking production', sub:bsub, head:bh, rows:brs, perPage:24, totalRow:null});
+    }
+    /* THE STANDARD TARGETS SHEET — the same columns and grouping Production
+       Plan, Production Schedule and Demand Plot print. "Can make?" travels in
+       Remarks; the blockers page above follows it. */
+    const T=(_po&&window._wdtPrintT)||window._wdtT;
+    if(T){
+      const wb={}; (S.rows||[]).forEach(r=>{ wb[r.sku]=r; });
+      const rows=T.rows.map(r=>{ const x={...r, remark:(r.remark||[]).slice()}; const w0=wb[r.sku];
+        if(w0 && (+r.remaining||0)>0){
+          if(w0.ready===false) x.remark.push('SHORT: '+(w0.shortName||'ingredient')+' '+num(Math.round((w0.needG||0)/100)/10)+'/'+num(Math.round((w0.haveG||0)/100)/10)+' kg');
+          else if(w0.ready===true) x.remark.push('can make');
+        }
+        return x; });
+      w.document.open();
+      w.document.write(planSheetHtml({...T, rows}, {title:'Weekly Demand Target'+(_wdtAsOf?' · as of '+_wdtAsOf:''),
+        only:_po?(_po.need?_ptNeedOnly:null):(_wdtOnlyOwed?_ptNeedOnly:null), extra:sections.slice(1)}));
+      w.document.close(); w.focus(); setTimeout(()=>{try{w.print();}catch(e){}},300);
+      return;
     }
 
   } else if(which==='custom'){
@@ -9911,10 +9956,14 @@ function demandPlotHtml(date, ref, d){
 /* The plot prints the standard targets sheet — its own demand is the Target —
    followed by its replenishment list, grouped as the count sheet groups it.
    demandPlotHtml stays for the emailed copy. */
-async function printMRPPlan(){ const v=window._viewPlan; if(!v)return;
+function printMRPPlan(){ const v=window._viewPlan; if(!v)return;
+  const _sv=String((v.d&&v.d.saved_at)||'');
+  ptAsk({title:'Demand Plot — '+(v.ref||''), plotFrom:_sv?isoLocal(new Date(_sv)):(v.date||'')}, o=>_printMRPPlan(v,o));
+}
+async function _printMRPPlan(v,o){
   showBusy('Building the demand plot sheet…');
   try{
-    const T=await planTargets({plot:{plan_date:v.date, ref:v.ref, data:v.d}});
+    const T=await planTargets({plot:{plan_date:v.date, ref:v.ref, data:v.d}, from:o.from, to:o.to});
     const d=v.d||{}; const lines=(d.lines||[]).filter(l=>l.final>0);
     const _rc=_repCols();
     const repL=((window._viewPlanRep||[]).length)?window._viewPlanRep
@@ -9934,8 +9983,8 @@ async function printMRPPlan(){ const v=window._viewPlan; if(!v)return;
     const extra=[{title:'Replenishment — '+(v.ref||''), sub:`${lines.length} item(s) · ${Math.round(kg*100)/100} kg · what this plot ordered, grouped as the weekly count sheet`
       +(om.length?`<br>Left out on purpose (no ingredients ordered): ${esc(om.map(o=>(o.name||o.sku)+' '+(o.offered||0)).join(' · '))}`:''),
       head:rh, rows:brs, perPage:30, totalRow:rtot}];
-    _ptOpen(planSheetHtml(T,{title:'Demand Plot · '+(v.ref||'')+' · '+(v.date||''), extra}));
-  }catch(e){ toast('Could not build the sheet: '+((e&&e.message)||e),true); }
+    _ptOpen(planSheetHtml(T,{title:'Demand Plot · '+(v.ref||'')+' · '+(v.date||''), extra, only:o.need?_ptNeedOnly:null}), o.w);
+  }catch(e){ try{ o.w&&o.w.close(); }catch(_){} toast('Could not build the sheet: '+((e&&e.message)||e),true); }
   finally{ hideBusy(); }
 }
 /* The download is the printout, line for line. It used to be its own flat list
@@ -14536,11 +14585,16 @@ async function planTargets(opt){
   }
   const ageDays=P&&P.from?Math.max(0,Math.round((Date.parse(today)-Date.parse(P.from))/864e5)):null;
 
-  /* made since the plot was saved, per SKU and per run */
+  /* THE MADE WINDOW — From defaults to last Saturday (the day the week is
+     pulled), or the day the plot was saved if that is later; To defaults to
+     today. Printouts ask before using it (ptAsk). Whatever the window, a run
+     the plot already saw (confirmed before it was saved) never comes off —
+     it is inside the plot's own figure. */
+  const from=opt.from||_ptFrom||ptDefaultFrom(P);
   const made={}, madeRun={};
   if(P && P.from){
     let rows=[];
-    const lo=isoLocal(new Date(Date.parse(P.from+'T00:00:00')-21*864e5));
+    const lo=isoLocal(new Date(Date.parse(((from<P.from)?from:P.from)+'T00:00:00')-21*864e5));
     try{
       if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,kind,production_date,run_ref,created_at&status=eq.confirmed&production_date=gte.'+encodeURIComponent(lo));
       else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed'&&String(b.production_date||'')>=lo);
@@ -14549,9 +14603,9 @@ async function planTargets(opt){
     (rows||[]).forEach(b=>{
       if(b.kind==='output') return;
       const q=+b.good_packs||0; if(!(q>0)) return;
-      const pd=String(b.production_date||'').slice(0,10); if(pd>to) return;
+      const pd=String(b.production_date||'').slice(0,10); if(pd>to || pd<from) return;
       const at=Date.parse(b.created_at||'');
-      if(!(isFinite(at)&&cut ? at>cut : pd>=P.from)) return;
+      if(!(isFinite(at)&&cut ? at>cut : pd>=P.from)) return;   // the plot already counted it
       made[b.product_sku]=(made[b.product_sku]||0)+q;
       if(b.run_ref){ const m=madeRun[b.product_sku]=madeRun[b.product_sku]||{}; m[b.run_ref]=(m[b.run_ref]||0)+q; }
     });
@@ -14567,11 +14621,12 @@ async function planTargets(opt){
     const G=prodGroup(p);
     const r={sku, name:nm[sku]||sku, sort_order:p.sort_order, _g1:G.g1, _g2:G.g2,
       pasig:+k.sellable||0, bulacan:+k.pipeline||0, total:+k.current||0,
+      perDay:+k.perDay||0, coverDays:(+k.perDay>0)?((+k.current||0)/(+k.perDay)):null,
       par:+k.newPar||0, live:+k.produce||0, target:null, made:0, remaining:null,
       extra:0, kind:'', remark:[], custom:isC};
     if(isC){
       const d=co[sku]; if(!d||!(+d.packs>0)) return;          // produced, completed or cancelled — not here at all
-      r.bulacan=+k.awaiting||0; r.pasig=0; r.total=+k.awaiting||0; r.par=0; r.live=0;
+      r.bulacan=+k.awaiting||0; r.pasig=0; r.total=+k.awaiting||0; r.par=0; r.live=0; r.coverDays=null; r.perDay=0;
       r.kind='order'; r.remaining=+d.packs||0; r.target=Math.max(r.remaining, +d.ordered||0); r.made=r.target-r.remaining;
       const who=[...new Set((d.orders||[]).map(o=>o.customer).filter(Boolean))].join(', ');
       const refs=[...new Set((d.orders||[]).map(o=>o.ref).filter(Boolean))].join(', ');
@@ -14624,8 +14679,47 @@ async function planTargets(opt){
       made:Math.max(0,(+d.ordered||0)-(+d.packs||0)), extra:0, kind:'order', custom:true,
       remark:[(who||'custom order')+' · no product record', d.needed?('make by '+d.needed+(d.needed<today?' — OVERDUE':'')):''].filter(Boolean)});
   });
-  return {rows, by, plot:P, ref, from:P?P.from:'', to, ageDays, made, madeRun, co, noT, nm};
+  return {rows, by, plot:P, ref, from:P?from:'', plotFrom:P?P.from:'', to, ageDays, made, madeRun, co, noT, nm};
 }
+/* The Made window's From. Session only, never stored: each new day it goes
+   back to the automatic default. */
+let _ptFrom='';
+function ptLastSat(d){ const t=new Date((d||todayISO())+'T00:00:00'); t.setDate(t.getDate()-((t.getDay()+1)%7)); return isoLocal(t); }
+function ptDefaultFrom(P){ const sat=ptLastSat(); return (P&&P.from&&P.from>sat)?P.from:sat; }
+function ptSetFrom(v){ _ptFrom=(v&&/^\d{4}-\d{2}-\d{2}$/.test(v))?v:''; }
+/* ---- ASK BEFORE PRINTING -------------------------------------------------
+   The printout's Made column is a window, so the person printing chooses it:
+   From (default last Saturday, or the plot's save day if later), To (default
+   today), and whether to list only what still needs producing. The print
+   window is opened inside the click so no pop-up blocker eats it. */
+function ptAsk(o, run){
+  o=o||{};
+  const from=_ptFrom||ptDefaultFrom(o.plotFrom?{from:o.plotFrom}:(window._prodPlan&&window._prodPlan.plot)||null);
+  const to=o.to||todayISO();
+  window._ptRun=run;
+  $('modal').innerHTML=`<div><h3>🖨 ${esc(o.title||'Print targets')}</h3>
+    <p class="mini">The <b>Made</b> column counts packs confirmed in this window, and <b>Remaining</b> = Target − Made. It starts from last Saturday; change it if this week began on another day.
+      Runs confirmed before the plot was saved are already inside the plot's figure, so they never come off twice.</p>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:8px 0">
+      <label class="mini">Made from <input type="date" id="pt_from" value="${esc(from)}"></label>
+      <label class="mini">to <input type="date" id="pt_to" value="${esc(to)}"></label>
+    </div>
+    <label class="mini" style="display:block;margin:6px 0"><input type="checkbox" id="pt_need" ${window._ptNeed?'checked':''}> Only products that still need producing (Remaining above 0)</label>
+    <div class="mfoot"><button class="btn" onclick="ptAskGo()">🖨 Print</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+function ptAskGo(){
+  const from=($('pt_from')||{}).value||'', to=($('pt_to')||{}).value||todayISO();
+  const need=!!(($('pt_need')||{}).checked); window._ptNeed=need;
+  if(from && to && from>to){ toast('From must be on or before To',true); return; }
+  ptSetFrom(from);
+  const w=window.open('','_blank'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  try{ w.document.write('<p style="font:14px Arial;padding:20px">Building the sheet…</p>'); }catch(e){}
+  closeModal();
+  const run=window._ptRun; window._ptRun=null;
+  Promise.resolve().then(()=>run({from, to, need, w})).catch(e=>{ try{ w.close(); }catch(_){} toast('Could not build the sheet: '+((e&&e.message)||e),true); });
+}
+const _ptNeedOnly=r=>(+r.remaining||0)>0;
 function _ptMD(d){ d=String(d||''); return d.length>=10?(d.slice(5,7)+'/'+d.slice(8,10)):'—'; }
 
 /* ---- THE ONE PRINTOUT ----------------------------------------------------
@@ -14640,33 +14734,36 @@ function planSheetHtml(T, o){
   const n=v=>(v==null||v==='')?'':num(Math.round((+v||0)*100)/100);
   const rows=(T.rows||[]).filter(r=>o.only?o.only(r):true);
   const tgt=rows.reduce((a,r)=>a+(+r.target||0),0), rem=rows.reduce((a,r)=>a+(+r.remaining||0),0), mad=rows.reduce((a,r)=>a+(+r.made||0),0);
-  const head=`<colgroup><col style="width:3%"><col style="width:24%"><col style="width:6.5%"><col style="width:6.5%"><col style="width:6.5%"><col style="width:6.5%"><col style="width:8%"><col style="width:7%"><col style="width:6.5%"><col style="width:25.5%"></colgroup>
+  const cov=r=>{ if(r.custom) return ''; if(r.coverDays==null) return 'no sales'; const d=Math.round(r.coverDays*10)/10; return d>999?'999+':String(d); };
+  const head=`<colgroup><col style="width:3%"><col style="width:22%"><col style="width:6%"><col style="width:6%"><col style="width:6.5%"><col style="width:6%"><col style="width:6%"><col style="width:7.5%"><col style="width:7%"><col style="width:6%"><col style="width:24%"></colgroup>
     <thead><tr><th class="n">#</th><th>Product</th><th class="n">Pasig Qty</th><th class="n">Bulacan Qty</th><th class="n">Total Inventory</th>
-      <th class="n">Target</th><th class="n">Made ${esc(win)}</th><th class="n">Remaining</th><th class="n">PAR Stocking</th><th>Remarks</th></tr></thead>`;
+      <th class="n">Cover (days)</th><th class="n">Target</th><th class="n">Made from ${esc(win)}</th><th class="n">Remaining</th><th class="n">PAR Stocking</th><th>Remarks</th></tr></thead>`;
   const trs=[]; let nn=0;
   hierGroups(rows,{g1:'_g1',g2:'_g2'}).forEach(G=>{
-    trs.push(`<tr class="g1"><td colspan="10">${esc(G.g1)} · ${G.all.length} product(s) · target ${G.all.reduce((a,r)=>a+(+r.target||0),0)} · remaining ${G.all.reduce((a,r)=>a+(+r.remaining||0),0)}</td></tr>`);
+    trs.push(`<tr class="g1"><td colspan="11">${esc(G.g1)} · ${G.all.length} product(s) · target ${G.all.reduce((a,r)=>a+(+r.target||0),0)} · remaining ${G.all.reduce((a,r)=>a+(+r.remaining||0),0)}</td></tr>`);
     G.subs.forEach(S=>{
-      trs.push(`<tr class="g2"><td colspan="10">&nbsp;&nbsp;▸ ${esc(S.g2||'Other')} (${S.items.length})</td></tr>`);
+      trs.push(`<tr class="g2"><td colspan="11">&nbsp;&nbsp;▸ ${esc(S.g2||'Other')} (${S.items.length})</td></tr>`);
       S.items.forEach(r=>{ nn++;
         const urg=(r.kind==='order'&&/OVERDUE/.test(r.remark.join(' ')))||r.extra>0;
         trs.push(`<tr class="${urg?'urgent':''}"><td class="n">${nn}</td>
           <td class="wrap">${esc(r.name)}<div style="font-size:7.5px;color:#777">${esc(r.sku)}</div></td>
           <td class="n">${r.custom?'':n(r.pasig)}</td><td class="n">${n(r.bulacan)}</td><td class="n">${n(r.total)}</td>
+          <td class="n" style="${(r.coverDays!=null&&r.coverDays<7)?'color:#b3261e;font-weight:700':''}">${cov(r)}</td>
           <td class="n"><b>${r.target==null?'—':r.target}</b></td>
           <td class="n">${r.target==null?'':(r.made||'0')}</td>
           <td class="n"><b>${r.remaining==null?'—':r.remaining}</b></td>
           <td class="n">${r.custom?'':(r.par||'')}</td>
           <td class="wrap" style="font-size:8.5px">${esc(r.remark.join(' · '))}</td></tr>`); }); }); });
-  if(!trs.length) trs.push('<tr><td colspan="10">Nothing to show.</td></tr>');
+  if(!trs.length) trs.push('<tr><td colspan="11">'+(o.only?'Nothing still needs producing.':'Nothing to show.')+'</td></tr>');
   const tot=`<tr class="tot"><td></td><td>Total · ${rows.length} product(s)</td>
-    <td class="n">${n(rows.reduce((a,r)=>a+(r.custom?0:r.pasig),0))}</td><td class="n">${n(rows.reduce((a,r)=>a+r.bulacan,0))}</td><td class="n">${n(rows.reduce((a,r)=>a+r.total,0))}</td>
+    <td class="n">${n(rows.reduce((a,r)=>a+(r.custom?0:r.pasig),0))}</td><td class="n">${n(rows.reduce((a,r)=>a+r.bulacan,0))}</td><td class="n">${n(rows.reduce((a,r)=>a+r.total,0))}</td><td></td>
     <td class="n">${tgt}</td><td class="n">${mad}</td><td class="n">${rem}</td><td></td><td></td></tr>`;
   const P=T.plot;
-  const sub=(P?`Target from demand plot <b>${esc(T.ref)}</b> (plan date ${esc(P.date)}, saved ${esc(_ptMD(T.from))})`
+  const sub=(P?`Target from demand plot <b>${esc(T.ref)}</b> (plan date ${esc(P.date)}, saved ${esc(_ptMD(T.plotFrom))})`
               +(T.ageDays>7?` · <b style="color:#b5762a">⚠ ${T.ageDays} days old — pull the week again</b>`:'')
              :`<b style="color:#b5762a">No demand plot is saved — no product has a target.</b>`)
-    +`<br>Made = packs confirmed after the plot was saved (${esc(win)}). Remaining = Target − Made. Custom orders: Target = packs on open orders, Remaining = still owed.`
+    +(o.only?`<br><b>Only products that still need producing</b> (Remaining above 0).`:'')
+    +`<br>Made = packs confirmed ${esc(win)} (a run the plot already counted never comes off twice). Remaining = Target − Made. Cover = Total Inventory ÷ average daily sales — how many days the stock lasts; under 7 in red. Custom orders: Target = packs on open orders, Remaining = still owed.`
     +`<br>Pasig Qty = what Shopify can sell · Bulacan Qty = made and not yet shipped · PAR Stocking = New Par. Supply-led, retiring, no-recipe and unplanned lines have no target; Remarks say why.`
     +(o.note?'<br>'+o.note:'');
   const foot=(i,nP)=>`<div class="foot"><span>Printed ${esc(st.when)} · by <b>${esc(st.by)}</b></span>
@@ -14674,16 +14771,16 @@ function planSheetHtml(T, o){
   const sections=[{title:o.title||'Production targets', sub, head, rows:trs, perPage:28, totalRow:tot}].concat(o.extra||[]);
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(o.title||'Production targets')}</title><style>${_wdtPrintCss(true)}</style></head><body>${_wdtRender(sections, foot)}</body></html>`;
 }
-function _ptOpen(html){
-  const w=window.open('','_blank'); if(!w){ toast('Allow pop-ups to print',true); return; }
+function _ptOpen(html, w0){
+  const w=w0||window.open('','_blank'); if(!w){ toast('Allow pop-ups to print',true); return; }
+  try{ w.document.open(); }catch(e){}
   w.document.write(html); w.document.close(); w.focus(); setTimeout(()=>{ try{ w.print(); }catch(e){} },250);
 }
-async function prodTargetsPrint(){
-  showBusy('Building the targets sheet…');
-  try{ const T=await planTargets({prods:window._prodAllProdsAny||window._prodAllProducts});
-    _ptOpen(planSheetHtml(T,{title:'Production Plan — targets'+(prodPlanDate?' · '+prodPlanDate:'')})); }
-  catch(e){ toast('Could not build the sheet: '+((e&&e.message)||e),true); }
-  finally{ hideBusy(); }
+function prodTargetsPrint(){
+  ptAsk({title:'Production Plan — targets'}, async o=>{
+    const T=await planTargets({prods:window._prodAllProdsAny||window._prodAllProducts, from:o.from, to:o.to});
+    _ptOpen(planSheetHtml(T,{title:'Production Plan — targets'+(prodPlanDate?' · '+prodPlanDate:''), only:o.need?_ptNeedOnly:null}), o.w);
+  });
 }
 async function noTargetMap(prods){
   if(_noTgt && (Date.now()-_noTgtAt)<60000) return _noTgt;
@@ -14802,7 +14899,7 @@ function drawProdPlan(){
     ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
     <span class="mini" style="color:var(--muted)">the day this run was actually made — it does not choose which demand is shown</span>
     ${window._prodTargetPlot
-      ? `<span style="color:var(--muted);font-size:12px"><b>Target</b> = what the demand plot <b>${esc(window._prodTargetRef||'')}</b>${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''} asked for, for ${window._prodTargetN} product(s)${window._prodTargetCo?' including '+window._prodTargetCo+' custom order SKU(s) (packs on open orders)':''}. <b>Made</b> = packs confirmed since the plot was saved (${esc(_ptMD(window._prodTargetFrom))} to ${esc(_ptMD(window._prodTargetTo))}). <b>Remaining</b> = Target − Made − this run. Supply-led, retiring and unplanned products have no target.${(window._prodTargetAge>7)?` <b style="color:var(--earth,#b5762a)">⚠ The plot is ${window._prodTargetAge} days old — pull the week again in Demand/MRP.</b>`:''}</span>`
+      ? `<span style="color:var(--muted);font-size:12px"><b>Target</b> = what the demand plot <b>${esc(window._prodTargetRef||'')}</b>${window._prodTargetDate?' ('+esc(window._prodTargetDate)+')':''} asked for, for ${window._prodTargetN} product(s)${window._prodTargetCo?' including '+window._prodTargetCo+' custom order SKU(s) (packs on open orders)':''}. <b>Made</b> = packs confirmed from <input type="date" value="${esc(window._prodTargetFrom||'')}" onchange="ptSetFrom(this.value);renderProdPlan()" title="Defaults to last Saturday (or the day the plot was saved, if later). A run the plot already counted never comes off twice." style="padding:1px 4px;font-size:12px"> to ${esc(_ptMD(window._prodTargetTo))}${_ptFrom?` <span class="btn link" style="font-size:12px" onclick="ptSetFrom('');renderProdPlan()">↺ last Saturday</span>`:''}. <b>Remaining</b> = Target − Made − this run. Supply-led, retiring and unplanned products have no target.${(window._prodTargetAge>7)?` <b style="color:var(--earth,#b5762a)">⚠ The plot is ${window._prodTargetAge} days old — pull the week again in Demand/MRP.</b>`:''}</span>`
       : `<span style="color:var(--earth,#b5762a);font-size:12px">${window._prodTargetRef?`<b>Nothing is owed</b> — no product on ${esc(window._prodTargetRef)} has packs left to make and no custom order is owed.`:`<b>No demand plot is saved</b>, so no product has a target. Pull the week in Demand/MRP and save the plot.`} You can still build and post a run without one.</span>`}</div>
     ${(()=>{ const N=window._prodNoTargetN||{}, T=(N.retiring||0)+(N.supply||0)+(N.norecipe||0);
       if(!T) return '';
@@ -15184,6 +15281,7 @@ function prodKitchenCart(){
       <b>Current stock</b> is what <span style="color:#2f5d33">${esc(locName(planSellLoc()))}</span> can sell + what is sitting <span style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</span> — two places, two numbers. <b>Cover</b> is days on the shelf, then the share of New Par + safety we hold everywhere. A high % beside a low day count means the packs exist and are at the wrong site.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
       <input id="kc_q" placeholder="🔎 search name / SKU / group…" oninput="window._kcQ=this.value;drawKitchenCartBody()" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
+      <label class="mini" title="Hide products whose Remaining is 0 — show only what still needs producing"><input type="checkbox" ${window._kcNeed?'checked':''} onchange="window._kcNeed=this.checked;drawKitchenCartBody()"> only what needs producing</label>
       <select id="kc_g" onchange="window._kcG=this.value;drawKitchenCartBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px"><option value="">All groups</option>${groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
     </div>
     <div class="mscroll" style="overflow-x:auto"><table style="min-width:640px"><thead><tr><th>Product</th>
@@ -15356,7 +15454,7 @@ function drawKitchenCartBody(){
      ever minted stays in the product table, so listing them here showed every
      order ever made — produced, completed, cancelled — as if it were work. */
   const _isCo=p=>!!p.is_custom||/^CUST-/i.test(String(p.sku||''));
-  hierGroups(shown.filter(p=>!_isCo(p)),{g1:'_g1',g2:'_g2'}).forEach(G=>G.subs.forEach(S=>{
+  hierGroups(shown.filter(p=>!_isCo(p) && (!window._kcNeed || _prodRemain(p.sku,0)>0)),{g1:'_g1',g2:'_g2'}).forEach(G=>G.subs.forEach(S=>{
     body+=`<tr style="background:#f6f8f4"><td colspan="6" style="padding-left:10px">▸ <b>${esc(G.g1+' › '+(S.g2||''))}</b></td></tr>`;
     S.items.forEach(p=>{ const hasT=+prodTargetMap[p.sku]>0; const rem=hasT?_prodRemain(p.sku,0):0; const v=(window._kcQty&&window._kcQty[p.sku]!=null)?window._kcQty[p.sku]:'';
       const pic=stockPicFor(p.sku);
@@ -22480,13 +22578,13 @@ const KB = {
        'A cancelled custom order stops owing packs straight away, so it leaves Demand/MRP on the next run.',
        'Cancelled purchase orders are hidden from the PO list by default; the eye button shows them again.',
        'Nothing here is automatic. Cancel only happens when somebody presses the button, and the activity log records who did it.']},
-  wdt:{d:'Everything the week owes, in one place — from the locked demand plot, the demand table and every locked custom order.',
+  wdt:{d:'Everything still to make, in one place — Target is the newest saved demand plot (custom orders: their open orders), the same figure the Production Plan and every targets printout use.',
     h:['Pick the week; the locked plot for that date is used if there is one',
        'Read the product list top-down — it is sorted by what is closest to running out',
        '🖨 Product target / Custom orders / Raw ingredients — three printouts for three different people'],
     l:['PRIORITY IS BY COVER, NOT SIZE. A product with nothing on hand against an outstanding order leads the list whatever the quantity, because that is the one that stops a delivery. A large order already sitting in the freezer is not urgent.',
-       'Still to make = target − what has been confirmed produced since the week started, so the list shrinks as the kitchen works.',
-       'Custom orders get their own section: a named customer with a date cannot be swapped for another product.',
+       'Still to make = Target − packs confirmed since the plot was saved, so the list shrinks as the kitchen works. Supply-led, retiring and unplanned products have no target; a spike past the plot is flagged, not added — pull the week again.',
+       'Custom orders lead the sheet, soonest make-by first: Target = packs on open orders, Still = what they owe. Completed and cancelled orders are not on it.',
        'The raw list covers only what is STILL to make, and prints both bases — processed (what the kitchen weighs) and as-purchased raw (what you buy).']},
   yields:{d:'The three losses a run has, kept as three numbers instead of one.',
     h:['Pick a date range; every confirmed prep batch in it is read',
