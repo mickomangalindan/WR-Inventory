@@ -2569,11 +2569,19 @@ function demStepNote(){
 }
 /* Custom orders are NOT rounded. A customer ordered 14; making 24 is 10 packs
    of somebody's bespoke recipe that nobody will ever buy. */
+/* A LINE TAKEN OUT STAYS OUT UNTIL THE PLOT IS SAVED.
+   🧮 Pull the week can be pressed several times in one sitting — it was pressed
+   five times on 19 Sep — and every press re-offered everything, so rabbit and
+   lamb, deleted by hand minutes earlier, were quietly back in the editor and
+   went into DP-09192026 [RAW] V03 with 660 packs nobody had planned. The
+   removals are remembered for the session and the next pull leaves them alone,
+   saying so. Typing a figure back in clears the memory for that line. */
+let _mrpDrop={};
 function mrpSetDem(sku, v){
   const raw=Math.max(0, Math.round(+v||0));
   const isCust=/^CUST-/i.test(String(sku||''));
   const q=isCust?raw:demSnap(raw);
-  if(q>0) mrpDemand[sku]=q; else delete mrpDemand[sku];
+  if(q>0){ mrpDemand[sku]=q; delete _mrpDrop[sku]; } else { delete mrpDemand[sku]; _mrpDrop[sku]=1; }
   if(!isCust && q!==raw && raw>0) toast(raw+' → '+q+' — minimum '+DEM_MIN+', then steps of '+DEM_INC);
   renderMRP();
 }
@@ -5143,7 +5151,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-20 14:20Z';
+const WR_BUILD='2026-09-21 08:10Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -8880,6 +8888,7 @@ async function renderMRP(){
   const _allP=await db.list('products',{});
   const allBySku={}; _allP.forEach(p=>allBySku[p.sku]=p);
   const prods=_allP.filter(p=>!isArchivedProd(p)), boms=await db.list('bom_lines',{}), ings=await listIngredients();
+  window._mrpNm={}; _allP.forEach(p=>{ window._mrpNm[p.sku]=prodLabel(p,{noSku:true})||p.sku; });
   const sups=await db.list('suppliers',{});
   const supMin={}; sups.forEach(s=>{ const nm=(s.name||'').trim(); if(nm) supMin[nm]=(+s.min_order_kg||0)*1000; });   // supplier min order → grams
   // Only the locations configured as SUPPLY. Summing every location counted
@@ -9130,6 +9139,19 @@ async function renderMRP(){
       <button class="btn sm sec" onclick="mrpClearDemand(MRPDATE)" title="Remove the demand rows recorded against this date — by source, and without deleting the orders">🗑 Clear demand for this date</button>
       <button class="btn sm ${demStepOn()?'':'sec'}" onclick="demStepToggle()" title="round quantities to what the line can actually pack">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button></div>
     <div class="hint" style="margin:6px 0 0">${demStepNote()}</div>`;
+  dh+=(()=>{ const O=mrpOmissions(); if(!O.extra.length) return '';
+    const packs=O.extra.reduce((a,x)=>a+x.qty,0);
+    return `<div style="margin:10px 0;padding:10px;border:1px solid var(--danger);background:#fdf0ed;border-radius:6px;font-size:12.5px">
+      ⚠ <b>${O.extra.length} line(s) in this editor — ${packs} pack(s) — were not offered by 🧮 Pull the week.</b>
+      They were here before the pull: typed by hand, loaded from an older plot, or left over from another week. The pull overwrites what it offers and never removes the rest, so these ride along into the saved plot and its purchase orders unless you take them out.
+      <div class="mini" style="margin-top:5px">${esc(O.extra.slice(0,10).map(x=>(x.name+' '+x.qty)).join(' · '))}${O.extra.length>10?' …':''}</div>
+      <div style="margin-top:7px"><button class="btn sec sm" onclick="mrpDropExtra()">🧹 Remove them</button></div></div>`; })();
+  dh+=(()=>{ const held=Object.keys(_mrpDrop||{}); if(!held.length) return '';
+    const nm=window._mrpNm||{};
+    return `<div style="margin:8px 0;padding:8px 10px;border:1px solid var(--line);background:#f6f8f4;border-radius:6px;font-size:12.5px">
+      ✋ <b>${held.length} line(s) you took out stay out of the next pull.</b>
+      <span class="mini" style="color:var(--muted)">${esc(held.slice(0,8).map(k=>nm[k]||k).join(' · '))}${held.length>8?' …':''}</span>
+      <span class="btn link" style="margin-left:6px" onclick="_mrpDrop={};renderMRP()">↺ offer them again</span></div>`; })();
   dh+=`<h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3>
     <table><thead><tr><th>Product</th><th>SKU</th><th class="num">Demand</th></tr></thead><tbody>`;
   /* Name + Variant, then the code beneath. "Rabbit Meat (GC)" exists at 250 g
@@ -9151,6 +9173,7 @@ async function renderMRP(){
      not be filled, which is how a shortfall column stops being read. They keep
      their place in the production target and in production itself. */
   const _supLed=prods.filter(isSupplyLed);
+  window._mrpSupLed={}; _supLed.forEach(p=>{ window._mrpSupLed[p.sku]=1; });
   const catalogue=prods.filter(p=>!coAll[p.sku] && !isSupplyLed(p));
   if(_supLed.length){
     dh=dh.replace('<tbody>','<tbody>'+
@@ -9456,7 +9479,7 @@ async function genRef(type,opts){ opts=opts||{}; const dd=_mmddyyyy(opts.date);
    less of. Shared by the save dialog (before) and the saved plot (after). */
 function mrpOmissions(){
   const P=window._mrpPulled;
-  const out={omitted:[], trimmed:[], offeredN:0, at:'', by:''};
+  const out={omitted:[], trimmed:[], extra:[], offeredN:0, at:'', by:''};
   if(!P || P.date!==MRPDATE) return out;
   out.at=P.at; out.by=P.by;
   Object.keys(P.map||{}).forEach(sku=>{
@@ -9466,9 +9489,40 @@ function mrpOmissions(){
     if(saved<=0) out.omitted.push({sku, name:P.names[sku]||sku, offered});
     else if(saved<offered) out.trimmed.push({sku, name:P.names[sku]||sku, offered, saved});
   });
+  /* ---- AND WHAT THE PULL NEVER OFFERED AT ALL ---------------------------
+     The demand editor is one object that survives a change of date, a loaded
+     plot and every pull: 🧮 Pull the week OVERWRITES the lines it offers and
+     never removes the rest. So a figure typed for another week, or loaded from
+     an older plot as a starting point, rides along invisibly and is saved into
+     the plot as if it had been planned.
+     DP-09192026 [RAW] V03 is the case: the pull offered 67 catalogue lines, 23
+     were left out, and 50 were saved — six lines (264 packs) that the pull had
+     not offered, on products already above their par. Nobody put them there on
+     purpose and nothing on screen said they were different. */
+  const nm=window._mrpNm||{};
+  Object.keys(mrpDemand||{}).forEach(sku=>{
+    const q=+mrpDemand[sku]||0; if(!(q>0)) return;
+    if(/^CUST-/i.test(sku)) return;                 // committed orders, never offered by the pull
+    if((window._mrpSupLed||{})[sku]) return;        // supply-led: never offered, always typed by hand
+    if((+((P.map||{})[sku])||0)>0) return;          // the pull did offer it
+    out.extra.push({sku, name:nm[sku]||sku, qty:q});
+  });
   const byQ=(a,b)=>b.offered-a.offered;
-  out.omitted.sort(byQ); out.trimmed.sort(byQ);
+  out.omitted.sort(byQ); out.trimmed.sort(byQ); out.extra.sort((a,b)=>b.qty-a.qty);
   return out;
+}
+/* Drop every line the pull did not offer. Nothing else is touched. */
+function mrpDropExtra(){
+  const O=mrpOmissions(); if(!O.extra.length){ toast('Nothing to remove'); return; }
+  const packs=O.extra.reduce((a,x)=>a+x.qty,0);
+  if(!confirm('Remove '+O.extra.length+' line(s) the pull did not offer ('+packs+' pack(s))?\n\n'
+    +O.extra.slice(0,15).map(x=>'• '+x.name+' — '+x.qty).join('\n')
+    +(O.extra.length>15?('\n… and '+(O.extra.length-15)+' more'):'')
+    +'\n\nThey stay in the product list and can be typed back in.')) return;
+  O.extra.forEach(x=>{ delete mrpDemand[x.sku]; delete mrpAdd[x.sku]; });
+  sysLog('mrp',MRPDATE,'🧹 Removed '+O.extra.length+' demand line(s) the pull did not offer ('+packs+' pack(s)) by '+CURRENT_USER
+    +' — '+O.extra.slice(0,12).map(x=>x.sku).join(', '));
+  closeModal(); renderMRP(); toast('Removed '+O.extra.length+' line(s) · '+packs+' pack(s)');
 }
 async function saveMRPPlan(){
   const plan=(window._mrpPlan||[]); const toBuy=plan.filter(l=>l.final>0);
@@ -9488,6 +9542,16 @@ async function saveMRPPlan(){
       <li>Ingredients to order: <b>${toBuy.length}</b></li>
       <li>Estimated order value: <b>₱${Math.round(totVal).toLocaleString('en-PH')}</b></li>
     </ul>${(()=>{ const O=mrpOmissions();
+      if(!O.extra.length) return '';
+      const packs=O.extra.reduce((a,x)=>a+x.qty,0);
+      return `<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:10px;margin:12px 0;font-size:12.5px">
+        <b>⚠ ${O.extra.length} line(s) — ${packs} pack(s) — were NOT offered by this pull.</b>
+        <div class="mini" style="margin:5px 0 0;color:var(--muted)">They were already in the editor before the pull: typed by hand, loaded from an older plot, or left over from another week. The shelf does not ask for them. Keep them only if you mean to make them; ingredients WILL be ordered for them.</div>
+        <div style="margin-top:6px;max-height:120px;overflow:auto" class="mini">${
+          O.extra.slice(0,40).map(x=>`• ${esc(x.name)} <span style="color:var(--muted)">— ${x.qty}</span>`).join('<br>')
+          +(O.extra.length>40?('<br>… and '+(O.extra.length-40)+' more'):'')}</div>
+        <div style="margin-top:8px"><button class="btn sec sm" onclick="mrpDropExtra()">🧹 Remove these ${O.extra.length} line(s)</button></div></div>`;
+      })()}${(()=>{ const O=mrpOmissions();
       if(!O.omitted.length && !O.trimmed.length) return '';
       const packs=O.omitted.reduce((a,x)=>a+x.offered,0);
       return `<div style="background:#fff8e1;border:1px solid #e0b400;border-radius:6px;padding:10px;margin:12px 0;font-size:12.5px">
@@ -9508,10 +9572,10 @@ async function confirmSaveMRPPlan(hasExisting){
   const g=await genRef('DP',{category:'RAW',date:MRPDATE}); window._mrpDPit=g.it;
   // Saving a plot LOCKS this week's demand — the Production Plan will only take a
   // target from a locked plot, never from what is being typed on this screen.
-  const _om=mrpOmissions();
+  const _om=mrpOmissions(); _mrpDrop={};
   const data={ref:g.ref,locked:true,demand:{...mrpDemand},manual:{...mrpManual},add:{...mrpAdd},remarks:{...mrpRemarks},by:CURRENT_USER,saved_at:new Date().toISOString(),
     /* the judgement, kept with the document it was made on — see mrpPullPackReq */
-    omitted:_om.omitted, trimmed:_om.trimmed, offeredN:_om.offeredN,
+    omitted:_om.omitted, trimmed:_om.trimmed, extra:_om.extra, offeredN:_om.offeredN,
     lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
   try{
     if(isLive()){
@@ -9595,8 +9659,10 @@ async function mrpPullPackReq(){
      types them in on purpose (the meat has landed) — and then the plot IS
      their production target. */
   let _slSet=new Set(); try{ _slSet=new Set(((await db.list('products',{}))||[]).filter(isSupplyLed).map(p=>p.sku)); }catch(e){}
-  const cat=(built.rows||[]).map(r=>({r,c:pqCalc(r)}))
+  const _catAll=(built.rows||[]).map(r=>({r,c:pqCalc(r)}))
     .filter(x=>x.c.produce>0 && co[x.r.sku]==null && !_slSet.has(x.r.sku));
+  const _held=_catAll.filter(x=>_mrpDrop[x.r.sku]);        // taken out by hand earlier — left out
+  const cat=_catAll.filter(x=>!_mrpDrop[x.r.sku]);
   const catPacks=cat.reduce((a,x)=>a+x.c.produce,0);
 
   if(!coSkus.length && !cat.length){
@@ -9613,6 +9679,10 @@ async function mrpPullPackReq(){
     +'\n\nWorked out at: lead '+PQ.lead+'d · movement '+PQ.move+'× · cycle '+PQ.cycle+'d · window '+PQ.win+'d · case '+PQ.cs
     +'\nSellable read from '+built.src+'.'
     +(noSales?('\n\n'+noSales+' product(s) have no sales in the window and so ask for nothing.'):'')
+    +(_held.length?('\n\nSTAYING OUT — '+_held.length+' line(s) you removed earlier in this session are offered again and will NOT be re-added:\n'
+        +_held.slice(0,10).map(x=>'• '+x.r.name+' — '+x.c.produce).join('\n')
+        +(_held.length>10?('\n… and '+(_held.length-10)+' more'):'')
+        +'\nType a figure back in if you want any of them.'):'')
     +(coErr?('\n\n⚠ The custom orders could not be read ('+coErr+') — the catalogue half will load without them.'):'')
     +'\n\nNothing is saved until you save the plot.')) return;
 
@@ -9640,12 +9710,26 @@ async function mrpPullPackReq(){
   coSkus.forEach(sk=>{ mrpDemand[sk]=Math.max(0,Math.round(+co[sk]||0)); nCo++; });   // never rounded
   cat.forEach(x=>{ mrpDemand[x.r.sku]=demSnap(x.c.produce); nCat++; });
   sysLog('mrp',MRPDATE,'🧮 Week pulled into the plot — '+nCo+' custom-order SKU(s) / '+Math.round(coPacks)
-    +' pack(s) committed, '+nCat+' catalogue SKU(s) / '+Math.round(catPacks)+' pack(s) by '+CURRENT_USER);
+    +' pack(s) committed, '+nCat+' catalogue SKU(s) / '+Math.round(catPacks)+' pack(s) by '+CURRENT_USER
+    +(_held.length?(' · '+_held.length+' line(s) removed earlier were not re-added'):''));
   try{ await coSyncStatuses(); }catch(e){}
   await renderMRP();
   toast('Pulled '+nCo+' custom-order SKU(s) + '+nCat+' catalogue SKU(s) for '+MRPDATE+' — review, then 💾 Save the plot');
 }
-async function mrpGoDate(d){ MRPDATE=d; window._mrpPulled=null; await renderMRP();
+async function mrpGoDate(d){
+  /* THE EDITOR IS NOT THE WEEK'S. It is one object, and moving the date used to
+     carry every figure over to the new week silently — which is how lines
+     nobody planned ended up inside a saved plot. Moving the date now empties
+     it, after saying what is being dropped. */
+  const held=Object.keys(mrpDemand).filter(k=>(+mrpDemand[k]||0)>0).length;
+  if(held){
+    const packs=Object.keys(mrpDemand).reduce((a,k)=>a+(+mrpDemand[k]||0),0);
+    if(!confirm('The demand editor still holds '+held+' line(s) / '+packs+' pack(s) for '+MRPDATE+'.\n\n'
+      +'Moving to '+d+' clears them, so the new week starts empty and 🧮 Pull the week fills it from the shelf.\n\n'
+      +'Cancel if you meant to save '+MRPDATE+' first.')) return;
+    mrpDemand={}; mrpManual={}; mrpAdd={}; mrpRemarks={}; _mrpDrop={};
+  }
+  MRPDATE=d; window._mrpPulled=null; await renderMRP();
   toast('Now on '+d+' — press 🧮 Pull the week to load it'); }
 
 /* ---- Clearing a trial demand -------------------------------------------
