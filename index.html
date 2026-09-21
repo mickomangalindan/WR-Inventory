@@ -5151,7 +5151,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-21 08:10Z';
+const WR_BUILD='2026-09-21 11:30Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -11164,6 +11164,12 @@ function wrLine(pts,xk,yk,color){ if(!pts||pts.length<2) return '<div class="hin
   return '<svg viewBox="0 0 '+W+' '+H+'" width="100%" height="'+H+'">'+grid+'<path d="'+area+'" fill="'+color+'" opacity=".08"/><path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="'+px(pts.length-1).toFixed(1)+'" cy="'+py(last[yk]).toFixed(1)+'" r="3.5" fill="'+color+'"/><text x="'+px(pts.length-1).toFixed(1)+'" y="'+(py(last[yk])-8).toFixed(1)+'" text-anchor="end" font-size="11" font-weight="700" fill="'+WINK+'">'+wkfmt(last[yk])+'</text>'+xl+'</svg>';
 }
 
+/* the average cost of a pack on the books — the only honest way to price a
+   drift figure when the gap is spread over a hundred SKUs */
+function packsCostAvg(fgVal, stockRows){
+  const n=(stockRows||[]).filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.on_hand||0),0);
+  return n>0?(fgVal/n):0;
+}
 async function renderDashboard(){
   $('crumb').innerHTML='<b>Dashboard</b>';
   $('cp').innerHTML=`<div class="title">Operations Dashboard</div><div class="sp"></div>
@@ -11180,18 +11186,70 @@ async function renderDashboard(){
   const prodBy={}; prod.forEach(p=>prodBy[p.sku]=p);
   const LOCNAME={bulacan:'Bulacan',pasig:'Pasig'};
   const stock={}; let stockVal=0; const siteVal={}; const famVal={};
-  stockRows.forEach(s=>{ stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);
-    const v=+s.stock_value||0; stockVal+=v; siteVal[s.location_code]=(siteVal[s.location_code]||0)+v;
-    if(s.kind==='product'){ const p=prodBy[s.ref_sku]; const fam=(p&&p.group_1)||(p&&p.family)||'Other'; famVal[fam]=(famVal[fam]||0)+v; } });
-  const fgVal=stockRows.filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.stock_value||0),0);
+  /* Ingredients only. Finished goods are valued further down, where the cost
+     model is loaded and the shop's own count is known — see PASIG IS SHOPIFY. */
+  stockRows.forEach(s=>{ if(s.kind!=='ingredient') return;
+    stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);
+    const v=+s.stock_value||0; stockVal+=v; siteVal[s.location_code]=(siteVal[s.location_code]||0)+v; });
+  const fgValLedger=stockRows.filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.stock_value||0),0);
+  /* ---- WHAT THE SHOP ITSELF SAYS IT HAS -------------------------------------
+     Every figure on this page is the ERP LEDGER, valued at cost. The ledger only
+     loses a pack when a sale posts to it, and Shopify's sales have not been
+     posting — so the shelf at the sell site drifts upwards and the inventory
+     value drifts with it. The production screens are safe: they read the
+     Shopify snapshot. This page did not, and said nothing about it.
+     So: compare, SKU by SKU, the ledger at the sell site with Shopify's own
+     reading, over the SKUs Shopify actually carries (a custom order has no
+     Shopify row and is not a discrepancy). */
+  let _sp=null; try{ _sp=await stockPicture(); }catch(e){}
+  const _sellLoc=planSellLoc();
+  let shopRead=0, ledgerCmp=0, driftPacks=0, driftVal=0, noRead=0;
+  if(_sp&&_sp.by){
+    const ledSell={}; stockRows.forEach(s=>{ if(s.kind==='product' && String(s.location_code||'')===_sellLoc)
+      ledSell[s.ref_sku]=(ledSell[s.ref_sku]||0)+(+s.on_hand||0); });
+    Object.keys(_sp.by).forEach(k=>{ const r=_sp.by[k]||{};
+      if(r.shopQ==null){ if((ledSell[k]||0)>0) noRead++; return; }
+      shopRead+=Math.max(0,+r.shopQ||0); ledgerCmp+=(+ledSell[k]||0); });
+    driftPacks=Math.round(ledgerCmp-shopRead);
+    driftVal=packsCostAvg(fgValLedger, stockRows)*driftPacks;
+  }
   const rawVal=stockRows.filter(s=>s.kind==='ingredient').reduce((a,s)=>a+(+s.stock_value||0),0);
-  const packs=stockRows.filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.on_hand||0),0);
-  const fgSkus=new Set(stockRows.filter(s=>s.kind==='product'&&(+s.on_hand||0)!==0).map(s=>s.ref_sku)).size;
+  const packsLedger=stockRows.filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.on_hand||0),0);
   const rawItems=new Set(stockRows.filter(s=>s.kind==='ingredient'&&(+s.on_hand||0)!==0).map(s=>s.ref_sku)).size;
   const supItems=ing.filter(active).filter(i=>(''+(i.category||'')).toLowerCase()==='supplies').length;
   await loadCostModel();
   let _dled={}; try{ _dled=await ingCostLedger(); }catch(e){}
-  const withMargin=marginRowsFor(prod.filter(active),boms,ing,_dled).map(r=>({name:r.p.name,cost:r.total,sell:r.sell,margin:r.sell?r.gp*100:null}));
+  const _mrRows=marginRowsFor(prod.filter(active),boms,ing,_dled);
+  const costBy={}; _mrRows.forEach(r=>{ costBy[r.p.sku]=+r.total||0; });
+  /* ---- PASIG IS SHOPIFY, AND THE VALUE FOLLOWS THE RULE ---------------------
+     The shelf at the sell site is Shopify's count, everywhere else is our
+     ledger — that is settled for the production screens, and the money has to
+     be counted the same way or the two halves of the business report different
+     stock. A pack is valued at its cost per the cost model (ingredients,
+     process, packaging, fees), the same figure the margin report prints; no
+     selling price appears in any inventory total.
+     A SKU Shopify does not carry — a custom order awaiting handover, a retired
+     code — keeps its ledger quantity, because there is no reading to prefer. */
+  const fgQty={}; stockRows.forEach(s=>{ if(s.kind!=='product') return;
+    const o=fgQty[s.ref_sku]=fgQty[s.ref_sku]||{sell:0, other:0, bySite:{}};
+    const L=String(s.location_code||''); const q=+s.on_hand||0;
+    if(L===_sellLoc) o.sell+=q; else { o.other+=q; o.bySite[L]=(o.bySite[L]||0)+q; } });
+  let fgVal=0, packs=0, fgNoRead=0; const fgSkuSet=new Set();
+  Object.keys(fgQty).forEach(k=>{ const o=fgQty[k];
+    const pic=(_sp&&_sp.by&&_sp.by[k])||null;
+    const read=(pic && pic.shopQ!=null);
+    if(!read && o.sell>0) fgNoRead++;
+    const sellQ=read?Math.max(0,+pic.shopQ||0):o.sell;
+    const q=sellQ+o.other; const c=+costBy[k]||0; const v=q*c;
+    stock[k]=(stock[k]||0)+q;                       // the shelf every tile on this page reads
+    fgVal+=v; packs+=q; if(q!==0) fgSkuSet.add(k);
+    if(sellQ) siteVal[_sellLoc]=(siteVal[_sellLoc]||0)+sellQ*c;
+    Object.keys(o.bySite).forEach(L=>{ siteVal[L]=(siteVal[L]||0)+o.bySite[L]*c; });
+    const p=prodBy[k]; const fam=(p&&p.group_1)||(p&&p.family)||'Other';
+    famVal[fam]=(famVal[fam]||0)+v; });
+  stockVal+=fgVal;
+  const fgSkus=fgSkuSet.size;
+  const withMargin=_mrRows.map(r=>({name:r.p.name,cost:r.total,sell:r.sell,margin:r.sell?r.gp*100:null}));
   const topMargin=withMargin.filter(x=>x.margin!=null&&x.cost>0).sort((a,b)=>b.margin-a.margin).slice(0,8);
   const thinMargin=withMargin.filter(x=>x.margin!=null&&x.cost>0).sort((a,b)=>a.margin-b.margin).slice(0,8);
   const openVars=vars.filter(v=>v.status==='open');
@@ -11232,7 +11290,7 @@ async function renderDashboard(){
   });
   paySched.sort((a,b)=> String(a.due||'9999').localeCompare(String(b.due||'9999')) || b.amt-a.amt);
   // Glimpse metrics for the quick-analysis cards.
-  const _mr=marginRowsFor(prod.filter(active),boms,ing,_dled).filter(r=>r.sell>0);
+  const _mr=_mrRows.filter(r=>r.sell>0);
   const _tgm=+COST_MODEL.target_gm||0.3;
   const mgBelow=_mr.filter(r=>r.gp<_tgm).length; const mgAvg=_mr.length?_mr.reduce((s,r)=>s+r.gp,0)/_mr.length:0;
   let _mom=[]; try{_mom=await momLoad()}catch(e){}
@@ -11280,7 +11338,7 @@ async function renderDashboard(){
   const kpi=(l,v,s,accent,go)=>`<div class="card kpi"${go?` onclick="${go}" style="cursor:pointer" title="Open ↗"`:''}><div class="l">${l}</div><div class="v${accent?' accent':''}">${v}</div><div class="s">${s||''}</div></div>`;
   const kpis = mh
     ? [kpi('Packs on hand',Math.round(packs).toLocaleString(),'sellable units',true,"openModel('stock_balance')"),kpi('Finished SKUs',fgSkus,'with stock',false,"openModel('stock_balance')"),kpi('Ingredients',rawItems,'with stock',false,"openModel('ingredients')"),kpi('Items to reorder',reorder.length,'labels below par',false,"gotoReport('lowstock')"),kpi('Open POs',openPo,po.length+' total',false,"openModel('purchase_orders')"),kpi('Supplies tracked',supItems,'consumables',false,"openModel('supplies_reorder')")].join('')
-    : [kpi('Total inventory value',wpeso(fgVal+rawVal),'finished + raw',true,"openModel('stock_balance')"),kpi('Finished goods · Pasig',wpeso(fgVal),Math.round(packs).toLocaleString()+' packs · '+fgSkus+' SKUs',false,"openModel('stock_balance')"),kpi('Raw materials · Bulacan',wpeso(rawVal),rawItems+' ingredients',false,"openModel('ingredients')"),kpi('Payables',wpeso(payables),payCount+' unpaid PO'+(payCount===1?'':'s'),false,"gotoReport('payables')"),kpi('Open PO pipeline',wpeso(estPO),estPOcount+' PO'+(estPOcount===1?'':'s')+' · at est. price',false,"openModel('purchase_orders')"),kpi('Items to reorder',reorder.length,'labels below par',false,"gotoReport('lowstock')"),kpi('Supplies tracked',supItems,'consumables',false,"openModel('supplies_reorder')")].join('');
+    : [kpi('Total inventory value',wpeso(fgVal+rawVal),'finished + raw · at cost',true,"openModel('stock_balance')"),kpi('Finished goods · all sites',wpeso(fgVal),Math.round(packs).toLocaleString()+' packs · '+fgSkus+' SKUs · at cost · '+esc(locName(_sellLoc))+' from Shopify',false,"openModel('stock_balance')"),kpi('Raw materials · all sites',wpeso(rawVal),rawItems+' ingredients · at cost',false,"openModel('ingredients')"),kpi('Payables',wpeso(payables),payCount+' unpaid PO'+(payCount===1?'':'s'),false,"gotoReport('payables')"),kpi('Open PO pipeline',wpeso(estPO),estPOcount+' PO'+(estPOcount===1?'':'s')+' · at est. price',false,"openModel('purchase_orders')"),kpi('Items to reorder',reorder.length,'labels below par',false,"gotoReport('lowstock')"),kpi('Supplies tracked',supItems,'consumables',false,"openModel('supplies_reorder')")].join('');
   const donutBody = (!mh && famArr.length)? wrDonut(famArr) : (mh? '<div class="hint">Value hidden for your role. Packs on hand: <b>'+Math.round(packs).toLocaleString()+'</b></div>' : '<div class="hint">No finished-goods value yet — seed or receive stock to see this.</div>');
   const siteBody = (!mh && siteArr.length)? wrHbars(siteArr,WBRAND,wpeso) : '<div class="hint">Value hidden for your role.</div>';
   const rawlineBody = wrLine(WR_HISTORY.raw_trend,'date','kg',WSER[4])+'<p class="note">Weekly commissary counts, Feb–Jul 2026 (historical).</p>';
@@ -11317,8 +11375,23 @@ async function renderDashboard(){
   const gStock = glimpse('📦','Live stock',mh?Math.round(packs).toLocaleString()+' packs':wpeso(stockVal), (belowReorder>0?('<b style="color:var(--earth,#b5762a)">'+belowReorder+'</b> below reorder/PAR'):'all above reorder ✅'),"openModel('stock_balance')");
   const gMom = glimpse('🚀','Sales momentum', (momStockout.length>0?('<span style="color:var(--danger)">'+momStockout.length+' stockout risk</span>'):'no stockout risk ✅'), (momOver>0?momOver+' overstock · ':'')+(momUrgent?('most urgent: '+esc(momUrgent.product)+' ('+(momUrgent.cover>=999?'∞':Math.round(momUrgent.cover))+'d)'):'add sales to see'),"openModel('momentum')");
 
+  /* The gap between the two ways of counting Pasig, stated where the money is
+     read rather than left to be discovered in a stock report. */
+  const _drCard=(driftPacks>20 && shopRead>0) ? `<div class="card" style="margin-bottom:14px;border-left:4px solid var(--danger)">
+      <h2 style="margin:0 0 6px">⚠ The ledger at ${esc(locName(_sellLoc))} is above the shop's own count</h2>
+      <div style="font-size:13px;line-height:1.6">
+        The figures above are valued <b>at cost</b>, and <b>${esc(locName(_sellLoc))} is counted from Shopify</b> — the same rule the production screens follow.
+        Our own ledger at ${esc(locName(_sellLoc))} says <b>${Math.round(ledgerCmp).toLocaleString()}</b> pack(s) where Shopify says <b>${Math.round(shopRead).toLocaleString()}</b>:
+        <b style="color:var(--danger)">${driftPacks.toLocaleString()} pack(s)</b> on our books that are not on the shelf${mh?'':` (about <b>${wpeso(driftVal)}</b>, which is why the value here is lower than the stock report's <b>${wpeso(fgValLedger)}</b>)`}.
+        <div class="mini" style="margin-top:6px;color:var(--muted)">A pack leaves the ledger only when a SALE posts to it. The last sale posted was
+          <b>${esc((_sp&&_sp.lastSale)||'—')}</b>${(_sp&&_sp.saleAgeDays!=null)?` (${Math.round(_sp.saleAgeDays)} day(s) ago)`:''}, so every sale since then is still sitting in the ledger as stock.
+          Fix the sales feed and post the missing sales; a count and an opening correction does the same job in one step.
+          ${fgNoRead?(fgNoRead+' SKU(s) have no Shopify row (custom orders awaiting handover, retired codes) and keep their ledger quantity.'):''}</div>
+        <div style="margin-top:8px"><button class="btn sec sm" onclick="openModel('stock_balance')">Open Live Stock</button>
+          <button class="btn sec sm" onclick="openModel('variances')">Variances</button></div></div></div>` : '';
   $('content').innerHTML=`<div class="wrdash">
     <div class="grid k6" style="margin-bottom:14px">${kpis}</div>
+    ${_drCard}
     <div class="grid c3" style="margin-bottom:14px">${gMargin}${gStock}${gMom}</div>
     ${mh?'':`<div class="grid" style="margin-bottom:14px">${card('💵 Purchase payables &amp; payment schedule',payBody)}</div>`}
     ${ownerCard}
