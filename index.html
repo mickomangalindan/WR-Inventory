@@ -745,12 +745,14 @@ const MODELS = {
       {n:'uom',l:'Unit',t:'text'},
       {n:'list_price_kg',l:'Cost / unit (₱)',t:'currency'},
       {n:'sticker_art_url',l:'Artwork link (labels)',t:'url'},
+      {n:'sticker_art_label',l:'Artwork file name',t:'text'},
+      {n:'sticker_art_folder',l:'Artwork category folder',t:'url'},
       {n:'supplier',l:'Default supplier',t:'rel',rel:'suppliers'},{n:'supplier1',l:'Supplier 1',t:'text'},
       {n:'par_g',l:'PAR (units)',t:'number'},{n:'reorder_g',l:'Reorder (units)',t:'number'},{n:'min_order_kg',l:'Min order',t:'number'},
       {n:'lead_time_days',l:'Lead time (d)',t:'number'},{n:'is_supply',l:'Kitchen supply',t:'bool'},
       {n:'notes',l:'Notes',t:'longtext'}],
     list:['name','category','uom','list_price_kg','par_g','supplier'],
-    groups:[['sku','name','category','uom','storage'],['list_price_kg','supplier','supplier1','sticker_art_url'],['par_g','reorder_g','min_order_kg','lead_time_days','is_supply']],
+    groups:[['sku','name','category','uom','storage'],['list_price_kg','supplier','supplier1','sticker_art_url','sticker_art_label','sticker_art_folder'],['par_g','reorder_g','min_order_kg','lead_time_days','is_supply']],
     tabs:[{l:'🧴 Item', groups:[0]},{l:'₱ & supplier', groups:[1]},{l:'⚙ Stock', groups:[2]}],
     full:['notes'] },
 
@@ -773,7 +775,9 @@ const MODELS = {
       {n:'cost_debone',l:'Labor: with deboning',t:'bool'},{n:'cost_butcher',l:'Add butcher charge',t:'bool'},
       {n:'cost_sousvide',l:'Sous-vide',t:'bool'},{n:'cost_ecobag',l:'Ecobag',t:'bool'},{n:'cost_thermal',l:'Thermal pouch',t:'bool'},
       {n:'sticker_net',l:'Sticker — net weight',t:'text'},{n:'sticker_dimension',l:'Sticker — dimension',t:'text'},
-      {n:'sticker_art_url',l:'Sticker — artwork link',t:'url'},{n:'sticker_supplier',l:'Sticker — supplier',t:'text'},
+      {n:'sticker_art_url',l:'Sticker — artwork link',t:'url'},
+      {n:'sticker_art_label',l:'Sticker — artwork file name',t:'text'},
+      {n:'sticker_art_folder',l:'Sticker — category folder',t:'url'},{n:'sticker_supplier',l:'Sticker — supplier',t:'text'},
       {n:'sticker_per_sheet',l:'Stickers per sheet/page',t:'number'},
       {n:'sticker_bulacan_on_hand',l:'Labels — Bulacan on hand',t:'number'},{n:'sticker_bulacan_par',l:'Labels — Bulacan PAR',t:'number'},
       {n:'sticker_pasig_on_hand',l:'Labels — Pasig on hand',t:'number'},{n:'sticker_pasig_par',l:'Labels — Pasig PAR',t:'number'},
@@ -786,7 +790,7 @@ const MODELS = {
     list:['name','status','family','variant','pack_g','sell_price'],
     groups:[['sku','variant','name','family'],['product_line','feeding_format','mix_category','group_1','group_2','animal','status','supply_led','replaced_by'],['pack_g','box_size','sell_price','par_packs','tot_cost_ref','feeding_style'],
             ['cost_debone','cost_butcher','cost_sousvide','cost_ecobag','cost_thermal'],
-            ['sticker_net','sticker_dimension','sticker_art_url','sticker_supplier','sticker_per_sheet','sticker_price','sticker_par_mode','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par','sticker_archived']],
+            ['sticker_net','sticker_dimension','sticker_art_url','sticker_art_label','sticker_art_folder','sticker_supplier','sticker_per_sheet','sticker_price','sticker_par_mode','sticker_bulacan_on_hand','sticker_bulacan_par','sticker_pasig_on_hand','sticker_pasig_par','sticker_archived']],
     tabs:[{l:'📦 Product', groups:[0,1,2], o2m:true},{l:'💰 Cost profile', groups:[3]},{l:'🏷️ Stickers', groups:[4]}],
     o2m:{ field:'bom', model:'bom_lines', fk:'product_sku', label:'Recipe (BOM)',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ingredient_category',l:'Category',t:'text'},{n:'usable_g',l:'Grams/pack',t:'number'},{n:'pct_of_pack',l:'% of pack',t:'number'},{n:'has_bones',l:'Bones',t:'text'},{n:'method_override',l:'Method',t:'text'}] } },
@@ -5151,7 +5155,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-21 16:40Z';
+const WR_BUILD='2026-09-22 06:10Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -21688,6 +21692,7 @@ async function renderStickerReorder(){
         group_1:'Custom Orders', group_2:'Personalised name', sort_order:p.sort_order, oh:0, par:0,
         packs, inc:pinc, incRefs:(onOrderRefs[p.sku]||[]), forProd:Math.max(0,packs-pinc), forPar:0, noPar:true, perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0,
         supplier:(p.sticker_supplier||'').trim(), link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'',
+        label:(p.sticker_art_label||'').trim(), folder:(p.sticker_art_folder||'').trim(),
         net:p.sticker_net||'', kind:'personal', note:ref+' · printed name, no stock held'}));
       return false;
     }
@@ -21707,7 +21712,8 @@ async function renderStickerReorder(){
       perDay:(stockPicFor(p.sku)||{}).perDay||0,
       parStored:Math.max(0,+p['sticker_'+_stkRoLoc+'_par']||0),
       perSheet:+p.sticker_per_sheet||0, price:+p.sticker_price||0, supplier:(p.sticker_supplier||'').trim(),
-      link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'', net:p.sticker_net||'', kind:'product'});
+      link:(p.sticker_art_url||'').trim(), dim:p.sticker_dimension||'', net:p.sticker_net||'',
+      label:(p.sticker_art_label||'').trim(), folder:(p.sticker_art_folder||'').trim(), kind:'product'});
   });
   // the shared custom label is a SUPPLY item — PAR and stock live on the ingredients row
   try{
@@ -21723,6 +21729,7 @@ async function renderStickerReorder(){
         sort_order:9e8, oh:on, par, packs, inc, incRefs:(onOrderRefs[i.sku]||[]),
         forProd:Math.max(0,packs-on-inc), forPar:Math.max(0,par-Math.max(0,on+inc-packs)),
         perSheet:0, price:+i.list_price_kg||0, supplier:(i.supplier||'').trim(), link:_firstUrl(i.sticker_art_url||i.notes||i.source||''),
+        label:(i.sticker_art_label||'').trim(), folder:(i.sticker_art_folder||'').trim(),
         dim:'', net:i.uom||'pcs', kind:'shared',
         /* ALWAYS ON THE ORDER LIST, even at zero. This is the one label
            somebody checks every single week — every custom order packs behind
@@ -22018,7 +22025,7 @@ function drawStickerReorder(){
           <td><b>${esc(r.name||bare)}</b>${(r.variant&&varAppend(r.name||bare,r.variant)!==String(r.name||bare))?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}${r.note?`<div class="mini" style="color:var(--berry)">${esc(r.note)}</div>`:''}${(r.pinned&&!(r.order>0))?'<div class="mini" style="color:var(--muted)">always listed — check the count, leave it blank if nothing is needed</div>':''}</td>
           <td class="mini">${esc(r.net||'')||'—'}</td>
           <td><code>${esc(bare)}</code></td>
-          <td>${r.link&&safeUrl(r.link)!=='#'?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener noreferrer">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>
+          <td>${r.link&&safeUrl(r.link)!=='#'?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener noreferrer" title="${esc(r.label||'the artwork file on Drive')}">Open artwork ↗</a>`:'<span style="color:var(--danger)">— pending</span>'}</td>
           <td class="mini">${esc(r.dim||'')||'—'}</td>
           <td class="num">${r.urgent?`<div class="mini" style="color:var(--danger);font-weight:700" title="What is on hand plus what is already on order (${_spN((+r.oh||0)+(+r.inc||0))}) is less than the ${_spN(r.leadNeed)} this label will get through while the printer takes its ${r.leadDays} day(s).${r.daysLeft!=null?` About ${Math.round(r.daysLeft*10)/10} day(s) of labels left.`:''} Ordering next week is already too late.">⚠ inside the print lead time</div>`:''}<b title="${
             r.parSrc==='derived'
@@ -22141,7 +22148,13 @@ function _stkRowsFrom(lines, prods, ings){
       name:(p.name||String(ing.name||'').replace(/ — Sticker$/,'')||l.ingredient_sku),
       variant:(p.variant||''),
       fam:(p.family||p.feeding_style||'Other'), group_1:prodG1(p), group_2:prodG2(p),
-      net:(p.sticker_net||''), dim:(p.sticker_dimension||''), link:(p.sticker_art_url||''),
+      net:(p.sticker_net||''), dim:(p.sticker_dimension||''),
+      /* A label held as a kitchen SUPPLY (the shared custom label) has no
+         product row, so read the artwork off the ingredient when the product
+         has none. Both tables carry the same three columns. */
+      link:(p.sticker_art_url||ing.sticker_art_url||''),
+      label:(p.sticker_art_label||ing.sticker_art_label||''),
+      folder:(p.sticker_art_folder||ing.sticker_art_folder||''),
       par:(+p['sticker_'+(window._stkPoLoc||'bulacan')+'_par']||+p.sticker_bulacan_par||0),
       oh:(+p['sticker_'+(window._stkPoLoc||'bulacan')+'_on_hand']||+p.sticker_bulacan_on_hand||0),
       sort_order:p.sort_order, per_sheet:(+p.sticker_per_sheet||0),
@@ -22153,11 +22166,13 @@ function _stkTableHTML(rows){
   hierGroups(pgRows(rows),{g1:'_g1',g2:'_g2'}).forEach(G=>{
     h+=`<tr style="background:#d7e7db"><td colspan="11"><b style="font-size:13.5px">${esc(G.g1)}</b></td></tr>`;
     G.subs.forEach(S=>{
-      h+=`<tr style="background:#eef3ea"><td colspan="11" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
+      const _fld=(S.items.find(x=>x.folder&&safeUrl(x.folder)!=='#')||{}).folder||'';
+      h+=`<tr style="background:#eef3ea"><td colspan="11" style="padding-left:22px">▸ <b>${esc(S.g2)}</b>${
+        _fld?` <a href="${esc(safeUrl(_fld))}" target="_blank" rel="noopener" style="font-weight:400;font-size:11.5px">📁 folder ↗</a>`:''}</td></tr>`;
       S.items.forEach(r=>{ n++; totO+=r.ordered; totR+=r.received; if(r.link) linked++;
         const sh=stickerSheets(r.ordered,r.per_sheet); const shTxt=r.per_sheet>0?(sh.sheets+' × '+r.per_sheet):'—';
         h+=`<tr><td>${n}</td><td><b>${esc(r.name)}</b>${r.variant&&r.variant!==r.name?`<div class="mini" style="color:var(--muted)">▸ ${esc(r.variant)}</div>`:''}</td><td>${esc(r.net)||'—'}</td><td><code>${esc(r.sku)}</code></td>`+
-          `<td>${(r.link&&safeUrl(r.link)!=='#')?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener">Open artwork ↗</a>`
+          `<td>${(r.link&&safeUrl(r.link)!=='#')?`<a href="${esc(safeUrl(r.link))}" target="_blank" rel="noopener" title="${esc(r.label||'the artwork file on Drive')}">Open artwork ↗</a>`
             :(r.link?`<span style="color:var(--danger)" title="this is a file NAME, not a link — run PART 11">— not a link</span>`
                     :'<span style="color:var(--danger)">— pending</span>')}</td>`+
           `<td>${esc(r.dim)||'—'}</td>`+
@@ -22215,9 +22230,10 @@ async function stkMasterRows(ref){
   const prods={}; try{ (await db.list('products',{})).forEach(p=>prods[p.sku]=p); }catch(e){}
   const ings={};  try{ (await db.list('ingredients',{})).forEach(i=>ings[i.sku]=i); }catch(e){}
   const rows=_stkRowsFrom(lines, prods, ings);
-  rows.forEach(r=>{ const p=prods[r.sku]||{};
+  rows.forEach(r=>{ const p=prods[r.sku]||{}, i=ings[r.sku]||{};
     r.supplier=(p.sticker_supplier||'').trim();
-    r.label=(p.sticker_art_label||'').trim(); });
+    r.label=(p.sticker_art_label||i.sticker_art_label||r.label||'').trim();
+    r.folder=(p.sticker_art_folder||i.sticker_art_folder||r.folder||'').trim(); });
   return rows;
 }
 async function stkMasterPrint(){
@@ -22231,7 +22247,14 @@ async function stkMasterPrint(){
     S.groups.forEach(G=>{
       body+=`<tr class="g1"><td colspan="8">${esc(G.g1)}</td></tr>`;
       G.subs.forEach(sub=>{
-        body+=`<tr class="g2"><td colspan="4">&nbsp;&nbsp;&nbsp;${esc(sub.g2)}</td><td colspan="4"></td></tr>`;
+        /* THE CATEGORY FOLDER, ONCE PER BAND — the master file's own habit.
+           A print shop pulling ten labels for one category would rather open
+           the folder than ten separate file links, and when one line's link is
+           missing the folder is still a way to reach the artwork. Any row in
+           the band can supply it; they all carry the same one. */
+        const _fld=(sub.items.find(x=>x.folder&&safeUrl(x.folder)!=='#')||{}).folder||'';
+        body+=`<tr class="g2"><td colspan="4">&nbsp;&nbsp;&nbsp;${esc(sub.g2)}</td><td colspan="4">${
+          _fld?`<a href="${esc(safeUrl(_fld))}">📁 whole category folder ↗</a>`:''}</td></tr>`;
         sub.items.forEach(r=>{ n++;
           const linked=r.link&&safeUrl(r.link)!=='#';
           body+=`<tr><td class="n">${n}</td><td>${esc(r.name)}${r.variant&&r.variant!==r.name?' — '+esc(r.variant):''}</td>
@@ -22294,7 +22317,9 @@ async function stkMasterSheet(){
     S.groups.forEach(G=>{
       out.push(['  '+G.g1]);
       G.subs.forEach(sub=>{
-        out.push(['     '+sub.g2]);
+        const _fld=(sub.items.find(x=>x.folder&&safeUrl(x.folder)!=='#')||{}).folder||'';
+        out.push(['     '+sub.g2, '', '', '',
+          _fld?('=HYPERLINK("'+safeUrl(_fld)+'","📁 whole category folder")'):'']);
         sub.items.forEach(r=>{ n++;
           const linked=r.link&&safeUrl(r.link)!=='#';
           out.push([n, r.name+(r.variant&&r.variant!==r.name?(' — '+r.variant):''), r.net||'', r.sku,
