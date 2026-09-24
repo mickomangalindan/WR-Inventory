@@ -807,7 +807,7 @@ const MODELS = {
     searchOn:['po_ref','supplier_name','status','created_by'],
     fields:[
       {n:'po_ref',l:'PO Reference',t:'text'},{n:'supplier_name',l:'Vendor',t:'rel',rel:'suppliers'},
-      {n:'order_date',l:'Order date',t:'date'},{n:'expected_delivery',l:'Expected delivery',t:'date'},{n:'status',l:'Status',t:'select',o:['open','rfq','quoted','confirmed','partial','received','cancelled']},
+      {n:'order_date',l:'Order date',t:'date'},{n:'expected_delivery',l:'Expected delivery',t:'date'},{n:'received_at',l:'Received at',t:'text',ro:true},{n:'status',l:'Status',t:'select',o:['open','rfq','quoted','confirmed','partial','received','cancelled']},
       {n:'created_by',l:'Created by',t:'text'},
       {n:'discount',l:'Discount ₱',t:'currency'},{n:'delivery_fee',l:'Delivery fee ₱',t:'currency'},
       {n:'delivery_payee',l:'Delivery fee payable to',t:'select',o:['Supplier','Fleet service']},
@@ -817,7 +817,7 @@ const MODELS = {
     // Discount, delivery fee, who the fee is owed to and the courier's name are NOT
     // repeated up here — they all live in the 💵 Payments & delivery section below,
     // which is where they are actually settled. One field, one place.
-    groups:[['po_ref','order_date'],['created_by','expected_delivery']], full:['supplier_name'],
+    groups:[['po_ref','order_date'],['created_by','expected_delivery','received_at']], full:['supplier_name'],
     o2m:{ field:'lines', model:'po_lines', fk:'po_ref', label:'Order Lines',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Requested (kg)',t:'number'},{n:'available_kg',l:'Order qty · vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
 
@@ -858,9 +858,9 @@ const MODELS = {
       {n:'from_stock_kg',l:'Drawn from processed stock (kg)',t:'number'},{n:'yield_pct',l:'Actual yield %',t:'number'},
       {n:'run_ref',l:'Run',t:'text',ro:true},
       {n:'waste_g',l:'Waste (g)',t:'number'},{n:'output_lot',l:'Output lot',t:'text'},
-      {n:'production_date',l:'Date',t:'date'},{n:'best_before',l:'Best before',t:'date'},{n:'cost_per_pack',l:'₱/pack',t:'currency'},{n:'operator',l:'Operator',t:'text',ro:true}],
+      {n:'production_date',l:'Date',t:'date'},{n:'scheduled_date',l:'Scheduled for',t:'date',ro:true},{n:'confirmed_at',l:'Confirmed at',t:'text',ro:true},{n:'best_before',l:'Best before',t:'date'},{n:'cost_per_pack',l:'₱/pack',t:'currency'},{n:'operator',l:'Operator',t:'text',ro:true}],
     list:['batch_ref','kind','_item','status','good_packs','output_kg','production_date'],
-    groups:[['batch_ref','kind','run_ref','_item','product_sku','production_date','best_before'],['good_packs','reject_packs','waste_g','output_lot','cost_per_pack'],['raw_used_kg','output_kg','from_stock_kg','yield_pct']],
+    groups:[['batch_ref','kind','run_ref','_item','product_sku','scheduled_date','production_date','confirmed_at','best_before'],['good_packs','reject_packs','waste_g','output_lot','cost_per_pack'],['raw_used_kg','output_kg','from_stock_kg','yield_pct']],
     o2m:{field:'issues',model:'batch_issues',fk:'batch_ref',label:'Ingredients Issued',
       cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'uom',l:'UoM',t:'select',o:['kg','g','pcs','mL']},
         {n:'expected_raw_g',l:'Exp raw (kg)',t:'number',scale:1000,ro:true},{n:'actual_raw_g',l:'Act raw (kg)',t:'number',scale:1000},
@@ -871,9 +871,9 @@ const MODELS = {
     status:{f:'status',stages:['sent','received','cancelled']}, cancelable:true,
     fields:[{n:'transfer_ref',l:'Reference',t:'text'},{n:'from_code',l:'From',t:'select',o:['bulacan','pasig']},
       {n:'to_code',l:'To',t:'select',o:['pasig','bulacan']},{n:'status',l:'Status',t:'select',o:['sent','received','cancelled']},
-      {n:'transfer_date',l:'Date',t:'date'},{n:'created_by',l:'Created by',t:'text',ro:true}],
+      {n:'transfer_date',l:'Date',t:'date'},{n:'received_at',l:'Received at',t:'text',ro:true},{n:'created_by',l:'Created by',t:'text',ro:true}],
     list:['transfer_ref','from_code','to_code','status','transfer_date'],
-    groups:[['transfer_ref','from_code','to_code'],['transfer_date','created_by']],
+    groups:[['transfer_ref','from_code','to_code'],['transfer_date','received_at','created_by']],
     o2mLoaders:[{label:'🥩 Ingredients', fn:"trPick('ingredient')"},{label:'📦 Products', fn:"trPick('product')"},
                 {label:'🧴 Supplies', fn:"trPick('supply')"},{label:'🏷 Stickers', fn:"trPick('sticker')"},
                 {label:'⬇ Finished stock…', fn:'openTransferLoad'}],
@@ -5155,7 +5155,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-22 06:10Z';
+const WR_BUILD='2026-09-24 14:40Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -8887,6 +8887,377 @@ function wdtPrint(which){
    products table with no filter, so a cancelled order's SKU carried on asking
    to be planned every week after the order itself had gone. Two of them were
    still on the list with their order deleted and no demand row anywhere. */
+/* ===========================================================================
+   RAW PAR — a ceiling of its own for every ingredient
+   ---------------------------------------------------------------------------
+   WHAT WAS HERE BEFORE.  One number, `RAW_REORDER_G = 5000`, for all 169
+   ingredients: buy when fewer than five kilos are left.  Five kilos of pork
+   loin is four days.  Five kilos of crocodile is most of a year.  The same
+   line therefore left the fast items short and the slow ones buried, and on a
+   24-Sep read of the ledger it was holding 951 kg — three weeks of cover — of
+   which 25 items were over-protected and 21 were under.
+
+   WHAT IT IS NOW.  Each ingredient gets two numbers worked out from how fast
+   IT is actually used:
+
+     trigger (reorder point) = daily use × lead time × (1 + cushion)
+     target  (the ceiling)   = daily use × (review + lead) × (1 + cushion)
+
+   and the buying rule is the one the whole plan now runs on:
+
+     order = target − what we hold − what is already coming
+
+   Nothing is ordered until stock falls THROUGH the trigger; when it does, the
+   order fills back to the target and no further.  That is the difference
+   between a floor and a ceiling, and it is why this cannot overstock: the
+   ceiling is the most that can ever be bought, and it is sized in days of the
+   item's own usage rather than in kilos of nothing in particular.
+
+   WHERE THE USAGE RATE COMES FROM.  sales_momentum — the same table Regular
+   Packs reads — turned into a steady week of packs, then run down the BOMs and
+   converted to the form we actually purchase via yield.  So the raw ceiling
+   MOVES with sales, automatically, and it moves from the same figure the
+   finished-goods par moves from.  One demand signal, two screens.
+
+   THREE THINGS IT REFUSES TO DO.
+     · It will not hold more than the item keeps.  Shelf life caps the target,
+       so a slow mover with a 30-day life can never be given 90 days of cover.
+     · It will not double-buy what is already in the building.  Processed and
+       part-prepped stock is converted back to raw-equivalent and counted as
+       stock we hold — the rice already in the pot.  Drip loss comes off it
+       first, so a frozen bin is not counted at more than it will yield.
+     · It will not argue with a person.  Type a figure into par_g or reorder_g
+       in Master Data and that ingredient uses yours, for ever, and says so.
+
+   CUSTOM ORDERS DO NOT GET A CEILING, and must not: they are lumpy and they
+   are already known by name.  Their material is bought against the week's
+   actual demand (the `rawNeed + lead` term below), which is why a big order
+   still buys everything it needs while the steady ceiling stays where it is.
+   =========================================================================== */
+const RP_DEF={ on:1, review:7, leadMin:7, leadCap:30, cushion:0.5, win:60, procOn:1, shelfOn:1, minG:0 };
+let RP=Object.assign({},RP_DEF);
+try{ RP=Object.assign({},RP_DEF,JSON.parse(localStorage.getItem('wr_rawpar')||'{}')); }catch(e){}
+/* SETTINGS LIVE IN THE DATABASE, NOT IN A BROWSER.  The pack-request settings
+   are in localStorage and it has cost real confusion — two people reading the
+   same screen and getting different numbers because one of them once typed a
+   21 into their own laptop.  These are in app_settings from the start; the
+   localStorage copy is only a cache so the first paint is not blank. */
+async function loadRawPar(){ if(window._rawParLoaded||!isLive()) return; window._rawParLoaded=true;
+  try{ const r=await sb('app_settings?select=value&key=eq.raw_par');
+    if(r&&r[0]&&r[0].value&&typeof r[0].value==='object'&&!Array.isArray(r[0].value)){
+      RP=Object.assign({},RP_DEF,r[0].value);
+      try{ localStorage.setItem('wr_rawpar',JSON.stringify(RP)); }catch(e){}
+    } }catch(e){}
+}
+function saveRawPar(){ try{ localStorage.setItem('wr_rawpar',JSON.stringify(RP)); }catch(e){}
+  if(isLive()) sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
+    body:JSON.stringify({key:'raw_par',value:RP})}).catch(()=>{}); }
+function rpSet(k,v){ RP[k]=(v===''||v==null)?RP_DEF[k]:(parseFloat(v)||0); saveRawPar(); renderMRP(); }
+function rpToggle(k){ RP[k]=RP[k]?0:1; saveRawPar(); renderMRP(); }
+function rpReset(){ RP=Object.assign({},RP_DEF); saveRawPar(); toast('Raw par settings back to default'); renderMRP(); }
+
+/* The purchasable item a recipe line really lands on.  A recipe asks for
+   deboned sardine; we buy sardine whole.  source_sku is the statement of that,
+   and the "Raw input (what you buy)" text is the fallback for rows that never
+   had one set.  Same resolution the demand roll-up uses — deliberately, so a
+   target and a need can never disagree about which ingredient they mean. */
+function rawParRoot(it, bySku, byName){
+  if(!it) return '';
+  if(!isProcessedItem(it)) return it.sku;
+  const bySrc = (it.source_sku && bySku[it.source_sku]) ? bySku[it.source_sku] : null;
+  const ri=(it.raw_input||'').trim().toLowerCase();
+  const byRi = (ri && byName[ri] && byName[ri].sku!==it.sku) ? byName[ri] : null;
+  const parent = bySrc || byRi;
+  return parent ? parent.sku : it.sku;
+}
+
+/* A STEADY WEEK, rolled up to the ingredient we buy.
+   Not this week's plot — that swings with whatever custom orders happened to
+   land — but the rate the catalogue has actually been selling at over the
+   window.  Archived products are out; supply-led products are IN, because
+   rabbit and lamb really are consumed even though we never order them, and
+   leaving them out would understate the freezer.  Their INGREDIENTS are still
+   skipped at the buying step, where that decision belongs. */
+async function rawParUsage(ings, boms, prods){
+  const win=Math.max(1,+RP.win||60);
+  let mom=[]; try{ mom=await momLoad(); }catch(e){ mom=[]; }
+  const perWeek={};
+  (mom||[]).forEach(r=>{ if(!r||!r.sku) return;
+    const u = win<=30?(+r.u30||0) : win<=60?(+r.u60||0) : win<=90?(+r.u90||0) : (+r.u120||0);
+    if(u>0) perWeek[r.sku]=(u/win)*7; });
+  const live={}; (prods||[]).forEach(p=>{ if(p&&p.sku&&!isArchivedProd(p)) live[p.sku]=1; });
+  const bySku={}, byName={};
+  (ings||[]).forEach(it=>{ bySku[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm) byName[nm]=it; });
+  const use={}, seen={};
+  (boms||[]).forEach(b=>{
+    if(!b||!live[b.product_sku]) return;
+    const wk=+perWeek[b.product_sku]||0; if(!(wk>0)) return;
+    const g=(+b.usable_g||0)*wk; if(!(g>0)) return;
+    seen[b.product_sku]=1;
+    const it=bySku[b.ingredient_sku];
+    if(!it){ use[b.ingredient_sku]=(use[b.ingredient_sku]||0)+g; return; }
+    const y=(+it.yield_pct||100)/100;
+    const root=rawParRoot(it,bySku,byName);
+    use[root]=(use[root]||0)+(y>0 ? g/y : g);
+  });
+  return { use, perWeek, win, nSold:Object.keys(perWeek).length, nPriced:Object.keys(seen).length };
+}
+
+/* MEASURED BUYING LEAD ------------------------------------------------------
+   A ceiling is (review period + lead time) of usage, so the lead time is half
+   the number.  ingredients.lead_time_days is blank on all 44 purchasable raws,
+   and an assumed lead makes every ceiling the same number of DAYS — right in
+   size, because each item's own usage sets the kilos, but not actually per
+   ingredient.  The POs know better: order_date is one end of the ruler and the
+   receipt is the other.
+
+   Read at the 75th percentile, not the median.  The lead time in a reorder
+   point is not "how long it usually takes", it is "how long we must survive" —
+   the median is the coin flip we lose half the time.  Measured 24 Sep across 33
+   received POs: median 3 days, p75 7, max 27.
+
+   Three tiers, and the screen says which one an ingredient is on, because a
+   figure from one delivery is not evidence and should not be dressed as one:
+     the ingredient's own history   (n ≥ 3)
+     its default supplier's history (n ≥ 3)  — lead is a property of who sells it
+     the lead floor in settings                — honest ignorance
+   received_at is preferred wherever it exists; updated_at stands in for rows
+   received before it was recorded, and those are counted but flagged. */
+async function rawParLeads(){
+  const O={bySku:{}, bySup:{}, all:[], real:0, proxy:0};
+  const P75=a=>{ const v=a.slice().sort((x,y)=>x-y); return v.length?v[Math.min(v.length-1,Math.floor(0.75*v.length))]:null; };
+  try{
+    const pos=await db.list('purchase_orders',{});
+    const lines=await db.list('po_lines',{});
+    const byRef={};
+    (pos||[]).forEach(o=>{
+      if(!o||!o.order_date) return;
+      const st=String(o.status||'').toLowerCase();
+      if(st!=='received' && st!=='partial') return;
+      /* ONLY A REAL RECEIPT STAMP COUNTS.  The first version of this read
+         updated_at when received_at was missing, and the simulation against the
+         live data showed exactly why that is wrong: updated_at also moves when
+         somebody edits a PO weeks later, so two stale rows read as 24- and
+         27-day deliveries, and those two rows alone pushed pork loin's ceiling
+         to 170 kg and the whole raw ceiling ABOVE what we already hold — the
+         opposite of the point. A dirty measurement is worse than an admitted
+         gap, because it gets built into a par and never questioned. So the
+         proxy rows are counted and reported, and they set nothing. */
+      if(!o.received_at){ O.proxy++; return; }
+      const a=new Date(String(o.order_date).slice(0,10)+'T00:00:00');
+      const b=new Date(String(o.received_at).slice(0,10)+'T00:00:00');
+      if(isNaN(a)||isNaN(b)) return;
+      const d=Math.round((b-a)/86400000);
+      if(!(d>=0 && d<=60)) return;            // a negative or two-month lag is a typo, not a lead time
+      const sup=(o.supplier_name||'').trim();
+      byRef[o.po_ref]={d, sup, real:true};
+      O.all.push(d); O.real++;
+      if(sup) (O.bySup[sup]=O.bySup[sup]||[]).push(d);
+    });
+    (lines||[]).forEach(l=>{ const m=byRef[l.po_ref]; if(!m||!l.ingredient_sku) return;
+      (O.bySku[l.ingredient_sku]=O.bySku[l.ingredient_sku]||[]).push(m.d); });
+  }catch(e){}
+  O.p75Sku={}; Object.keys(O.bySku).forEach(k=>{ if(O.bySku[k].length>=3) O.p75Sku[k]=P75(O.bySku[k]); });
+  O.p75Sup={}; Object.keys(O.bySup).forEach(k=>{ if(O.bySup[k].length>=3) O.p75Sup[k]=P75(O.bySup[k]); });
+  O.p75All=(O.all.length>=5)?P75(O.all):null;
+  return O;
+}
+/* Which lead an ingredient is actually on, and where it came from. */
+function rawParLeadFor(it, O){
+  const typed=+it.lead_time_days||0;
+  if(typed>0) return {days:typed, src:'typed', n:null};
+  if(O){
+    if(O.p75Sku[it.sku]!=null) return {days:O.p75Sku[it.sku], src:'this ingredient', n:(O.bySku[it.sku]||[]).length};
+    const sup=((it.supplier||'').trim()) || ((it.supplier1||'').trim());
+    if(sup && O.p75Sup[sup]!=null) return {days:O.p75Sup[sup], src:'supplier '+sup, n:(O.bySup[sup]||[]).length};
+    if(O.p75All!=null) return {days:O.p75All, src:'all suppliers', n:O.all.length};
+  }
+  return {days:Math.max(0,+RP.leadMin||0), src:'assumed', n:null};
+}
+
+/* The two numbers for ONE ingredient.  Everything here is in grams a day of
+   that ingredient's own usage, which is the only unit in which "enough" means
+   the same thing for crocodile and for chicken. */
+function rawParCalc(it, perWeekG, leadObs){
+  const perDay=Math.max(0,(+perWeekG||0)/7);
+  const review=Math.max(0,+RP.review||0);
+  const cush=Math.max(0,+RP.cushion||0);
+  const L=rawParLeadFor(it, leadObs);
+  const leadKnown=(L.src!=='assumed');
+  let lead=Math.max(0,+L.days||0);
+  lead=Math.min(lead, Math.max(1,+RP.leadCap||30));      // a 365 typed by accident is not a year of stock
+  let target=perDay*(review+lead)*(1+cush);
+  let rop   =perDay*lead*(1+cush);
+  /* SHELF LIFE IS A CEILING ON THE CEILING.  Holding 60 days of something that
+     keeps 30 is not cover, it is waste with a plan. */
+  const shelf=+it.shelf_life_days||0;
+  let capped=false;
+  if((+RP.shelfOn) && shelf>0 && perDay>0 && (perDay*shelf)<target){ target=perDay*shelf; capped=true; }
+  const floorG=Math.max(0,+RP.minG||0);
+  if(floorG>0 && perDay>0 && target<floorG) target=floorG;
+  if(rop>target) rop=target;
+  const auto={target, rop};
+  /* A TYPED FIGURE WINS.  par_g and reorder_g have been on the ingredient
+     master all along; until now the plan ignored them for raws.  They are the
+     override, and the screen says which rows are on one. */
+  const mPar=+it.par_g||0, mRop=+it.reorder_g||0;
+  if(mPar>0) target=mPar;
+  if(mRop>0) rop=mRop;
+  if(rop>target) rop=target;
+  return { perDay, perWeek:Math.max(0,+perWeekG||0), lead, leadKnown, leadSrc:L.src, leadN:L.n, review, cush,
+           target, rop, auto, capped, shelf, manual:(mPar>0||mRop>0) };
+}
+
+/* The settings strip above the replenishment plan.  Every number that shapes a
+   ceiling is on this one line, with the arithmetic printed under it, because a
+   buying rule nobody can read is a buying rule nobody will trust. */
+function rpSettingsHtml(plan){
+  const P=plan||[];
+  const held=P.reduce((s,l)=>s+(+l.oh||0)+(+l.wip||0),0);
+  const wip =P.reduce((s,l)=>s+(+l.wip||0),0);
+  const tgt =P.reduce((s,l)=>s+(+l.target||0),0);
+  const buy =P.reduce((s,l)=>s+(+l.final||0),0);
+  const withCeiling=P.filter(l=>l.perWeek>0).length;
+  const noRate =P.filter(l=>!(l.perWeek>0) && !l.isSupply).length;
+  const capped =P.filter(l=>l.capped).length;
+  const typed  =P.filter(l=>l.manualPar).length;
+  const noLead =P.filter(l=>!l.leadKnown && !l.isSupply).length;
+  const U=window._mrpRpU||{};
+  const on=!!(+RP.on);
+  const n=(l,k,t,w)=>`<label style="display:inline-flex;align-items:center;gap:5px;margin-right:12px" title="${t}">
+      <span class="mini" style="color:var(--muted)">${l}</span>
+      <input type="number" step="any" value="${RP[k]}" style="width:${w||58}px;text-align:right;padding:4px 6px;border:1px solid var(--line);border-radius:5px"
+             onchange="rpSet('${k}',this.value)"></label>`;
+  return `<div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 10px;background:${on?'#f6f8f4':'#faf7ef'}">
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
+      <button class="btn sm ${on?'':'sec'}" onclick="rpToggle('on')"
+        title="off = the old flat 5 kg reorder point for every ingredient">${on?'✓ Per-ingredient par':'✕ Per-ingredient par (using flat 5 kg)'}</button>
+      ${on?`${n('Review (d)','review','how often you actually sit down and buy. 7 = weekly.')}
+            ${n('Cushion ×','cushion','safety on top of lead-time use. 0.5 = half again.')}
+            ${n('Lead floor (d)','leadMin','used when an ingredient has no lead time typed')}
+            ${n('Lead cap (d)','leadCap','protects against a lead time typed in error')}
+            ${n('Window (d)','win','sales window the usage rate is read from',52)}
+            <button class="btn sm ${(+RP.procOn)?'':'sec'}" onclick="rpToggle('procOn')" title="count processed / part-prepped stock back as raw so it is not bought twice">${(+RP.procOn)?'✓':'✕'} Count WIP</button>
+            <button class="btn sm ${(+RP.shelfOn)?'':'sec'}" onclick="rpToggle('shelfOn')" title="never hold more days than the ingredient keeps">${(+RP.shelfOn)?'✓':'✕'} Shelf-life cap</button>
+            <button class="btn sm sec" onclick="rpWriteTargets()" title="fill par_g / reorder_g on the ingredient master with these computed figures, so Live Stock's low-stock alerts use the same numbers">📌 Write targets to Master Data</button>`:''}
+      <button class="btn sm sec" onclick="rpReset()">↺ Default</button>
+      <span class="sp" style="flex:1"></span>
+      <span class="mini" style="color:var(--muted)">settings are saved for everyone, not just this browser</span>
+    </div>
+    ${on?`<div class="mini" style="margin-top:7px;color:var(--muted);line-height:1.6">
+      <b>${withCeiling}</b> ingredient(s) on a computed ceiling${typed?` · <b>${typed}</b> on a figure you typed`:''}${capped?` · <b>${capped}</b> capped by shelf life`:''}${noRate?` · <b>${noRate}</b> with no sales history, bought only against the week's own demand`:''}${noLead?` · <b>${noLead}</b> with no lead time typed, assuming ${RP.leadMin} days`:''}.
+      Ceilings total <b>${kgf(tgt)} kg</b>; you already hold <b>${kgf(held)} kg</b>${wip>0?` (of which <b>${kgf(wip)} kg</b> is processed stock counted back as raw)`:''};
+      this order adds <b>${kgf(buy)} kg</b>.
+      ${tgt>0&&(held+buy)>tgt*1.05?`<span style="color:var(--earth,#b5762a)">You are above the ceilings by ${kgf(held+buy-tgt)} kg — that is existing stock running down, not something this plan bought. Nothing will be ordered for those items until they fall through their trigger.</span>`:''}
+      ${U.nSold!=null?`<br>Usage rate read from <b>${U.nSold}</b> product(s) with sales in the last ${U.win} days, of which <b>${U.nPriced}</b> have a recipe to roll up.`:''}
+      ${(()=>{const L=window._mrpRpL; if(!L) return '';
+        const meas=P.filter(l=>l.leadSrc&&l.leadSrc!=='assumed'&&l.leadSrc!=='typed').length, asm=P.filter(l=>l.leadSrc==='assumed').length, typ=P.filter(l=>l.leadSrc==='typed').length;
+        return `<br>Lead time: <b>${meas}</b> measured from delivery history${typ?`, <b>${typ}</b> typed on the ingredient`:''}${asm?`, <b>${asm}</b> still assumed at ${RP.leadMin} days`:''}
+          ${L.all.length?` · ${L.all.length} received PO(s) read${L.proxy?` (<b>${L.proxy}</b> of them dated by updated_at, a proxy — it firms up as POs are received from today)`:''}`:''}.`;})()}
+    </div>`:`<div class="mini" style="margin-top:7px;color:var(--earth,#b5762a)">The flat rule is on: every ingredient reorders at 5 kg, whether that is four days of pork loin or most of a year of crocodile.</div>`}
+  </div>`;
+}
+
+/* Copy the computed ceilings onto the ingredient master.  The plan does not
+   need this — it recomputes every time — but Live Stock's "below reorder"
+   count and the daily digest both read par_g / reorder_g, and two screens
+   disagreeing about what "low" means is how people stop believing either.
+   It never touches an ingredient that already has a figure typed by hand. */
+async function rpWriteTargets(){
+  const plan=(window._mrpPlan||[]).filter(l=>!l.isSupply && l.perWeek>0 && !l.manualPar && l.target>0);
+  if(!plan.length){ toast('Nothing to write — no computed ceilings yet. Compute the plan first.',true); return; }
+  if(!confirm('Write the computed target and trigger onto '+plan.length+' ingredient(s) in Master Data?\n\n'
+    +'Par / week ← target, Reorder ← trigger. Ingredients where somebody already typed a figure are skipped.\n\n'
+    +'This only changes what Live Stock calls "low" — the buying plan works the same either way.')) return;
+  let ok=0, bad=0;
+  for(const l of plan){
+    try{ await db.update('ingredients','sku',l.sku,{par_g:Math.round(l.target), reorder_g:Math.round(l.trigger)}); ok++; }
+    catch(e){ bad++; console.warn('par write failed',l.sku,String(e&&e.message||e)); }
+  }
+  mastersBust('ingredients');
+  sysLog('ingredients','(raw par)','📌 Wrote computed par to '+ok+' ingredient(s) by '+CURRENT_USER
+    +' — review '+RP.review+'d, cushion ×'+(1+(+RP.cushion||0)).toFixed(2)+(bad?(' — '+bad+' failed'):''));
+  toast(ok+' ingredient(s) updated'+(bad?(', '+bad+' failed'):''), !!bad);
+  renderMRP();
+}
+
+/* ---------------------------------------------------------------------------
+   MEASURED LEAD TIME — the clock the cover numbers are supposed to be set by.
+   ---------------------------------------------------------------------------
+   Finished-goods cover exists to survive the wait between noticing we are short
+   and packs being sellable at Pasig. That wait has three legs and until now the
+   app guessed all three:
+
+     queue     plan date  → production date   (waiting for the bench)
+     make/ship production  → transfer date     (made, waiting for the van)
+     transit   transfer    → received          (the 4-hour road, batched weekly)
+
+   Measured, not assumed. Where a leg cannot be measured yet it says so instead
+   of printing a number, because a made-up lead time is worse than an admitted
+   gap: it gets built into a par and nobody ever revisits it.
+   Rows before 2026-09-24 have no scheduled_date and no received_at; the receipt
+   leg falls back to updated_at for those and is labelled as a proxy. --------- */
+function _ltStats(a){
+  const v=(a||[]).filter(x=>x!=null && !isNaN(x)).sort((x,y)=>x-y);
+  if(!v.length) return null;
+  const q=f=>v[Math.min(v.length-1, Math.floor(f*v.length))];
+  return {n:v.length, min:v[0], med:(v.length%2?v[(v.length-1)/2]:(v[v.length/2-1]+v[v.length/2])/2),
+          mean:v.reduce((s,x)=>s+x,0)/v.length, p75:q(0.75), max:v[v.length-1]};
+}
+const _ltDays=(a,b)=>{ if(!a||!b) return null;
+  const A=new Date(String(a).slice(0,10)+'T00:00:00'), B=new Date(String(b).slice(0,10)+'T00:00:00');
+  if(isNaN(A)||isNaN(B)) return null; const d=Math.round((B-A)/86400000);
+  return (d<0||d>120)?null:d; };            // a negative or three-month gap is a typo, not a lead time
+
+async function mrpLeadTimeCard(){
+  let B=[], T=[], L=[];
+  try{ B=(await db.list('production_batches',{})||[]).filter(b=>b&&b.status==='confirmed'&&b.production_date); }catch(e){}
+  try{ T=(await db.list('transfers',{})||[]).filter(t=>t&&t.status==='received'&&t.transfer_date); }catch(e){}
+  try{ L=await db.list('transfer_lines',{})||[]; }catch(e){}
+  if(!B.length && !T.length) return '';
+  // queue: scheduled → made
+  const queue=_ltStats(B.map(b=>_ltDays(b.scheduled_date, b.production_date)));
+  // made → shipped: for each outbound transfer line, the latest batch of that SKU on or before the transfer
+  const bySku={}; B.forEach(b=>{ (bySku[b.product_sku]=bySku[b.product_sku]||[]).push(String(b.production_date).slice(0,10)); });
+  Object.keys(bySku).forEach(k=>bySku[k].sort());
+  const tByRef={}; T.forEach(t=>tByRef[t.transfer_ref]=t);
+  const ship=[];
+  L.forEach(l=>{ const t=tByRef[l.transfer_ref]; if(!t || t.from_code!==planProduceLoc()) return;
+    const td=String(t.transfer_date).slice(0,10);
+    const ds=(bySku[l.product_sku]||[]).filter(d=>d<=td);
+    if(!ds.length) return;
+    const d=_ltDays(ds[ds.length-1], td); if(d!=null) ship.push(d); });
+  const made=_ltStats(ship);
+  // transit: real stamps first, updated_at only as a labelled fallback
+  const real=T.filter(t=>t.received_at).map(t=>_ltDays(t.transfer_date, t.received_at));
+  const prox=T.filter(t=>!t.received_at && t.updated_at).map(t=>_ltDays(t.transfer_date, t.updated_at));
+  const transit=_ltStats(real), transitProx=_ltStats(prox);
+  const f=s=>s?`<b>${Math.round(s.med*10)/10}</b> <span class="mini" style="color:var(--muted)">med · ${Math.round(s.p75*10)/10} p75 · ${s.max} max · n=${s.n}</span>`:'<span class="mini" style="color:var(--earth,#b5762a)">not measured yet</span>';
+  const tot=(queue?queue.med:0)+(made?made.med:0)+((transit||transitProx)?(transit||transitProx).med:0);
+  const anyReal=!!(queue||made||transit);
+  return `<div class="repcard" style="margin-top:14px">
+    <h3 style="margin:0 0 4px">⏱ Measured lead time</h3>
+    <div class="hint" style="margin:0 0 8px">How long it really takes for a decision to become packs on the shelf at ${esc(planSellLoc?planSellLoc():'the sell site')}, read from the rows themselves rather than assumed. This is the number the finished-goods cover setting (<b>Cycle</b> on Regular Packs) should be argued from.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Leg</th><th>From → to</th><th class="num">Days</th><th>Read from</th></tr></thead><tbody>
+      <tr><td><b>Queue</b><div class="mini" style="color:var(--muted)">waiting for a turn on the bench</div></td>
+          <td class="mini">plan date → production date</td><td class="num">${f(queue)}</td>
+          <td class="mini" style="color:var(--muted)">${queue?'production_batches.scheduled_date':'needs scheduled_date — stamped on runs saved from 24 Sep onward'}</td></tr>
+      <tr><td><b>Made → shipped</b><div class="mini" style="color:var(--muted)">packed, waiting for the van</div></td>
+          <td class="mini">production date → transfer date</td><td class="num">${f(made)}</td>
+          <td class="mini" style="color:var(--muted)">${made?'matched by SKU to the last run before each transfer':'no outbound transfers with matching batches yet'}</td></tr>
+      <tr><td><b>Transit</b><div class="mini" style="color:var(--muted)">the road — about 4 hours</div></td>
+          <td class="mini">transfer date → received</td>
+          <td class="num">${transit?f(transit):(transitProx?f(transitProx):f(null))}</td>
+          <td class="mini" style="color:${transit?'var(--muted)':'var(--earth,#b5762a)'}">${transit?'transfers.received_at':(transitProx?'⚠ updated_at, a proxy — it also moves when the row is edited':'—')}</td></tr>
+    </tbody></table></div>
+    ${anyReal?`<div style="margin-top:8px;padding:9px 11px;background:#f6f8f4;border-radius:6px;font-size:12.5px">
+      Decision → sellable, at the median: <b>${Math.round(tot*10)/10} days</b>.
+      A finished-goods cover setting below that is a promise the kitchen cannot keep; far above it is money sitting in a freezer.
+      ${transit?'':'<span style="color:var(--earth,#b5762a)">The transit leg is still a proxy — it firms up as transfers are received from 24 Sep onward.</span>'}
+    </div>`:''}
+  </div>`;
+}
+
 async function renderMRP(){
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderMRP()">↻ Compute</button>
@@ -9247,13 +9618,37 @@ async function renderMRP(){
   });
   window._mrpProcUse=procUse;
   window._mrpUnmapped=Object.keys(_unmapped);
-  // build plan lines. Raw-ingredient reorder RULE (per WR):
-  //   Reorder a raw when demand outstrips stock (projected ending inv < 0)
-  //   OR when remaining stock is low (~1–5 kg). Custom PAR stocking is for the
-  //   SELLABLE PRODUCTS, not raws — so raws use this low-stock reorder point,
-  //   never par_g. When reordering, top up to cover demand + lead-time use and
-  //   restore the small reorder buffer.
-  const RAW_REORDER_G = 5000;   // reorder point for raw ingredients: 5 kg
+  /* ---- WHAT IS ALREADY IN THE BUILDING ----------------------------------
+     The rice analogy, in code.  Ten cups to fill, six in the jar, one already
+     in the pot — you buy three, not four.  `procAvail` is what is left in the
+     processed bins after this week's demand has drawn from them; converting it
+     back through yield gives the raw we would otherwise have bought twice.
+     Drip comes off FIRST, because a frozen bin does not yield what it weighs:
+     thaw_loss_pct is the measured loss and it is applied before the conversion,
+     so the pot is counted at what will actually come out of it.
+     Measured 24 Sep: 133.6 kg of processed stock = 178.7 kg raw-equivalent.
+     Not counting it is the single biggest source of over-buying we have. */
+  const wipG={}, wipSrc={};
+  Object.keys(procAvail).forEach(sku=>{
+    const left=Math.max(0,+procAvail[sku]||0); if(!(left>0)) return;
+    const it=bySku[sku]; if(!it) return;
+    const thaw=Math.min(0.9,Math.max(0,(+it.thaw_loss_pct||0)/100));
+    const y=(+it.yield_pct||100)/100;
+    const root=rawParRoot(it,bySku,byName);
+    if(root===sku) return;                       // no purchasable parent — nothing to credit
+    const rawEq=(left*(1-thaw))/(y>0?y:1);
+    wipG[root]=(wipG[root]||0)+rawEq;
+    (wipSrc[root]=wipSrc[root]||[]).push({sku, name:it.name||sku, g:left, rawEq, thaw});
+  });
+  window._mrpWip=wipG; window._mrpWipSrc=wipSrc;
+  /* ---- THE STEADY RATE EACH CEILING IS SIZED ON -------------------------- */
+  const _rpU=await rawParUsage(ings, boms, _allP).catch(()=>({use:{},perWeek:{},win:60,nSold:0,nPriced:0}));
+  const rpUse=_rpU.use||{};
+  window._mrpRpU=_rpU;
+  const _rpL=await rawParLeads().catch(()=>null);
+  window._mrpRpL=_rpL;
+  const RP_ON=!!(+RP.on);
+  const RAW_REORDER_G = 5000;   // the old flat rule — still here, behind the switch
   const plan=[];
   window._mrpSupLedIng=[];
   /* mrpAdd holds items the buyer put on the order by hand — anything in the master
@@ -9273,17 +9668,42 @@ async function renderMRP(){
     if(it.is_intermediate && !added) return;   // processed forms are made, not bought — unless asked for by name
     if(sup && !added) return;                  // supplies reorder on PAR in their own module — unless asked for by name
     const rawNeed=need[it.sku]||0;   // already as-purchased — processed forms have been rolled up into this one
-    const lead=+it.lead_time_days||0, oh=stock[it.sku]||0;
+    const oh=stock[it.sku]||0;
     const inc=onOrder[it.sku]||0;                            // confirmed POs not yet received
-    const avail=oh+inc;                                      // what we will actually have
+    const wip=(RP_ON && +RP.procOn) ? (wipG[it.sku]||0) : 0; // processed stock, back in raw terms
+    const avail=oh+inc+wip;                                  // everything we already own, in one number
     const endInv=avail-rawNeed;                              // projected ending inventory after this week's demand
-    // trigger: demand exceeds what is on hand PLUS what is already coming
-    const lowStock = (endInv < 0) || (endInv <= RAW_REORDER_G && (rawNeed>0 || avail>0));
+    const C=rawParCalc(it, rpUse[it.sku]||0, _rpL);          // this ingredient's own ceiling and trigger
+    /* The old rule read a blank lead time as zero days; the new one reads it as
+       RP.leadMin, because "we never wrote it down" is not "it arrives today".
+       The fallback path keeps the old reading so switching back is exact. */
+    const lead = RP_ON ? C.lead : (+it.lead_time_days||0);
     const manualKg=+mrpManual[it.sku]||0;
-    if(!lowStock && manualKg<=0 && added<=0) return;          // healthy stock, nothing added → nothing to order
-    const leadBuf=rawNeed*(lead/7);                          // consumption during lead time
-    const buf = lowStock ? RAW_REORDER_G : 0;                // restore the reorder buffer when we do reorder
-    const base = lowStock ? (rawNeed + buf + leadBuf - avail) : 0;   // target − (on hand + on order)
+    let target, trigger, leadBuf, lowStock;
+    if(RP_ON){
+      /* THE WEEK IS NOT ALLOWED TO GO SHORT.  The ceiling is sized on the
+         steady rate; a custom order that lands this week is not in that rate
+         and must still be bought.  So the requirement is whichever is larger:
+         the ceiling, or what this week actually eats plus enough to last the
+         lead time.  A ceiling can never make us buy LESS than the week needs. */
+      leadBuf=Math.max(C.rop, rawNeed*(lead/7));
+      target =Math.max(C.target, rawNeed + leadBuf);
+      trigger=C.rop;
+      /* ORDER ONLY THROUGH THE TRIGGER, THEN FILL TO THE TOP.  Without the
+         first clause this places a small order every single week, which is how
+         a review system turns into a standing order nobody reads. */
+      lowStock = (endInv < 0)
+              || (trigger>0 && avail <= trigger)
+              || (rawNeed>0 && endInv < leadBuf);
+    } else {
+      leadBuf=rawNeed*(lead/7);
+      trigger=RAW_REORDER_G;
+      lowStock = (endInv < 0) || (endInv <= RAW_REORDER_G && (rawNeed>0 || avail>0));
+      target = lowStock ? (rawNeed + RAW_REORDER_G + leadBuf) : 0;
+    }
+    if(!lowStock && manualKg<=0 && added<=0) return;          // above the trigger, nothing added → nothing to order
+    const buf=trigger;
+    const base = lowStock ? Math.max(0, target - avail) : 0;   // order = target − on hand − on order − WIP
     const subtotal=base + manualKg*1000;
     const moq=(+it.min_order_kg||0)*1000;
     // round up to satisfy the min order AND land on a whole ordering-pack multiple (#4)
@@ -9293,7 +9713,10 @@ async function renderMRP(){
     else if(added>0) final=final + added*1000;
     // default supplier: the ingredient's own default, else fall back to Supplier 1 from the master (ignore "to be determined")
     const _s1=(it.supplier1||'').trim(); const defSup=(it.supplier||'').trim() || (/to be determined/i.test(_s1)?'':_s1);
-    plan.push({sku:it.sku,name:it.name,rawNeed,par:buf,leadBuf,lead,oh,inc,eta:(onOrderEta[it.sku]||''),base,endInv,lowStock,manualKg,moq,final,
+    plan.push({sku:it.sku,name:it.name,rawNeed,par:buf,leadBuf,lead,oh,inc,wip,target,trigger,
+      perWeek:C.perWeek,perDay:C.perDay,capped:C.capped,shelf:C.shelf,manualPar:C.manual,leadKnown:C.leadKnown,leadSrc:C.leadSrc,leadN:C.leadN,
+      cover:(C.perDay>0?(avail/C.perDay):null),coverAfter:(C.perDay>0?(Math.max(avail,target)/C.perDay):null),
+      eta:(onOrderEta[it.sku]||''),base,endInv,lowStock,manualKg,moq,final,
       added, unit:(sup?(it.uom||'units'):'kg'), isSupply:sup, isProcessed:!!it.is_intermediate,
       remark:(mrpRemarks[it.sku]||''),supplier:defSup,price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
   });
@@ -9302,15 +9725,29 @@ async function renderMRP(){
   const _pu=window._mrpProcUse||{}; const _puN=Object.keys(_pu).length;
   let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">2 · Replenishment plan</h3>
     ${_puN?`<div class="hint" style="margin:0 0 6px">Processed stock counts: <b>${_puN} processed ingredient(s)</b> covered part of this demand from stock already made (${Object.keys(_pu).slice(0,3).map(k=>esc(ingName(k))+' '+(Math.round(_pu[k]/10)/100)+' kg').join(', ')}${_puN>3?', …':''}), so no raw is ordered for that portion.</div>`:''}
-    <div class="hint" style="margin:0 0 8px">Raws reorder when demand outstrips <b>stock + what is already on order</b>, or ending stock is low (≤ 5 kg). <b>On order</b> = confirmed POs not yet received, so you don't re-buy a shipment that is already coming; it drops out the moment you receive it. Order qty = weekly need + 5 kg buffer + lead-time buffer − on hand − on order, then ± your manual adjustment, rounded up to the <b>min order</b> and to a whole <b>ordering pack</b> (both set per ingredient in Master Data). (Custom PAR stocking is for the sellable products.) Processed forms (deboned, ground, liver…) are rolled up into the whole-dressed / raw ingredient you actually buy. Supplier = each item's default.</div>
+    ${rpSettingsHtml(plan)}
+    <div class="hint" style="margin:0 0 8px">${RP_ON
+      ? `Every ingredient has its <b>own</b> ceiling now, worked out from how fast it is actually used — not one 5 kg line for all of them.
+         <b>Target</b> = daily use × (${Math.round(RP.review)} review days + that item's lead time) × ${(1+(+RP.cushion||0)).toFixed(2)} cushion, capped by shelf life.
+         <b>Trigger</b> = daily use × lead time × ${(1+(+RP.cushion||0)).toFixed(2)}. Nothing is bought until stock falls through the trigger; then it fills to the target and stops.
+         <b>Order = target − on hand − on order − WIP.</b> <b>WIP</b> is processed stock converted back to raw through yield, less drip — the cup already in the pot, so it is never bought twice.
+         A week with a big custom order still buys what that week needs: the requirement is whichever is larger, the ceiling or the week.
+         Typing a figure into <b>Par / week</b> or <b>Reorder</b> in Master Data overrides the sum for that one ingredient.`
+      : `<b>Flat 5 kg rule (old).</b> Raws reorder when demand outstrips stock + on order, or ending stock is ≤ 5 kg, and top up to need + 5 kg + lead-time use. Every ingredient uses the same 5 kg whether it is a day of cover or a year of it.`}
+      Order qty is then ± your manual adjustment and rounded up to the <b>min order</b> and a whole <b>ordering pack</b> (both per ingredient in Master Data). Processed forms (deboned, ground, liver…) roll up into the raw you actually buy. Supplier = each item's default.</div>
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
-    <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num">On hand</th><th class="num">On order</th><th class="num">End inv</th><th class="num">+Buffer</th><th class="num">+Lead</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
+    <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Use / wk</th><th class="num">Need</th><th class="num">On hand</th><th class="num">WIP</th><th class="num">On order</th><th class="num">Have</th><th class="num" title="the ceiling — the most this ingredient is ever filled to">Target</th><th class="num" title="stock has to fall through this before anything is ordered">Trigger</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
   const _rowHtml=(l)=>`<tr><td>${esc(l.name)}
     ${l.isSupply?'<span class="tagf" style="background:#e8e6df;color:#57544c">supply</span>':(l.isProcessed?'<span class="tagf tagf-proc">processed</span>':'')}
     <div class="mini">${l.isSupply?('per '+esc(l.unit)):('yield '+(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)+'%')}</div>${l.remark?`<div class="mini" style="color:var(--berry)">📝 ${esc(l.remark)}</div>`:''}</td>
+    <td class="num" style="color:var(--muted)" title="${l.perDay>0?('the steady rate this ceiling is sized on — '+(Math.round(l.perDay/10)/100)+' kg a day'):'no sales history in the window: this ingredient has no ceiling, and is bought only against the week\'s own demand'}">${l.perWeek>0?kgf(l.perWeek):'—'}</td>
     <td class="num">${kgf(l.rawNeed)}</td><td class="num">${kgf(l.oh)}</td>
+    <td class="num" style="${(+l.wip||0)>0?'color:#6a4ea8;font-weight:600':'color:var(--muted)'}" title="${(+l.wip||0)>0?('processed stock converted back to raw through yield, less drip: '+((window._mrpWipSrc||{})[l.sku]||[]).map(w=>w.name+' '+(Math.round(w.g/10)/100)+' kg → '+(Math.round(w.rawEq/10)/100)+' kg raw').join('; ')):'no processed stock held for this raw'}">${(+l.wip||0)>0?kgf(l.wip):'—'}</td>
     <td class="num" style="${(+l.inc||0)>0?'color:#1e6b2e;font-weight:600':'color:var(--muted)'}" title="${l.eta?('earliest expected '+esc(l.eta)):'confirmed POs not yet received'}">${(+l.inc||0)>0?kgf(l.inc)+(l.eta?`<div class="mini" style="font-weight:400">eta ${esc(l.eta)}</div>`:''):'—'}</td>
-    <td class="num" style="${(+l.endInv||0)<RAW_REORDER_G?'color:var(--danger);font-weight:600':''}">${kgf(l.endInv)}</td><td class="num">${kgf(l.par)}</td><td class="num">${kgf(l.leadBuf)}</td><td class="num">${kgf(Math.max(0,l.base))}</td>
+    <td class="num" title="on hand + WIP + on order — everything we already own${l.cover!=null?(', '+Math.round(l.cover)+' days of cover'):''}"><b>${kgf((+l.oh||0)+(+l.wip||0)+(+l.inc||0))}</b>${l.cover!=null?`<div class="mini" style="font-weight:400;color:${l.cover<7?'var(--danger)':'var(--muted)'}">${Math.round(l.cover)}d</div>`:''}</td>
+    <td class="num" style="${l.manualPar?'color:#6a4ea8':''}" title="${l.manualPar?'a figure typed into Master Data — the sum is overridden for this ingredient':(l.capped?('capped by shelf life: '+l.shelf+' days'):'daily use × (review + lead) × cushion')}">${l.target>0?kgf(l.target):'—'}${l.capped?'<div class="mini" style="font-weight:400;color:var(--earth,#b5762a)">shelf '+l.shelf+'d</div>':''}${l.manualPar?'<div class="mini" style="font-weight:400">typed</div>':''}</td>
+    <td class="num" style="${(+l.endInv||0)<0?'color:var(--danger);font-weight:600':'color:var(--muted)'}" title="lead time ${l.lead} days — ${l.leadSrc==='typed'?'typed on the ingredient':(l.leadSrc==='assumed'?('nothing measured, assuming the '+RP.leadMin+'-day floor'):('measured at the 75th percentile from '+l.leadSrc+(l.leadN?(', '+l.leadN+' deliveries'):'')))}">${l.trigger>0?kgf(l.trigger):'—'}<div class="mini" style="font-weight:400;color:${l.leadSrc==='assumed'?'var(--earth,#b5762a)':'var(--muted)'}">${l.lead}d ${l.leadSrc==='assumed'?'?':(l.leadSrc==='typed'?'set':'meas')}</div></td>
+    <td class="num">${kgf(Math.max(0,l.base))}</td>
     <td class="num"><input type="number" step="any" style="width:74px;text-align:right" value="${l.manualKg||''}" onchange="mrpManual['${l.sku}']=+this.value||0;renderMRP()"></td>
     <td class="num">${l.moq?kgf(l.moq):'—'}</td>
     <td class="num"><b style="color:var(--berry)">${l.final>0?(l.isSupply?(l.final+' '+esc(l.unit)):kgf(l.final)):'—'}</b>${l.added>0?`<div class="mini" style="color:var(--muted)">incl. ${l.added} added by hand <span class="x" style="cursor:pointer;color:var(--danger)" onclick="mrpAddSet('${esc(l.sku)}',0)">✕</span></div>`:''}</td>
@@ -9322,13 +9759,13 @@ async function renderMRP(){
     const arr=_bySup[sup]; const sItems=arr.filter(l=>l.final>0); const sVal=sItems.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); const sKg=_supKg(arr);
     const minG=supMin[sup]||0; const shortG=minG>0?(minG-sKg):0;
     const minTag = minG>0 ? (shortG>0 ? ` · <span style="color:var(--danger)">min ${kgf(minG)} — short ${kgf(shortG)}</span>` : ` · <span style="color:#4e7a3e">✓ meets min ${kgf(minG)}</span>`) : '';
-    rh+=`<tr><td colspan="12" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">🏭 ${esc(sup)} <span style="opacity:.6;font-weight:400">— ${sItems.length} item(s) · <b>${kgf(sKg)} kg</b> · est. ₱${Math.round(sVal).toLocaleString('en-PH')}${minTag}</span></td></tr>`;
+    rh+=`<tr><td colspan="15" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">🏭 ${esc(sup)} <span style="opacity:.6;font-weight:400">— ${sItems.length} item(s) · <b>${kgf(sKg)} kg</b> · est. ₱${Math.round(sVal).toLocaleString('en-PH')}${minTag}</span></td></tr>`;
     arr.sort((a,b)=>b.final-a.final).forEach(l=>{ rh+=_rowHtml(l); });
   });
-  if(_supLedIng.length) rh+=`<tr><td colspan="12" style="background:#fff8e1;border-left:3px solid #e0b400;padding:7px 9px;font-size:12.5px">
+  if(_supLedIng.length) rh+=`<tr><td colspan="15" style="background:#fff8e1;border-left:3px solid #e0b400;padding:7px 9px;font-size:12.5px">
     <b>${_supLedIng.length} supply-led ingredient(s) are never put on a purchase order</b> — ${esc(_supLedIng.slice(0,8).map(i=>i.name||i.sku).join(', '))}${_supLedIng.length>8?' …':''}.
     The supplier tells us when there is material, not the other way round, so an order for them is a wish. Put one on this order by hand with <b>＋ Add item to order</b> when a supplier has actually offered stock.</td></tr>`;
-  if(!plan.length && !_supLedIng.length) rh+=`<tr><td colspan="12" class="empty">Enter demand above — raws reorder when demand outstrips stock or ending stock drops to ~5 kg. Or use <b>＋ Add item to order</b> to put something on the order yourself.</td></tr>`;
+  if(!plan.length && !_supLedIng.length) rh+=`<tr><td colspan="15" class="empty">Enter demand above — nothing is ordered until an ingredient falls through its own trigger. Or use <b>＋ Add item to order</b> to put something on the order yourself.</td></tr>`;
   const toBuy=plan.filter(l=>l.final>0); const totVal=toBuy.reduce((s,l)=>s+(l.final/1000)*l.price,0); const totKg=_supKg(plan);
   rh+=`</tbody></table></div>
     <div style="margin-top:8px"><button class="btn sec sm" onclick="mrpAddOpen()">＋ Add item to order</button>
@@ -9336,6 +9773,7 @@ async function renderMRP(){
     <div class="pager">${toBuy.length} item(s) · ${kgf(totKg)} kg total · est. ₱${Math.round(totVal).toLocaleString('en-PH')}</div></div>`;
   // ---- 3 · Minimum order qty analysis -------------------------------------
   rh+=mrpMinOrderCard(_bySup,supMin,_supKg);
+  try{ rh+=await mrpLeadTimeCard(); }catch(e){ console.warn('lead card',String(e&&e.message||e)); }
   rh+=savedPlansHtml();
   $('content').innerHTML=dh+rh;
 }
@@ -11061,6 +11499,21 @@ async function _poReceiveApply(){
     // A PO with one delivery in and another still to come now says so.
     formRec.status = willClose ? 'received' : 'partial';
     await formUpdate('purchase_orders','po_ref',formRec.po_ref,{status:formRec.status});
+    /* WHEN THE MEAT ACTUALLY ARRIVED.  The raw ceiling is sized on lead time,
+       and lead_time_days is blank on every one of the 44 purchasable raws — so
+       until this is recorded, every ceiling falls back to the same assumed
+       number and the "per ingredient" part of a per-ingredient par is only half
+       true. order_date is already here; this is the other end of the ruler.
+       Stamped once, on the FIRST delivery, because that is when the supplier
+       actually turned up; a second batch against the same PO does not reset it.
+       Separate call, own try: an older database has no such column and a failed
+       stamp must never cost a real receipt. */
+    if(!formRec.received_at){
+      const _ra=new Date().toISOString();
+      try{ await sb('purchase_orders?po_ref=eq.'+encodeURIComponent(formRec.po_ref),
+        {method:'PATCH',prefer:'return=minimal',body:JSON.stringify({received_at:_ra})});
+        formRec.received_at=_ra; }catch(e){}
+    }
     /* WHAT WAS WRITTEN, NOT WHAT WAS TYPED. The log used to add up the boxes
        on the form; if the ledger rejected a line the log still claimed it. */
     const batchQty=_res?_res.posted:deltas.reduce((s,d)=>s+(+d.recvKg||0),0);
@@ -11143,6 +11596,17 @@ async function _transferReceiveApply(){
     }
     formRec.status='received';
     await formUpdate('transfers','transfer_ref',formRec.transfer_ref,{status:'received'});
+    /* WHEN IT ACTUALLY LANDED.  Until now the only timestamp on a received
+       transfer was updated_at, which also moves whenever somebody edits the row
+       afterwards — so a run that arrived the same afternoon could read as five
+       weeks later, and one did (DR-09052026 V01). This stamp is written once,
+       here, after the stock has actually moved, and never again.
+       It is deliberately a SEPARATE call in its own try: on a database that has
+       not had wr_leadtime_fields_20260924.sql run yet the column does not exist,
+       and a failed stamp must never take a genuine receipt down with it. */
+    try{ await sb('transfers?transfer_ref=eq.'+encodeURIComponent(formRec.transfer_ref),
+      {method:'PATCH',prefer:'return=minimal',body:JSON.stringify({received_at:new Date().toISOString()})});
+      formRec.received_at=new Date().toISOString(); }catch(e){}
     sysLog('transfers',formRec.transfer_ref, '📥 Received by '+CURRENT_USER
       +(_res&&_res.already?' — stock had already been posted':'')
       +(short?(' — '+short+' line(s) short'):' — all lines complete'));
@@ -17397,7 +17861,40 @@ async function prodPersist(status, allowEmpty){
   const active=prodPlanLines.filter(l=>(+l.planned_packs||0)>0||(+l.good_packs||0)>0);
   if(!active.length && !allowEmpty){ toast('Nothing to save — load demand or enter packs',true); return null; }
   if(!prodRunRef){ prodRunRef=(await genRef('PR',{date:prodPlanDate})).ref; }
-  const recs=active.map((l,i)=>({batch_ref:prodRunRef+'/'+_p2(i+1), run_ref:prodRunRef, product_sku:l.product_sku, planned_packs:+l.planned_packs||0, good_packs:+l.good_packs||0, reject_packs:+l.reject_packs||0, waste_g:+l.waste_g||0, output_lot:l.output_lot||'', production_date:prodPlanDate, status, operator:CURRENT_USER}));
+  /* ---- STAMPS THAT MUST SURVIVE A RE-SAVE --------------------------------
+     Every draft save DELETES this run's rows and writes them again, so anything
+     write-once has to be carried across by hand or it is reset each time. Two
+     things are write-once:
+       scheduled_date — the plan date the run was FIRST saved for. Together with
+         production_date it measures the queue: how long a product waited for its
+         turn on the bench. On 15 Aug – 11 Sep that wait was a median of 8 days,
+         against 3 from made to shipped, so it is the larger half of the lead
+         time and the half nothing currently records.
+       confirmed_at — the instant the run was confirmed, which unlike updated_at
+         does not move when somebody corrects a pack count a week later.
+     The probe read doubles as the feature test: on a database without
+     wr_leadtime_fields_20260924.sql the select fails, and we then write neither
+     column rather than 400-ing every production save. */
+  const _stamp={}; let _stampCols=true;
+  if(isLive()){
+    try{ (await sb('production_batches?select=batch_ref,scheduled_date,confirmed_at&run_ref=eq.'+encodeURIComponent(prodRunRef))||[])
+      .forEach(b=>{ _stamp[b.batch_ref]={sd:b.scheduled_date||null, ca:b.confirmed_at||null}; }); }
+    catch(e){ _stampCols=false; }
+  } else {
+    (DEMO.production_batches||[]).filter(b=>b.run_ref===prodRunRef)
+      .forEach(b=>{ _stamp[b.batch_ref]={sd:b.scheduled_date||null, ca:b.confirmed_at||null}; });
+  }
+  const _now=new Date().toISOString();
+  const recs=active.map((l,i)=>{
+    const ref=prodRunRef+'/'+_p2(i+1);
+    const rec={batch_ref:ref, run_ref:prodRunRef, product_sku:l.product_sku, planned_packs:+l.planned_packs||0, good_packs:+l.good_packs||0, reject_packs:+l.reject_packs||0, waste_g:+l.waste_g||0, output_lot:l.output_lot||'', production_date:prodPlanDate, status, operator:CURRENT_USER};
+    if(_stampCols){
+      const s=_stamp[ref]||{};
+      rec.scheduled_date = s.sd || prodPlanDate;
+      rec.confirmed_at   = s.ca || (status==='confirmed' ? _now : null);
+    }
+    return rec;
+  });
   if(isLive()){
     /* The delete is what actually removes a line somebody took off the plan, so
        it has to run even when nothing is going back in. It deliberately spares
