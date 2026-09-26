@@ -5155,7 +5155,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-26 05:20Z';
+const WR_BUILD='2026-09-26 06:05Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -9259,6 +9259,13 @@ async function mrpLeadTimeCard(){
 }
 
 async function renderMRP(){
+  /* THE SETTINGS ARE SHARED, SO THEY HAVE TO BE READ. saveRawPar writes them to
+     app_settings and the strip says "saved for everyone, not just this browser"
+     — but nothing ever read them back, so a second person got RP_DEF and the
+     promise on screen was false. That is the exact localStorage failure the raw
+     par was supposed to stop repeating. Same shape as loadCostModel: once per
+     session, live only, app_settings wins over the local mirror. */
+  await loadRawPar();
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderMRP()">↻ Compute</button>
     <button class="btn sec" onclick="saveMRPPlan()" title="Saving locks this week's demand — the Production Plan only takes targets from a saved (locked) plot">💾 Save plan (locks demand)</button>
