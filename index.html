@@ -3545,12 +3545,22 @@ function _psDays(){
    large share of the total ask, and on a slow mover a 24-pack floor can buy
    months of cover. So the screen prints the cover the rounding buys beside the
    number — the cost of the convenience is shown, not assumed. */
-const PQ_DEF={lead:8, move:1, cycle:21, win:60, cs:12, minPacks:24, minOn:1};
+const PQ_DEF={lead:8, move:1, cycle:21, win:60, cs:12, minPacks:24, minOn:1, defer:1, capDays:90, parCase:1};
 let PQ=Object.assign({},PQ_DEF);
 try{ PQ=Object.assign({},PQ_DEF,JSON.parse(localStorage.getItem('wr_packreq')||'{}')); }catch(e){}
 let PQ_MOVE={};   // per-SKU movement override — the one variable that is genuinely per product
 try{ PQ_MOVE=JSON.parse(localStorage.getItem('wr_packreq_move')||'{}')||{}; }catch(e){}
 let PQ_Q='', PQ_ONLY=true, PQ_GROUP='hier';
+/* SHOW THE WORKING. The columns already carry every input; what they do not
+   carry is the arithmetic joining them, and "does this number make sense" is
+   not answerable from inputs alone. Off by default because the table is the
+   busiest in the app and most days nobody needs to audit it — on when somebody
+   does, and remembered per person. */
+let PQ_WORK=false;
+try{ PQ_WORK=localStorage.getItem('wr_pq_work')==='1'; }catch(e){}
+function pqWorkToggle(){ PQ_WORK=!PQ_WORK;
+  try{ localStorage.setItem('wr_pq_work', PQ_WORK?'1':'0'); }catch(e){}
+  pqDraw(); }
 function pqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0);
   try{ localStorage.setItem('wr_packreq',JSON.stringify(PQ)); }catch(e){} pqDraw(); }
 function pqReset(){ PQ=Object.assign({},PQ_DEF); PQ_MOVE={};
@@ -3571,6 +3581,38 @@ function _transferStamp(t){
   try{ const dt=new Date(+m[1], +m[2]-1, +m[3], 0, 0, 0, 0);
     return isNaN(dt.getTime()) ? '' : dt.toISOString(); }catch(e){ return ''; }
 }
+/* The sum, in words, with this row's own numbers in it. Every clause is the
+   line of pqCalc immediately above it, in the same order, so a figure that
+   looks wrong can be traced to the step that produced it rather than argued
+   about. Deferral and the cap explain themselves here too — a product that
+   drops off the ask has to say why, or it looks like the screen forgot it. */
+function pqWorkLine(r, c){
+  const n0=v=>Math.round(+v||0).toLocaleString('en-PH');
+  /* A slow mover's rate is 0.03 a day. Printed to one decimal that is "0", and
+     a working line that reads "lead 8d × 0 = 0.3" is worse than no working
+     line at all. Small numbers get the digits they need. */
+  const n1=v=>{ const x=+v||0; const dp = Math.abs(x)>=1 ? 1 : (Math.abs(x)>=0.1 ? 2 : 3);
+    return (Math.round(x*Math.pow(10,dp))/Math.pow(10,dp)).toLocaleString('en-PH',{maximumFractionDigits:dp}); };
+  const P=[];
+  P.push(`<b>${n0(r.sold)}</b> sold in ${PQ.win}d → <b>${n1(c.perDay)}</b>/day`);
+  P.push(`lead ${PQ.lead}d × ${n1(c.perDay)} = <b>${n1(c.ltd)}</b>`
+        +` · safety ×${(PQ_MOVE[r.sku]!=null?PQ_MOVE[r.sku]:PQ.move)} = <b>${n1(c.safety)}</b>`
+        +` → trigger <b>${n1(c.rop)}</b>`);
+  P.push(`par ${PQ.cycle}d = ${n1(c.par)}`+((c.minOn&&(+PQ.parCase)&&PQ.cs)?` → case of ${PQ.cs} → <b>${n0(c.newPar)}</b>`:` → <b>${n0(c.newPar)}</b>`)
+        +` · target ${n0(c.newPar)} + ${n1(c.safety)} = <b>${n1(c.target)}</b>`);
+  P.push(`have <b>${n0(c.cur)}</b> (${n0(r.shop)} sellable + ${n0(r.other)} at the kitchen)`
+        +` → shortfall ${n1(c.target)} − ${n0(c.cur)} = <b>${n0(c.rawNeed)}</b>`);
+  if(c.deferred){
+    P.push(`<b style="color:#4e7a3e">waiting</b> — ${n0(c.cur)} is still above the trigger ${n1(c.rop)}`
+      +(c.deferDays!=null&&c.deferDays<900?`, about <b>${Math.round(c.deferDays)} day(s)</b> before it is due`:'')
+      +`. Topping it up now would ask for ${n0(c.rawNeed)} and the floor would lift that to ${n0(Math.max(c.rawNeed,PQ.minPacks))}.`);
+  } else if(c.produce>0){
+    if(c.padded>0) P.push(`case of ${PQ.cs}${PQ.minPacks?` and the ${PQ.minPacks}-pack floor`:''} lifted ${n0(c.rawNeed)} → <b>${n0(c.produce)}</b> (+${n0(c.padded)})`);
+    if(c.capped)  P.push(`<b style="color:var(--earth,#b5762a)">cap</b> — ${PQ.capDays}d of cover is ${n0(c.perDay*PQ.capDays)} packs, so the run came down to <b>${n0(c.produce)}</b>`);
+    if(c.coverAfter!=null&&c.coverAfter<900) P.push(`leaves <b>${Math.round(c.coverAfter)}</b> day(s) of cover`);
+  }
+  return P.join(' &nbsp;•&nbsp; ');
+}
 const _pqCeil=(v,step)=>{ const s=+step||0; if(!(s>0)) return Math.ceil(v); return Math.ceil(v/s)*s; };
 
 function pqCalc(r){
@@ -3585,7 +3627,26 @@ function pqCalc(r){
   const minOn  = !!(+PQ.minOn);
   const cs     = minOn ? Math.max(0,+PQ.cs||0) : 0;
   const minPk  = minOn ? Math.max(0,+PQ.minPacks||0) : 0;
-  const newPar = cs>0 ? _pqCeil(par, cs) : Math.ceil(par);
+  /* ---- IS A TARGET A MULTIPLE OF A CASE? ---------------------------------
+     The case of 12 has always been applied to the PAR as well as to the run,
+     and for a slow mover that is where the real inflation starts — before the
+     24-pack floor gets anywhere near it. Pork Organ Liver sells 2 packs in 60
+     days, so its par is 0.7 packs; rounded to a case of 12 the TARGET becomes
+     12, which is 360 days of cover the product is supposed to hold at all
+     times. The floor then gets blamed for a number the par had already ruined.
+
+     Measured 26 Sep across the catalogue:
+       case on the par (today)   target cover  median 39d, p75 63d, max 368d,
+                                 6 products with a target over 90 days
+       case on the run only      target cover  median 29d, p75 30d, max 33d
+
+     A par is a LEVEL, not a batch. Only the run has to be packable, so there is
+     no reason for the target to sit on the case grid. The right answer is
+     almost certainly parCase:0 — but it moves the target, both coverage
+     percentages and the transfer suggestion on every product, which is more
+     than "add deferral and a cap". So it ships switchable, left as it was, and
+     the screen names the products it is hurting. */
+  const newPar = (cs>0 && (+PQ.parCase)) ? _pqCeil(par, cs) : Math.ceil(par);
   const cur    = (+r.shop||0)+(+r.other||0);
   const need   = newPar + safety - cur;
   /* THE FLOOR APPLIES TO A RUN, NOT TO A PRODUCT.
@@ -3596,15 +3657,61 @@ function pqCalc(r){
      back on the case grid so a floor of 24 against a case of 10 asks for 30
      rather than an unpackable 24. */
   let produce = Math.max(0, need);
+  const rawNeed    = Math.max(0, Math.ceil(need));
+  /* ---- DEFERRAL: THE FLOOR WAS NEVER THE PROBLEM -------------------------
+     Measured 26 Sep against the ledger: of 39 lines the pull would ask for, the
+     24-pack floor binds on 32 and creates 437 of the 478 packs of padding —
+     91% of it.  Pork Organ Liver sells 2 packs in 60 days, needs 8, and is
+     asked for 24: 870 days of cover.
+
+     The tempting fix is to abolish the floor.  That is the wrong fix.  The
+     floor exists because a run of seven packs costs the same setup as a run of
+     twenty-four, and removing it only moves the waste from packs to changeovers.
+
+     The real fault is that EVERY product is topped back up to par EVERY WEEK.
+     A slow mover generates a one-pack need, and the floor turns that one into
+     twenty-four.  So do not ask at all until stock has actually fallen through
+     the reorder point — lead-time demand plus safety, the same trigger the raw
+     par uses.  On the same data that takes the week from 39 runs / 1,056 packs
+     to 18 runs / 540, and the worst cover from 870 days to 120, with the floor
+     left exactly where it is.
+
+     A deferred product is NOT dropped.  It carries `deferred` and the days of
+     cover it is sitting on, and the screen groups it under a heading that says
+     so — a product that silently disappears from the list is how one stops
+     being made at all. */
+  let deferred=false, deferDays=null;
+  if(produce>0 && (+PQ.defer) && cur > rop){
+    deferred=true; produce=0;
+    deferDays = perDay>0 ? (cur-rop)/perDay : null;
+  }
+  let capped=false;
   if(produce>0){
     produce = cs>0 ? _pqCeil(produce, cs) : Math.ceil(produce);
     if(minPk>0 && produce<minPk) produce = cs>0 ? _pqCeil(minPk, cs) : minPk;
+    /* ---- AND A CEILING ON ONE RUN --------------------------------------
+       Deferral fixes how OFTEN we ask; it does not fix the handful where 24 is
+       absurd however rarely it is made. `capDays` is the most days of cover a
+       single run may leave behind. Where it bites, the floor gives way — but
+       never below the honest shortfall, because under-supplying the week is a
+       different and worse mistake than over-supplying it.
+       It is a SETTING, not a derived figure: shelf_life_days is filled on 31 of
+       182 products and every value is 4, which is the gently-cooked number, not
+       the frozen one. Deriving a cap from that would be inventing data. */
+    const capD=Math.max(0,+PQ.capDays||0);
+    if(capD>0 && perDay>0){
+      const room=Math.floor(perDay*capD - cur);
+      if(room < produce){
+        let q = cs>0 ? Math.floor(Math.max(0,room)/cs)*cs : Math.max(0,room);
+        if(q < rawNeed) q = rawNeed;               // never under-supply the week
+        if(q < produce){ produce = Math.max(0,q); capped = true; }
+      }
+    }
   }
   /* WHAT THE ROUNDING COST. `rawNeed` is the honest shortfall; everything above
      it is convenience, and on a slow mover convenience is measured in months.
      coverAfter is the days of cover the run leaves behind, so the person
      setting the floor can see 206 days before they agree to it. */
-  const rawNeed    = Math.max(0, Math.ceil(need));
   const padded     = Math.max(0, produce - rawNeed);
   const coverAfter = perDay>0 ? (cur+produce)/perDay : null;
   /* PRIORITY AND QUANTITY ARE DIFFERENT QUESTIONS.
@@ -3640,6 +3747,7 @@ function pqCalc(r){
   const target = newPar + safety;
   return {perDay, lead, move, ltd, safety, rop, par, newPar, cur, produce,
           cover, toMove, toMake, target, minOn, rawNeed, padded, coverAfter,
+          rop, deferred, deferDays, capped,
           covPct:(target>0?cur/target:null),
           shelfPct:(target>0?shelf/target:null),
           alert:(cur<rop), pct:(newPar>0?cur/newPar:null)};
@@ -4177,7 +4285,7 @@ async function stockPicture(force){
       newPar:c.newPar, safety:c.safety, par:c.par,
       target:c.target, covPct:c.covPct, shelfPct:c.shelfPct,
       toMove:c.toMove, toMake:c.toMake, produce:c.produce, rop:c.rop, alert:c.alert,
-      padded:c.padded, coverAfter:c.coverAfter };
+      padded:c.padded, coverAfter:c.coverAfter, deferred:c.deferred, deferDays:c.deferDays, capped:c.capped };
   });
   _stockPic={ by, src:built.src||err, err, snap:built.snap, waterLine:built.waterLine,
               lastSale:built.lastSale||'', saleAgeDays:(built.saleAgeDays==null?null:built.saleAgeDays),
@@ -4323,7 +4431,10 @@ function pqDraw(){
   if(q) rows=rows.filter(r=>(r.name+' '+r.sku+' '+r.group_1+' '+r.group_2).toLowerCase().includes(q));
   const calc={}; rows.forEach(r=>calc[r.sku]=pqCalc(r));
   let show=rows;
-  if(PQ_ONLY) show=rows.filter(r=>calc[r.sku].produce>0 || calc[r.sku].toMove>0);
+  /* A DEFERRED PRODUCT STAYS ON THE LIST. It is not "nothing to do" — it is
+     "not yet", which is a different answer and the planner is entitled to see
+     it. Dropping it would make the ask shrink for reasons nobody could see. */
+  if(PQ_ONLY) show=rows.filter(r=>calc[r.sku].produce>0 || calc[r.sku].toMove>0 || calc[r.sku].deferred);
   /* A NEW PRODUCT ASKS FOR NOTHING, and therefore disappears. With no sales
      the average is zero, so the par is zero, so "to produce" is zero — and the
      default filter is "only what needs producing". Four BARF Rabbit mixes added
@@ -4352,6 +4463,28 @@ function pqDraw(){
        const refs=[...new Set(rows.flatMap(r=>r.transitRefs||[]))];
        return kpi('🚚 In transit', Math.round(tr),
          'sent, not confirmed received'+(refs.length?' · '+esc(refs.join(', ')):''), 'var(--berry)'); })()}
+    ${(()=>{ if(!(+PQ.defer)) return kpi('Waiting for the trigger','off','every product is topped back up to par every week','var(--earth,#b5762a)');
+       const d=rows.filter(r=>calc[r.sku].deferred);
+       if(!d.length) return kpi('Waiting for the trigger', 0, 'nothing is above its reorder point', 'var(--muted)');
+       const held=d.reduce((a,r)=>a+Math.max(0,Math.max(calc[r.sku].rawNeed,PQ.minOn?PQ.minPacks:0)),0);
+       return kpi('Waiting for the trigger', d.length,
+         'product(s) still above their reorder point \u2014 about '+Math.round(held)+' pack(s) not asked for this week',
+         '#4e7a3e'); })()}
+    ${(()=>{ const cp=rows.filter(r=>calc[r.sku].capped);
+       if(!(+PQ.capDays)) return '';
+       return kpi('Held to the cover cap', cp.length,
+         cp.length? ('run(s) trimmed to '+PQ.capDays+' days of cover') : ('no run exceeds '+PQ.capDays+' days'),
+         cp.length?'var(--earth,#b5762a)':'var(--muted)'); })()}
+    ${(()=>{ if(!(+PQ.parCase) || !PQ.cs) return '';
+       const bad=rows.map(r=>({r,c:calc[r.sku]}))
+         .filter(x=>x.c.perDay>0 && (x.c.target/x.c.perDay)>90)
+         .sort((a,b)=>(b.c.target/b.c.perDay)-(a.c.target/a.c.perDay));
+       if(!bad.length) return '';
+       const w=bad[0];
+       return kpi('Targets over 90 days', bad.length,
+         'product(s) — the case of '+PQ.cs+' is rounding the PAR, not just the run · worst: '
+         +esc(w.r.name)+' '+Math.round(w.c.target/w.c.perDay)+'d',
+         'var(--earth,#b5762a)'); })()}
     ${(()=>{ if(!PQ.minOn) return kpi('Rounding','off','asking for the exact shortfall','var(--muted)');
        const pad=rows.reduce((a,r)=>a+(calc[r.sku].padded||0),0);
        const share=totProduce>0?Math.round(pad/totProduce*100):0;
@@ -4370,6 +4503,7 @@ function pqDraw(){
       <input value="${esc(PQ_Q)}" placeholder="Search…" oninput="PQ_Q=this.value;pqDraw()"
         style="min-width:180px;padding:5px 8px;border:1px solid var(--line);border-radius:6px">
       <label class="mini"><input type="checkbox" ${PQ_ONLY?'checked':''} onchange="PQ_ONLY=this.checked;pqDraw()"> only what needs producing</label>
+      <button class="btn sm ${PQ_WORK?'':'sec'}" onclick="pqWorkToggle()" title="print the sum under every row \u2014 sales rate, trigger, target, what we hold, and what the rounding, the cap or the deferral did to it">${PQ_WORK?'\u2713':'\ud83d\udd0d'} Show the working</button>
       <span style="flex:1"></span>
       <span class="mini" style="color:var(--muted)">lead ${PQ.lead}d · move ×${PQ.move} · cycle ${PQ.cycle}d · window ${PQ.win}d${PQ.minOn?(' · min '+PQ.minPacks+'/'+PQ.cs):' · no rounding'}</span>
     </div>
@@ -4384,6 +4518,15 @@ function pqDraw(){
       ${nm('Movement ×','move','safety-stock multiplier — raise it for a product whose sales jump about','any')}
       ${nm('Cycle (days)','cycle','how many days of cover a full par is meant to hold')}
       ${nm('Sales window','win','days of sales history the average is taken from — 30, 60, 90 or 120')}
+      <span class="mini" style="display:inline-flex;gap:6px;align-items:center;padding:2px 8px;border:1px solid var(--line);border-radius:14px;${(+PQ.defer)?'background:#eef3ec':''}">
+        <label style="display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="On = a product is only asked for once its stock has fallen through its own reorder point (lead-time demand + safety). Off = every product is topped back up to par every week, which is what turns a one-pack need into a 24-pack run.">
+          <input type="checkbox" ${(+PQ.defer)?'checked':''} onchange="pqToggle('defer')"> <b>Wait for the trigger</b></label>
+      </span>
+      ${nm('Max cover per run (days)','capDays','the most days of cover ONE run may leave behind. Where it bites, the minimum gives way — but never below the honest shortfall. 0 = no cap.')}
+      <span class="mini" style="display:inline-flex;gap:6px;align-items:center;padding:2px 8px;border:1px solid var(--line);border-radius:14px;${(+PQ.parCase)?'':'background:#eef3ec'}">
+        <label style="display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="A par is a level, not a batch — only the RUN has to be packable. Rounding the target up to a whole case as well turns a 0.7-pack par into 12, which is 360 days of cover for a product that sells two a month. Untick to round only the run.">
+          <input type="checkbox" ${(+PQ.parCase)?'checked':''} onchange="pqToggle('parCase')"> <b>Round the par to a case too</b></label>
+      </span>
       <span class="mini" style="display:inline-flex;gap:6px;align-items:center;padding:2px 8px;border:1px solid var(--line);border-radius:14px;${PQ.minOn?'background:#eef3ec':''}">
         <label style="display:inline-flex;gap:4px;align-items:center;cursor:pointer" title="Off = ask for exactly what the sum says, to the pack. On = round every run up to a whole case and never ask for fewer than the minimum.">
           <input type="checkbox" ${PQ.minOn?'checked':''} onchange="pqToggle('minOn')"> <b>Round to a case</b></label>
@@ -4507,11 +4650,13 @@ function pqDraw(){
         <td class="num">${c.covPct==null?'<span class="mini" style="color:var(--muted)">—</span>'
           :`<b style="color:${c.covPct<0.6?'var(--danger)':(c.covPct<1?'var(--earth,#b5762a)':'#4e7a3e')}">${Math.round(c.covPct*100)}%</b>
              <div class="mini" style="color:var(--muted)" title="the SHELF alone against the same target — the gap between this and the figure above is a transfer, not a production run">${c.shelfPct==null?'':Math.round(c.shelfPct*100)+'% on shelf'}</div>`}</td>
-        <td class="num">${c.produce?`<b style="color:var(--berry)">${k0(c.produce)}</b>${c.padded>0
+        <td class="num">${c.deferred?`<span class="mini" style="color:#4e7a3e">waiting</span>${c.deferDays!=null&&c.deferDays<900?`<div class="mini" style="color:var(--muted)">~${Math.round(c.deferDays)}d</div>`:''}`
+          :c.produce?`<b style="color:var(--berry)">${k0(c.produce)}</b>${c.capped?`<div class="mini" style="color:var(--earth,#b5762a)" title="trimmed so one run does not leave more than ${PQ.capDays} days of cover">capped ${PQ.capDays}d</div>`:''}${c.padded>0
           ? `<div class="mini" style="color:var(--earth,#b5762a)" title="the sum asked for ${k0(c.rawNeed)}; the case rule and the ${PQ.minPacks}-pack floor lifted it to ${k0(c.produce)}${c.coverAfter!=null&&c.coverAfter<900?', which leaves '+Math.round(c.coverAfter)+' days of cover':''}">+${k0(c.padded)} rounding${(c.coverAfter!=null&&c.coverAfter<900&&c.coverAfter>90)?` · ${Math.round(c.coverAfter)}d cover`:''}</div>`
           : ''}`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
         <td class="mini">${(!c.toMove&&!c.toMake)?'<span style="color:var(--muted)">—</span>'
           :`${c.toMove>0?`<b style="color:var(--earth,#b5762a)">MOVE ${k0(c.toMove)}</b>`:''}${(c.toMove>0&&c.toMake>0)?'<br>':''}${c.toMake>0?`<b style="color:var(--berry)">MAKE ${k0(c.toMake)}</b>`:''}${(c.toMove>0&&!c.toMake)?'<div style="color:var(--muted)">already made — just transfer it</div>':''}`}</td></tr>`;
+      if(PQ_WORK) h+=`<tr><td colspan="${span}" class="mini" style="background:#fbfbf8;color:var(--muted);border-top:0;padding:3px 10px 7px 26px;line-height:1.7">${pqWorkLine(r,c)}</td></tr>`;
       });
     });
   });
@@ -5155,7 +5300,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-26 06:05Z';
+const WR_BUILD='2026-09-26 08:15Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
