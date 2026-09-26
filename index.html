@@ -5155,7 +5155,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-24 14:40Z';
+const WR_BUILD='2026-09-26 05:20Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -9311,23 +9311,33 @@ async function renderMRP(){
      plotted once and never produced quietly disappears from planning. But it
      does not belong in the "what do I plan today" table either, so it moves to
      its own collapsed group with the plan it is sitting on.                     */
-  const coEv=await coPlanEvidence().catch(()=>({planned:{},inDemand:{}}));
+  const _coCl=await coClaimsNow();
+  const coEv=_coCl.ev||{plannedAll:{},demandAll:{}};
   /* A ROW IN THE DEMAND TABLE IS NOT A PLAN, and treating it as one is how
      orders vanished into the "already planned" fold while their own badge read
      "not planned yet". Only two things count as planned: a saved demand PLOT
      (it carries a DP reference the kitchen works from) or a live production
      plan. Everything else is still to plan and belongs in the open list. */
-  const coDone={}, coFresh={};
+  /* AND IT IS ANSWERED PER ORDER, NOT PER SKU. This card groups by product,
+     because that is what gets bought — but two orders can sit on one CUST-
+     code, and ⧉ Duplicate order makes that happen on purpose. A SKU only
+     counts as handled when EVERY order owing it has been allotted planned packs
+     of its own. One unplanned order keeps the whole row on the list, with the
+     orders named, which is the direction that costs a glance rather than a
+     customer's packs. */
+  const coDone={}, coFresh={}, coPer={};
   Object.keys(coAll).forEach(k=>{
-    /* Only a plot made after the newest order owing this SKU can have planned
-       what is outstanding on it. Without that, a duplicate of a finished order
-       folded straight into "already planned" behind its predecessor's plot. */
-    const _e=coEvAt(coEv, ((coAll[k]||{}).since)||'', ((coAll[k]||{}).needed)||'');
-    const p=(_e.planned||{})[k], d=(_e.inDemand||{})[k];
-    const reallyPlanned = !!p || !!(d && d.ref);
-    if(reallyPlanned) coDone[k]=coWhyText(_e,k)||'already planned'; else coFresh[k]=true;
+    const refs=((coAll[k]||{}).orders||[]).map(o=>o.ref);
+    const per=refs.map(ref=>{
+      const c=_coCl.claims[ref]||{planned:{}, inDemand:{}};
+      const p=(c.planned||{})[k], d=(c.inDemand||{})[k];
+      return {ref, planned: !!p || !!(d && d.ref), why: coWhyText(c, k)};
+    });
+    const allPlanned = per.length>0 && per.every(x=>x.planned);
+    coPer[k]=per;
+    if(allPlanned) coDone[k]=(per.find(x=>x.why)||{}).why||'already planned'; else coFresh[k]=true;
   });
-  window._mrpCoEv=coEv; window._mrpCoDone=coDone;
+  window._mrpCoEv=coEv; window._mrpCoDone=coDone; window._mrpCoPer=coPer;
   /* ---- A LOCKED WEEK IS CLOSED ------------------------------------------
      An order that arrives on Wednesday cannot join Monday's locked plot. The
      ingredients for that plot have been bought, the run has been scheduled
@@ -9365,10 +9375,19 @@ async function renderMRP(){
     const _corow=(sku,planned)=>{
       const c=coAll[sku]; const inD=+mrpDemand[sku]||0;
       const late=c.needed && c.needed<todayISO();
+      /* WHICH ORDERS, not just "the product". When one order on this recipe is
+         already on a plan and another is not — a duplicate, typically — the row
+         has to say so, or the planner sees "not planned yet" against a number
+         that is partly handled and plans it all again. */
+      const per=(window._mrpCoPer||{})[sku]||[];
+      const nOn=per.filter(x=>x.planned).length;
+      const mixed=nOn>0 && nOn<per.length;
       const state = planned ? `<span class="badge b-invoiced">${esc(coDone[sku])}</span>`
+                  : (mixed ? `<span class="badge b-open">not planned yet</span>
+                       <div class="mini" style="color:var(--earth,#b5762a)">${nOn} of ${per.length} order(s) on this recipe already planned — this asks for the rest</div>`
                   : (inD>=c.packs ? '<span class="badge b-received">in this run</span>'
                   : (inD>0 ? '<span class="badge b-invoiced">part in this run</span>'
-                           : '<span class="badge b-open">not planned yet</span>'));
+                           : '<span class="badge b-open">not planned yet</span>')));
       const unlocked=(window._mrpCoUnlock||{})[sku];
       const qtyCell = (planned && !unlocked)
         ? `<td class="num" title="already on a plan — adding it here would buy the ingredients a second time">
@@ -9377,7 +9396,11 @@ async function renderMRP(){
         : `<td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${mrpDemand[sku]||''}" onchange="mrpSetDem('${sku}',this.value)" title="a customer's own quantity — never rounded"${(planned&&unlocked)?' style="width:84px;text-align:right;border-color:var(--danger)"':''}>${(planned&&unlocked)?'<div class="mini" style="color:var(--danger)">counted twice unless the other plan is dropped</div>':''}</td>`;
       return `<tr>
         <td>${esc(c.orders.map(o=>o.customer).filter((v,i,a)=>a.indexOf(v)===i).join(', ')||'—')}
-          <div class="mini" style="color:var(--muted)">${esc(c.orders.map(o=>o.ref).join(', '))}</div></td>
+          <div class="mini" style="color:var(--muted)">${c.orders.map(o=>{
+            const x=per.find(y=>y.ref===o.ref);
+            return (x&&x.planned)
+              ? `<span title="${esc(x.why||'already planned')}" style="color:#4e7a3e">✓ ${esc(o.ref)}</span>`
+              : esc(o.ref); }).join(', ')}</div></td>
         <td>${esc(_pName[sku]||sku)}<div class="mini"><code>${esc(sku)}</code></div></td>
         <td class="mini" style="white-space:nowrap;${late?'color:var(--danger);font-weight:700':''}">${esc(c.needed||'—')}${late?' · overdue':''}</td>
         <td class="num"><b>${c.packs}</b></td>
@@ -12217,14 +12240,26 @@ let coRec={}, coLines=[]; let _coView='list'; let _coProd={}, _coIng=[];
    answer "is this in the demand run yet?" or "has half of it been made?". These
    six do. Everything after `for_production` is DERIVED from facts — a demand row,
    a production plan, confirmed packs — so nobody has to remember to move a card.  */
+/* `d` is what the status MEANS; `n` is what moves it on, which is the question
+   somebody actually has when they are looking at the board. Only Draft → For
+   Demand Planning and the two exits are pressed by a person; everything else is
+   derived from facts by coSyncStatuses, so a card that will not move is telling
+   you the fact is missing, not that somebody forgot to click. */
 const CO_FLOW=[
-  {k:'draft',          l:'Draft',                b:'open',      d:'Editable quote. Nothing reserved, nothing in demand.'},
-  {k:'for_production', l:'For Demand Planning',  b:'confirmed', d:'Locked, but on no demand plot yet — it still has to be planned into a week.'},
-  {k:'in_demand',      l:'Added in Demand',      b:'invoiced',  d:'Counted in a demand plan / MRP.'},
-  {k:'in_production',  l:'In Production',        b:'invoiced',  d:'On a DRAFT production plan whose date has not passed. Nothing is produced yet — confirming the run moves it on. An abandoned draft in the past does not count.'},
-  {k:'partial',        l:'Partially Fulfilled',  b:'invoiced',  d:'At least one confirmed production, not all packs yet.'},
-  {k:'completed',      l:'Completed',            b:'received',  d:'Every ordered pack has been produced.'},
-  {k:'cancelled',      l:'Cancelled',            b:'cancelled', d:'Voided.'}
+  {k:'draft',          l:'Draft',                b:'open',      d:'Editable quote. Nothing reserved, nothing in demand, no SKU exists yet.',
+   n:'You press 🔒 Lock. That mints a CUST- SKU and a BOM per recipe and puts the packs into demand.'},
+  {k:'for_production', l:'For Demand Planning',  b:'confirmed', d:'Locked, but on no demand plot yet — it still has to be planned into a week. The ingredients have not been bought.',
+   n:'Plan it into a week on Demand / MRP and save the plot. The custom-orders card at the top of that screen lists exactly these.'},
+  {k:'in_demand',      l:'Added in Demand',      b:'invoiced',  d:'On a saved demand plot, so its ingredients are on a purchase run. A bare row in the demand table does NOT count — that is a quantity somebody pushed at a date, not a planned week.',
+   n:'Put it on a production plan. It moves by itself once a draft run carries its packs.'},
+  {k:'in_production',  l:'In Production',        b:'invoiced',  d:'On a DRAFT production plan whose date has not passed. Nothing has been made yet. An abandoned draft in the past does not count, and a plan belonging to another order on the same recipe does not count either.',
+   n:'Confirm the run. Confirmed packs are what move it on.'},
+  {k:'partial',        l:'Partially Fulfilled',  b:'invoiced',  d:'At least one confirmed production, but not every pack yet. The remainder keeps asking in the demand run.',
+   n:'Make the rest — or 📕 Close out, which writes off what will never be made and completes it.'},
+  {k:'completed',      l:'Completed',            b:'received',  d:'Every ordered pack has been produced. Terminal: it owes nothing, it leaves the demand run, and it cannot reopen itself.',
+   n:'Nothing. ⧉ Duplicate it if the customer orders again — the copy is a fresh order with its own claim on production.'},
+  {k:'cancelled',      l:'Cancelled',            b:'cancelled', d:'Voided before anything downstream took it up. Its demand rows are cleaned out; its SKUs stay so the history reads.',
+   n:'Nothing. Cancel is refused once a plan or confirmed packs have claimed it — take it off that plan first.'}
 ];
 const _CO_LEGACY={quote:'draft', confirmed:'for_production', fulfilled:'completed', '':'draft'};
 /* SETTLED = finished with, one way or the other. A completed order has been
@@ -12568,10 +12603,14 @@ async function coDemandDiag(){
      had been loaded straight into demand still sitting on the to-plan list,
      which is how the same order gets added twice. A DRAFT plot does not count;
      that week is still being argued about. */
-  const _isPlotted=(ls,since)=>{
-    const plotted=(coEvAt(_ev||{}, since)||{}).inDemand||{};
-    return ls.some(l=>{ const e=l.product_sku && plotted[l.product_sku];
-      return !!e && (e.locked || e.src==='row'); });
+  /* PER ORDER, NOT PER SKU. Asking "is this SKU on a plot" drops a brand-new
+     duplicate off this list behind the plot belonging to the order it was
+     copied from — and this list is the one place that explains why an order is
+     missing from the run, so dropping it silently is the worst possible answer. */
+  const _claims=coClaimPlans(_ev||{}, orders, lines, coClaimPacks(orders, lines, {}));
+  const _isPlotted=(ref)=>{
+    const d=((_claims[ref]||{}).inDemand)||{};
+    return Object.keys(d).some(sku=>{ const e=d[sku]; return !!e && (e.locked || e.src==='row'); });
   };
   const rows=(orders||[]).map(o=>{
     const ls=byOrder[o.order_ref]||[];
@@ -12579,7 +12618,7 @@ async function coDemandDiag(){
     const packs=withSku.reduce((s,l)=>s+(+l.packs||0),0);
     const st=coStat(o.status);
     let reason='';
-    if(_isPlotted(ls, o.order_date||'')) return null;   // already on a locked plot OF ITS OWN
+    if(_isPlotted(o.order_ref)) return null;   // already on a locked plot OF ITS OWN
     if(st==='draft')          reason='Still a Draft — open it and press 🔒 Lock.';
     else if(st==='cancelled') reason='Cancelled.';
     else if(st==='completed') reason='Completed — every pack already produced.';
@@ -12617,8 +12656,13 @@ async function coPlanEvidence(){
       if(!((+b.planned_packs||0)>0 || (+b.good_packs||0)>0)) return;     // a zero line plans nothing
       const d=String(b.production_date||'').slice(0,10);
       if(d && d<_today) return;                                          // abandoned draft — not "in production"
+      /* HOW MANY, not just "there is one". Until this carried a quantity the
+         evidence was a boolean per SKU, and a boolean cannot be shared out
+         between two orders that hold the same SKU — which ⧉ Duplicate order
+         creates on purpose. See coClaimPlans. */
       push(plannedAll, b.product_sku, {ref:b.run_ref||b.batch_ref||'', date:d,
-        at:String(b.created_at||b.updated_at||'').slice(0,10)});
+        at:String(b.created_at||b.updated_at||'').slice(0,10),
+        qty:Math.max(+b.planned_packs||0, +b.good_packs||0)});
     });
   }catch(e){}
   try{ let rows;
@@ -12652,6 +12696,10 @@ async function coPlanEvidence(){
       });
     });
   }catch(e){}
+  /* `planned` / `inDemand` here are the UNFILTERED best candidate per SKU, kept
+     for screens that genuinely ask a product-level question. No custom-order
+     screen reads them any more: an order's own allotment comes from
+     coClaimPlans, because a SKU can belong to more than one order. */
   const ev=coEvAt({plannedAll, demandAll}, '');
   ev.plannedAll=plannedAll; ev.demandAll=demandAll;
   return ev;
@@ -12683,21 +12731,29 @@ async function coPlanEvidence(){
 
    Passing '' asks for the unfiltered best, which is what the SKU-level screens
    want when no particular order is in question.                               */
+/* Can this candidate be evidence for an order raised on `since`? */
+function _coFits(c, since){
+  since=String(since||'').slice(0,10);
+  return !since || (c.date && c.date>=since) || (c.at && c.at>=since) || (!c.date && !c.at);
+}
+/* Which of several eligible candidates gets quoted on the badge. A plot beats a
+   bare demand row, because it carries the DP reference the kitchen works from.
+   After that, the one for the week this order is actually due beats one for a
+   different week — without that, an order due on the 9th was quoting a row for
+   the 20th, which is the next order's. Everything else being equal, the most
+   recent. */
+function _coBetter(a, b, want){
+  want=String(want||'').slice(0,10);
+  const score=c=>[ c.ref?1:0, (want && c.date===want)?1:0, c.date||'' ];
+  const x=score(a), y=score(b);
+  for(let i=0;i<x.length;i++){ if(x[i]>y[i]) return true; if(x[i]<y[i]) return false; }
+  return false;
+}
 function coEvAt(ev, since, want){
   since=String(since||'').slice(0,10);
   want=String(want||'').slice(0,10);
-  const fits=c=>!since || (c.date && c.date>=since) || (c.at && c.at>=since)
-                       || (!c.date && !c.at);
-  /* Which of several eligible candidates gets quoted on the badge. A plot beats
-     a bare demand row, because it carries the DP reference the kitchen works
-     from. After that, the one for the week this order is actually due beats one
-     for a different week — without that, an order due on the 9th was quoting a
-     row for the 20th, which is the next order's. Everything else being equal,
-     the most recent. */
-  const score=(c)=>[ c.ref?1:0, (want && c.date===want)?1:0, c.date||'' ];
-  const better=(a,b)=>{ const x=score(a), y=score(b);
-    for(let i=0;i<x.length;i++){ if(x[i]>y[i]) return true; if(x[i]<y[i]) return false; }
-    return false; };
+  const fits=c=>_coFits(c, since);
+  const better=(a,b)=>_coBetter(a,b,want);
   const planned={}, inDemand={};
   Object.keys((ev&&ev.plannedAll)||{}).forEach(sku=>{
     ev.plannedAll[sku].filter(fits).forEach(c=>{ const cur=planned[sku];
@@ -12709,6 +12765,114 @@ function coEvAt(ev, since, want){
       if(!cur || better(c,cur)) inDemand[sku]=c; });
   });
   return {planned, inDemand};
+}
+/* ---- WHOSE PLAN IS IT? ------------------------------------------------------
+   THE BUG THIS FIXES.  Every piece of planning evidence — a saved demand plot,
+   a row in the demand table, a draft production run — is filed under a PRODUCT
+   SKU and nothing else.  For catalogue products that is fine.  For custom
+   orders it is not, because ⧉ Duplicate order deliberately keeps the SKU: two
+   identical recipes hash to the same CUST- code, which is the whole point.
+
+   So the question "is this planned?" was being answered for the PRODUCT when
+   the only answer anybody needs is for THE ORDER AND THE PRODUCT TOGETHER.
+
+   The previous guard was a date test: evidence must be dated on or after the
+   day the order was raised (coEvAt).  It catches a plot from last month.  It
+   does NOT catch the case that actually happens — a duplicate raised today
+   against a plan for a week that is still ahead of us.  That plan is newer than
+   the order, so it passes, and the copy opens reading "In Production" with
+   nothing scheduled and nobody making it.  A duplicated order that goes
+   straight into production is exactly this.
+
+   THE FIX is the rule the app already uses for produced packs.  Produced packs
+   are a pool drawn down soonest-needed-first, so two orders on one recipe cannot
+   both claim the same packs (coClaimPacks).  Planned packs are the same kind of
+   thing and get the same treatment: each candidate carries a QUANTITY, orders
+   are walked in the same order by the same comparator, and each takes what it is
+   owed and no more.  Fifteen planned packs claimed by August's order are gone;
+   today's duplicate finds an empty pool and correctly reports that nobody has
+   planned it yet.
+
+   TWO DETAILS THAT MATTER.
+
+   A locked order drains the pool by its FULL claim, not by what it still needs.
+   The plot planned all fifteen for that order; the fact that they have since
+   been made does not hand them back to the next order in the queue.  This is
+   the same reasoning that made coClaimPacks run over locked orders rather than
+   open ones, and getting it wrong here would reproduce the Homia & Tawke bug on
+   the planning side.
+
+   A candidate with no quantity has no capacity, so it is evidence for nobody.
+   That is the deliberate direction to fail in: an order wrongly shown as "not
+   planned yet" costs somebody a glance at a week that turns out to be handled;
+   wrongly shown as planned is how a real customer's packs stopped being asked
+   for.  Both producers above now write a quantity.
+
+   Returns { order_ref: {planned:{sku:cand}, inDemand:{sku:cand}, need:{sku:n}} },
+   where each cand is the winning candidate plus `claimed` (how many of this
+   order's packs it covers) and `short` (how many it does not).                 */
+function coClaimPlans(ev, orders, lines, fulfilled){
+  const out={};
+  const byOrder={}; (lines||[]).forEach(l=>{ if(l&&l.product_sku) (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
+  const pool=(all)=>{ const m={};
+    Object.keys(all||{}).forEach(sku=>{ m[sku]=(all[sku]||[]).map(c=>({c, left:Math.max(0, +c.qty||0)})); });
+    return m; };
+  const P=pool(ev&&ev.plannedAll), D=pool(ev&&ev.demandAll);
+  /* Take up to `claim` packs out of one SKU's candidates. Drafts are ranked
+     soonest-first (the run about to happen); demand evidence uses the same
+     ranking the badge uses, so the two can never quote different things. */
+  const take=(slots, since, want, claim, isPlan)=>{
+    if(!slots || !slots.length || !(claim>0)) return null;
+    const usable=slots.filter(s=>s.left>0 && _coFits(s.c, since));
+    usable.sort(isPlan
+      ? (a,b)=>String(a.c.date||'9999').localeCompare(String(b.c.date||'9999'))
+      : (a,b)=>(_coBetter(a.c,b.c,want)?-1:(_coBetter(b.c,a.c,want)?1:0)));
+    let got=0, first=null;
+    for(let i=0;i<usable.length && got<claim;i++){
+      const s=usable[i], t=Math.min(claim-got, s.left);
+      if(!(t>0)) continue;
+      s.left-=t; got+=t; if(!first) first=s.c;
+    }
+    return got>0 ? Object.assign({}, first, {claimed:got, short:Math.max(0, claim-got)}) : null;
+  };
+  (orders||[]).filter(o=>coIsLocked(o.status))
+    .sort((a,b)=>String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))
+                 ||String(a.order_ref).localeCompare(String(b.order_ref)))
+    .forEach(o=>{
+      const since=String(o.order_date||'').slice(0,10);
+      const want =String(o.needed_date||'').slice(0,10);
+      const madeBySku=((fulfilled||{})[o.order_ref]||{}).bySku||{};
+      const claimBySku={};
+      (byOrder[o.order_ref]||[]).forEach(l=>{ const q=coClaimQty(l);
+        if(q>0) claimBySku[l.product_sku]=(claimBySku[l.product_sku]||0)+q; });
+      const r=out[o.order_ref]={planned:{}, inDemand:{}, need:{}};
+      Object.keys(claimBySku).forEach(sku=>{
+        const claim=claimBySku[sku];
+        const need=Math.max(0, claim-(+madeBySku[sku]||0));
+        r.need[sku]=need;
+        /* Drain on the FULL claim even when nothing is still owed — see above. */
+        const p=take(P[sku], since, want, claim, true);
+        const d=take(D[sku], since, want, claim, false);
+        if(need>0){ if(p) r.planned[sku]=p; if(d) r.inDemand[sku]=d; }
+      });
+    });
+  return out;
+}
+/* The whole chain in one call, for screens that do not already hold the pieces. */
+async function coClaimsNow(){
+  let orders=[], lines=[];
+  try{ orders=await db.list('custom_orders',{}); lines=await db.list('custom_order_lines',{}); }
+  catch(e){ return {claims:{}, fulfilled:{}, ev:{plannedAll:{},demandAll:{}}, orders:[], lines:[]}; }
+  const made={};
+  try{ let rows;
+    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
+    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
+    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
+  }catch(e){}
+  let ev={plannedAll:{}, demandAll:{}};
+  try{ ev=await coPlanEvidence(); }catch(e){}
+  const fulfilled=coClaimPacks(orders, lines, made);
+  return {claims:coClaimPlans(ev, orders, lines, fulfilled), fulfilled, ev, orders, lines};
 }
 // Plain-English "why is it at this status", for the card and the demand run.
 function coWhyText(ev, sku){
@@ -12759,6 +12923,11 @@ async function coSyncStatuses(){
      a finished order takes its own production out of the pool before an open one
      can claim it — see coClaimPacks. */
   const fulfilled=coClaimPacks(orders, lines, made);
+  /* PLANS ARE SHARED OUT THE SAME WAY PACKS ARE. Two orders on one CUST- SKU
+     used to read the same evidence and both move to In Production; now each
+     takes only what it is owed out of the planned quantity, soonest-needed-first
+     — see coClaimPlans. */
+  const claims=coClaimPlans(ev, orders, lines, fulfilled);
 
   const moved={}; const why={};
   for(const o of (orders||[])){
@@ -12766,9 +12935,10 @@ async function coSyncStatuses(){
     // finished must not be reopened just because the batch history was cleared.
     const cur=coStat(o.status); if(cur==='draft'||cur==='cancelled'||cur==='completed') continue;
     const ls=byOrder[o.order_ref]||[]; const f=fulfilled[o.order_ref]||{ord:0,got:0};
-    /* Only evidence that post-dates this order counts for it — see coEvAt. A
-       plot saved before the order was raised planned somebody else's packs. */
-    const evO=coEvAt(ev, o.order_date||'', o.needed_date||'');
+    /* Only what THIS order was actually allotted — see coClaimPlans. The date
+       test alone (coEvAt) let a duplicate raised today read a plan for next week
+       that belongs to the order it was copied from. */
+    const evO=claims[o.order_ref]||{planned:{}, inDemand:{}};
     const planned=evO.planned, inDemand=evO.inDemand;
     let next;
     if(f.ord>0 && f.got>=f.ord){ next='completed'; why[o.order_ref]=f.got+' of '+f.ord+' pack(s) produced'; }
@@ -12805,6 +12975,27 @@ async function coSyncStatuses(){
   }
   window._coWhy=why;
   return moved;
+}
+
+/* WHAT EACH STATUS MEANS, on the screen rather than in somebody's head.
+   The strip above carries these as tooltips, which is no use on a phone and no
+   use to anybody explaining the board to a new CS hire. Five of the seven
+   statuses move BY THEMSELVES, so the useful column is not "what is this" but
+   "what moves it on" — a card stuck at For Demand Planning is waiting for a
+   plot, not for a button nobody pressed. */
+function coFlowLegend(){
+  return `<details style="margin:0 0 10px;border:1px solid var(--line);border-radius:8px;background:#f6f8f4">
+    <summary style="padding:8px 11px;cursor:pointer;font-size:12.5px"><b>What the statuses mean</b>
+      <span class="mini" style="color:var(--muted)">· only Lock, Close out and Cancel are pressed by a person — the rest move themselves</span></summary>
+    <div style="padding:0 11px 10px"><table style="width:100%">
+      <thead><tr><th style="width:150px">Status</th><th>What it means</th><th style="width:34%">What moves it on</th></tr></thead>
+      <tbody>${CO_FLOW.map(f=>`<tr>
+        <td><span class="badge b-${f.b}">${esc(f.l)}</span></td>
+        <td class="mini">${esc(f.d)}</td>
+        <td class="mini" style="color:var(--muted)">${esc(f.n||'')}</td></tr>`).join('')}</tbody>
+    </table>
+    <div class="mini" style="color:var(--muted);margin-top:7px">Two orders can share one <code>CUST-</code> code — identical recipes hash to the same SKU, and <b>⧉ Duplicate order</b> relies on that. Each order is credited only with the planned and produced packs it is actually owed, oldest need first, so a duplicate never inherits the original's plan or its production.</div>
+    </div></details>`;
 }
 
 async function renderCustomOrders(){
@@ -12855,6 +13046,7 @@ async function renderCustomOrders(){
       ${(_coQ||_coStatF)?`<button class="btn sec sm" onclick="_coQ='';_coStatF='';renderCustomOrders()">✕ Clear</button>`:''}
     </div>
     <div style="margin:0 0 10px">${flowStrip}<span class="mini" style="color:var(--muted)">tap a status to list those orders — searching and picking a status both look at every order, settled included</span></div>
+    ${coFlowLegend()}
     <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th title="What the customer was promised">Delivery</th><th title="The production deadline — delivery minus the lead time. This is the demand week.">Make by</th><th>Status</th><th class="num">Lines</th><th class="num">Total</th><th></th></tr></thead>
     <tbody>${rows||`<tr><td colspan="8" class="empty">${(_coQ||_coStatF)?'No order matches'+(_coQ?(' “'+esc(_coQ)+'”'):'')+(_coStatF?(' in '+esc(coStatLabel(_coStatF))):'')+'.':(settledN&&!_coShowDone?'Nothing needs action — '+settledN+' settled order(s) are hidden.':'No custom orders yet — click ＋ New quote.')}</td></tr>`}</tbody></table></div>
     ${(settledN&&!_coQ&&!_coStatF)?`<div class="mini" style="color:var(--muted);margin-top:8px">
@@ -13178,11 +13370,14 @@ async function coCancelCheck(){
   const out={blocked:[], demandRows:[], skus:[], packs:0};
   const lines=(coLines||[]).filter(l=>l.product_sku && (+l.packs||0)>0);
   if(!lines.length) return out;
-  /* Read against THIS order's own date: a plot that predates it was never
-     planning these packs, and refusing the cancel because of it is a block
-     nobody can act on. */
-  const _evAll=await coPlanEvidence().catch(()=>({plannedAll:{},demandAll:{}}));
-  const ev=coEvAt(_evAll, (coRec&&coRec.order_date)||'', (coRec&&coRec.needed_date)||'');
+  /* Read against THIS ORDER, not against the SKU. A plot that predates it was
+     never planning these packs, and neither was a plan for next week that
+     belongs to the order this one was duplicated from — refusing the cancel
+     because of either is a block nobody can act on. coClaimPlans hands each
+     order only the planned packs it is owed; if this order was allotted none,
+     nothing here blocks it. */
+  const _cl=await coClaimsNow();
+  const ev=_cl.claims[(coRec&&coRec.order_ref)||''] || {planned:{}, inDemand:{}};
   /* PACKS ALREADY MADE **FOR THIS ORDER**. A partly produced order is not a
      mistake to be erased — it is stock that exists, and the cancel is rightly
      refused. But this counted every confirmed batch for the SKU, all time,
@@ -13198,18 +13393,9 @@ async function coCancelCheck(){
 
      coClaimPacks answers the right question: it walks every LOCKED order
      soonest-needed-first and hands each one the packs it is entitled to, so a
-     finished order keeps its own production and a copy inherits none of it. */
-  const made={};
-  try{ let rows;
-    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
-    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
-    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
-  }catch(e){}
-  let mine={};
-  try{
-    const _o=await db.list('custom_orders',{}), _l=await db.list('custom_order_lines',{});
-    mine=((coClaimPacks(_o,_l,made)[(coRec&&coRec.order_ref)||''])||{}).bySku||{};
-  }catch(e){ mine={}; }
+     finished order keeps its own production and a copy inherits none of it.
+     coClaimsNow has already done that walk, above. */
+  const mine=((_cl.fulfilled[(coRec&&coRec.order_ref)||''])||{}).bySku||{};
   /* A CUST- code means nothing to a person. The order line already carries the
      recipe name that was quoted, and the catalogue carries the product name; a
      refusal that says "CUST-7F3A9C is on a production plan" is not a refusal
