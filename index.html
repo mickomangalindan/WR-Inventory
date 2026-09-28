@@ -5357,7 +5357,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-28 09:20Z';
+const WR_BUILD='2026-09-28 13:05Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -10304,6 +10304,16 @@ async function confirmSaveMRPPlan(hasExisting){
       a.unshift({plan_date:MRPDATE,date:MRPDATE,ref:g.ref,by:CURRENT_USER,data}); localStorage.setItem('wr_mrp_plans',JSON.stringify(a));
     }
     toast('Saved & locked '+g.ref);
+    /* ---- THE STATUS GAP THIS CLOSES ------------------------------------
+       Saving the plot is the exact moment an order stops waiting to be planned
+       and becomes planned — For Demand Planning → Added in Demand. Every other
+       trigger of coSyncStatuses fires somewhere else: the PULL (before the save),
+       opening the Custom Orders board, saving a production draft, posting
+       actuals. So the one event that causes the move did not cause the update,
+       and the badge stayed wrong until somebody happened to open another screen.
+       It matters more now than it used to: the production plan only offers an
+       order once it reads as planned. */
+    try{ await coSyncStatuses(); }catch(e){}
     if(_om.omitted.length) sysLog('mrp',g.ref,'⚖ '+_om.omitted.length+' line(s) the pull offered were left out on purpose ('
       +_om.omitted.reduce((a,x)=>a+x.offered,0)+' pack(s)) by '+CURRENT_USER
       +' — '+_om.omitted.slice(0,6).map(x=>x.sku).join(', ')+(_om.omitted.length>6?' …':''));
@@ -12841,8 +12851,16 @@ async function coOpenDemand(){
     const cut=k.indexOf('|'); const ref=k.slice(0,cut), sku=k.slice(cut+1);
     const o=keep[ref]; if(!o) return;
     const needed=String(o.needed_date||o.order_date||'').slice(0,10);
-    const e=map[sku]=map[sku]||{packs:0,ordered:0,needed:'',since:'',orders:[]};
+    const e=map[sku]=map[sku]||{packs:0,ordered:0,ready:0,held:0,needed:'',since:'',orders:[]};
     e.packs+=q; e.ordered+=(+ordq[k]||q);
+    /* One SKU can be owed by two orders at different stages — ⧉ Duplicate makes
+       that routine — so the split is per ORDER and then re-totalled, never a
+       property of the SKU. `ready` is what the kitchen may start on; `held` is
+       what is still waiting for its ingredients to be bought. Demand planning
+       keeps reading `packs`: an order that is not ready to MAKE is exactly the
+       one that still has to be PLANNED. */
+    const _rdy=coReadyToMake(o);
+    if(_rdy) e.ready+=q; else e.held+=q;
     if(needed && (!e.needed || needed<e.needed)) e.needed=needed;       // soonest need drives urgency
     /* `since` is the NEWEST order still owing this SKU. A plot older than that
        cannot have planned everything now outstanding, so the planning screen
@@ -12852,7 +12870,8 @@ async function coOpenDemand(){
        real customer's packs stopped being asked for. */
     const raised=String(o.order_date||'').slice(0,10);
     if(raised && (!e.since || raised>e.since)) e.since=raised;
-    e.orders.push({ref, customer:o.customer_name||'', packs:q, needed});
+    e.orders.push({ref, customer:o.customer_name||'', packs:q, needed,
+      ready:_rdy, status:coStat(o.status), plan_route:o.plan_route||'', fulfil_route:o.fulfil_route||''});
   });
   return map; }
 // Flat {sku: packs} for the demand map.
@@ -13302,6 +13321,33 @@ function coFlowLegend(){
 const CO_PLAN_ROUTE={ plan:'Plan into a week', now:'Straight to production' };
 const CO_FULFIL_ROUTE={ pasig:'Via the sell site', direct:'Direct from the kitchen' };
 function coRouted(o){ return !!(o && o.plan_route && o.fulfil_route); }
+/* ---- IS THIS ORDER READY FOR THE KITCHEN TO MAKE? --------------------------
+   A locked order is not automatically something the kitchen can start. Until
+   its ingredients have been bought, offering it on the production plan invites
+   a run that cannot be finished — and the packs get counted as planned while
+   nobody has ordered a gram of meat for them.
+
+   Two ways an order becomes ready:
+
+     • Its ingredients were bought with the week. That is precisely what
+       "Added in Demand" means — on a SAVED demand plot, which is what the
+       purchase orders are generated from. in_production and partial are past
+       that point, so they qualify too.
+
+     • Somebody decided it goes now regardless (plan_route = 'now'): use what
+       is in the freezer, replenish the raw on the next cycle. That is the
+       urgent path, and it is a deliberate decision by production, not a
+       default — which is why it is a routing answer and not a guess.
+
+   An order still at "For Demand Planning" with no routing answer is neither:
+   it is waiting to be planned into a week, and the production plan should not
+   be offering it yet. It is not hidden — the screens that leave it out say how
+   many they are holding back and why. */
+function coReadyToMake(o){
+  if(!o || !coIsOpen(o.status)) return false;
+  if(String(o.plan_route||'')==='now') return true;
+  return ['in_demand','in_production','partial'].includes(coStat(o.status));
+}
 function coNeedsRouting(o){ return !!o && coIsOpen(o.status) && !coRouted(o); }
 
 /* Can this order be made right now out of what is in the kitchen?
@@ -15644,7 +15690,12 @@ async function prodLoadTargets(){
   window._prodPlotDm=P?{...P.demand}:{};
   window._prodPlotOmit=P?P.omit:{};
   window._prodLiveDm=live;
-  window._prodCoDue=T.co||{};
+  /* THE PICKER READS THE SAME SPLIT. A custom order that is not ready to make
+     is not offered as a quantity to type; it is reported above the list with
+     the reason, so "where did my order go" has an answer on the screen. */
+  window._prodCoDue={}; Object.keys(T.co||{}).forEach(s=>{ const d=T.co[s];
+    if((+d.ready||0)>0) window._prodCoDue[s]={...d, packs:+d.ready||0}; });
+  window._prodCoHeld=T.heldCo||{};
   window._prodPlotGap=gap;
   window._prodMadeRun=T.madeRun||{};
   prodTargetMap=dm;
@@ -15981,6 +16032,7 @@ async function planTargets(opt){
   }
 
   let co={}; try{ co=await coOpenDemand(); }catch(e){ co={}; }
+  const heldCo={};                       // owed, but not yet buyable — see coReadyToMake
   const ref=P?(P.ref||P.date):'';
   const rows=[], by={}, seen={}, noTargets={};
   const push=r=>{ rows.push(r); by[r.sku]=r; seen[r.sku]=1; };
@@ -15995,8 +16047,20 @@ async function planTargets(opt){
       extra:0, kind:'', remark:[], custom:isC};
     if(isC){
       const d=co[sku]; if(!d||!(+d.packs>0)) return;          // produced, completed or cancelled — not here at all
+      /* ONLY WHAT THE KITCHEN MAY ACTUALLY START. An order still waiting to be
+         planned into a week has had no ingredients bought for it; putting it on
+         the production target invites a run that cannot be finished. What is
+         held back is counted, named and reported above the sheet — see
+         window._prodCoHeld — rather than quietly dropped. */
+      if(!(+d.ready>0)){
+        (heldCo[sku]=heldCo[sku]||{sku, packs:0, orders:[]});
+        heldCo[sku].packs+=(+d.held||+d.packs||0);
+        (d.orders||[]).filter(o=>!o.ready).forEach(o=>heldCo[sku].orders.push(o));
+        return;
+      }
       r.bulacan=+k.awaiting||0; r.pasig=0; r.total=+k.awaiting||0; r.par=0; r.live=0; r.coverDays=null; r.perDay=0;
-      r.kind='order'; r.remaining=+d.packs||0; r.target=Math.max(r.remaining, +d.ordered||0); r.made=r.target-r.remaining;
+      r.kind='order'; r.remaining=+d.ready||0; r.target=Math.max(r.remaining, +d.ordered||0); r.made=r.target-r.remaining;
+      if((+d.held||0)>0) r.remark.push((+d.held)+' more pack(s) on this recipe are still waiting to be planned');
       const who=[...new Set((d.orders||[]).map(o=>o.customer).filter(Boolean))].join(', ');
       const refs=[...new Set((d.orders||[]).map(o=>o.ref).filter(Boolean))].join(', ');
       r.remark.push((who||'custom order')+(refs?' · '+refs:''));
@@ -16046,7 +16110,7 @@ async function planTargets(opt){
       made:Math.max(0,(+d.ordered||0)-(+d.packs||0)), extra:0, kind:'order', custom:true,
       remark:[(who||'custom order')+' · no product record', d.needed?('make by '+d.needed+(d.needed<today?' — OVERDUE':'')):''].filter(Boolean)});
   });
-  return {rows, by, plot:P, ref, from:P?from:'', plotFrom:P?P.from:'', to, ageDays, made, madeRun, co, noT, noTargets, nm};
+  return {rows, by, plot:P, ref, from:P?from:'', plotFrom:P?P.from:'', to, ageDays, made, madeRun, co, heldCo, noT, noTargets, nm};
 }
 /* The Made window's From. Session only, never stored: each new day it goes
    back to the automatic default. */
@@ -16257,6 +16321,28 @@ function covPill(tag, long){
   if(!tag) return '';
   return `<div class="mini" style="color:${tag.c}" title="${esc(tag.title)}">${tag.k==='short'?'⚠ ':''}${esc(long?tag.long:tag.txt)}</div>`;
 }
+/* ---- WHAT THE PRODUCTION PLAN IS DELIBERATELY NOT OFFERING -----------------
+   Held-back orders are real work somebody is waiting for. They are off the
+   target sheet because nobody has bought their ingredients yet — but a line
+   that simply vanishes is how an order stops being made at all, which this
+   codebase has been bitten by more than once. So they are named, counted, and
+   given the one action that unblocks them. */
+function prodHeldCoHtml(){
+  const h=window._prodCoHeld||{}; const skus=Object.keys(h);
+  if(!skus.length) return '';
+  const packs=skus.reduce((a,s)=>a+(+h[s].packs||0),0);
+  const orders=[]; skus.forEach(s=>(h[s].orders||[]).forEach(o=>{ if(!orders.some(x=>x.ref===o.ref)) orders.push(o); }));
+  const late=orders.filter(o=>o.needed && o.needed<todayISO()).length;
+  return `<div style="margin:8px 0;padding:9px 11px;border:1px solid #e0b400;background:#fff8e1;border-radius:6px;font-size:12.5px">
+    ⏸ <b>${orders.length} custom order(s) · ${packs} pack(s) are not on this plan yet</b> — their ingredients have not been bought.
+    ${late?`<b style="color:var(--danger)"> ${late} of them are already past the make-by date.</b>`:''}
+    <div class="mini" style="margin:5px 0 0;color:var(--muted)">${esc(orders.slice(0,6).map(o=>(o.customer||o.ref)+' · '+o.packs+' pack(s)'+(o.needed?(' · by '+o.needed):'')).join(' — '))}${orders.length>6?' …':''}</div>
+    <div class="mini" style="margin:5px 0 0">Plan them into a week in <b>Demand / MRP</b> and save the plot — they appear here the moment the ingredients are on a purchase run.
+      Genuinely urgent? Open the order and route it <b>Straight to production</b>: it uses stock on hand and the raw is replenished on the next cycle.</div>
+    <div style="margin-top:7px"><button class="btn sec sm" onclick="openModel('mrp')">→ Demand / MRP</button></div>
+  </div>`;
+}
+
 function drawProdPlan(){
   const totTarget=prodPlanLines.reduce((s,l)=>s+(+prodTargetMap[l.product_sku]||0),0);
   const totGood=prodPlanLines.reduce((s,l)=>s+(+l.good_packs||0),0);
@@ -16287,6 +16373,7 @@ function drawProdPlan(){
       Orders have moved since ${esc(window._prodTargetRef||'the last plot')}, or these lines were never plotted. They are <i>not</i> in the target, because nobody bought raws for them — the Remarks on each row say how many.
       Open <b>Demand/MRP</b> and <b>🧮 Pull the week</b> again: the new plot becomes the new target.
       <span class="mini" style="color:var(--muted)">Supply-led lines and custom orders are excluded from this count — neither is bought against a plot.</span></div>`:''}
+    ${prodHeldCoHtml()}
     <div class="smart" style="margin:8px 0"><div class="stile"><div class="v">${totTarget}</div><div class="l">Target packs</div></div><div class="stile"><div class="v">${totGood}</div><div class="l">This run (good)</div></div><div class="stile"><div class="v" style="color:${totRemain>0?'var(--berry)':'#4e7a3e'}">${totRemain}</div><div class="l">Remaining to make</div></div></div>
     <div style="overflow-x:auto"><table style="min-width:1060px"><thead><tr><th>Product</th>
       <th class="num" title="Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. The first figure IS the Shopify reading, unadjusted — ${esc(locName(planSellLoc()))} is Shopify, the commissary is the ERP.">Current<br>stock</th>
@@ -16787,6 +16874,12 @@ function drawKitchenCartBody(){
       🧑‍🍳 Custom orders owed · ${co.length} · ${co.reduce((a,r)=>a+r.packs,0)} pack(s)
       ${nLate?`<span style="color:var(--danger)"> · ${nLate} past the make-by date</span>`:''}
       <div class="mini" style="font-weight:400;opacity:.8">Somebody is waiting for these. Soonest first — read from the ORDERS, so a line appears here even if its product record is missing.</div></td></tr>`;
+    const _held=window._prodCoHeld||{}; const _hs=Object.keys(_held);
+    if(_hs.length){ const _hp=_hs.reduce((a,s)=>a+(+_held[s].packs||0),0);
+      const _ho=[]; _hs.forEach(s=>(_held[s].orders||[]).forEach(o=>{ if(!_ho.some(x=>x.ref===o.ref)) _ho.push(o); }));
+      body+=`<tr><td colspan="6" style="background:#fff8e1;color:#7a5a00;padding:6px 10px;font-size:12px">
+        ⏸ <b>${_ho.length} more order(s) · ${_hp} pack(s)</b> are not listed — their ingredients have not been bought yet.
+        <span style="opacity:.8">Plan them in Demand / MRP, or route the order <b>Straight to production</b> if it is urgent.</span></td></tr>`; }
     co.forEach(r=>{
       const rem=r.packs;
       const v=(window._kcQty&&window._kcQty[r.sku]!=null)?window._kcQty[r.sku]:'';
