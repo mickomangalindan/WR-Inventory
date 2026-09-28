@@ -1970,7 +1970,12 @@ function pbPrintList(){
   const packs=rows.reduce((s,r)=>s+(+r.good_packs||0),0);
   const kgs=rows.reduce((s,r)=>s+(+r.output_kg||0),0);
   w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Production — ${H(win)}</title><style>
-    @page{size:A4 landscape;margin:11mm}
+    @page{size:A4 portrait;margin:11mm}
+    /* PORTRAIT BY DEFAULT — paper costs money and most of these sheets never needed
+       the wide page. table-layout:fixed plus overflow-wrap is the safety net: a long
+       product name wraps inside its column instead of shoving the table off the right
+       edge, so portrait cannot spill however long the content gets. */
+    table{table-layout:fixed;width:100%} th,td{overflow-wrap:anywhere;word-break:break-word}
     body{font:11.5px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a;margin:0}
     h1{font-size:17px;margin:0 0 2px} .sub{color:#6b6a64;font-size:11px;margin-bottom:10px}
     table{width:100%;border-collapse:collapse}
@@ -2653,7 +2658,7 @@ async function openForm(idEnc){
     for(const rn of (Array.isArray(c.relAny)?c.relAny:[c.rel])) if(typeof rn==='string') await relOptions(rn); }
   // product map (box size + name + group) for transfer lines: box/loose entry, name, and grouped print
   if(m.o2m && m.o2m.cols.some(c=>c.n==='product_sku')){ window._prodLineMap={};
-    try{ (await db.list('products',{})).forEach(p=>window._prodLineMap[p.sku]={name:p.name,variant:p.variant,box:(+p.box_size||1),group_1:p.group_1,group_2:p.group_2,family:p.family,sort_order:p.sort_order}); }catch(e){} }
+    try{ (await db.list('products',{})).forEach(p=>window._prodLineMap[p.sku]={name:p.name,variant:p.variant,box:(+p.box_size||1),group_1:p.group_1,group_2:p.group_2,family:p.family,feeding_format:p.feeding_format,product_line:p.product_line,feeding_style:p.feeding_style,mix_category:p.mix_category,sort_order:p.sort_order}); }catch(e){} }
   renderForm(); syncHash();
 }
 async function renderForm(){
@@ -3133,7 +3138,12 @@ async function pbRunSheet(){
       <td class="n">${b.output_kg!=null?(+b.output_kg).toFixed(3):'—'}</td><td class="n">${b.yield_pct!=null?b.yield_pct+'%':'—'}</td></tr>`).join('');
   const w=window.open('','_pbs','width=1000,height=980'); if(!w){ toast('Allow pop-ups to print',true); return; }
   w.document.write(`<html><head><meta charset="utf-8"><title>Production ${esc(run)}</title><style>
-    @page{size:A4 landscape;margin:12mm} *{box-sizing:border-box}
+    @page{size:A4 portrait;margin:12mm} *{box-sizing:border-box}
+    /* PORTRAIT BY DEFAULT — paper costs money and most of these sheets never needed
+       the wide page. table-layout:fixed plus overflow-wrap is the safety net: a long
+       product name wraps inside its column instead of shoving the table off the right
+       edge, so portrait cannot spill however long the content gets. */
+    table{table-layout:fixed;width:100%} th,td{overflow-wrap:anywhere;word-break:break-word}
     html,body{-webkit-print-color-adjust:exact;print-color-adjust:exact;color-adjust:exact}
     body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:11.5px}
     h1{color:#4e7a3e;margin:0 0 2px;font-size:19px} .sub{color:#666;margin:0 0 12px;font-size:11px}
@@ -3178,7 +3188,22 @@ function renderLines(){
   /* An ISSUED purchase order is a commitment. Its lines are read-only from here
      on; what still arrives unordered goes through Receiving. */
   const _lock=(state.model==='purchase_orders') && poLinesLocked(formRec);
-  tb.innerHTML=formChildren.map((ln,i)=>`<tr>${o.cols.map(c=>{
+  /* ---- BANDS, THE WAY EVERY OTHER SCREEN READS ---------------------------
+     The child grid drew lines in the order they were added and nothing else.
+     On a thirty-line transfer spanning four families that is a wall, while the
+     printout of the same transfer, the count sheet, the demand run and Regular
+     Packs all group category › sub-group › item. One grid disagreeing with
+     every other view is the kind of thing that makes people check twice.
+
+     THE ORDER OF `formChildren` IS NOT TOUCHED. It is what gets saved, what
+     lSet / delLine / trSetBoxLoose index into, and what the o2m writer replays;
+     reordering the array to group it would silently rewrite the document. Only
+     the DISPLAY is grouped, and every row carries its own true array index, so
+     editing a line in a band writes to exactly the line it came from.
+
+     Grouping is skipped when there is nothing to group by (no item column, or
+     fewer than three lines), because a band over two rows is noise. */
+  const _liRow=(ln,i)=>`<tr>${o.cols.map(c=>{
     let v=ln[c.n]==null?'':ln[c.n];
     const ro=(_lock||(typeof c.ro==='function'?c.ro(ln,formRec):c.ro))?'disabled':'';
     if(ro&&(c.n==='received_packs'||c.n==='received_kg')&&(v===''||v==null)) v=0; // captured at receiving
@@ -3198,7 +3223,36 @@ function renderLines(){
     if(c.t==='number'){ const sc=+c.scale||1; const disp=(v===''||v==null)?'':(sc!==1?(Math.round((+v/sc)*1e6)/1e6):v);
       return `<td class="num"><input type="number" step="any" value="${esc(disp)}" oninput="lSetNum(${i},'${c.n}',this.value,${sc})" ${ro} ${ro?'title="From the recipe" style="background:#f4f5f8;color:#8a93a5"':''}></td>`; }
     return `<td><input value="${esc(v)}" oninput="lSet(${i},'${c.n}',this.value)" ${ro}></td>`;
-  }).join('')}<td>${_lock?'':`<span class="btn link" style="color:var(--danger)" onclick="delLine(${i})">✕</span>`}</td></tr>`).join('');
+  }).join('')}<td>${_lock?'':`<span class="btn link" style="color:var(--danger)" onclick="delLine(${i})">✕</span>`}</td></tr>`;
+
+  const skuCol=(o.cols.find(c=>c.n==='product_sku')||o.cols.find(c=>c.n==='ingredient_sku')||{}).n;
+  const span=o.cols.length+1;
+  if(!skuCol || formChildren.length<3){ tb.innerHTML=formChildren.map(_liRow).join(''); return; }
+  const IG=window._ingLineMap||{};
+  /* A line with no item picked yet has nothing to group by and must stay where
+     the person can see it — it is the row they are in the middle of filling in.
+     Those go first, ungrouped. */
+  const tagged=[], loose=[];
+  formChildren.forEach((ln,i)=>{
+    const sku=ln[skuCol];
+    if(!sku){ loose.push({ln,i}); return; }
+    const isIng=(skuCol==='ingredient_sku') || ((ln.kind||'product')!=='product');
+    const meta=isIng ? (IG[sku]||{}) : (PM[sku]||{});
+    const g1 = isIng ? (meta.g1||'Ingredients') : prodG1(meta);
+    const g2 = isIng ? (meta.g2||'') : prodG2(meta);
+    tagged.push({ln,i,_g1:g1,_g2:g2,sort_order:meta.sort_order,name:meta.name||sku,sku});
+  });
+  let h=loose.map(x=>_liRow(x.ln,x.i)).join('');
+  hierGroups(tagged,{g1:'_g1',g2:'_g2'}).forEach(G=>{
+    h+=`<tr class="grp"><td colspan="${span}" style="background:#e7f0e9;color:#2f5d33;font-weight:800;padding:4px 8px">${esc(G.g1)}
+      <span style="font-weight:400;opacity:.65">· ${G.all.length}</span></td></tr>`;
+    G.subs.forEach(S=>{
+      if(S.g2 && !/^other$/i.test(String(S.g2)))
+        h+=`<tr class="cat"><td colspan="${span}" style="background:#f2f6ef;color:#4e7a3e;font-weight:700;padding:3px 8px 3px 24px">▸ ${esc(S.g2)}</td></tr>`;
+      h+=S.items.map(x=>_liRow(x.ln,x.i)).join('');
+    });
+  });
+  tb.innerHTML=h;
 }
 // Transfer send: boxes + loose packs → total sent_packs.
 function trSetBoxLoose(i,boxV,looseV){ const l=formChildren[i]; const box=((window._prodLineMap||{})[l.product_sku]||{}).box||1;
@@ -4724,7 +4778,7 @@ function pqPrint(){
     <td>${(!c.toMove&&!c.toMake)?'—':[c.toMove>0?('MOVE '+k(c.toMove)):'',c.toMake>0?('MAKE '+k(c.toMake)):''].filter(Boolean).join(' · ')}</td>
     <td class="wr"></td><td class="wr"></td></tr>`).join('');
   w.document.write(`<html><head><meta charset="utf-8"><title>Packs Production Request</title><style>
-    @page{margin:14mm;size:A4}
+    @page{margin:14mm;size:A4 portrait}
     *{box-sizing:border-box} body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;font-size:12px}
     h1{color:#4e7a3e;font-size:19px;margin:0} .hd{border-bottom:3px solid #4e7a3e;padding-bottom:8px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:flex-end}
     .lv{color:#666;font-size:11px;margin-bottom:10px}
@@ -4948,6 +5002,9 @@ async function psPrint(){
   const H=v=>esc(String(v==null?'':v));
   const dh=d=>{ const t=new Date(d+'T00:00:00'); return t.toLocaleDateString(undefined,{weekday:'short'})+' '+t.getDate(); };
   w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Production Schedule ${H(PS_FROM)} → ${H(PS_TO)}</title><style>
+    /* STAYS LANDSCAPE, DELIBERATELY. This is a calendar: Item, Begin, ONE COLUMN PER
+       DAY, then Ending, Target, Remaining. A week is twelve columns and a fortnight
+       nineteen, so the width is set by the date range, not by the design. */
     @page{size:A4 landscape;margin:9mm}
     body{font:10px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;color:#1a1a1a;margin:0}
     h1{font-size:15px;margin:0 0 2px}.sub{color:#6b6a64;font-size:10px;margin-bottom:8px}
@@ -5300,7 +5357,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-26 08:15Z';
+const WR_BUILD='2026-09-28 09:20Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -6049,7 +6106,11 @@ function recordPrintHtml(m, r, children){
     const isTr=(state.model==='transfers');
     const numCols=cols.filter(c=>['number','currency'].includes(c.t) && !(isTr&&/^(sent_packs|received_packs)$/.test(c.n)));
     const _nm=l=>{
-      if((l.kind||'product')!=='product'){ const g=IG[l.product_sku]||{}; return {n:(g.name||ingName(l.product_sku)||l.product_sku), v:'', g1:(g.g1||'Ingredients'), g2:(g.g2||'')}; }
+      if((l.kind||'product')!=='product'){ const g=IG[l.product_sku]||{};
+        /* `so` was missing here, so every ingredient line sorted as rank 0 and the
+           whole Ingredients band jumped to the top of the printed sheet while the
+           screen had it in its proper place. */
+        return {n:(g.name||ingName(l.product_sku)||l.product_sku), v:'', g1:(g.g1||'Ingredients'), g2:(g.g2||''), so:g.so}; }
       const p=P[l.product_sku]||{};
       const nm=p.name||l.product_sku, v=(varAppend(nm,p.variant)===String(nm))?'':String(p.variant||'');
       return {n:nm, v, g1:prodG1(p), g2:prodG2(p), so:p.sort_order};
@@ -6144,7 +6205,13 @@ function recordPrintHtml(m, r, children){
     lines=`<h3>${esc(m.o2m.label)}</h3><table class="lines"><thead><tr>${head}</tr></thead><tbody>${body}${foot}</tbody></table>`;
   }
   return `<html><head><meta charset="utf-8"><title>${esc(r[m.pk]||m.label)}</title><style>
-    @page{margin:16mm}
+    /* AN @page RULE WITH NO SIZE HANDS THE ORIENTATION TO THE BROWSER, which uses
+       whatever that person last printed with — so the same sheet came out portrait
+       for one person and landscape for the next, and nobody could see why. Naming
+       the size AND the orientation is what makes the print dialog open on portrait.
+       A web page cannot stop somebody changing it afterwards; it can stop the
+       default being a coin flip. */
+    @page{size:A4 portrait;margin:16mm}
     *{box-sizing:border-box} body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0}
     .hd{border-bottom:3px solid #4e7a3e;padding-bottom:10px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:flex-end}
     .hd h1{color:#4e7a3e;margin:0;font-size:22px} .hd .doc{text-align:right} .hd .doc .t{font-size:13px;color:#666} .hd .doc .r{font-size:18px;font-weight:700}
@@ -6189,8 +6256,14 @@ async function printForm(){ const m=MODELS[state.model], r=formRec;
   const w=window.open('','_pr','width=840,height=920'); if(!w){toast('Allow pop-ups to print',true);return;}
   w.document.write('<p style="font-family:Arial;padding:24px;color:#4e7a3e">Preparing print…</p>');
   // Make sure the product map is loaded (name/SKU/group) for grouped product-line prints.
-  if(m.o2m && m.o2m.cols.some(c=>c.n==='product_sku') && !window._prodLineMap){ window._prodLineMap={};
-    try{ (await db.list('products',{})).forEach(p=>window._prodLineMap[p.sku]={name:p.name,variant:p.variant,box:(+p.box_size||1),group_1:p.group_1,group_2:p.group_2,family:p.family,sort_order:p.sort_order}); }catch(e){} }
+  /* prodG1/prodG2 fall back to feeding_format / product_line / feeding_style /
+       mix_category when group_1 or group_2 is blank. This map used to drop those
+       fields, so the PRINTED sheet grouped a product with no group_1 under a flat
+       "Products" while every on-screen view put it under "Gently Cooked" — two
+       different orderings of the same transfer, which is exactly what somebody
+       transcribing from the paper cannot afford. Carry the fallbacks. */
+      if(m.o2m && m.o2m.cols.some(c=>c.n==='product_sku') && !window._prodLineMap){ window._prodLineMap={};
+    try{ (await db.list('products',{})).forEach(p=>window._prodLineMap[p.sku]={name:p.name,variant:p.variant,box:(+p.box_size||1),group_1:p.group_1,group_2:p.group_2,family:p.family,feeding_format:p.feeding_format,product_line:p.product_line,feeding_style:p.feeding_style,mix_category:p.mix_category,sort_order:p.sort_order}); }catch(e){} }
   // …and the same for ingredient lines, so a printed PO reads in names and groups.
   if(m.o2m && (m.o2m.cols.some(c=>c.n==='ingredient_sku') || state.model==='transfers')){ window._ingLineMap={};
     try{ const ai=await listIngredients();
@@ -7651,6 +7724,10 @@ function ylPrint(){
     <td class="n">${r.recipePct!=null?r.recipePct+'%':'—'}</td>
     <td class="n">${r.exc?((r.exc>0?'+':'')+r.exc.toFixed(3)):'0'}</td></tr>`).join('')||'<tr><td colspan="14">—</td></tr>';
   w.document.write(`<html><head><meta charset="utf-8"><title>Yield &amp; Loss</title><style>
+    /* STAYS LANDSCAPE, DELIBERATELY. Fourteen columns of yield arithmetic — raw in,
+       created, thawed, drip, used, excess, gap, recipe % — on A4 portrait give each one
+       about 12mm, narrower than the numbers they have to hold. Every other printout in
+       this app is portrait; this one earns the wide page. */
     @page{margin:14mm;size:A4 landscape}body{font-family:Arial;color:#222;font-size:11px}
     h1{color:#4e7a3e;margin:0;font-size:19px}h2{margin:3px 0 12px;font-size:13px;font-weight:400;color:#666}
     table{width:100%;border-collapse:collapse;margin-top:8px}
@@ -8667,7 +8744,12 @@ function wpPrint(){
     <tr class="tot"><td colspan="3">Week total</td><td class="n">${P(k.net)}</td><td class="n">${P(k.paid)}</td>
       <td class="n">${P(k.bal)}</td><td class="n">${P(k.fee)}</td><td class="n">${P(k.pendVal)}</td><td></td></tr>`).join('');
   w.document.write(`<html><head><meta charset="utf-8"><title>Weekly Payables</title><style>
-    @page{margin:14mm;size:A4 landscape}body{font-family:Arial;color:#222;font-size:11px}
+    @page{margin:14mm;size:A4 portrait}body{font-family:Arial;color:#222;font-size:11px}
+    /* PORTRAIT BY DEFAULT — paper costs money and most of these sheets never needed
+       the wide page. table-layout:fixed plus overflow-wrap is the safety net: a long
+       product name wraps inside its column instead of shoving the table off the right
+       edge, so portrait cannot spill however long the content gets. */
+    table{table-layout:fixed;width:100%} th,td{overflow-wrap:anywhere;word-break:break-word}
     h1{color:#4e7a3e;margin:0;font-size:19px}h2{margin:3px 0 12px;font-size:13px;font-weight:400;color:#666}
     table{width:100%;border-collapse:collapse;margin-top:8px}
     th{background:#4e7a3e;color:#fff;padding:5px 6px;text-align:left;font-size:10px}
@@ -10658,7 +10740,7 @@ function demandPlotHtml(date, ref, d){
     body+='<tr>'+_rc.map(c=>`<td${c.align==='right'?' style="text-align:right"':''}>${esc(String(c.val(r.l,r.n)))}</td>`).join('')+'</tr>';
   });
   if(!body) body=`<tr><td colspan="${_rc.length}">—</td></tr>`;
-  return `<html><head><meta charset="utf-8"><title>${esc(ref)}</title><style>@page{margin:16mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:4px 0 14px}h3{color:#4e7a3e;font-size:13px;margin:16px 0 6px}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #eee}tr.tot td{font-weight:700;border-top:2px solid #4e7a3e}</style></head><body>
+  return `<html><head><meta charset="utf-8"><title>${esc(ref)}</title><style>@page{size:A4 portrait;margin:16mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:4px 0 14px}h3{color:#4e7a3e;font-size:13px;margin:16px 0 6px}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #eee}tr.tot td{font-weight:700;border-top:2px solid #4e7a3e}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Demand Plot</h1><h2>${esc(ref)} · ${esc(date)} (${esc(weekOf(date))})</h2>
     <h3>Demand — ${items.length} SKU(s) · ${demTot} packs</h3><table><thead><tr><th>Product</th><th>SKU</th><th style="text-align:right">Packs</th></tr></thead><tbody>${demRows}
     <tr class="tot"><td colspan="2" style="text-align:right">Total packs</td><td style="text-align:right">${demTot}</td></tr></tbody></table>
@@ -11711,25 +11793,67 @@ async function openTransferReceive(){
   if(!lines.length){ try{ lines=await db.children(MODELS.transfers.o2m, formRec.transfer_ref); formChildren=lines; }catch(e){} }
   if(!lines.length){ toast('No products to receive',true); return; }
   const creator=formRec.created_by||'—';
-  let prodMap={}; try{ (await db.list('products',{})).forEach(p=>prodMap[p.sku]={name:prodLabel(p,{noSku:true}),box:(+p.box_size||1)}); }catch(e){}
+  let prodMap={}; try{ (await db.list('products',{})).forEach(p=>prodMap[p.sku]={name:prodLabel(p,{noSku:true}),box:(+p.box_size||1),
+    g1:prodG1(p), g2:prodG2(p), so:p.sort_order}); }catch(e){}
   /* A transfer can carry ingredients now, and an ingredient is WEIGHED. The
      dialog said "packs actually received" over a line holding 9.8 kg of
      ostrich, and the row showed a bare SKU because ingredients are not in the
      product map. Both are named properly here. */
-  try{ (await listIngredients()).forEach(i=>{ if(!prodMap[i.sku]) prodMap[i.sku]={name:i.name,box:1,ing:true}; }); }catch(e){}
+  /* Through _outIngRows, which is the grouping Live Stock, the count sheet and
+     the printed transfer all use. Reading ingredient_group / category straight
+     off the row is how two screens end up disagreeing about where an ingredient
+     lives — and this dialog is read side by side with the paper. */
+  try{ const ai=await listIngredients();
+    _outIngRows(ai,ai).forEach(x=>{ if(!prodMap[x.sku]) prodMap[x.sku]={name:(x._nm||x.name), box:1, ing:true,
+      g1:x._g1, g2:x._g2, so:x._grank}; }); }catch(e){}
   const _isIng=l=>((l.kind||'product')!=='product')||!!(prodMap[l.product_sku]||{}).ing;
   const _anyIng=lines.some(_isIng);
   window._trBox=lines.map(l=>(prodMap[l.product_sku]||{}).box||1);
+  /* ---- THE DIALOG MUST READ LIKE THE PAPER -------------------------------
+     Whoever confirms a receipt is holding the printed transfer sheet and typing
+     what it says into this box. The sheet is grouped category › sub-group ›
+     item and numbered 1..n down the page; this dialog listed the lines in the
+     order they happened to be added. Two differently ordered lists of the same
+     thirty products, read side by side, is a transcription error waiting to
+     happen — and the person doing it is the last check before stock moves.
+
+     So it is grouped and numbered exactly as recordPrintHtml numbers it, which
+     makes "line 7 on the paper" and "line 7 on the screen" the same line.
+
+     THE INPUT IDS STAY ON THE ARRAY INDEX. _transferReceiveApply reads
+     tr_r<i> / tr_bx<i> / tr_lo<i> against formChildren[i], so the display may
+     be reordered but the ids may not; every row carries its own true index. */
+  const _rcRow=(l,i,n)=>{
+    const box=(prodMap[l.product_sku]||{}).box||1;
+    const nm=(prodMap[l.product_sku]||{}).name||l.product_sku;
+    const sent=+l.sent_packs||0;
+    const cell = box>1
+      ? `<td class="num" style="white-space:nowrap"><input id="tr_bx${i}" type="number" step="1" value="${Math.floor(sent/box)}" style="width:44px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"> box ×${box} + <input id="tr_lo${i}" type="number" step="1" value="${sent-Math.floor(sent/box)*box}" style="width:44px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"> loose</td>`
+      : `<td><input id="tr_r${i}" type="number" step="any" value="${sent}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>`;
+    const u=_isIng(l)?'kg':'packs';
+    return `<tr><td class="num mini" style="color:var(--muted)">${n}</td>
+      <td>${esc(nm)}<div class="mini" style="color:var(--muted)"><code>${esc(l.product_sku)}</code>${box>1?' · '+box+'/box':''}</div></td>
+      <td class="num" style="color:var(--muted);white-space:nowrap">${sent} <span class="mini">${u}</span></td>${cell}</tr>`;
+  };
+  /* Grouped off the map built above, not off window._prodLineMap — that one is
+     populated by the record-form loader and is empty when this dialog is opened
+     any other way, which would silently collapse every row into "Other". */
+  const _tagged=lines.map((l,i)=>{ const meta=prodMap[l.product_sku]||{};
+    return {l, i, _g1:(meta.g1||(_isIng(l)?'Ingredients':'Products')), _g2:(meta.g2||''), sort_order:meta.so}; });
+  let _rcBody='', _n=0;
+  hierGroups(_tagged,{g1:'_g1',g2:'_g2'}).forEach(G=>{
+    _rcBody+=`<tr><td colspan="4" style="background:#e7f0e9;color:#2f5d33;font-weight:800;padding:4px 8px">${esc(G.g1)}</td></tr>`;
+    G.subs.forEach(S=>{
+      if(S.g2 && !/^other$/i.test(String(S.g2)))
+        _rcBody+=`<tr><td colspan="4" style="background:#f2f6ef;color:#4e7a3e;font-weight:700;padding:3px 8px 3px 22px">▸ ${esc(S.g2)}</td></tr>`;
+      S.items.forEach(x=>{ _n++; _rcBody+=_rcRow(x.l, x.i, _n); });
+    });
+  });
   $('modal').innerHTML=`<h3>Receive transfer — ${esc(formRec.transfer_ref)}</h3>
     <p>Sent by <b>${esc(creator)}</b> from <b>${esc(formRec.from_code||'bulacan')}</b>. Enter what <b>actually arrived</b> at <b>${esc(formRec.to_code||'pasig')}</b> — ${_anyIng?'products in <b>packs</b>, ingredients in <b>kg</b>':'in <b>packs</b>'}; case-packed products take boxes + loose. Sent qty is locked. Any shortfall is flagged as a Check 4 variance.</p>
-    <div style="max-height:340px;overflow:auto"><table><thead><tr><th>Item</th><th class="num">Sent</th><th class="num">Received</th></tr></thead><tbody>
-    ${lines.map((l,i)=>{ const box=(prodMap[l.product_sku]||{}).box||1; const nm=(prodMap[l.product_sku]||{}).name||l.product_sku; const sent=+l.sent_packs||0;
-      const cell = box>1
-        ? `<td class="num" style="white-space:nowrap"><input id="tr_bx${i}" type="number" step="1" value="${Math.floor(sent/box)}" style="width:44px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"> box ×${box} + <input id="tr_lo${i}" type="number" step="1" value="${sent-Math.floor(sent/box)*box}" style="width:44px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"> loose</td>`
-        : `<td><input id="tr_r${i}" type="number" step="any" value="${sent}" style="width:96px;text-align:right;padding:5px;border:1px solid var(--line);border-radius:5px"></td>`;
-      const u=_isIng(l)?'kg':'packs';
-      return `<tr><td>${esc(nm)}<div class="mini" style="color:var(--muted)"><code>${esc(l.product_sku)}</code>${box>1?' · '+box+'/box':''}</div></td>
-        <td class="num" style="color:var(--muted);white-space:nowrap">${sent} <span class="mini">${u}</span></td>${cell}</tr>`; }).join('')}
+    <p class="mini" style="color:var(--muted);margin:-4px 0 8px">Grouped and numbered <b>exactly like the printed sheet</b> — line ${_n?('1…'+_n):'numbers'} here are the same lines, in the same order, as the paper in your hand.</p>
+    <div style="max-height:340px;overflow:auto"><table><thead><tr><th class="num">#</th><th>Item</th><th class="num">Sent</th><th class="num">Received</th></tr></thead><tbody>
+    ${_rcBody}
     </tbody></table></div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="transferReceiveApply()">📥 Post receipt</button><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
   $('overlay').classList.add('on');
@@ -13150,6 +13274,215 @@ function coFlowLegend(){
     </div></details>`;
 }
 
+/* ==================== POST-LOCK ROUTING ===================================
+   Two decisions belong to production and logistics, not to customer service,
+   and both happen AFTER the order is locked:
+
+     plan_route    "plan" — join the next demand plot, ingredients bought with
+                            the week
+                   "now"  — make it from stock on hand, replenish the raw next
+                            cycle
+     fulfil_route  "pasig"  — transfer to the sell site, then out to the customer
+                   "direct" — straight out of the production site
+
+   Neither was recorded anywhere, so the van was loaded from memory and "can
+   this one go straight through" was re-argued every week.
+
+   THE PLANNING ROUTE IS NOT REALLY A PREFERENCE. "Make it now" is only true
+   when the ingredients are actually on hand, and that is a fact the app already
+   holds. So it is computed and OFFERED, and a person confirms or overrides —
+   which is a different thing from a dropdown that lets somebody promise a run
+   the kitchen cannot start. The override is kept because a buyer may know a
+   delivery is landing on Tuesday that the ledger has not seen.
+
+   THE FULFILMENT ROUTE IS NOT A STOCK FIX. coHandoverPost already deducts at
+   whichever site the packs are standing in, so a direct delivery out of Bulacan
+   is posted correctly today. What is missing is knowing IN ADVANCE, so the
+   transfer picker can offer the right orders and the right document prints. */
+const CO_PLAN_ROUTE={ plan:'Plan into a week', now:'Straight to production' };
+const CO_FULFIL_ROUTE={ pasig:'Via the sell site', direct:'Direct from the kitchen' };
+function coRouted(o){ return !!(o && o.plan_route && o.fulfil_route); }
+function coNeedsRouting(o){ return !!o && coIsOpen(o.status) && !coRouted(o); }
+
+/* Can this order be made right now out of what is in the kitchen?
+   Processed stock first, then raw converted at yield — the same precedence
+   _prodShortages uses, so the two screens cannot disagree about whether a run
+   can start. Returns {ok, short:[{name, needKg, haveKg}], checked}. */
+async function coCoverCheck(lines){
+  const out={ok:true, short:[], checked:false};
+  const want=(lines||[]).filter(l=>l.product_sku && (+l.packs||0)>0);
+  if(!want.length) return out;
+  let bm={}, ings=[], oh={};
+  try{ bm=await prodBOMMap(); ings=await listIngredients(); oh=await _ingOhBulacanG(); }
+  catch(e){ return out; }                       // cannot check → do not pretend to have
+  out.checked=true;
+  const im={}, bySku={}, byName={};
+  ings.forEach(i=>{ im[i.sku]=i; bySku[i.sku]=i; const n=(i.name||'').trim().toLowerCase(); if(n) byName[n]=i; });
+  const need={};
+  want.forEach(l=>{ const packs=+l.packs||0;
+    (bm[l.product_sku]||[]).forEach(b=>{ need[b.ingredient_sku]=(need[b.ingredient_sku]||0)+(+b.processed_g||0)*packs; }); });
+  Object.keys(need).forEach(sku=>{
+    const it=im[sku]||{}; const y=((+it.yield_pct||100)/100)||1;
+    const p=(typeof _procParent==='function') ? _procParent(it,bySku,byName) : null;
+    const canMakeG=Math.max(0,oh[sku]||0) + (p?Math.max(0,oh[p.sku]||0)*y:0);
+    const shortG=need[sku]-canMakeG;
+    if(shortG>1){ out.ok=false;
+      out.short.push({sku, name:(it.name||sku), needKg:Math.round(need[sku]/10)/100, haveKg:Math.round(canMakeG/10)/100}); }
+  });
+  out.short.sort((a,b)=>(b.needKg-b.haveKg)-(a.needKg-a.haveKg));
+  return out;
+}
+
+/* ---- ASKED AT THE MOMENT IT BECOMES A REAL ORDER --------------------------
+   Opens straight after a lock, and from the routing card whenever somebody
+   wants to change their mind. Three answers, and the third is real: Decide
+   later leaves both blank and the order shows up in the needs-routing queue.
+   The ingredient check runs while the dialog is open, so the recommendation
+   appears a moment later rather than holding the dialog shut. */
+async function coRoutePrompt(){
+  if(!coRec || !coRec.order_ref || !coPastDraft(coRec.status) || coIsSettled(coRec.status)) return;
+  const pr=coRec.plan_route||'', fr=coRec.fulfil_route||'';
+  window._coRouteDraft={plan:pr, fulfil:fr};
+  const opt=(kind,map,key)=>Object.keys(map).map(k=>
+    `<button class="btn sm ${((window._coRouteDraft||{})[key]===k)?'':'sec'}" id="crp_${kind}_${k}"
+       onclick="coRoutePick('${key}','${k}')">${esc(map[k])}</button>`).join(' ');
+  $('modal').innerHTML=`<div><h3>\ud83e\udded Route ${esc(coRec.order_ref)}</h3>
+    <p class="mini" style="color:var(--muted);margin:-4px 0 10px">The order is locked and its SKUs exist. Two things production and logistics need to know — customer service cannot answer either, so if you are not the one who decides, choose <b>Decide later</b> and it goes on the routing list.</p>
+    <div style="margin-bottom:12px">
+      <div style="font-weight:700;margin-bottom:3px">How does it reach production?</div>
+      <div id="crp_plan">${opt('plan',CO_PLAN_ROUTE,'plan')}</div>
+      <div id="crp_advice" class="mini" style="color:var(--muted);margin-top:5px">Checking what is in the kitchen\u2026</div>
+    </div>
+    <div style="margin-bottom:6px">
+      <div style="font-weight:700;margin-bottom:3px">How does it reach the customer?</div>
+      <div id="crp_fulfil">${opt('fulfil',CO_FULFIL_ROUTE,'fulfil')}</div>
+      <div class="mini" style="color:var(--muted);margin-top:5px">Direct means no transfer — the packs leave ${esc(locName(planProduceLoc()))} and the handover deducts there.</div>
+    </div>
+    <div class="mfoot" style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" onclick="coRouteSave()">\u2713 Save routing</button>
+      <button class="btn sec" onclick="closeModal()">Decide later</button>
+      <span style="flex:1"></span>
+      <span class="mini" style="color:var(--muted)">left blank, it waits on the routing list</span>
+    </div></div>`;
+  $('overlay').classList.add('on');
+  coCoverCheck(coLines).then(c=>{
+    const el=$('crp_advice'); if(!el) return;
+    window._coCover=c; window._coCoverFor=coRec.order_ref;
+    if(!c.checked){ el.textContent='Could not read stock, so no recommendation \u2014 choose from what you know.'; return; }
+    el.innerHTML = c.ok
+      ? '<b style="color:#4e7a3e">\u2713 Every ingredient is covered at '+esc(locName(planProduceLoc()))+'</b> — this can go straight to production.'
+      : '<b style="color:var(--earth,#b5762a)">\u26a0 Short on '+c.short.length+' ingredient(s)</b> — plan it into a week unless a delivery is already on the way. <span style="color:var(--muted)">'
+        +esc(c.short.slice(0,3).map(s=>s.name+' need '+s.needKg+' kg, have '+s.haveKg).join(' · '))+(c.short.length>3?' \u2026':'')+'</span>';
+  }).catch(()=>{ const el=$('crp_advice'); if(el) el.textContent=''; });
+}
+function coRoutePick(key,val){
+  const d=window._coRouteDraft=window._coRouteDraft||{};
+  d[key]=(d[key]===val)?'':val;
+  const box=$('crp_'+key); if(!box) return;
+  const map=(key==='plan')?CO_PLAN_ROUTE:CO_FULFIL_ROUTE;
+  box.innerHTML=Object.keys(map).map(k=>
+    `<button class="btn sm ${d[key]===k?'':'sec'}" onclick="coRoutePick('${key}','${k}')">${esc(map[k])}</button>`).join(' ');
+}
+async function coRouteSave(){
+  const d=window._coRouteDraft||{};
+  if(!d.plan && !d.fulfil){ closeModal(); toast('Left for later \u2014 it is on the routing list on the Custom Orders board.'); return; }
+  const patch={plan_route:d.plan||null, fulfil_route:d.fulfil||null, routed_by:CURRENT_USER, routed_at:new Date().toISOString()};
+  try{
+    await db.update('custom_orders','order_ref',coRec.order_ref,patch);
+    Object.assign(coRec,patch);
+    sysLog('custom_orders',coRec.order_ref,'\ud83e\udded Routed by '+CURRENT_USER+' — '
+      +(d.plan?CO_PLAN_ROUTE[d.plan]:'production route not set')+' · '
+      +(d.fulfil?CO_FULFIL_ROUTE[d.fulfil]:'delivery route not set'));
+    closeModal();
+    toast((d.plan&&d.fulfil) ? 'Routed.' : 'Saved \u2014 the other half is still on the routing list.');
+  }catch(e){
+    toast(/column|42703/i.test(String(e&&e.message||e))
+      ? 'The routing columns are not on this database yet \u2014 run wr_co_routing_20260928.sql, then try again.'
+      : String(e&&e.message||e), true);
+  }
+  drawCOForm();
+}
+
+async function coSetRoute(field, value){
+  if(!coRec || !coRec.order_ref){ toast('Save the order first',true); return; }
+  if(!coPastDraft(coRec.status)){ toast('Lock the order first — routing is decided after it is locked.',true); return; }
+  const patch={}; patch[field]=value||null;
+  patch.routed_by=CURRENT_USER; patch.routed_at=new Date().toISOString();
+  try{
+    await db.update('custom_orders','order_ref',coRec.order_ref,patch);
+    Object.assign(coRec,patch);
+    const L=(field==='plan_route'?CO_PLAN_ROUTE:CO_FULFIL_ROUTE)[value]||'(cleared)';
+    sysLog('custom_orders',coRec.order_ref,'🧭 '+(field==='plan_route'?'Planning route':'Fulfilment route')+' → '+L+' by '+CURRENT_USER);
+    toast('Route saved — '+L);
+  }catch(e){
+    toast(/column|42703/i.test(String(e&&e.message||e))
+      ? 'The routing columns are not on this database yet — run wr_co_routing_20260928.sql, then try again.'
+      : String(e&&e.message||e), true);
+  }
+  drawCOForm();
+}
+
+/* The card on the order, shown only once it is locked. */
+function coRouteCardHtml(cover){
+  if(!coPastDraft(coRec.status) || coIsSettled(coRec.status)) return '';
+  const pr=coRec.plan_route||'', fr=coRec.fulfil_route||'';
+  const pick=(field,map,cur)=>Object.keys(map).map(k=>
+    `<button class="btn sm ${cur===k?'':'sec'}" onclick="coSetRoute('${field}','${k}')">${cur===k?'✓ ':''}${esc(map[k])}</button>`).join(' ');
+  const advice=!cover||!cover.checked ? ''
+    : (cover.ok
+      ? `<div class="mini" style="color:#4e7a3e;margin-top:4px">✓ Every ingredient is covered at ${esc(locName(planProduceLoc()))} — this order <b>can</b> go straight to production.</div>`
+      : `<div class="mini" style="color:var(--earth,#b5762a);margin-top:4px">⚠ Short on <b>${cover.short.length}</b> ingredient(s) — it needs planning into a week unless a delivery is already on the way.
+         <span style="color:var(--muted)">${esc(cover.short.slice(0,4).map(s=>s.name+' need '+s.needKg+' kg, have '+s.haveKg).join(' · '))}${cover.short.length>4?' …':''}</span></div>`);
+  return `<div class="repcard" style="margin:10px 0;border-left:4px solid ${coRouted(coRec)?'#4e7a3e':'var(--earth,#b5762a)'}">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <b>🧭 Routing</b>
+      ${coRouted(coRec)
+        ? `<span class="badge b-received">routed</span><span class="mini" style="color:var(--muted)">${esc(coRec.routed_by||'')}${coRec.routed_at?(' · '+String(coRec.routed_at).slice(0,10)):''}</span>`
+        : `<span class="badge b-open">not routed yet</span>`}
+      <span style="flex:1"></span>
+      <button class="btn sm sec" onclick="coRoutePrompt()">✎ Route it…</button>
+    </div>
+    <div class="hint" style="margin:6px 0 8px">Decided after the order is locked, by whoever runs production and logistics — customer service cannot answer either of these.</div>
+    <div style="display:flex;gap:18px;flex-wrap:wrap">
+      <div><div class="mini" style="color:var(--muted);margin-bottom:3px">How it reaches production</div>${pick('plan_route',CO_PLAN_ROUTE,pr)}${advice}</div>
+      <div><div class="mini" style="color:var(--muted);margin-bottom:3px">How it reaches the customer</div>${pick('fulfil_route',CO_FULFIL_ROUTE,fr)}
+        <div class="mini" style="color:var(--muted);margin-top:4px">${fr==='direct'
+          ? 'No transfer — the packs leave '+esc(locName(planProduceLoc()))+' and the handover deducts there.'
+          : (fr==='pasig' ? 'Needs a transfer to '+esc(locName(planSellLoc()))+' before it can go out.' : 'Sets whether a transfer has to be loaded for this order.')}</div></div>
+    </div>
+  </div>`;
+}
+
+/* ---- WHAT IS WAITING ON A DECISION -----------------------------------------
+   A field nobody is prompted to fill stays empty, and then the DEFAULT quietly
+   becomes the decision — which here means every order silently waits for the
+   next demand plot and every one of them silently expects a transfer. So the
+   orders nobody has routed get their own line at the top of the board, with the
+   soonest make-by first, and they stay there until somebody answers both
+   questions. It disappears entirely when there is nothing waiting. */
+function coRouteQueueHtml(orders){
+  const q=(orders||[]).filter(coNeedsRouting)
+    .sort((a,b)=>String(coProduceBy(a)||a.needed_date||'9999').localeCompare(String(coProduceBy(b)||b.needed_date||'9999'))
+                 ||String(a.order_ref).localeCompare(String(b.order_ref)));
+  if(!q.length) return '';
+  const today=todayISO();
+  return `<div class="repcard" style="margin:0 0 10px;border-left:4px solid var(--earth,#b5762a)">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <b>🧭 ${q.length} locked order(s) nobody has routed</b>
+      <span class="mini" style="color:var(--muted)">production and logistics decide these, not customer service</span>
+    </div>
+    <div class="hint" style="margin:6px 0 8px">Two questions per order: does it go into the next demand plot or straight to production, and do the packs travel through ${esc(locName(planSellLoc()))} or leave ${esc(locName(planProduceLoc()))} direct. Until both are answered nobody knows what to load on the van.</div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th>Make by</th><th>Status</th><th>Missing</th></tr></thead><tbody>
+      ${q.map(o=>{ const mk=coProduceBy(o)||o.needed_date||''; const late=mk&&mk<today;
+        const miss=[!o.plan_route?'how it reaches production':'', !o.fulfil_route?'how it reaches the customer':''].filter(Boolean).join(' · ');
+        return `<tr onclick="coOpen('${encodeURIComponent(o.order_ref)}')" style="cursor:pointer">
+          <td>${esc(o.order_ref)}</td><td>${esc(o.customer_name||'\u2014')}</td>
+          <td${late?' style="color:var(--danger);font-weight:700"':''}>${esc(mk||'\u2014')}${late?'<div class="mini">make-by passed</div>':''}</td>
+          <td>${coStatBadge(o.status)}</td>
+          <td class="mini" style="color:var(--earth,#b5762a)">${esc(miss)}</td></tr>`; }).join('')}
+    </tbody></table></div></div>`;
+}
+
 async function renderCustomOrders(){
   try{ (await db.list('products',{})).forEach(p=>_coProd[p.sku]=p); }catch(e){}
   try{ _coIng=(await listIngredients()).filter(i=>!isSupplyItem(i)); }catch(e){ _coIng=[]; }
@@ -13198,6 +13531,7 @@ async function renderCustomOrders(){
       ${(_coQ||_coStatF)?`<button class="btn sec sm" onclick="_coQ='';_coStatF='';renderCustomOrders()">✕ Clear</button>`:''}
     </div>
     <div style="margin:0 0 10px">${flowStrip}<span class="mini" style="color:var(--muted)">tap a status to list those orders — searching and picking a status both look at every order, settled included</span></div>
+    ${coRouteQueueHtml(orders)}
     ${coFlowLegend()}
     <div style="overflow-x:auto"><table><thead><tr><th>Order</th><th>Customer</th><th title="What the customer was promised">Delivery</th><th title="The production deadline — delivery minus the lead time. This is the demand week.">Make by</th><th>Status</th><th class="num">Lines</th><th class="num">Total</th><th></th></tr></thead>
     <tbody>${rows||`<tr><td colspan="8" class="empty">${(_coQ||_coStatF)?'No order matches'+(_coQ?(' “'+esc(_coQ)+'”'):'')+(_coStatF?(' in '+esc(coStatLabel(_coStatF))):'')+'.':(settledN&&!_coShowDone?'Nothing needs action — '+settledN+' settled order(s) are hidden.':'No custom orders yet — click ＋ New quote.')}</td></tr>`}</tbody></table></div>
@@ -13435,7 +13769,12 @@ async function coKitchenBatch(){
   const H=v=>esc(String(v==null?'':v));
   w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
   <title>Kitchen Batch — ${H(coRec.customer_name||coRec.order_ref)}</title><style>
-    @page{size:A4 landscape;margin:11mm}
+    @page{size:A4 portrait;margin:11mm}
+    /* PORTRAIT BY DEFAULT — paper costs money and most of these sheets never needed
+       the wide page. table-layout:fixed plus overflow-wrap is the safety net: a long
+       product name wraps inside its column instead of shoving the table off the right
+       edge, so portrait cannot spill however long the content gets. */
+    table{table-layout:fixed;width:100%} th,td{overflow-wrap:anywhere;word-break:break-word}
     body{margin:0;font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1a1a1a}
     .wrap{padding:4px 2px}
     h1{font-size:17px;margin:0 0 2px;display:flex;align-items:center;gap:7px}
@@ -13665,6 +14004,16 @@ async function coDeleteOrder(){
 }
 function drawCOForm(){
   const locked = coPastDraft(coRec.status);
+  /* CAN IT ACTUALLY BE MADE NOW? Worked out once per order, in the background,
+     then the form redraws with the answer. It is advice on the routing card, not
+     a gate — a buyer may know a delivery lands on Tuesday that the ledger has
+     not seen, so the override stays. */
+  if(locked && coRec.order_ref && window._coCoverFor!==coRec.order_ref){
+    window._coCoverFor=coRec.order_ref; window._coCover=null;
+    coCoverCheck(coLines).then(c=>{ window._coCover=c;
+      if(_coView==='form' && coRec.order_ref===window._coCoverFor) drawCOForm(); }).catch(()=>{});
+  }
+  if(!locked){ window._coCoverFor=null; window._coCover=null; }
   $('crumb').innerHTML=`<b>Custom Orders</b> / ${esc(coRec.order_ref||'New quote')}`;
   $('cp').innerHTML=`<div class="title">Custom Orders</div>
     ${!locked?`<button class="btn sec" onclick="coSave()">💾 Save quote</button><button class="wfbtn" onclick="coLock()">🔒 Lock order</button>`:''}
@@ -13736,6 +14085,7 @@ function drawCOForm(){
         </div>`;
       })()}
     </div>
+    ${coRouteCardHtml(window._coCover)}
     <div class="notebook"><div class="nbtabs"><button class="on">Order lines (${coLines.length})</button></div>
       <div class="lines"><table><thead><tr><th>Type</th><th>Item / recipe</th><th class="num">Pack g</th><th class="num">Packs</th><th class="num">₱/pack</th><th class="num">Line ₱</th><th></th></tr></thead>
       <tbody>${lineRows||'<tr><td colspan="7" class="empty">Add a product or a custom recipe below.</td></tr>'}</tbody></table></div>
@@ -14150,6 +14500,13 @@ async function coLock(){
     }
     else toast('Order locked · '+made+' custom SKU(s) created · demand pushed'+(isLive()?' · saved to Supabase':' · local only'));
     drawCOForm();
+    /* ROUTING IS THE NEXT STEP, so it is asked here rather than waited for.
+       A field on a form is a question nobody is being asked; a prompt at the
+       moment the order becomes real is. "Decide later" is a first-class answer
+       — the person locking may genuinely not know, and a forced guess is worse
+       than an honest blank — and it drops the order into the needs-routing
+       queue, which is what that queue is for. */
+    setTimeout(()=>{ try{ coRoutePrompt(); }catch(e){} }, 300);
   }catch(e){ hideBusy(); toast(_coErr(e),true); }
 }
 function prec2Name(l){ return (l.description||'Custom meal')+' · '+(l.pack_size_g||0)+'g'; }
@@ -16946,7 +17303,7 @@ const KSHEET_CSS=`  :root{
   .cover-notes .note-lines div{border-bottom:1.3px solid var(--line);min-height:24px;}
 
   @media print{
-    @page{ size:A4; margin:14mm; }
+    @page{ size:A4 portrait; margin:14mm; }
     body{background:#fff;}
     .no-print{display:none !important;}
     .wrap{max-width:100%;padding:0;margin:0;}
@@ -20199,7 +20556,7 @@ async function countPrintSheet(){
       body+='<tr>'+cols.map((c,ci)=>{ const v=c.val(r.l,r.n);
         const cls=(ci===0)?' class="num"':(c.label==='Counted'?' class="ct"':(c.align==='right'?' class="bk"':''));
         return `<td${cls}>${esc(v==null?'':v)}</td>`; }).join('')+'</tr>'; });
-    const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}thead{display:table-header-group}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}td.num{text-align:right;width:34px;color:#888}tr.grp1 td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.cat td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:120px;border-bottom:1px solid #333}</style></head><body>
+    const html=`<html><head><meta charset="utf-8"><title>Count ${esc(countRec.count_ref||'')}</title><style>@page{size:A4 portrait;margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 12px;font-size:14px}table{width:100%;border-collapse:collapse;font-size:12px}thead{display:table-header-group}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}td.num{text-align:right;width:34px;color:#888}tr.grp1 td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.cat td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.bk{text-align:right;color:#888;width:90px}td.ct{width:120px;border-bottom:1px solid #333}</style></head><body>
       <h1>🐇 Wholesome Rabbit — Weekly Count Sheet</h1>
       <h2>${esc(countRec.count_ref||'')} · ${esc(loc)} · ${esc(countRec.count_date||'')} · counted by: ____________________</h2>
       <table><thead><tr>${cols.map(c=>`<th${c.align==='right'?' style="text-align:right"':''}>${esc(c.label)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>
@@ -21938,7 +22295,7 @@ function _openingPrintDoc(S, blank, title){
   const loc=(S.ingredients[0]||S.products[0]||{}).location||_opLoc;
   const secs=[['Ingredients (raw + processed)',S.ingredients],['Finished products',S.products],['Kitchen supplies',S.supplies],['Stickers',S.stickers]];
   const body=secs.map(([lbl,lines],i)=>_openingSecTable(lbl,lines,blank,i===0)).join('');
-  return `<html><head><meta charset="utf-8"><title>${esc(title)}</title><style>@page{margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 14px;font-size:13px;color:#555}h3{color:#2f5d33;margin:0 0 8px;font-size:15px;border-bottom:2px solid #4e7a3e;padding-bottom:4px}h3 .cnt{font-weight:400;color:#888;font-size:12px}.sect{margin-bottom:18px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.grp td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.sub td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.qt{width:130px;border-bottom:1px solid #333;text-align:right}</style></head><body>
+  return `<html><head><meta charset="utf-8"><title>${esc(title)}</title><style>@page{size:A4 portrait;margin:14mm}body{font-family:Arial;color:#222}h1{color:#4e7a3e;margin:0}h2{margin:2px 0 14px;font-size:13px;color:#555}h3{color:#2f5d33;margin:0 0 8px;font-size:15px;border-bottom:2px solid #4e7a3e;padding-bottom:4px}h3 .cnt{font-weight:400;color:#888;font-size:12px}.sect{margin-bottom:18px}table{width:100%;border-collapse:collapse;font-size:12px}th{background:#4e7a3e;color:#fff;padding:6px 8px;text-align:left}td{padding:5px 8px;border-bottom:1px solid #ddd}tr.grp td{background:#e7f0e9;font-weight:800;color:#2f5d33}tr.sub td{background:#f2f6ef;font-weight:700;color:#4e7a3e}td.qt{width:130px;border-bottom:1px solid #333;text-align:right}</style></head><body>
     <h1>🐇 Wholesome Rabbit — Official Opening Inventory Balance</h1>
     <h2>Location: <b>${esc(String(loc).toUpperCase())}</b> · As of ${esc(todayISO())} · prepared by: ____________________ · approved by: ____________________</h2>
     ${body}
@@ -23111,7 +23468,12 @@ async function stkMasterPrint(){
   w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
     <title>WR Sticker Label Order — ${esc(ref)}</title>
     <style>
-      @page{size:A4 landscape;margin:11mm}
+      @page{size:A4 portrait;margin:11mm}
+    /* PORTRAIT BY DEFAULT — paper costs money and most of these sheets never needed
+       the wide page. table-layout:fixed plus overflow-wrap is the safety net: a long
+       product name wraps inside its column instead of shoving the table off the right
+       edge, so portrait cannot spill however long the content gets. */
+    table{table-layout:fixed;width:100%} th,td{overflow-wrap:anywhere;word-break:break-word}
       body{font:11px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;color:#1a1a1a}
       h1{font-size:17px;margin:0 0 2px} h2{font-size:12px;margin:16px 0 5px;padding:5px 7px;background:#1a1a1a;color:#fff;border-radius:3px}
       .sub{color:#666;font-size:10px;margin-bottom:6px}
