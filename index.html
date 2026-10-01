@@ -5357,7 +5357,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-01 05:30Z';
+const WR_BUILD='2026-10-01 07:10Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -5935,9 +5935,12 @@ const ADMIN_ONLY=['users','studio','connection','fieldacl','refs','notif','clean
    PURCHASING is payables, transfers and production. */
 const NAV_HIDE={ Warehouse:['mrp','packreq','purchase_orders','reporting','automations','margin','momentum','shopify'],
                  Pasig:['mrp','packreq','prodplan','production_batches','purchase_orders','reporting','automations','margin'] };
+/* Demand / MRP added 1 Oct: the replenishment plan and the buying list live
+   there, and that screen is where a purchaser decides what to order. Leaving it
+   off the allowlist meant the one person whose job it is could not open it. */
 const NAV_SHOW={ Purchasing:['home','purchase_orders','receiving','transfers','prodplan','production_batches',
                              'suppliers','ingredients','supplies','products','stock_balance',
-                             'sticker_reorder','supplies_reorder','variance_log','guides'] };
+                             'sticker_reorder','supplies_reorder','variance_log','guides','mrp'] };
 function roleCan(role,mod){ if(role==='Admin')return true; if(ADMIN_ONLY.includes(mod))return false;
   if(ACCESS[role]&&ACCESS[role][mod]!==undefined) return ACCESS[role][mod]!==false;   // explicit override wins
   if(NAV_SHOW[role]) return NAV_SHOW[role].includes(mod);                              // named remit — nothing else
@@ -10887,6 +10890,88 @@ async function generatePOsFromMRP(){
 }
 
 /* Users & Access */
+/* ==================== NAVIGATION vs THE DATABASE ==========================
+   The matrix above decides what a role can SEE. Row-Level Security decides what
+   they can actually READ. Nothing has ever checked that the two agree, and they
+   disagree in two different ways, each with its own failure:
+
+     navigation YES, database NO   the person opens the screen and it errors, or
+                                   shows an empty list that looks like missing
+                                   data. This is the one that generates "the app
+                                   is broken" messages.
+     navigation NO, database YES   the module is merely hidden. Anybody who
+                                   knows the URL hash reaches it. Hiding is
+                                   tidying, not a boundary — worth knowing which
+                                   ones are only tidied.
+
+   This asks the database, as the signed-in user, instead of reasoning about
+   policy text nobody can see from here: one `select ... limit 1` per module
+   table. READS ONLY — it never writes, so it cannot tell you whether somebody
+   can SAVE, only whether they can open the screen and see rows. That limit is
+   stated on the screen rather than glossed.
+
+   It reports on the role of whoever is signed in, because that is the only role
+   the database will answer honestly for. To check another role, sign in as
+   somebody who has it. */
+function _acTableFor(mod){
+  const m=MODELS[mod]; if(!m) return null;
+  if(m.special || m.report) return null;          // a screen, not a table of its own
+  return m.srcTable || mod;
+}
+async function accessCheckRun(){
+  if(!(isLive() && SUPA && SUPA.token)){ toast('Sign in to Supabase first — there is no database to ask in demo mode.',true); return; }
+  const role=curRole();
+  const mods=MODULES.flatMap(m=>m.items).filter(x=>!['users','studio'].includes(x));
+  const rows=[]; let done=0;
+  showBusy('Asking the database what this role can actually read…');
+  for(const mod of mods){
+    const nav=roleCan(role,mod);
+    const tbl=_acTableFor(mod);
+    if(!tbl){ rows.push({mod, tbl:null, nav, db:null, why:'no table of its own'}); continue; }
+    let db=null, why='';
+    try{ await sb(encodeURIComponent(tbl)+'?select=*&limit=1'); db=true; }
+    catch(e){ const msg=String((e&&e.message)||e);
+      /* A MISSING TABLE IS NOT A REFUSED ONE. 42P01 means the migration has not
+         been run; saying "no access" there would send somebody to fix a
+         permission that was never the problem. */
+      if(/42P01|does not exist|PGRST205/i.test(msg)){ db=null; why='table not in this database'; }
+      else { db=false; why=msg.slice(0,120); }
+    }
+    rows.push({mod, tbl, nav, db, why}); done++;
+  }
+  hideBusy();
+  window._acRows=rows; window._acRole=role;
+  accessCheckDraw();
+}
+function accessCheckDraw(){
+  const rows=window._acRows||[]; const role=window._acRole||curRole();
+  const bad=rows.filter(r=>r.nav===true && r.db===false);
+  const open=rows.filter(r=>r.nav===false && r.db===true);
+  const skip=rows.filter(r=>r.db===null);
+  const line=r=>`<tr><td>${esc(MODELS[r.mod]?MODELS[r.mod].label:r.mod)}<div class="mini" style="color:var(--muted)"><code>${esc(r.tbl||r.mod)}</code></div></td>
+    <td style="text-align:center">${r.nav?'<b style="color:#4e7a3e">yes</b>':'<span style="color:var(--muted)">no</span>'}</td>
+    <td style="text-align:center">${r.db===true?'<b style="color:#4e7a3e">yes</b>':(r.db===false?'<b style="color:var(--danger)">refused</b>':'<span class="mini" style="color:var(--muted)">—</span>')}</td>
+    <td class="mini" style="color:var(--muted)">${esc(r.why||'')}</td></tr>`;
+  $('modal').innerHTML=`<div><h3>🔍 Navigation vs the database — role <b>${esc(role)}</b></h3>
+    <p class="mini" style="color:var(--muted);margin:-2px 0 10px">Checked by reading one row from each module's table <b>as you are signed in now</b>, so it reports on <b>${esc(role)}</b> and no other role — the database will only answer honestly for the caller. To check another role, sign in as somebody who has it.
+      <b>Reads only.</b> It cannot tell you whether somebody can SAVE, only whether they can open the screen and see rows.</p>
+    ${bad.length?`<div style="border:1px solid var(--danger);background:#fdf0ed;border-radius:6px;padding:9px 11px;margin-bottom:10px;font-size:12.5px">
+      ⚠ <b>${bad.length} module(s) are in the menu but refused by the database.</b> ${esc(role)} opens these and gets an error or an empty list that looks like missing data.
+      <div class="mini" style="margin-top:4px">${esc(bad.map(r=>(MODELS[r.mod]?MODELS[r.mod].label:r.mod)).join(' · '))}</div>
+      <div class="mini" style="margin-top:4px">Either grant the role in RLS, or untick the module above so the sidebar stops offering it.</div></div>`:
+      `<div style="border:1px solid #cfe0cf;background:#f1f7f1;border-radius:6px;padding:8px 11px;margin-bottom:10px;font-size:12.5px">✓ Nothing in ${esc(role)}'s menu is refused by the database.</div>`}
+    ${open.length?`<div style="border:1px solid #e0b400;background:#fff8e1;border-radius:6px;padding:9px 11px;margin-bottom:10px;font-size:12.5px">
+      ${open.length} module(s) are <b>hidden from the menu but readable</b> by the database. That is normal — hiding tidies a sidebar, it is not a boundary. It matters only if you believed it was one.
+      <div class="mini" style="margin-top:4px">${esc(open.map(r=>(MODELS[r.mod]?MODELS[r.mod].label:r.mod)).join(' · '))}</div></div>`:''}
+    <div class="mscroll" style="max-height:400px;overflow:auto"><table class="stickyhead"><thead><tr>
+      <th>Module</th><th class="num">In menu</th><th class="num">Database</th><th>Note</th></tr></thead>
+      <tbody>${rows.filter(r=>r.db!==null).map(line).join('')}
+      ${skip.length?`<tr><td colspan="4" class="mini" style="background:#f6f8f4;color:var(--muted);padding:6px 8px">${skip.length} screen(s) have no table of their own and were not probed: ${esc(skip.map(r=>(MODELS[r.mod]?MODELS[r.mod].label:r.mod)).join(', '))}</td></tr>`:''}
+      </tbody></table></div>
+    <div class="mfoot" style="margin-top:12px"><button class="btn sec" onclick="closeModal()">Close</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
+}
+
 async function renderUsers(){
   $('cp').innerHTML=`<div class="title">Users &amp; Access</div><button class="btn" onclick="addUser()">New user</button>${(SUPA&&SUPA.token)?`<button class="btn sec" onclick="refreshMyRole()">↻ Refresh my role</button>`:''}<div class="sp"></div>`;
   const roles=['Admin','Purchasing','Warehouse','Pasig','Finance'];
@@ -10917,7 +11002,9 @@ async function renderUsers(){
       here tidies somebody's sidebar; it is not a security boundary on its own.
       ${(isLive()&&SUPA&&SUPA.token)?'':'<br><b style="color:var(--earth,#b5762a)">Not signed in to Supabase, so changes here stay in this browser only.</b>'}
     </div>
-    <div style="margin-top:8px"><button class="btn sec sm" onclick="resetAccess()" title="drop every override and go back to the built-in defaults for all roles">↺ Back to built-in defaults</button></div></div>`;
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn sec sm" onclick="accessCheckRun()" title="ask the database, as you are signed in now, which of these modules it will actually let you read">🔍 Check this against the database</button>
+      <button class="btn sec sm" onclick="resetAccess()" title="drop every override and go back to the built-in defaults for all roles">↺ Back to built-in defaults</button></div></div>`;
   if(isLive() && SUPA && SUPA.token){
     h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Supabase Auth users → role &amp; contacts <span class="badge b-approved">live</span></h3>
       <div class="hint">Each person who signs in has a row in the <code>profiles</code> table with a role and their contacts. The role is what RLS enforces; the <b>Email</b> and <b>Telegram chat ID</b> are what @mentions and assigned activities notify. Create the login in <b>Supabase → Authentication → Users</b>; set the rest here (Admin only). New sign-ups default to <b>Warehouse</b>. <span class="mini">Telegram chat ID: the person sends /start to your bot, then read it from <code>getUpdates</code> — a number like 5306350559.</span></div>
