@@ -5293,7 +5293,7 @@ function openSettings(){
 async function signIn(){ const email=($('s_email').value||'').trim(), pw=$('s_pw').value; if(!email||!pw){ toast('Enter email & password',true); return; }
   try{ const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    await loadFieldAcl(); await loadAutos(); await loadProfiles(); await loadLocs(); await loadPlanCfg(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
+    await loadFieldAcl(); await loadRoleAccess(); await loadAutos(); await loadProfiles(); await loadLocs(); await loadPlanCfg(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
   }catch(e){ toast(e.message,true); } }
 function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.email; delete SUPA.role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); }
   // purge cached record data on sign-out so nothing sensitive is left on a shared machine
@@ -5357,7 +5357,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-09-28 13:05Z';
+const WR_BUILD='2026-10-01 05:30Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -5854,7 +5854,7 @@ async function gateSignIn(){
   try{
     const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    await loadFieldAcl(); await loadAutos(); await loadProfiles(); await loadLocs(); await loadPlanCfg(); hideGate(); updateMode(); renderUserSel(); renderSide(); bootRoute();
+    await loadFieldAcl(); await loadRoleAccess(); await loadAutos(); await loadProfiles(); await loadLocs(); await loadPlanCfg(); hideGate(); updateMode(); renderUserSel(); renderSide(); bootRoute();
   }catch(e){ $('g_err').textContent=e.message; }
 }
 
@@ -5883,6 +5883,34 @@ function fieldMode(model, field, role){ role=role||curRole(); if(role==='Admin')
   const mm=(FIELDACL[role]||{})[model]||{}; return mm[field]||'edit'; }
 async function loadFieldAcl(){   // team-wide policy from Supabase app_config; localStorage fallback
   if(isLive() && SUPA && SUPA.token){ try{ const r=await sb("app_config?select=value&key=eq.field_acl"); if(r&&r[0]&&r[0].value){ FIELDACL=r[0].value; localStorage.setItem('wr_fieldacl',JSON.stringify(FIELDACL)); } }catch(e){} }
+}
+/* ---- MODULE ACCESS IS A TEAM POLICY, NOT A BROWSER PREFERENCE -------------
+   Field Access has been team-wide since the day it shipped (app_config.field_acl,
+   loaded at boot). Module access — the screen that decides which modules a role
+   can even see — was writing to localStorage and nowhere else.
+
+   So an Admin could open Users & Access, tick Demand / MRP for Purchasing, watch
+   the box stay ticked, and nothing whatsoever would change for the purchasing
+   user: their browser still computed roleCan() from the hardcoded NAV_SHOW list.
+   The screen looked like it worked. That is worse than not having it.
+
+   Same shape as loadFieldAcl / saveFieldAcl, deliberately: one pattern for both
+   access screens, loaded at boot on every path that signs somebody in. */
+async function loadRoleAccess(){
+  if(isLive() && SUPA && SUPA.token){
+    try{ const r=await sb("app_config?select=value&key=eq.role_access");
+      if(r&&r[0]&&r[0].value && typeof r[0].value==='object' && !Array.isArray(r[0].value)){
+        ACCESS=r[0].value; localStorage.setItem('wr_access',JSON.stringify(ACCESS)); }
+    }catch(e){}
+  }
+}
+async function saveRoleAccess(){ localStorage.setItem('wr_access',JSON.stringify(ACCESS));
+  if(isLive() && SUPA && SUPA.token){
+    try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
+      body:JSON.stringify({key:'role_access',value:ACCESS})}); }
+    catch(e){ toast('Saved in this browser only — the shared copy failed: '+e.message,true); return false; }
+  }
+  return true;
 }
 async function saveFieldAcl(){ localStorage.setItem('wr_fieldacl',JSON.stringify(FIELDACL));
   if(isLive() && SUPA && SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'field_acl',value:FIELDACL})}); }catch(e){ toast('Saved locally; DB sync failed: '+e.message,true); return; } }
@@ -10867,8 +10895,29 @@ async function renderUsers(){
   h+='</tbody></table></div>';
   const mods=MODULES.flatMap(m=>m.items).filter(x=>!['users','studio'].includes(x));
   h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Role → module access (navigation)</h3><table><thead><tr><th>Role</th>${mods.map(x=>`<th style="font-size:10px">${MODELS[x]?MODELS[x].label:x}</th>`).join('')}</tr></thead><tbody>`;
-  roles.forEach(r=>{ h+=`<tr><td><b>${r}</b></td>${mods.map(x=>`<td style="text-align:center"><input type="checkbox" ${roleCan(r,x)?'checked':''} ${r==='Admin'?'disabled':''} onchange="setAccess('${r}','${x}',this.checked)"></td>`).join('')}</tr>`; });
-  h+=`</tbody></table><div class="hint" style="margin-top:8px">This controls the app's navigation per role. <b>Real enforcement</b> is live in Supabase via Row-Level Security (RLS) + Supabase Auth: each signed-in user's role (from their profile) governs what they can read and write at the database level.</div></div>`;
+  /* A CHECKBOX THAT CANNOT BE TICKED MUST LOOK LIKE ONE. ADMIN_ONLY modules are
+     refused inside roleCan() whatever the policy says, so an editable box there
+     accepted the click, saved nothing anybody could use, and reverted on the
+     next draw — which reads as "the screen is broken", and fairly. They are
+     drawn disabled, with the reason on hover. */
+  roles.forEach(r=>{ h+=`<tr><td><b>${r}</b></td>${mods.map(x=>{
+    const adminOnly=ADMIN_ONLY.includes(x);
+    const dis=(r==='Admin'||adminOnly);
+    const tip=adminOnly ? ' title="Admin only by design — this module changes how the whole system behaves"'
+            : (r==='Admin' ? ' title="Admin always sees everything"' : '');
+    return `<td style="text-align:center${adminOnly&&r!=='Admin'?';opacity:.35':''}"${tip}><input type="checkbox" ${roleCan(r,x)?'checked':''} ${dis?'disabled':''} onchange="setAccess('${r}','${x}',this.checked)"></td>`;
+  }).join('')}</tr>`; });
+  h+=`</tbody></table>
+    <div class="hint" style="margin-top:8px">
+      <b>This is what each role can SEE in the sidebar</b>, and it is shared with the whole team — a change here reaches
+      everyone the next time they reload, not just this browser.
+      A tick overrides the built-in default for that role; untick to take a module away again.
+      <br><b>Real enforcement is separate and lives in Supabase</b> (Row-Level Security + Auth): a person's role on their
+      <code>profiles</code> row governs what they can actually read and write, whatever the navigation shows. Hiding a module
+      here tidies somebody's sidebar; it is not a security boundary on its own.
+      ${(isLive()&&SUPA&&SUPA.token)?'':'<br><b style="color:var(--earth,#b5762a)">Not signed in to Supabase, so changes here stay in this browser only.</b>'}
+    </div>
+    <div style="margin-top:8px"><button class="btn sec sm" onclick="resetAccess()" title="drop every override and go back to the built-in defaults for all roles">↺ Back to built-in defaults</button></div></div>`;
   if(isLive() && SUPA && SUPA.token){
     h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Supabase Auth users → role &amp; contacts <span class="badge b-approved">live</span></h3>
       <div class="hint">Each person who signs in has a row in the <code>profiles</code> table with a role and their contacts. The role is what RLS enforces; the <b>Email</b> and <b>Telegram chat ID</b> are what @mentions and assigned activities notify. Create the login in <b>Supabase → Authentication → Users</b>; set the rest here (Admin only). New sign-ups default to <b>Warehouse</b>. <span class="mini">Telegram chat ID: the person sends /start to your bot, then read it from <code>getUpdates</code> — a number like 5306350559.</span></div>
@@ -10914,7 +10963,22 @@ async function refreshMyRole(){ if(!(SUPA&&SUPA.token&&SUPA.uid)){ toast('Sign i
 function addUser(){ const n=prompt('User name:'); if(!n)return; USERS.push({name:n,role:'Warehouse'}); saveUsers(); renderUsers(); renderUserSel(); }
 function delUser(i){ if(USERS.length<=1)return; USERS.splice(i,1); saveUsers(); renderUsers(); renderUserSel(); }
 function setRole(i,r){ USERS[i].role=r; saveUsers(); }
-function setAccess(r,mod,on){ ACCESS[r]=ACCESS[r]||{}; ACCESS[r][mod]=on; localStorage.setItem('wr_access',JSON.stringify(ACCESS)); renderSide(); }
+/* Overrides accumulate, and a matrix somebody has been clicking around in for a
+   month is hard to reason about. One button puts every role back to the rules
+   written in NAV_SHOW / NAV_HIDE. */
+async function resetAccess(){
+  if(!confirm('Drop every module-access override and go back to the built-in defaults, for all roles?\n\nThis applies to everyone.')) return;
+  ACCESS={}; const ok=await saveRoleAccess(); renderSide(); renderUsers();
+  toast(ok?'Back to the built-in defaults':'Reset in this browser only — the shared copy failed',!ok);
+}
+async function setAccess(r,mod,on){
+  if(ADMIN_ONLY.includes(mod)){ toast('That module is Admin-only by design — it changes how the whole system behaves.',true); renderUsers(); return; }
+  ACCESS[r]=ACCESS[r]||{}; ACCESS[r][mod]=on;
+  const ok=await saveRoleAccess();
+  renderSide();
+  if(ok) toast((on?'Granted ':'Removed ')+(MODELS[mod]?MODELS[mod].label:mod)+' for '+r
+    +' — it applies to everyone; '+r+' sees it next time they reload.');
+}
 
 /* ===== Field Access (per-role field visibility across all modules) ===== */
 let faModel='products';
@@ -24330,7 +24394,7 @@ if(!DEMO.variance_log.length) DEMO.variance_log=[
   {id:2,check_type:'1 · 3-way match',source_ref:'WR-PO-0012',expected:5,actual:4.2,gap_qty:-0.8,gap_value:224,location:'bulacan',responsible_user:'Purchasing',status:'open',note:''}];
 applyStudio(); applyLean(); updateMode(); renderUserSel(); renderSide(); _watchSticky();
 try{ console.log('%cWR ERP build '+WR_BUILD,'font-weight:700'); }catch(e){}
-if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadAutos(); loadProfiles(); loadLocs(); loadPlanCfg(); }
+if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadRoleAccess(); loadAutos(); loadProfiles(); loadLocs(); loadPlanCfg(); }
 window.addEventListener('hashchange', onHashRoute);
 if(needAuth()) showGate(); else bootRoute();
 </script>
