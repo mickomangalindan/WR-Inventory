@@ -5357,7 +5357,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-02 09:40Z';
+const WR_BUILD='2026-10-02 12:20Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -5860,7 +5860,12 @@ async function gateSignIn(){
 
 /* ============ Users, audit log, attachments, print, bulk, MRP, Studio ============ */
 let USERS = JSON.parse(localStorage.getItem('wr_users')||'null') || [
-  {name:'Zeus',role:'Admin'},{name:'Purchasing',role:'Purchasing'},{name:'Warehouse',role:'Warehouse'},{name:'Pasig Hub',role:'Pasig'},{name:'Finance',role:'Finance'}];
+  {name:'Zeus',role:'Admin'},{name:'Purchasing',role:'Purchasing'},{name:'Warehouse',role:'Warehouse'},
+  {name:'Pasig Hub',role:'Pasig'},{name:'Finance',role:'Finance'},
+  /* Added 2 Oct with the roles themselves, so the demo switcher can preview what
+     each of them actually sees — which is the only way to check an allowlist
+     before giving somebody the login. */
+  {name:'Delivery',role:'Delivery'},{name:'Customer Service',role:'Customer Service'}];
 let CURRENT_USER = localStorage.getItem('wr_cur') || USERS[0].name;
 let ACCESS = JSON.parse(localStorage.getItem('wr_access')||'{}');
 let STUDIO = JSON.parse(localStorage.getItem('wr_studio')||'{}');
@@ -5935,12 +5940,54 @@ const ADMIN_ONLY=['users','studio','connection','fieldacl','refs','notif','clean
    PURCHASING is payables, transfers and production. */
 const NAV_HIDE={ Warehouse:['mrp','packreq','purchase_orders','reporting','automations','margin','momentum','shopify'],
                  Pasig:['mrp','packreq','prodplan','production_batches','purchase_orders','reporting','automations','margin'] };
+/* ---- THE ROLE LIST WAS WRITTEN OUT FOUR TIMES -----------------------------
+   Users & Access, the Supabase profiles table, Field Access and the capability
+   grid each had their own literal array, so a role added to one of them existed
+   in that screen and nowhere else. One list now, and adding a role means adding
+   it here.
+
+   Delivery and Customer Service are new on 2 Oct, because the ERP work is moving
+   off Admin and onto the person who actually does it. Both get an ALLOWLIST
+   rather than a hide list, deliberately: a module added next year is then hidden
+   from them by default instead of quietly granted. These are starting points —
+   Users & Access can widen either of them, and the change reaches everybody.
+
+   DELIVERY is what leaves the building: transfers out to the shop, which custom
+   order is going where, and what is on the shelf to send.
+   CUSTOMER SERVICE is the order desk: look the pet up, build the pack, raise the
+   order, and read the catalogue. It does not buy, make, count or move. */
+const WR_ROLES=['Admin','Purchasing','Warehouse','Pasig','Finance','Delivery','Customer Service'];
 /* Demand / MRP added 1 Oct: the replenishment plan and the buying list live
    there, and that screen is where a purchaser decides what to order. Leaving it
    off the allowlist meant the one person whose job it is could not open it. */
 const NAV_SHOW={ Purchasing:['home','purchase_orders','receiving','transfers','prodplan','production_batches',
                              'suppliers','ingredients','supplies','products','stock_balance',
-                             'sticker_reorder','supplies_reorder','variance_log','guides','mrp'] };
+                             'sticker_reorder','supplies_reorder','variance_log','guides','mrp'],
+                 Delivery:['home','transfers','custom_orders','stock_balance','products','guides'],
+                 'Customer Service':['home','ffprofiles','ffcalc','custom_orders','packreq','products','guides'] };
+/* ---- A CAPABILITY IS NOT A SCREEN --------------------------------------
+   The data-readiness checks are not a module — they are a panel that appears on
+   two screens somebody already has. roleCan() cannot answer for them: it is
+   keyed on module ids, so an unknown key falls through to NAV_SHOW (false for a
+   role with an allowlist) or all the way to `return true` (every role without
+   one). Both answers would be an accident rather than a decision.
+
+   So capabilities are their own register, with their own default list, stored in
+   the same ACCESS object under a `cap:` prefix so there is still one saved
+   policy and one Supabase row — and so a capability can never collide with a
+   module id. */
+const CAPS={
+  datachecks:{ label:'Data checks',
+    d:'The “Is the data ready to plan on?” panel — on the dashboard, and collapsed above the demand run.',
+    def:['Purchasing','Delivery','Customer Service'] }
+};
+function roleHasCap(role,cap){
+  role=role||curRole();
+  if(role==='Admin') return true;
+  const k='cap:'+cap;
+  if(ACCESS[role] && ACCESS[role][k]!==undefined) return ACCESS[role][k]!==false;   // explicit grant wins
+  return ((CAPS[cap]||{}).def||[]).includes(role);
+}
 function roleCan(role,mod){ if(role==='Admin')return true; if(ADMIN_ONLY.includes(mod))return false;
   if(ACCESS[role]&&ACCESS[role][mod]!==undefined) return ACCESS[role][mod]!==false;   // explicit override wins
   if(NAV_SHOW[role]) return NAV_SHOW[role].includes(mod);                              // named remit — nothing else
@@ -9865,7 +9912,17 @@ function _prLine(c){
       <div>${act}</div>
     </div></div>`;
 }
+/* COLLAPSED, ALWAYS. The first build opened the card by itself whenever a red
+   check was failing, on the reasoning that a wrong number deserves to be in your
+   face. In practice the planners met a screenful of problems before they reached
+   the week they came to plan, and an overwhelming panel gets scrolled past —
+   which is the same outcome as not having it, with more friction. So the demand
+   screen carries a one-line summary that says how many and what tier, and opens
+   only when somebody asks it to. The DASHBOARD is where these live now: it is
+   the screen people arrive on, and a tile there is read before the day starts
+   rather than in the middle of a job. */
 async function planReadyCard(force){
+  if(!roleHasCap(null,'datachecks')) return '';
   let R; try{ R=await planReadyCheck(force); }catch(e){ return ''; }
   const bad=R.stop.concat(R.chk).concat(R.note);
   const okN=R.checks.length-bad.length;
@@ -9875,7 +9932,7 @@ async function planReadyCard(force){
        <span class="mini" style="color:var(--muted)">· ${okN} of ${R.checks.length} checks pass</span>`;
   const okList=R.checks.filter(c=>c.ok).map(c=>esc(c.label)).join(' · ');
   return `<div class="repcard" style="border-left:4px solid ${R.tier==='ok'?'#4e7a3e':PR_TIER[R.tier].c};padding:0;margin:0 0 14px">
-    <details ${R.tier==='stop'?'open':''}>
+    <details>
       <summary style="padding:10px 12px;cursor:pointer">Is the data ready to plan on? &nbsp;${head}</summary>
       <div class="hint" style="margin:0;border-radius:0;border-left:0;border-right:0">
         This never stops you saving — it is stamped into the plot instead, so a week planned on stale figures says so afterwards.
@@ -9887,24 +9944,73 @@ async function planReadyCard(force){
         checked ${_prWhen(R.at)} · <a href="javascript:planReadyRecheck()">re-check</a></div>
     </details></div>`;
 }
-async function planReadyRecheck(){ planReadyInvalidate(); stockPicInvalidate();
-  if(typeof renderMRP==='function') await renderMRP(); }
+/* ---- THE DASHBOARD IS WHERE THESE LIVE NOW ------------------------------
+   The tile used to be a summary that sent you to Demand / MRP for the detail.
+   That is wrong twice over. It was wrong for the planners, who met the full list
+   in the middle of planning a week. And it was broken for Delivery and Customer
+   Service, who are supposed to see these checks but have no Demand / MRP in
+   their sidebar at all — the tile would have navigated them into a screen they
+   cannot open.
 
-/* The dashboard tile: the same answer, small enough to glance at, and it opens
-   the screen where the full card lives rather than repeating it. */
+   So the tile stands on its own: every failing check named on the dashboard, and
+   the full list in a modal, which works whatever else the role can reach. */
 async function planReadyTile(){
+  if(!roleHasCap(null,'datachecks')) return '';
   let R; try{ R=await planReadyCheck(); }catch(e){ return ''; }
   const bad=R.stop.length+R.chk.length;
+  const okN=R.checks.length-R.stop.length-R.chk.length-R.note.length;
   const col=R.tier==='ok'?'#4e7a3e':PR_TIER[R.tier].c;
-  const lines=R.stop.concat(R.chk).slice(0,4).map(c=>`<div class="mini" style="color:var(--muted)">${PR_TIER[c.tier].i} ${esc(c.label)} — <b style="color:${PR_TIER[c.tier].c}">${c.fact}</b></div>`).join('');
-  return `<div class="repcard" style="border-left:4px solid ${col};cursor:pointer" onclick="openModel('mrp')"
-      title="Open Demand / MRP, where the full checklist lives">
-    <h3 style="margin:0 0 4px">Ready to plan?</h3>
-    <div style="font-size:19px;font-weight:800;color:${col}">
-      ${R.tier==='ok'?'✓ all clear':(bad+' to fix')}</div>
-    <div class="mini" style="color:var(--muted);margin-bottom:${lines?'6px':'0'}">${R.checks.length-R.stop.length-R.chk.length-R.note.length} of ${R.checks.length} checks pass${R.stop.length?' · '+R.stop.length+' make the numbers wrong':''}</div>
+  /* STOP and CHECK are named in full — there are at most nine of them and the
+     whole point of putting this on the dashboard is that nobody has to go
+     looking. NOTE lines are counted, not listed: they are context, and context
+     does not belong on a tile somebody reads before the day starts. */
+  const lines=R.stop.concat(R.chk).map(c=>`<div style="display:flex;gap:7px;align-items:baseline;padding:3px 0;border-top:1px solid var(--line)">
+      <span style="font-size:11px">${PR_TIER[c.tier].i}</span>
+      <div style="flex:1"><span style="font-size:12.5px">${esc(c.label)}</span>
+        <div class="mini" style="color:${PR_TIER[c.tier].c};font-weight:600">${c.fact}</div></div>
+      ${c.fn?`<button class="btn sm" onclick="event.stopPropagation();${c.fn}">${esc(c.act||'Fix')}</button>`
+            :(c.go&&roleCan(curRole(),c.go)?`<button class="btn sm sec" onclick="event.stopPropagation();openModel('${esc(c.go)}')">Open</button>`:'')}
+    </div>`).join('');
+  return `<div class="repcard" style="border-left:4px solid ${col}">
+    <div style="display:flex;align-items:baseline;gap:10px">
+      <h3 style="margin:0">Is the data ready to plan on?</h3><span style="flex:1"></span>
+      <button class="btn sm sec" onclick="planReadyOpen()">All ${R.checks.length} checks</button></div>
+    <div style="font-size:19px;font-weight:800;color:${col};margin-top:4px">
+      ${R.tier==='ok'?'✓ all clear':(bad?bad+(bad===1?' thing to fix':' things to fix'):'nothing blocking')}</div>
+    <div class="mini" style="color:var(--muted);margin-bottom:${lines?'7px':'0'}">${okN} of ${R.checks.length} pass${R.stop.length?` · <b style="color:${PR_TIER.stop.c}">${R.stop.length} make the numbers wrong</b>`:''}${R.note.length?' · '+R.note.length+' for information':''}</div>
     ${lines}</div>`;
 }
+/* The full card, from wherever somebody is standing. A modal rather than a trip
+   to Demand / MRP, because three of the four roles that hold this capability
+   cannot open that screen. */
+async function planReadyOpen(){
+  $('modal').innerHTML=`<div class="mwrap"><div class="mhead">Is the data ready to plan on?<span style="flex:1"></span>
+      <button class="btn sm sec" onclick="planReadyModalRefresh()">↻ Re-check</button>
+      <button class="btn sm sec" onclick="closeModal()">✕ Close</button></div>
+    <div class="mbody" id="prModalBody"><div class="empty">Checking…</div></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
+  await planReadyModalDraw();
+}
+async function planReadyModalDraw(){
+  const b=$('prModalBody'); if(!b) return;
+  let R; try{ R=await planReadyCheck(); }catch(e){ b.innerHTML='<div class="empty">Could not run the checks: '+esc(String(e&&e.message||e))+'</div>'; return; }
+  const bad=R.stop.concat(R.chk).concat(R.note);
+  const okList=R.checks.filter(c=>c.ok).map(c=>esc(c.label)).join(' · ');
+  b.innerHTML=`<div class="hint" style="margin:0 0 10px">
+      Every number on the demand run and the production plan is arithmetic over these feeds. Nothing here blocks a save —
+      the answer is stamped into the plot instead, so a week planned on stale figures says so afterwards.</div>
+    <div style="border:1px solid var(--line);border-radius:8px;overflow:hidden">
+      ${bad.length?bad.map(_prLine).join(''):'<div style="padding:12px" class="mini"><b style="color:#4e7a3e">✓ Every check passes.</b></div>'}
+      ${okList?`<div style="padding:8px 11px;border-top:1px solid var(--line)" class="mini">
+        <span style="color:#4e7a3e">✓ passing:</span> <span style="color:var(--muted)">${okList}</span></div>`:''}
+    </div>
+    <div class="mini" style="color:var(--muted);margin-top:7px">checked ${_prWhen(R.at)}</div>`;
+}
+async function planReadyModalRefresh(){ planReadyInvalidate(); stockPicInvalidate();
+  const b=$('prModalBody'); if(b) b.innerHTML='<div class="empty">Checking…</div>';
+  await planReadyCheck(true); await planReadyModalDraw(); }
+async function planReadyRecheck(){ planReadyInvalidate(); stockPicInvalidate();
+  if(typeof renderMRP==='function') await renderMRP(); }
 
 /* WHAT GETS WRITTEN INTO THE PLOT. Small on purpose — the ids, the tier and the
    one-line fact, not the prose. A year from now the only question anybody asks
@@ -11403,7 +11509,7 @@ function accessCheckDraw(){
 
 async function renderUsers(){
   $('cp').innerHTML=`<div class="title">Users &amp; Access</div><button class="btn" onclick="addUser()">New user</button>${(SUPA&&SUPA.token)?`<button class="btn sec" onclick="refreshMyRole()">↻ Refresh my role</button>`:''}<div class="sp"></div>`;
-  const roles=['Admin','Purchasing','Warehouse','Pasig','Finance'];
+  const roles=WR_ROLES;
   let h=`<div class="repcard"><h3 style="margin:0 0 8px">Users</h3><table><thead><tr><th>User</th><th>Role</th><th></th></tr></thead><tbody>`;
   USERS.forEach((u,i)=>{ h+=`<tr><td>${esc(u.name)}${u.name===CURRENT_USER?' <span class="badge b-true">you</span>':''}</td><td><select onchange="setRole(${i},this.value)">${roles.map(r=>`<option ${u.role===r?'selected':''}>${r}</option>`).join('')}</select></td><td>${USERS.length>1?`<span class="btn link" style="color:var(--danger)" onclick="delUser(${i})">Remove</span>`:''}</td></tr>`; });
   h+='</tbody></table></div>';
@@ -11434,6 +11540,24 @@ async function renderUsers(){
     <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn sec sm" onclick="accessCheckRun()" title="ask the database, as you are signed in now, which of these modules it will actually let you read">🔍 Check this against the database</button>
       <button class="btn sec sm" onclick="resetAccess()" title="drop every override and go back to the built-in defaults for all roles">↺ Back to built-in defaults</button></div></div>`;
+  /* ---- Capabilities: panels, not screens -------------------------------
+     These do not appear in the sidebar, so they cannot be granted by ticking a
+     module. Kept in their own grid rather than smuggled into the one above,
+     because "can this role open Purchase Orders" and "does this role get told
+     the data is stale" are different questions and reading them in one row
+     would suggest they are the same. */
+  const caps=Object.keys(CAPS);
+  if(caps.length){
+    h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">Role → capabilities (panels, not screens)</h3>
+      <div class="hint" style="margin:0 0 8px">Things that appear <b>inside</b> a screen somebody already has, so there is no sidebar entry to tick. ${esc(caps.map(c=>CAPS[c].label).join(', '))} ${caps.length===1?'is':'are'} off for every role not listed below.</div>
+      <div style="overflow-x:auto"><table><thead><tr><th>Role</th>${caps.map(c=>`<th style="text-align:center" title="${esc(CAPS[c].d||'')}">${esc(CAPS[c].label)}</th>`).join('')}</tr></thead><tbody>`;
+    roles.forEach(r=>{ h+=`<tr><td><b>${esc(r)}</b></td>${caps.map(c=>{
+      const dis=(r==='Admin');
+      return `<td style="text-align:center"${dis?' title="Admin always sees everything"':''}><input type="checkbox" ${roleHasCap(r,c)?'checked':''} ${dis?'disabled':''} onchange="setCap('${esc(r)}','${esc(c)}',this.checked)"></td>`;
+    }).join('')}</tr>`; });
+    h+=`</tbody></table></div>
+      <div class="hint" style="margin-top:8px">${caps.map(c=>`<b>${esc(CAPS[c].label)}</b> — ${esc(CAPS[c].d||'')} <span class="mini">on by default for ${esc((CAPS[c].def||[]).join(', ')||'nobody')}.</span>`).join('<br>')}</div></div>`;
+  }
   if(isLive() && SUPA && SUPA.token){
     h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Supabase Auth users → role &amp; contacts <span class="badge b-approved">live</span></h3>
       <div class="hint">Each person who signs in has a row in the <code>profiles</code> table with a role and their contacts. The role is what RLS enforces; the <b>Email</b> and <b>Telegram chat ID</b> are what @mentions and assigned activities notify. Create the login in <b>Supabase → Authentication → Users</b>; set the rest here (Admin only). New sign-ups default to <b>Warehouse</b>. <span class="mini">Telegram chat ID: the person sends /start to your bot, then read it from <code>getUpdates</code> — a number like 5306350559.</span></div>
@@ -11443,7 +11567,7 @@ async function renderUsers(){
   if(isLive() && SUPA && SUPA.token) loadAuthUsers();
 }
 async function loadAuthUsers(){
-  const roles=['Admin','Purchasing','Warehouse','Pasig','Finance']; const admin=curRole()==='Admin';
+  const roles=WR_ROLES; const admin=curRole()==='Admin';
   // Contact columns may not exist yet (before wr_migration_profile_contacts.sql) — degrade gracefully.
   let rows, hasContacts=true;
   try{ rows=await sb('profiles?select=id,name,role,email,telegram_chat_id,mobile&order=role.asc'); }
@@ -11496,10 +11620,18 @@ async function setAccess(r,mod,on){
     +' — it applies to everyone; '+r+' sees it next time they reload.');
 }
 
+async function setCap(r,cap,on){
+  ACCESS[r]=ACCESS[r]||{}; ACCESS[r]['cap:'+cap]=on;
+  const ok=await saveRoleAccess();
+  if(ok) toast((on?'Granted ':'Removed ')+((CAPS[cap]||{}).label||cap)+' for '+r
+    +' — it applies to everyone; '+r+' sees it next time they reload.');
+  renderUsers();
+}
+
 /* ===== Field Access (per-role field visibility across all modules) ===== */
 let faModel='products';
 function renderFieldAcl(){
-  const roles=['Purchasing','Warehouse','Pasig','Finance'];
+  const roles=WR_ROLES.filter(r=>r!=='Admin');
   const sources=Object.keys(MODELS).filter(k=>MODELS[k].fields && !MODELS[k].special);
   if(!MODELS[faModel]||!MODELS[faModel].fields) faModel=sources[0];
   const m=MODELS[faModel];
