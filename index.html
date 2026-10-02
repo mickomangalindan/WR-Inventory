@@ -5357,7 +5357,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-01 07:10Z';
+const WR_BUILD='2026-10-02 09:40Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -9516,6 +9516,408 @@ async function mrpLeadTimeCard(){
   </div>`;
 }
 
+/* ==================== IS THE DATA READY TO PLAN ON? ========================
+   A demand run is arithmetic over half a dozen feeds, and when one of them is
+   stale the plan comes out confidently wrong rather than obviously broken. On
+   1 Oct sales_momentum had not refreshed since 24 Sep: every par in the app was
+   average daily sale from an eight-day-old window, and nothing on any screen
+   said so. A par computed off stale velocity looks exactly as authoritative as
+   a correct one. That is the failure this card exists to stop.
+
+   Read once, rendered twice: in full above the demand run, and as a traffic
+   light on the dashboard.
+
+   THREE TIERS, BECAUSE ONE TIER TEACHES PEOPLE TO IGNORE ALL OF IT.
+     stop   the numbers are WRONG. Velocity, the sales feed, the Shopify
+            snapshot, production that never posted. A plan built on one of
+            these is not incomplete, it is incorrect.
+     check  the plan will be INCOMPLETE. A quote nobody locked, packs in
+            transit, a count left unapproved, a PO still claiming to be coming.
+     note   worth a glance, never a blocker.
+
+   IT DOES NOT BLOCK THE SAVE, DELIBERATELY. People plan under real time
+   pressure, and a hard gate gets worked around rather than obeyed — the plan
+   moves to a spreadsheet and the ERP stops being where the week is decided.
+   What it does instead is STAMP itself into mrp_plans.data.preflight, so a plot
+   saved on stale velocity says so for good and the next variance review can
+   find out why the week missed, instead of guessing.
+
+   EVERY LINE STATES THE FACT, NOT THE VERDICT. "Velocity last refreshed 24 Sep,
+   8 days ago" is actionable; a red dot is not. And every failing line carries
+   the one thing that clears it.                                             */
+const PR_AGE={mom:2, sale:SALES_STALE_DAYS, snap:1, po:10, count:7};
+/* Cover beyond which stock at the commissary is not "waiting for a van" but a
+   production decision nobody has revisited. */
+const PR_BUL_COVER=45;
+function _prAgeD(at){ if(!at) return null;
+  const t=new Date(String(at).length<=10?(at+'T00:00:00Z'):at).getTime();
+  if(!isFinite(t)) return null; return Math.max(0,(Date.now()-t)/864e5); }
+function _prAgeTxt(n){ if(n==null) return 'never';
+  if(n<1) return Math.max(1,Math.round(n*24))+'h ago';
+  const d=Math.floor(n); return d+(d===1?' day ago':' days ago'); }
+function _prWhen(at){ const s=String(at||''); if(!s) return '—';
+  return s.slice(0,16).replace('T',' '); }
+const _prN=v=>(Math.round(+v||0)).toLocaleString('en-PH');
+
+/* The checks themselves. One async read of the world, cached for a minute the
+   same way stockPicture is, because the dashboard tile and the demand card ask
+   the identical question and must never give two answers. */
+let _prCache=null, _prCacheAt=0;
+function planReadyInvalidate(){ _prCache=null; _prCacheAt=0; }
+async function planReadyCheck(force){
+  const now=Date.now();
+  if(!force && _prCache && (now-_prCacheAt)<60000) return _prCache;
+  const C=[]; const add=o=>{ C.push(o); return o; };
+  const pic=await stockPicture().catch(()=>null);
+
+  /* ---- 1 · VELOCITY (stop) ------------------------------------------------
+     momLoad reads sales_momentum, momMetrics turns u30 into daily30, and the
+     whole pqCalc chain hangs off that one number. This is the check that was
+     missing and the one that was failing. */
+  let momAt=null, momN=0;
+  try{ const m=await momLoad(); momN=(m||[]).length;
+    (m||[]).forEach(r=>{ const a=String(r.refreshed_at||''); if(a>(momAt||'')) momAt=a; }); }catch(e){}
+  const momAge=_prAgeD(momAt);
+  /* WHY it is stale, when the database can say. wr_refresh_log is written by the
+     trigger on shopify_events, and it records a failed recompute instead of
+     swallowing it — see sql/wr_momentum_self_hosted_20261002.sql. A missing table
+     simply means the automation has not been installed, which is a different
+     sentence and deserves one. */
+  let momJob=null;
+  try{ if(isLive()){ const r=await sb('wr_refresh_log?select=*&job=eq.sales_momentum'); momJob=(r&&r[0])||{none:1}; } }catch(e){ momJob=null; }
+  const momWhy = !momJob ? 'No refresh automation is installed — run <code>sql/wr_momentum_self_hosted_20261002.sql</code> so this keeps itself current.'
+    : (momJob.none ? 'The automation is installed but has not fired yet — it runs when the next sale lands.'
+    : (/^FAILED/.test(String(momJob.note||'')) ? 'The automatic refresh is <b>failing</b>: <code>'+esc(String(momJob.note).slice(0,160))+'</code>'
+    : 'Refreshes automatically when sales land — last run '+_prWhen(momJob.last_at)+', '+(+momJob.runs||0)+' run(s).'));
+  add({id:'mom', tier:'stop', ok:(momAge!=null && momAge<PR_AGE.mom),
+    label:'Sales velocity is current',
+    fact: momAt ? ('last refreshed '+_prWhen(momAt)+' — '+_prAgeTxt(momAge)+', '+momN+' SKU(s)')
+                : 'sales_momentum is empty — it has never been computed',
+    why:'Average daily sale comes from this table and nowhere else. Every trigger, par, target and order quantity in the app is derived from it, so stale velocity plans last week.',
+    act:'Refresh now', fn:'planReadyRefreshMom()', note:momWhy});
+
+  /* ---- 2 · SALES FEED (stop) ---------------------------------------------
+     Already computed by stockPicture; gathered here rather than recomputed so
+     the card and salesStaleHtml can never disagree. */
+  const saleAge=pic?pic.saleAgeDays:null;
+  add({id:'sale', tier:'stop', ok:(saleAge!=null && saleAge<PR_AGE.sale),
+    label:'Shopify sales are posting',
+    fact: (pic&&pic.lastSale) ? ('last sale posted '+_prWhen(pic.lastSale)+' — '+_prAgeTxt(saleAge))
+                              : 'no sale has ever posted to the ledger',
+    why:'While the feed is stopped the ledger at the shop only goes UP: production and transfers still land, nothing comes off for what sold. Every ledger figure is overstated by whatever has sold since.',
+    act:'Open Shopify sync', go:'shopify',
+    note:'run <code>pullShopify()</code> in the Apps Script, then settle anything held with <code>select * from public.wr_shopify_repost();</code>'});
+
+  /* ---- 3 · STOCK SNAPSHOT (stop) ----------------------------------------- */
+  const snapAt=(pic&&pic.snap&&pic.snap.at)||'';
+  const snapAge=_prAgeD(snapAt);
+  const snapSrc=(pic&&pic.snap&&pic.snap.src)||'';
+  add({id:'snap', tier:'stop', ok:(snapAge!=null && snapAge<PR_AGE.snap),
+    label:'Shopify stock reading is fresh',
+    fact: snapAt ? ('taken '+_prWhen(snapAt)+' — '+_prAgeTxt(snapAge)+(snapSrc?' · '+esc(snapSrc):''))
+                 : 'no Shopify reading is loaded at all',
+    why:'This is the only figure for what '+esc(locName((pic&&pic.sellLoc)||planSellLoc()))+' can actually sell. Without it the sellable column reads &ldquo;no reading&rdquo; and the plan has no idea what is on the shelf.',
+    act:'Open Regular Packs', go:'packreq'});
+
+  /* ---- 4 · PRODUCTION THAT NEVER POSTED (stop) ---------------------------
+     A draft batch writes nothing to the ledger. Either the packs exist and
+     current stock is understated by exactly this much — so the plan asks for
+     them twice — or they do not and the production plan believes work is done
+     that is not. Only the kitchen can say which, so the batches are NAMED. */
+  let pbDraft=[];
+  try{ (await db.list('production_batches',{})).forEach(b=>{
+    if(String(b.status||'')!=='draft') return;
+    if(String(b.kind||'product')==='output') return;      // output batches carry kilos, not packs
+    pbDraft.push({ref:b.batch_ref, sku:b.product_sku, good:+b.good_packs||0,
+      planned:+b.planned_packs||0, date:String(b.production_date||'').slice(0,10)}); });
+  }catch(e){}
+  pbDraft.sort((a,b)=>String(b.date).localeCompare(String(a.date)));
+  const pbPacks=pbDraft.reduce((s,b)=>s+(b.good||b.planned||0),0);
+  add({id:'pb', tier:'stop', ok:!pbDraft.length, n:pbDraft.length,
+    label:'No production left unconfirmed',
+    fact: pbDraft.length ? (pbDraft.length+' batch(es) in draft holding '+_prN(pbPacks)+' pack(s)')
+                         : 'every batch is confirmed or cancelled',
+    why:'A draft batch posts nothing. If those packs were made, current stock is short by '+_prN(pbPacks)+' and the plan will ask for them again; if they were not, the production plan thinks finished work is done.',
+    act:'Open Production', go:'production_batches',
+    rows: pbDraft.slice(0,12).map(b=>b.ref+' · '+(window._mrpNm&&window._mrpNm[b.sku]||b.sku)+' · '+_prN(b.good||b.planned)+' pack(s) · '+b.date)});
+
+  /* ---- 5 · QUOTES NOBODY LOCKED (check) ---------------------------------- */
+  let coDraft=[];
+  try{ (await db.list('custom_orders',{})).forEach(o=>{
+    if(coStat(o.status)==='draft') coDraft.push({ref:o.order_ref, who:o.customer_name||'',
+      need:String(o.needed_date||o.order_date||'').slice(0,10)}); });
+  }catch(e){}
+  coDraft.sort((a,b)=>String(a.need||'9999').localeCompare(String(b.need||'9999')));
+  add({id:'co', tier:'check', ok:!coDraft.length, n:coDraft.length,
+    label:'Confirmed custom orders are locked',
+    fact: coDraft.length ? (coDraft.length+' order(s) still in draft')
+                         : 'no custom order is sitting in draft',
+    why:'A draft order has no CUST- SKU and no BOM, so it reaches no demand run. If any of these is actually confirmed, this week will be planned without it.',
+    act:'Open Custom Orders', go:'custom_orders',
+    rows: coDraft.slice(0,12).map(o=>o.ref+(o.who?' · '+o.who:'')+(o.need?' · needed '+o.need:''))});
+
+  /* ---- 6 · PACKS IN TRANSIT (check) --------------------------------------
+     Nothing posts when a transfer is SENT; both legs are written on Receive.
+     Until then the packs are counted at neither site — see the water-line note
+     in pqBuildRows — so the sellable shelf and the commissary pile are both
+     understated by the same quantity. */
+  let trSent=[];
+  try{ (await db.list('transfers',{})).forEach(t=>{
+    if(String(t.status||'')==='sent') trSent.push({ref:t.transfer_ref,
+      from:t.from_code, to:t.to_code, date:String(t.transfer_date||'').slice(0,10)}); });
+  }catch(e){}
+  let transitPacks=0;
+  if(pic&&pic.by) Object.keys(pic.by).forEach(k=>{ transitPacks+=(+pic.by[k].inTransit||0); });
+  add({id:'tr', tier:'check', ok:!trSent.length, n:trSent.length,
+    label:'Nothing sent but unreceived',
+    fact: trSent.length ? (trSent.length+' transfer(s) sent and not confirmed'+(transitPacks>0?' — '+_prN(transitPacks)+' pack(s) in transit':''))
+                        : 'every transfer is received',
+    why:'Both ledger legs are written on Receive, so packs on a sent transfer are counted at neither site. Confirming the receipt is the one action that resolves where they are.',
+    act:'Open Internal Transfer', go:'transfers',
+    rows: trSent.slice(0,12).map(t=>t.ref+' · '+t.from+' → '+t.to+(t.date?' · '+t.date:''))});
+
+  /* ---- 7 · COUNTS LEFT IN DRAFT (check) ---------------------------------- */
+  let csDraft=[];
+  try{ (await db.list('count_sessions',{})).forEach(s=>{
+    if(String(s.status||'')!=='draft') return;
+    const d=String(s.count_date||'').slice(0,10);
+    csDraft.push({ref:s.count_ref, loc:s.location_code||'', date:d, age:_prAgeD(d)}); });
+  }catch(e){}
+  csDraft.sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+  const csOld=csDraft.filter(s=>s.age!=null && s.age>=PR_AGE.count);
+  add({id:'cs', tier:'check', ok:!csDraft.length, n:csDraft.length,
+    label:'No weekly count left unapproved',
+    fact: csDraft.length ? (csDraft.length+' count(s) in draft'+(csOld.length?', oldest '+Math.floor(csOld[0].age)+' days old':''))
+                         : 'every count is approved',
+    why:'An unapproved count posts no variance, so a discrepancy somebody has already measured is sitting in a draft while the plan reads the uncorrected balance.',
+    act:'Open Weekly Inventory', go:'count_sessions',
+    rows: csDraft.slice(0,12).map(s=>s.ref+' · '+s.loc+' · '+s.date+(s.age!=null?' ('+Math.floor(s.age)+'d)':''))});
+
+  /* ---- 8 · POs STILL CLAIMING TO BE COMING (check) ----------------------
+     NOT "are there open POs" — there always are, and renderMRP already nets
+     them off the order. The fault is a PO that will never land but still
+     counts as on-order, which suppresses the reorder for good. Past its
+     expected date, or past the lead time where no date was given. */
+  let poLate=[];
+  try{
+    const open={};
+    (await db.list('purchase_orders',{})).forEach(o=>{ const st=String(o.status||'').toLowerCase();
+      if(st==='confirmed'||st==='partial') open[o.po_ref]={exp:String(o.expected_delivery||'').slice(0,10),
+        ord:String(o.order_date||'').slice(0,10), sup:o.supplier_name||'', st}; });
+    const rem={};
+    (await db.list('po_lines',{})).forEach(l=>{ if(!(l.po_ref in open)) return;
+      const left=poRemainQty(l); if(!(left>0.0001)) return;
+      rem[l.po_ref]=(rem[l.po_ref]||0)+left; });
+    Object.keys(rem).forEach(ref=>{ const o=open[ref];
+      const due=o.exp||o.ord; const age=_prAgeD(due); if(age==null) return;
+      const limit=o.exp?0:PR_AGE.po;
+      if(age>limit) poLate.push({ref, kg:rem[ref], age, sup:o.sup, st:o.st, dated:!!o.exp, due});
+    });
+  }catch(e){}
+  poLate.sort((a,b)=>b.age-a.age);
+  const poKg=poLate.reduce((s,p)=>s+p.kg,0);
+  const poDust=poLate.filter(p=>p.kg<1).length;
+  add({id:'po', tier:'check', ok:!poLate.length, n:poLate.length,
+    label:'No purchase order overdue on the books',
+    fact: poLate.length ? (poLate.length+' PO(s) past due still counted as on order — '+(Math.round(poKg*100)/100)+' kg'
+            +(poDust?', '+poDust+' of them under a kilo':''))
+                        : 'nothing is overdue',
+    why:'A remainder that will never be delivered goes on offsetting the next order for ever, so the ingredient is never bought again. Receive the rest or short-close the line.',
+    act:'Open Purchase Orders', go:'purchase_orders',
+    rows: poLate.slice(0,12).map(p=>p.ref+' · '+(Math.round(p.kg*100)/100)+' kg outstanding · '
+            +Math.floor(p.age)+'d past '+(p.dated?'expected delivery':'order date')+(p.sup?' · '+p.sup:''))});
+
+  /* ---- 9 · IMPOSSIBLE BALANCES (check) ----------------------------------
+     A negative balance always means a movement is missing — most often stock
+     sold at the shop that was never transferred in. The plan survives it at
+     the sell site because that figure comes from Shopify, but the drift
+     warning, the count&rsquo;s book quantity and every valuation read the ledger. */
+  /* THE TWO KINDS ARE NOT IN THE SAME UNIT, and printing them in one column
+     without saying so is how "-19,224" reads as nineteen thousand packs. The
+     ledger keeps ingredients in GRAMS and finished goods in PACKS, so each line
+     carries its own unit and the headline names the worse of the two rather
+     than ranking grams against packs. */
+  let negIng=[], negFg=[];
+  try{ (await db.list('stock_balance',{})).forEach(s=>{ const q=+s.on_hand||0;
+    if(!(q<0)) return;
+    if(String(s.kind||'')==='product'){ if(q<-0.5) negFg.push({sku:s.ref_sku, loc:s.location_code||'', q}); }
+    else { if(q<-50) negIng.push({sku:s.ref_sku, loc:s.location_code||'', q}); }   // under 50 g is weigh-scale dust
+  }); }catch(e){}
+  negIng.sort((a,b)=>a.q-b.q); negFg.sort((a,b)=>a.q-b.q);
+  const negN=negIng.length+negFg.length;
+  const _negBits=[];
+  if(negFg.length) _negBits.push(negFg.length+' finished good(s), worst '+_prN(negFg[0].q)+' pack(s) of '+esc(negFg[0].sku));
+  if(negIng.length) _negBits.push(negIng.length+' ingredient(s), worst '+(Math.round(negIng[0].q/100)/10)+' kg of '+esc(negIng[0].sku));
+  add({id:'neg', tier:'check', ok:!negN, n:negN,
+    label:'No negative stock balances',
+    fact: negN ? (negN+' balance(s) below zero — '+_negBits.join(' · '))
+               : 'every balance is zero or positive',
+    why:'Stock cannot be negative, so a movement is missing — usually something consumed or sold that was never received or transferred in. The weekly count&rsquo;s book quantity, the Shopify drift warning and every valuation are wrong by the size of the hole.',
+    act:'Open Live Stock', go:'stock_balance',
+    rows: negFg.slice(0,6).map(n=>n.sku+' @ '+n.loc+' · '+_prN(n.q)+' pack(s)')
+      .concat(negIng.slice(0,6).map(n=>n.sku+' @ '+n.loc+' · '+(Math.round(n.q/100)/10)+' kg'))});
+
+  /* ---- 10 · FINISHED STOCK AT THE COMMISSARY (note) ---------------------
+     Supply-led lines are excluded on purpose. Rabbit mask, ears and the rabbit
+     meatballs are what falls off a carcass, not something anybody chose to
+     make to a par, and counting 1,083 days of rabbit mask as a replenishment
+     failure makes the check permanently red and therefore ignored. What is
+     left is order-led stock that the kitchen DID choose to make. */
+  let bulPacks=0, bulSkus=0, bulSlow=[], bulMove=0, slLed=0;
+  try{
+    const prods=await db.list('products',{});
+    const sl={}; prods.forEach(p=>{ if(p.supply_led) sl[p.sku]=1; });
+    if(pic&&pic.by) Object.keys(pic.by).forEach(k=>{
+      const s=pic.by[k]; const q=+s.pipeline||0; if(!(q>0.5)) return;
+      if(s.isCust) return;                                  // packs owed to a named customer, never a shelf figure
+      if(sl[k]){ slLed+=q; return; }
+      bulPacks+=q; bulSkus++;
+      const cov=(+s.perDay>0)?(q/(+s.perDay)):null;
+      if(cov==null || cov>PR_BUL_COVER) bulSlow.push({sku:k, q, cov, name:s.name||k});
+      else bulMove+=q; });
+  }catch(e){}
+  bulSlow.sort((a,b)=>b.q-a.q);
+  const bulSlowQ=bulSlow.reduce((s,r)=>s+r.q,0);
+  const sellDay=(pic&&pic.by)?Object.keys(pic.by).reduce((s,k)=>s+(+pic.by[k].perDay||0),0):0;
+  add({id:'bul', tier:'note', ok:(bulPacks<=0), n:bulSkus,
+    label:'Finished stock at '+esc(locName(planProduceLoc()||'bulacan')),
+    fact: bulPacks>0
+      ? (_prN(bulPacks)+' pack(s) across '+bulSkus+' SKU(s)'
+         +(sellDay>0?' = '+(Math.round(bulPacks/sellDay*10)/10)+' days of sales':'')
+         +(slLed>0?' · '+_prN(slLed)+' supply-led pack(s) excluded':''))
+      : 'the commissary is clear'+(slLed>0?' ('+_prN(slLed)+' supply-led pack(s) excluded)':''),
+    why:'Ideally this is near zero when the week is planned: stock sitting here is stock the shop cannot sell. '
+      +(bulSlowQ>0?('Of it, '+_prN(bulSlowQ)+' pack(s) carry more than '+PR_BUL_COVER+' days of cover — that is a production decision, not a van. The other '+_prN(bulMove)+' is simply waiting to be moved.')
+                  :'All of it is within '+PR_BUL_COVER+' days of cover, so it is a transfer waiting to happen.'),
+    act:'Open Internal Transfer', go:'transfers',
+    rows: bulSlow.slice(0,12).map(r=>r.sku+' · '+_prN(r.q)+' pack(s) · '
+            +(r.cov==null?'no sales in the window':Math.round(r.cov)+' days cover')+' · '+r.name)});
+
+  /* ---- 11 · SALES NOBODY HAS RULED ON (note) ---------------------------
+     Held and "not stocked" are the guard working as designed. A bare error is
+     the only one that is a fault: a sale that moved no stock because nobody has
+     mapped the code. */
+  let shErr=0, shHeld=0;
+  try{
+    let rows=null;
+    if(isLive()) rows=await sb('shopify_events?select=post_error&posted=is.false&limit=2000');
+    else rows=(DEMO.shopify_events||[]).filter(r=>!r.posted);
+    (rows||[]).forEach(r=>{ const p=String(r.post_error||'');
+      if(/^held/i.test(p)) shHeld++;
+      else if(!/^not stocked/i.test(p) && p) shErr++; });
+  }catch(e){}
+  add({id:'sh', tier:'note', ok:(shErr===0), n:shErr,
+    label:'Every sale has moved stock',
+    fact: shErr ? (shErr+' sale line(s) posted nothing and need a decision'+(shHeld?' ('+shHeld+' more held by the opening count, which is correct)':''))
+                : 'no sale line is waiting on a decision',
+    why:'A sale that posted nothing took stock off the shop and off nothing here, so the ledger is high by that quantity until the code is mapped or ruled not-stocked.',
+    act:'Open Shopify sync', go:'shopify'});
+
+  const stop=C.filter(c=>c.tier==='stop' && !c.ok);
+  const chk =C.filter(c=>c.tier==='check'&& !c.ok);
+  const note=C.filter(c=>c.tier==='note' && !c.ok);
+  _prCache={checks:C, stop, chk, note, at:new Date().toISOString(),
+    tier: stop.length?'stop':(chk.length?'check':(note.length?'note':'ok'))};
+  _prCacheAt=now;
+  return _prCache;
+}
+
+/* The one button the velocity check needs, because there was no way to refresh
+   it from inside the app at all — the only cure was a SQL editor, which is why
+   it sat eight days stale. */
+async function planReadyRefreshMom(){
+  if(!isLive()){ toast('Demo mode — nothing to refresh'); return; }
+  toast('Recomputing sales velocity…');
+  try{
+    await sb('rpc/wr_refresh_sales_momentum',{method:'POST',body:'{}'});
+    planReadyInvalidate(); stockPicInvalidate();
+    try{ window._momDemo=null; }catch(e){}
+    toast('Sales velocity refreshed');
+    if(typeof renderMRP==='function' && $('content')) await renderMRP();
+  }catch(e){
+    const m=String((e&&e.message)||e);
+    toast('Could not refresh: '+m.slice(0,120), true);
+    alert('The refresh function did not run.\n\n'+m+'\n\nIf it says the function does not exist, run sql/wr_sales_momentum_from_events_20260924.sql in Supabase first.');
+  }
+}
+
+/* ---- THE CARD ----------------------------------------------------------
+   Passing states collapse to a single line. A card that is mostly green has to
+   take one glance, or it stops being read on the weeks when it matters. */
+const PR_TIER={stop:{c:'var(--danger)',i:'🔴',t:'These make the numbers wrong'},
+               check:{c:'#b5762a',i:'🟡',t:'These make the plan incomplete'},
+               note:{c:'var(--muted)',i:'🟣',t:'Worth a glance'}};
+function _prLine(c){
+  const T=PR_TIER[c.tier];
+  const act=c.fn?`<button class="btn sm" onclick="${c.fn}">${esc(c.act||'Fix')}</button>`
+        :(c.go?`<button class="btn sm sec" onclick="openModel('${esc(c.go)}')">${esc(c.act||'Open')}</button>`:'');
+  return `<div style="padding:9px 11px;border-top:1px solid var(--line)">
+    <div style="display:flex;gap:9px;align-items:flex-start">
+      <span>${T.i}</span>
+      <div style="flex:1">
+        <b>${esc(c.label)}</b>
+        <div style="font-size:12.5px;margin-top:2px"><b style="color:${T.c}">${c.fact}</b></div>
+        <div class="mini" style="color:var(--muted);margin-top:3px">${c.why||''}</div>
+        ${c.note?`<div class="mini" style="color:var(--muted);margin-top:3px">${c.note}</div>`:''}
+        ${(c.rows&&c.rows.length)?`<details style="margin-top:5px"><summary class="mini" style="cursor:pointer">show ${c.rows.length}${(c.n&&c.n>c.rows.length)?' of '+c.n:''}</summary>
+          <div class="mini" style="margin-top:4px;line-height:1.7">${c.rows.map(r=>'· '+esc(r)).join('<br>')}</div></details>`:''}
+      </div>
+      <div>${act}</div>
+    </div></div>`;
+}
+async function planReadyCard(force){
+  let R; try{ R=await planReadyCheck(force); }catch(e){ return ''; }
+  const bad=R.stop.concat(R.chk).concat(R.note);
+  const okN=R.checks.length-bad.length;
+  const head=(R.tier==='ok')
+    ? `<b style="color:#4e7a3e">✓ Ready to plan</b> <span class="mini" style="color:var(--muted)">· all ${R.checks.length} checks pass</span>`
+    : `<b style="color:${PR_TIER[R.tier].c}">${PR_TIER[R.tier].i} ${R.stop.length?R.stop.length+' thing(s) make these numbers wrong':(R.chk.length?R.chk.length+' thing(s) will leave the plan incomplete':R.note.length+' thing(s) worth a glance')}</b>
+       <span class="mini" style="color:var(--muted)">· ${okN} of ${R.checks.length} checks pass</span>`;
+  const okList=R.checks.filter(c=>c.ok).map(c=>esc(c.label)).join(' · ');
+  return `<div class="repcard" style="border-left:4px solid ${R.tier==='ok'?'#4e7a3e':PR_TIER[R.tier].c};padding:0;margin:0 0 14px">
+    <details ${R.tier==='stop'?'open':''}>
+      <summary style="padding:10px 12px;cursor:pointer">Is the data ready to plan on? &nbsp;${head}</summary>
+      <div class="hint" style="margin:0;border-radius:0;border-left:0;border-right:0">
+        This never stops you saving — it is stamped into the plot instead, so a week planned on stale figures says so afterwards.
+        ${R.stop.length?'<b> Fix the red ones first: they do not make the plan incomplete, they make it wrong.</b>':''}</div>
+      ${bad.map(_prLine).join('')}
+      ${okN?`<div style="padding:8px 11px;border-top:1px solid var(--line)" class="mini">
+        <span style="color:#4e7a3e">✓ passing:</span> <span style="color:var(--muted)">${okList}</span></div>`:''}
+      <div class="mini" style="padding:7px 11px;border-top:1px solid var(--line);color:var(--muted)">
+        checked ${_prWhen(R.at)} · <a href="javascript:planReadyRecheck()">re-check</a></div>
+    </details></div>`;
+}
+async function planReadyRecheck(){ planReadyInvalidate(); stockPicInvalidate();
+  if(typeof renderMRP==='function') await renderMRP(); }
+
+/* The dashboard tile: the same answer, small enough to glance at, and it opens
+   the screen where the full card lives rather than repeating it. */
+async function planReadyTile(){
+  let R; try{ R=await planReadyCheck(); }catch(e){ return ''; }
+  const bad=R.stop.length+R.chk.length;
+  const col=R.tier==='ok'?'#4e7a3e':PR_TIER[R.tier].c;
+  const lines=R.stop.concat(R.chk).slice(0,4).map(c=>`<div class="mini" style="color:var(--muted)">${PR_TIER[c.tier].i} ${esc(c.label)} — <b style="color:${PR_TIER[c.tier].c}">${c.fact}</b></div>`).join('');
+  return `<div class="repcard" style="border-left:4px solid ${col};cursor:pointer" onclick="openModel('mrp')"
+      title="Open Demand / MRP, where the full checklist lives">
+    <h3 style="margin:0 0 4px">Ready to plan?</h3>
+    <div style="font-size:19px;font-weight:800;color:${col}">
+      ${R.tier==='ok'?'✓ all clear':(bad+' to fix')}</div>
+    <div class="mini" style="color:var(--muted);margin-bottom:${lines?'6px':'0'}">${R.checks.length-R.stop.length-R.chk.length-R.note.length} of ${R.checks.length} checks pass${R.stop.length?' · '+R.stop.length+' make the numbers wrong':''}</div>
+    ${lines}</div>`;
+}
+
+/* WHAT GETS WRITTEN INTO THE PLOT. Small on purpose — the ids, the tier and the
+   one-line fact, not the prose. A year from now the only question anybody asks
+   of it is "was the velocity current when this week was planned", and that has
+   to be answerable from the saved row without re-deriving anything. */
+async function planReadyStamp(){
+  try{ const R=await planReadyCheck();
+    return { at:R.at, tier:R.tier,
+      failed:R.checks.filter(c=>!c.ok).map(c=>({id:c.id, tier:c.tier, fact:String(c.fact||'').replace(/<[^>]*>/g,'')})),
+      passed:R.checks.filter(c=>c.ok).map(c=>c.id) };
+  }catch(e){ return null; }
+}
+
 async function renderMRP(){
   /* THE SETTINGS ARE SHARED, SO THEY HAVE TO BE READ. saveRawPar writes them to
      app_settings and the strip says "saved for everyone, not just this browser"
@@ -10063,7 +10465,8 @@ async function renderMRP(){
   rh+=mrpMinOrderCard(_bySup,supMin,_supKg);
   try{ rh+=await mrpLeadTimeCard(); }catch(e){ console.warn('lead card',String(e&&e.message||e)); }
   rh+=savedPlansHtml();
-  $('content').innerHTML=dh+rh;
+  let _pre=''; try{ _pre=await planReadyCard(true); }catch(e){ console.warn('preflight',String(e&&e.message||e)); }
+  $('content').innerHTML=_pre+dh+rh;
 }
 // 3 · Per-supplier minimum order qty analysis for the current plan.
 // Minimum order is a SUPPLIER-level constraint (suppliers.min_order_kg). When a
@@ -10176,12 +10579,25 @@ async function mrpPlans(){ if(isLive()){ try{ return await sb('mrp_plans?select=
 // Label a demand plot by its plan date. (Previously converted to the week's Monday via
 // toISOString(), which drifted a day earlier under +08:00 — e.g. a 2026-07-29 plan showed 07-26.)
 function weekOf(dstr){ return dstr ? ('Wk of '+dstr) : '—'; }
+/* A PLOT CARRIES THE STATE OF THE DATA IT WAS BUILT ON. Without this the stamp
+   is only in the row, which means nobody ever sees it — and a figure nobody can
+   challenge is exactly how a bad week becomes the baseline for the next one. */
+function prPlotBadge(d){
+  const pf=(d&&d.preflight)||null;
+  if(!pf) return '<span class="mini" style="color:var(--muted)" title="Saved before the data checks existed, so nothing was recorded about the feeds behind it.">—</span>';
+  if(pf.tier==='ok') return '<span class="mini" style="color:#4e7a3e" title="All data checks passed when this plot was saved.">✓ clean</span>';
+  const f=(pf.failed||[]);
+  const stop=f.filter(x=>x.tier==='stop');
+  const col=stop.length?'var(--danger)':'#b5762a';
+  const tip=f.map(x=>x.id+': '+x.fact).join(' \n');
+  return `<span class="mini" style="color:${col};font-weight:700" title="${esc(tip)}">${stop.length?'⚠ '+stop.length+' wrong':'· '+f.length+' open'}</span>`;
+}
 function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return'';
   const rows=a.map((p,i)=>{ const date=p.plan_date||p.date||''; const ref=(p.data&&p.data.ref)||p.ref||''; const lines=(p.data?p.data.lines:p.lines)||[]; const items=lines.filter(l=>l.final>0);
-    const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); return {i,date,ref,items:items.length,val,wk:weekOf(date)}; });
+    const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); return {i,date,ref,items:items.length,val,wk:weekOf(date),pf:(p.data||p)}; });
   return `<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Demand plot monitoring — by week ${isLive()?'· Supabase':''}</h3>
-    <div style="overflow-x:auto"><table><thead><tr><th>Week</th><th>Reference</th><th>Plan date</th><th class="num">Items to order</th><th class="num">Est ₱</th><th></th></tr></thead><tbody>
-    ${rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span> · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
+    <div style="overflow-x:auto"><table><thead><tr><th>Week</th><th>Reference</th><th>Plan date</th><th class="num">Items to order</th><th class="num">Est ₱</th><th title="What the data checks said at the moment this plot was saved">Data</th><th></th></tr></thead><tbody>
+    ${rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td>${prPlotBadge(r.pf)}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span> · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
     </tbody></table></div></div>`; }
 // Dedicated, VIEW-ONLY history of every saved demand plot (no reuse / no delete).
 async function renderDemandHistory(){
@@ -10192,13 +10608,13 @@ async function renderDemandHistory(){
   mrpPlanCache=plans;
   const rows=plans.map((p,i)=>{ const date=p.plan_date||p.date||''; const d=p.data||p; const ref=(d&&d.ref)||p.ref||'';
     const lines=(d&&d.lines)||p.lines||[]; const items=lines.filter(l=>l.final>0); const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
-    const by=(d&&d.by)||p.by||''; return {i,date,ref,items:items.length,val,by,wk:weekOf(date)}; });
+    const by=(d&&d.by)||p.by||''; return {i,date,ref,items:items.length,val,by,wk:weekOf(date),pf:d}; });
   const body = rows.length
-    ? rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td class="mini">${esc(r.by||'')}</td><td><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span></td></tr>`).join('')
-    : '<tr><td colspan="7" class="empty">No saved demand plots yet.</td></tr>';
+    ? rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td>${prPlotBadge(r.pf)}</td><td class="mini">${esc(r.by||'')}</td><td><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span></td></tr>`).join('')
+    : '<tr><td colspan="8" class="empty">No saved demand plots yet.</td></tr>';
   $('content').innerHTML=`<div class="repcard"><h3 style="margin:0 0 6px">Saved demand plots ${isLive()?'· Supabase':''}</h3>
     <div class="hint" style="margin:0 0 10px">A read-only record of every demand plot you've saved. Open one to view its full replenishment plan — nothing here can be edited or deleted.</div>
-    <div style="overflow-x:auto"><table><thead><tr><th>Week</th><th>Reference</th><th>Plan date</th><th class="num">Items to order</th><th class="num">Est ₱</th><th>Saved by</th><th></th></tr></thead>
+    <div style="overflow-x:auto"><table><thead><tr><th>Week</th><th>Reference</th><th>Plan date</th><th class="num">Items to order</th><th class="num">Est ₱</th><th title="What the data checks said at the moment this plot was saved">Data</th><th>Saved by</th><th></th></tr></thead>
     <tbody>${body}</tbody></table></div></div>`;
 }
 /* ============ Internal reference numbering (DP / PO / DR / RR) ============ */
@@ -10321,7 +10737,15 @@ async function confirmSaveMRPPlan(hasExisting){
   // Saving a plot LOCKS this week's demand — the Production Plan will only take a
   // target from a locked plot, never from what is being typed on this screen.
   const _om=mrpOmissions(); _mrpDrop={};
+  /* WHAT THE DATA LOOKED LIKE WHEN THIS WEEK WAS DECIDED.
+     The preflight never blocks a save — a hard gate under time pressure moves
+     the planning into a spreadsheet instead of fixing the feed. So the honest
+     alternative is to record the answer: a plot saved while sales velocity was
+     eight days stale carries that fact for good, and the variance review that
+     asks why the week missed can read it instead of guessing. */
+  const _pf=await planReadyStamp();
   const data={ref:g.ref,locked:true,demand:{...mrpDemand},manual:{...mrpManual},add:{...mrpAdd},remarks:{...mrpRemarks},by:CURRENT_USER,saved_at:new Date().toISOString(),
+    preflight:_pf,
     /* the judgement, kept with the document it was made on — see mrpPullPackReq */
     omitted:_om.omitted, trimmed:_om.trimmed, extra:_om.extra, offeredN:_om.offeredN,
     lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
@@ -10345,6 +10769,11 @@ async function confirmSaveMRPPlan(hasExisting){
        It matters more now than it used to: the production plan only offers an
        order once it reads as planned. */
     try{ await coSyncStatuses(); }catch(e){}
+    if(_pf && _pf.tier!=='ok'){
+      const _st=(_pf.failed||[]).filter(f=>f.tier==='stop');
+      if(_st.length) sysLog('mrp',g.ref,'⚠ saved while '+_st.length+' data check(s) were failing — '
+        +_st.map(f=>f.id+': '+f.fact).join(' · '));
+    }
     if(_om.omitted.length) sysLog('mrp',g.ref,'⚖ '+_om.omitted.length+' line(s) the pull offered were left out on purpose ('
       +_om.omitted.reduce((a,x)=>a+x.offered,0)+' pack(s)) by '+CURRENT_USER
       +' — '+_om.omitted.slice(0,6).map(x=>x.sku).join(', ')+(_om.omitted.length>6?' …':''));
@@ -12338,7 +12767,13 @@ async function renderDashboard(){
           ${fgNoRead?(fgNoRead+' SKU(s) have no Shopify row (custom orders awaiting handover, retired codes) and keep their ledger quantity.'):''}</div>
         <div style="margin-top:8px"><button class="btn sec sm" onclick="openModel('stock_balance')">Open Live Stock</button>
           <button class="btn sec sm" onclick="openModel('variances')">Variances</button></div></div></div>` : '';
+  /* The same preflight the demand run shows, as one tile. It sits above the
+     KPIs on purpose: every number below it is only as good as the feeds the
+     tile is reporting on, and finding that out after reading the dashboard is
+     finding it out too late. */
+  let _prTile=''; try{ _prTile=await planReadyTile(); }catch(e){}
   $('content').innerHTML=`<div class="wrdash">
+    ${_prTile?`<div class="grid" style="margin-bottom:14px">${_prTile}</div>`:''}
     <div class="grid k6" style="margin-bottom:14px">${kpis}</div>
     ${_drCard}
     <div class="grid c3" style="margin-bottom:14px">${gMargin}${gStock}${gMom}</div>
