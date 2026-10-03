@@ -1898,6 +1898,17 @@ async function onHashRoute(){ if(_hashLock) return;
   if(!raw){ if(state.model!=='home') openModel('home'); return; }
   const slash=raw.indexOf('/'); const model=slash<0?raw:raw.slice(0,slash); const seg=slash<0?'':raw.slice(slash+1);
   if(model==='home'){ if(state.model!=='home'||state.view!=='home') openModel('home'); return; }
+  /* ---- A DEMAND PLOT HAD NO ADDRESS ----------------------------------------
+     The plot webhook posts model:'mrp_plans', so every Telegram and e-mail
+     notification about a demand plot carries a link of the shape
+     #/mrp_plans/DP-10032026%20[RAW]%20V01 — and mrp_plans is not in MODELS,
+     so that link fell straight through `if(!MODELS[model]) return;` and did
+     nothing at all. Somebody clicking it got the screen they were already on
+     and concluded the plot did not exist.
+     It is not a CRUD model and should not become one: a plot is read through
+     its own viewer, which knows how to render demand, the ingredient plan and
+     the omissions. So the route is handled here and hands off to that viewer. */
+  if(model==='mrp_plans'){ await openMRPPlanByRef(decodeURIComponent(seg||'')); return; }
   if(!MODELS[model]) return;
   if(seg){ if(state.model!==model){ state.model=model; renderSide(); } if(seg==='new') openForm(null); else openForm(seg); }
   else { if(state.model!==model||state.view==='form') openModel(model); }
@@ -5357,7 +5368,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-02 12:20Z';
+const WR_BUILD='2026-10-04 09:20Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -5761,7 +5772,71 @@ async function renderNotif(){ await loadNotif();
       <label style="font-size:13px">at hour (0–23)<br><input id="rc_hour" type="number" step="any" inputmode="decimal" min="0" max="23" value="${+REMIND_CFG.overdue_hour||8}" style="width:70px;padding:6px;border:1px solid var(--line);border-radius:6px"></label>
     </div>
     <div style="margin-top:12px"><button class="btn" onclick="saveReminderCfgBtn()">💾 Save reminder timing</button></div></div>`;
+  // ---- Who gets tagged on Telegram ----
+  await loadMentions();
+  h+=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 6px">🔔 Telegram mentions</h3>
+    <div class="hint" style="margin-bottom:10px">Who gets <b>@tagged</b> when one of these records is confirmed. The handles go out on the webhook as
+      <code>mentions</code> (an array) and <code>mention_text</code> (already joined), so an n8n Telegram node can drop
+      <code>{{$json.mention_text}}</code> straight into the message. Saved to Supabase (<code>app_config → mention_config</code>).</div>
+    <label style="font-size:13px;display:block;max-width:420px">Handles
+      <input id="mn_h" value="${esc((MENTIONS.handles||[]).join(', '))}" style="width:100%;box-sizing:border-box;padding:7px;border:1px solid var(--line);border-radius:6px" placeholder="@zeusgrageda">
+      <div class="mini" style="color:var(--muted)">comma-separated · the @ is added for you if you leave it off</div></label>
+    <div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
+      ${MENTION_RECORDS.map(r=>`<label style="font-size:13px;display:flex;gap:8px;align-items:baseline">
+        <input type="checkbox" id="mn_${r.k}" ${MENTIONS.on&&MENTIONS.on[r.k]?'checked':''}>
+        <span><b>${esc(r.label)}</b> <span class="mini" style="color:var(--muted)">— ${esc(r.d)}</span></span></label>`).join('')}
+    </div>
+    <div style="margin-top:12px"><button class="btn" onclick="saveMentionsBtn()">💾 Save mentions</button></div></div>`;
   $('content').innerHTML=h;
+}
+async function saveMentionsBtn(){
+  const raw=(($('mn_h')||{}).value||'');
+  MENTIONS={ handles: raw.split(',').map(x=>x.trim()).filter(Boolean),
+             on: Object.fromEntries(MENTION_RECORDS.map(r=>[r.k, !!(($('mn_'+r.k)||{}).checked)])) };
+  const ok=await saveMentions();
+  const on=MENTION_RECORDS.filter(r=>MENTIONS.on[r.k]).map(r=>r.label);
+  toast(ok ? ('Mentions saved — '+(MENTIONS.handles.length?mentionsFor(MENTION_RECORDS.find(r=>MENTIONS.on[r.k])?.k||'mrp_plans').join(' ')||'nobody':'nobody')
+              +(on.length?(' on '+on.join(' and ')):' — no record types ticked, so nothing will be tagged'))
+            : 'Saved in this browser only', !ok);
+  renderNotif();
+}
+/* ==================== WHO GETS TAGGED, AND ON WHAT =========================
+   A Telegram post that nobody is tagged in is a post nobody reads. Two records
+   are the ones Zeus has to see the day they happen — a demand plot being locked,
+   because that is the week's buying committed, and a weekly count being
+   approved, because that is stock moving on somebody's say-so.
+
+   Carried as a `mentions` ARRAY on the webhook payload rather than glued into
+   the message text, so n8n decides where it goes — Telegram wants @handle in
+   the body, e-mail wants nothing of the sort, and the same payload feeds both.
+   `mention_text` is the pre-joined string for a template that just wants to
+   drop it in.
+
+   Editable rather than hardcoded: the handle changes, people join, and a build
+   from me should not be the price of adding somebody. */
+const MENTION_RECORDS=[
+  {k:'mrp_plans',      label:'Confirmed Demand Planning', d:'when a demand plot is locked'},
+  {k:'count_sessions', label:'Weekly Inventory',          d:'when a count is approved and posts to stock'}
+];
+const MENTION_DEF={ handles:['@zeusgrageda'], on:{mrp_plans:true, count_sessions:true} };
+let MENTIONS=JSON.parse(JSON.stringify(MENTION_DEF));
+try{ const v=JSON.parse(localStorage.getItem('wr_mentions')||'null'); if(v&&v.handles) MENTIONS=v; }catch(e){}
+async function loadMentions(){
+  if(isLive()&&SUPA&&SUPA.token){ try{ const r=await sb("app_config?select=value&key=eq.mention_config");
+    if(r&&r[0]&&r[0].value&&r[0].value.handles){ MENTIONS=r[0].value; localStorage.setItem('wr_mentions',JSON.stringify(MENTIONS)); } }catch(e){} }
+}
+async function saveMentions(){
+  localStorage.setItem('wr_mentions',JSON.stringify(MENTIONS));
+  if(isLive()&&SUPA&&SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
+    body:JSON.stringify({key:'mention_config',value:MENTIONS})}); }catch(e){ toast('Saved in this browser only — '+e.message,true); return false; } }
+  return true;
+}
+/* The handles for one record type, or [] when it is not one of the tagged ones.
+   Normalised to a leading @ so a handle typed without one still works. */
+function mentionsFor(model){
+  if(!MENTIONS || !MENTIONS.on || !MENTIONS.on[model]) return [];
+  return (MENTIONS.handles||[]).map(h=>String(h||'').trim()).filter(Boolean)
+    .map(h=>h.startsWith('@')?h:('@'+h));
 }
 // Reminder timing config (app_config → reminder_config) — read by the Apps Script reminder job.
 let REMIND_CFG={before:[30,15],daily_overdue:true,overdue_hour:8};
@@ -5882,7 +5957,14 @@ const _floorHide = {
   variance_log:       { gap_value:'hide' },
   suppliers:          { payment_term:'hide' }
 };
-const RECOMMENDED_ACL = { Warehouse:_floorHide, Pasig:_floorHide };
+/* Customer Service carries the floor policy too, for the same reason it carries
+   the Warehouse menu: those people have cost, price and valuation hidden today.
+   Leaving them off this list would not be a neutral change — it would REVEAL
+   margin and supplier terms to them the moment their role was switched, which is
+   not something a role rename should do quietly. Note it hides
+   products.sell_price: if CS needs to quote from the ERP rather than from
+   Shopify, untick that one field in Administration → Field Access. */
+const RECOMMENDED_ACL = { Warehouse:_floorHide, Pasig:_floorHide, 'Customer Service':_floorHide };
 let FIELDACL = JSON.parse(localStorage.getItem('wr_fieldacl')||'null') || JSON.parse(JSON.stringify(RECOMMENDED_ACL));
 function fieldMode(model, field, role){ role=role||curRole(); if(role==='Admin')return 'edit';
   const mm=(FIELDACL[role]||{})[model]||{}; return mm[field]||'edit'; }
@@ -5909,11 +5991,39 @@ async function loadRoleAccess(){
     }catch(e){}
   }
 }
+/* ---- WHAT THE DATABASE HAS TO BE ABLE TO READ -----------------------------
+   app_config.role_access holds only the OVERRIDES — the boxes somebody ticked.
+   Everything else is decided by NAV_SHOW, NAV_HIDE and ADMIN_ONLY, which live
+   in JavaScript and which Postgres cannot see. So a policy written against
+   role_access would get the overrides right and the defaults wrong, and the two
+   would drift the first time a module was added.
+
+   So the app publishes the RESOLVED grid as well: role × module → true/false
+   with every default already applied, under app_config.role_access_effective.
+   One source of truth, resolved in one place, and wr_can() in SQL only has to
+   look a value up. Ticking a box in Users & Access is then genuinely all it
+   takes to let somebody post — which is the rule Zeus asked for. */
+function roleAccessEffective(){
+  const mods=MODULES.flatMap(m=>m.items);
+  const out={};
+  WR_ROLES.forEach(r=>{ const row={};
+    mods.forEach(m=>{ row[m]=!!roleCan(r,m); });
+    Object.keys(CAPS||{}).forEach(c=>{ row['cap:'+c]=!!roleHasCap(r,c); });
+    out[r]=row; });
+  return {at:new Date().toISOString(), by:CURRENT_USER, build:WR_BUILD, roles:out};
+}
 async function saveRoleAccess(){ localStorage.setItem('wr_access',JSON.stringify(ACCESS));
   if(isLive() && SUPA && SUPA.token){
     try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
       body:JSON.stringify({key:'role_access',value:ACCESS})}); }
     catch(e){ toast('Saved in this browser only — the shared copy failed: '+e.message,true); return false; }
+    /* Published in the same breath, so the grid and the database cannot be left
+       disagreeing by a step somebody forgot. A failure here is reported but does
+       not undo the save: the menu is already correct, only the write policy is
+       behind. */
+    try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
+      body:JSON.stringify({key:'role_access_effective',value:roleAccessEffective()})}); }
+    catch(e){ toast('Menus updated, but the database copy that governs POSTING did not: '+e.message,true); }
   }
   return true;
 }
@@ -5938,7 +6048,19 @@ const ADMIN_ONLY=['users','studio','connection','fieldacl','refs','notif','clean
    goods can be booked in without opening a purchase order full of prices.
 
    PURCHASING is payables, transfers and production. */
-const NAV_HIDE={ Warehouse:['mrp','packreq','purchase_orders','reporting','automations','margin','momentum','shopify'],
+/* CUSTOMER SERVICE IS THE WAREHOUSE REMIT, NOT A NEW ONE.
+   The first cut gave Customer Service an allowlist I had reasoned out from the
+   job title — pet profiles, calculator, orders, catalogue. Zeus: the CS people
+   are on the Warehouse role today and are doing fine on it. So the remit is not
+   mine to redesign: a role switch must take nothing away that works now.
+
+   They share ONE array rather than each having a copy, so the two cannot drift
+   apart later and leave somebody wondering which is authoritative. What Customer
+   Service gains over Warehouse is the data-checks capability, and nothing else.
+   Widen or narrow either of them in Users & Access; the change reaches everyone. */
+const _warehouseHide=['mrp','packreq','purchase_orders','reporting','automations','margin','momentum','shopify'];
+const NAV_HIDE={ Warehouse:_warehouseHide,
+                 'Customer Service':_warehouseHide,
                  Pasig:['mrp','packreq','prodplan','production_batches','purchase_orders','reporting','automations','margin'] };
 /* ---- THE ROLE LIST WAS WRITTEN OUT FOUR TIMES -----------------------------
    Users & Access, the Supabase profiles table, Field Access and the capability
@@ -5963,8 +6085,7 @@ const WR_ROLES=['Admin','Purchasing','Warehouse','Pasig','Finance','Delivery','C
 const NAV_SHOW={ Purchasing:['home','purchase_orders','receiving','transfers','prodplan','production_batches',
                              'suppliers','ingredients','supplies','products','stock_balance',
                              'sticker_reorder','supplies_reorder','variance_log','guides','mrp'],
-                 Delivery:['home','transfers','custom_orders','stock_balance','products','guides'],
-                 'Customer Service':['home','ffprofiles','ffcalc','custom_orders','packreq','products','guides'] };
+                 Delivery:['home','transfers','custom_orders','stock_balance','products','guides'] };
 /* ---- A CAPABILITY IS NOT A SCREEN --------------------------------------
    The data-readiness checks are not a module — they are a panel that appears on
    two screens somebody already has. roleCan() cannot answer for them: it is
@@ -6418,6 +6539,11 @@ function notifyChannels(kind){
 async function postWebhook(url, payload){ if(!url) return false;
   const body={...(payload||{})};
   if(!body.channels) body.channels=notifyChannels(body.kind);
+  /* Added here rather than at each call site, so a record type added to
+     MENTION_RECORDS is tagged everywhere it is posted from without hunting for
+     the senders. An untagged record simply gets an empty array. */
+  if(body.mentions===undefined){ const mm=mentionsFor(body.model||body.module);
+    body.mentions=mm; body.mention_text=mm.join(' '); }
   try{ await fetch(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify(body)}); return true; }
   catch(e){ console.warn('webhook post failed', e); return false; } }
 function autoCfg(k){ return (typeof AUTOS!=='undefined'&&AUTOS[k])?AUTOS[k]:null; }
@@ -6436,6 +6562,7 @@ async function notifyRecordDone(model, ref, recOverride, childrenOverride){
   if(children===undefined){ children=[]; if(m.o2m){ try{ children=(r[m.pk]===ref)?formChildren:await db.children(m.o2m, ref); }catch(e){} } }
   const html=recordPrintHtml(m, {...r,[m.pk]:ref}, children);
   await postWebhook(a.url, { model, module:model, ref:String(ref), kind:m.label,
+     link:recordLink(model, ref), by:CURRENT_USER,
      html, email:(SUPA&&SUPA.email)||'', telegram_chat_id:'' });
   sent[sentKey]=Date.now(); localStorage.setItem('wr_pdf_sent',JSON.stringify(sent));
   sysLog(model, ref, '📄 Sent to the PDF/Drive automation ('+ref+')');
@@ -10034,6 +10161,7 @@ async function renderMRP(){
   await loadRawPar();
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderMRP()">↻ Compute</button>
+    <button class="btn sec" onclick="saveMRPDraft()" title="Keeps this week's numbers without locking them. One draft per plan date — saving again replaces it, so the week never collects duplicate plots. Nothing is ordered or scheduled from a draft.">📝 Save draft</button>
     <button class="btn sec" onclick="saveMRPPlan()" title="Saving locks this week's demand — the Production Plan only takes targets from a saved (locked) plot">💾 Save plan (locks demand)</button>
     <button class="btn sec" onclick="renderDemandHistory()">📚 History</button>
     <button class="btn sec" onclick="openPlanLocs()">⚙ Planning locations</button>
@@ -10073,7 +10201,7 @@ async function renderMRP(){
     }
   }catch(e){}
   window._mrpOnOrder=onOrder;
-  mrpPlanCache=await mrpPlans();
+  mrpPlanCache=await mrpPlans({drafts:true});
   // Every locked custom order that still owes packs, whatever week it is scheduled
   // for. This is the "I locked the order but the MRP shows zero" case, made visible.
   const coAll=await coOpenDemand().catch(()=>({}));
@@ -10139,6 +10267,26 @@ async function renderMRP(){
      and taken out of the SKU table below to remove the double entry point. */
   const coSkus=Object.keys(coAll);
   let dh='';
+  /* ---- SAY THE DRAFT IS THERE, AND WHOSE IT IS ---------------------------
+     A draft nobody can see is a draft somebody re-does. The week's draft is
+     named at the top of the screen with who last touched it, so the second
+     person to open Monday knows they are continuing work rather than starting
+     it. Loading is deliberate rather than automatic: quietly replacing what is
+     on screen with somebody else's numbers is its own kind of data loss. */
+  (()=>{ const _d=mrpDraftFor(MRPDATE); if(!_d) return;
+    const dd=_d.data||{}; const n=Object.keys(dd.demand||{}).filter(k=>+dd.demand[k]>0).length;
+    const mine=String(dd.by||_d.created_by||'')===String(CURRENT_USER);
+    dh+=`<div class="repcard" style="border-left:4px solid #b5762a;margin:0 0 14px">
+      <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+        <b>📝 There is a draft for ${esc(MRPDATE)}</b>
+        <span class="mini" style="color:var(--muted)">${n} product(s) · last saved
+          ${esc(String(dd.saved_at||_d.saved_at||'').slice(0,16).replace('T',' '))}
+          by <b>${esc(dd.by||_d.created_by||'someone')}</b>${mine?' (you)':''}</span>
+        <span style="flex:1"></span>
+        <button class="btn sm" onclick="loadMRPDraft()">Load it into the editor</button>
+        <button class="btn sm sec" onclick="discardMRPDraft()">Discard</button></div>
+      <div class="mini" style="color:var(--muted);margin-top:6px">A draft is not a plot: nothing is ordered, scheduled or counted from it, and no custom order changes status.
+        Saving a draft again replaces this one, so the week cannot collect duplicates. <b>Save plan</b> turns it into the locked plot and clears it.</div></div>`; })();
   if(coSkus.length){
     const totPacks=coSkus.reduce((s,k)=>s+coAll[k].packs,0);
     const orders=[]; coSkus.forEach(k=>coAll[k].orders.forEach(o=>{ if(!orders.includes(o.ref)) orders.push(o.ref); }));
@@ -10681,7 +10829,24 @@ function mrpQualifySet(sku,newManualKg,addedKg){
   renderMRP();
 }
 let mrpPlanCache=[];
-async function mrpPlans(){ if(isLive()){ try{ return await sb('mrp_plans?select=*&order=saved_at.desc&limit=30'); }catch(e){ return []; } } return JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); }
+/* ---- A DRAFT IS NOT A PLOT, AND THE DEFAULT HAS TO SAY SO -----------------
+   Seven screens read this list and act on it: the custom-order plan evidence,
+   the weekly target, the sticker reorder, the "which weeks are plotted" set.
+   Not one of them tested `locked`, because until now every row in the table WAS
+   locked. Adding drafts without changing this would have let an unfinished week
+   move custom orders to "Added in Demand" and put labels on an order.
+
+   So the default is LOCKED ONLY, and a draft is opt-in. That way the failure
+   mode of a caller nobody remembered is "it ignored a draft", not "it acted on
+   one" — and any screen added next year inherits the safe answer. */
+async function mrpPlans(opts){
+  const withDrafts=!!(opts&&opts.drafts);
+  let rows;
+  if(isLive()){ try{ rows=await sb('mrp_plans?select=*&order=saved_at.desc&limit=30'); }catch(e){ return []; } }
+  else rows=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]');
+  rows=rows||[];
+  return withDrafts ? rows : rows.filter(p=>((p.data||p)||{}).locked!==false);
+}
 // Label a demand plot by its plan date. (Previously converted to the week's Monday via
 // toISOString(), which drifted a day earlier under +08:00 — e.g. a 2026-07-29 plan showed 07-26.)
 function weekOf(dstr){ return dstr ? ('Wk of '+dstr) : '—'; }
@@ -10699,18 +10864,22 @@ function prPlotBadge(d){
   return `<span class="mini" style="color:${col};font-weight:700" title="${esc(tip)}">${stop.length?'⚠ '+stop.length+' wrong':'· '+f.length+' open'}</span>`;
 }
 function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return'';
-  const rows=a.map((p,i)=>{ const date=p.plan_date||p.date||''; const ref=(p.data&&p.data.ref)||p.ref||''; const lines=(p.data?p.data.lines:p.lines)||[]; const items=lines.filter(l=>l.final>0);
-    const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); return {i,date,ref,items:items.length,val,wk:weekOf(date),pf:(p.data||p)}; });
+  const rows=a.map((p,i)=>{ const date=p.plan_date||p.date||''; const d=p.data||{}; const ref=d.ref||p.ref||''; const lines=(p.data?p.data.lines:p.lines)||[]; const items=lines.filter(l=>l.final>0);
+    const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
+    return {i,date,ref,items:items.length,val,wk:weekOf(date),pf:(p.data||p),
+            draft:(d.locked===false), by:(d.by||p.created_by||'')}; });
   return `<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 8px">Demand plot monitoring — by week ${isLive()?'· Supabase':''}</h3>
     <div style="overflow-x:auto"><table><thead><tr><th>Week</th><th>Reference</th><th>Plan date</th><th class="num">Items to order</th><th class="num">Est ₱</th><th title="What the data checks said at the moment this plot was saved">Data</th><th></th></tr></thead><tbody>
-    ${rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td>${prPlotBadge(r.pf)}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span> · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
+    ${rows.map(r=>`<tr${r.draft?' style="background:#fffaf0"':''}><td>${esc(r.wk)}</td>
+      <td>${r.draft?`<span class="badge b-open">Draft</span> <span class="mini" style="color:var(--muted)">not locked${r.by?' · '+esc(r.by):''}</span>`:`<code>${esc(r.ref||'—')}</code>`}</td>
+      <td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td>${r.draft?'<span class="mini" style="color:var(--muted)">—</span>':prPlotBadge(r.pf)}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span> · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
     </tbody></table></div></div>`; }
 // Dedicated, VIEW-ONLY history of every saved demand plot (no reuse / no delete).
 async function renderDemandHistory(){
   $('cp').innerHTML=`<div class="title">Demand History</div>
     <button class="btn sec" onclick="renderMRP()">← Back to MRP</button>
     <div class="sp"></div><span style="color:var(--muted)">past demand plots · view only</span>`;
-  let plans=[]; try{ plans=await mrpPlans(); }catch(e){}
+  let plans=[]; try{ plans=await mrpPlans({drafts:true}); }catch(e){}
   mrpPlanCache=plans;
   const rows=plans.map((p,i)=>{ const date=p.plan_date||p.date||''; const d=p.data||p; const ref=(d&&d.ref)||p.ref||'';
     const lines=(d&&d.lines)||p.lines||[]; const items=lines.filter(l=>l.final>0); const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
@@ -10794,12 +10963,90 @@ function mrpDropExtra(){
     +' — '+O.extra.slice(0,12).map(x=>x.sku).join(', '));
   closeModal(); renderMRP(); toast('Removed '+O.extra.length+' line(s) · '+packs+' pack(s)');
 }
+/* ==================== THE WORKING DRAFT ====================================
+   A demand plot is locked the moment it is saved, so a week that is half
+   planned had nowhere to live. People worked round it the only way they could —
+   by saving a real plot and saving another one later — and the week ended up
+   with several plots nobody could tell apart.
+
+   ONE DRAFT PER PLAN DATE, AND SAVING REPLACES IT. Not one per person: two
+   drafts for the same week is the problem, not the fix. The draft says who
+   touched it last and when, so a second person can see they are picking up
+   somebody's work rather than starting again.
+
+   A draft is an ordinary mrp_plans row with data.locked = false. It carries no
+   reference number, because a reference is a promise that a document exists and
+   a draft is not a document yet — it is given one only when it is locked. That
+   also keeps the DP counter honest: it counts plots, not attempts.
+
+   Nothing downstream reads a draft. coSyncStatuses, the production plan and the
+   weekly target all require a LOCKED plot, and they test data.locked === true,
+   so a draft cannot move an order's status or put work on the floor. */
+function mrpDraftFor(date){
+  return (mrpPlanCache||[]).find(p=>(p.plan_date||p.date)===(date||MRPDATE) && p.data && p.data.locked===false) || null;
+}
+async function saveMRPDraft(){
+  const demCount=Object.keys(mrpDemand).filter(k=>+mrpDemand[k]>0).length;
+  if(!demCount){ toast('Nothing to save yet — enter some demand first',true); return; }
+  if(window._mrpLocked){ toast('This week is already locked — a draft cannot sit under a locked plot',true); return; }
+  const prev=mrpDraftFor(MRPDATE);
+  const data={locked:false, demand:{...mrpDemand}, manual:{...mrpManual}, add:{...mrpAdd}, remarks:{...mrpRemarks},
+    by:CURRENT_USER, saved_at:new Date().toISOString(),
+    lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
+  try{
+    if(isLive()){
+      /* REPLACE, never add. The delete runs first and is NOT swallowed: if the
+         old draft cannot be removed, saving a new one would leave two. */
+      if(prev && prev.id) await sb('mrp_plans?id=eq.'+prev.id,{method:'DELETE',prefer:'return=minimal'});
+      await sb('mrp_plans',{method:'POST',prefer:'return=minimal',
+        body:JSON.stringify({plan_date:MRPDATE, ref:null, created_by:CURRENT_USER, data})});
+      const chk=await _mrpVerifySaved(MRPDATE, null);
+      if(!chk.ok){ _mrpSaveFailed(chk, 'draft'); return; }
+    } else {
+      let a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]');
+      a=a.filter(p=>!((p.plan_date||p.date)===MRPDATE && p.data && p.data.locked===false));
+      a.unshift({plan_date:MRPDATE,date:MRPDATE,created_by:CURRENT_USER,by:CURRENT_USER,data});
+      localStorage.setItem('wr_mrp_plans',JSON.stringify(a));
+    }
+    sysLog('mrp', MRPDATE, '📝 Draft '+(prev?'replaced':'saved')+' by '+CURRENT_USER+' — '+demCount+' product(s)');
+    toast('Draft saved for '+MRPDATE+(prev?' — it replaced the earlier draft':'')+'. Nothing is ordered or scheduled from a draft.');
+  }catch(e){ _mrpSaveFailed({err:String(e&&e.message||e)}, 'draft'); return; }
+  renderMRP();
+}
+/* ---- DID IT ACTUALLY LAND? ------------------------------------------------
+   A reference is reserved from the database before the plot is written, so a
+   person can be shown DP-10032026 [RAW] V01, share that link, and have the
+   write behind it refused — by a policy, a dropped connection, anything. The
+   screen said "Saved & locked" either way. That is how a plot nobody could find
+   came to exist. Nothing reports success now until it has been read back. */
+async function _mrpVerifySaved(date, ref){
+  if(!isLive()) return {ok:true};
+  try{
+    const rows=await sb('mrp_plans?select=id,plan_date,data,created_by,saved_at&plan_date=eq.'+encodeURIComponent(date));
+    const norm=x=>String(x||'').replace(/\s+/g,' ').trim().toLowerCase();
+    const hit=(rows||[]).find(p=> ref ? norm((p.data&&p.data.ref))===norm(ref)
+                                      : (p.data && p.data.locked===false));
+    return hit ? {ok:true, row:hit} : {ok:false, rows:(rows||[]).length};
+  }catch(e){ return {ok:false, err:String(e&&e.message||e)}; }
+}
+function _mrpSaveFailed(chk, what){
+  const why = chk.err
+    ? 'The database refused the write: '+chk.err
+    : 'The write returned no error, but reading it back found nothing for '+MRPDATE+'.';
+  sysLog('mrp', MRPDATE, '⛔ '+what+' NOT saved for '+CURRENT_USER+' — '+why);
+  alert('THE '+what.toUpperCase()+' WAS NOT SAVED.\n\n'+why+'\n\n'
+    +'Your numbers are still on screen — do not reload. This is almost always a permissions problem: '
+    +'your role can open Demand / MRP but the database is not letting it write to mrp_plans. '
+    +'Send this message to Zeus; the fix is one policy, not a re-type.');
+  toast('NOT saved — nothing was written. See the message above.', true);
+}
 async function saveMRPPlan(){
   const plan=(window._mrpPlan||[]); const toBuy=plan.filter(l=>l.final>0);
   const demCount=Object.keys(mrpDemand).filter(k=>+mrpDemand[k]>0).length;
   if(!demCount){ toast('Enter demand first before saving',true); return; }
   const totVal=toBuy.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
-  const existing=(mrpPlanCache||[]).filter(p=>(p.plan_date||p.date)===MRPDATE);
+  // A draft on this date is replaced by locking, not overridden — see saveMRPDraft.
+  const existing=(mrpPlanCache||[]).filter(p=>(p.plan_date||p.date)===MRPDATE && ((p.data||p)||{}).locked!==false);
   const warn = existing.length ? `<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:10px;margin:12px 0;color:var(--danger);font-size:13px">
      ⚠ A demand plot already exists for <b>${esc(MRPDATE)}</b> (${existing.map(e=>esc((e.data&&e.data.ref)||e.ref||'?')).join(', ')}).<br>
      Saving will <b>override</b> it — the previous plot for this date is replaced and cannot be recovered.
@@ -10857,13 +11104,19 @@ async function confirmSaveMRPPlan(hasExisting){
     lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
   try{
     if(isLive()){
-      // override = replace any existing plot(s) for this exact date
+      /* Override = replace every existing row for this exact date, the working
+         draft included. Locking IS the draft's purpose, so leaving it behind
+         would put a draft and a locked plot on the same week — the duplicate
+         this whole change exists to stop. */
       for(const e of (mrpPlanCache||[]).filter(p=>p.plan_date===MRPDATE && p.id)){ try{ await sb('mrp_plans?id=eq.'+e.id,{method:'DELETE',prefer:'return=minimal'}); }catch(_){} }
       await sb('mrp_plans',{method:'POST',prefer:'return=minimal',body:JSON.stringify({plan_date:MRPDATE,ref:g.ref,created_by:CURRENT_USER,data})});
     } else {
       let a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a=a.filter(p=>(p.plan_date||p.date)!==MRPDATE);
       a.unshift({plan_date:MRPDATE,date:MRPDATE,ref:g.ref,by:CURRENT_USER,data}); localStorage.setItem('wr_mrp_plans',JSON.stringify(a));
     }
+    /* READ IT BACK BEFORE CLAIMING IT EXISTS — see _mrpVerifySaved. */
+    const _chk=await _mrpVerifySaved(MRPDATE, g.ref);
+    if(!_chk.ok){ _mrpSaveFailed(_chk, 'demand plot'); return; }
     toast('Saved & locked '+g.ref);
     /* ---- THE STATUS GAP THIS CLOSES ------------------------------------
        Saving the plot is the exact moment an order stops waiting to be planned
@@ -10887,6 +11140,9 @@ async function confirmSaveMRPPlan(hasExisting){
   // route the saved plot through the single record-done automation → PDF to Drive → Telegram/Email
   const ap=autoCfg('record_pdf');
   if(ap&&ap.on&&ap.url){ postWebhook(ap.url,{ model:'mrp_plans', module:'mrp_plans', ref:g.ref, kind:'Demand Plot',
+     /* The link the notification carries now resolves — #/mrp_plans/<ref> is a
+        real route as of this build, which it was not when DP-10032026 went out. */
+     link:recordLink('mrp_plans', g.ref), plan_date:MRPDATE, by:CURRENT_USER,
      html:demandPlotHtml(MRPDATE,g.ref,data), email:(SUPA&&SUPA.email)||'', telegram_chat_id:'' });
      toast('Demand plot sent to PDF / Drive / notify'); }
   renderMRP();
@@ -11157,6 +11413,27 @@ async function mrpClearApply(){
   toast(errs.length? ('Removed '+gone+' row(s); failed: '+errs.join(', ')) : ('Removed '+gone+' demand row(s) from '+c.date), !!errs.length);
   await renderMRP();
 }
+function loadMRPDraft(){
+  const d=mrpDraftFor(MRPDATE); if(!d){ toast('No draft for '+MRPDATE,true); return; }
+  const dd=d.data||{};
+  if(Object.keys(mrpDemand||{}).some(k=>+mrpDemand[k]>0)
+     && !confirm('Replace what is on screen with the saved draft for '+MRPDATE+'?\n\nAnything you have typed and not saved will be lost.')) return;
+  mrpDemand={...(dd.demand||{})}; mrpManual={...(dd.manual||{})}; mrpAdd={...(dd.add||{})}; mrpRemarks={...(dd.remarks||{})};
+  toast('Draft loaded — saving a draft again will replace it'); renderMRP();
+}
+async function discardMRPDraft(){
+  const d=mrpDraftFor(MRPDATE); if(!d){ toast('No draft for '+MRPDATE,true); return; }
+  const who=(d.data&&d.data.by)||d.created_by||'someone';
+  if(!confirm('Discard the draft for '+MRPDATE+'?\n\nIt was last saved by '+who+'. This cannot be undone, and what is on your screen is not affected.')) return;
+  try{
+    if(isLive() && d.id) await sb('mrp_plans?id=eq.'+d.id,{method:'DELETE',prefer:'return=minimal'});
+    else { let a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]');
+      a=a.filter(p=>!((p.plan_date||p.date)===MRPDATE && p.data && p.data.locked===false));
+      localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); }
+  }catch(e){ toast('Could not discard it: '+e.message,true); return; }
+  sysLog('mrp', MRPDATE, '🗑 Draft discarded by '+CURRENT_USER);
+  toast('Draft discarded'); renderMRP();
+}
 function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; mrpAdd={...(d.add||{})}; mrpRemarks={...(d.remarks||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
 /* ---- THE REPLENISHMENT LIST IS A WALK ROUND THE FREEZER, TOO ---------------
    The demand half of a plot has been grouped and named for a while. The
@@ -11225,6 +11502,40 @@ function _repSeq(enriched){
   return out;
 }
 // A saved demand plot is immutable — VIEW it read-only, then print or download.
+/* Open a plot by its reference rather than its index in a cached array, which
+   is what a shared link, a notification and a mention can all actually carry.
+   Says plainly when the reference is not there instead of rendering nothing —
+   "I cannot see it" and "it was never saved" are different problems and the
+   screen now tells them apart. */
+async function openMRPPlanByRef(ref){
+  if(!ref){ openModel('mrp'); return; }
+  state.model='mrp'; renderSide();
+  $('content').innerHTML='<div class="empty">Opening '+esc(ref)+'…</div>';
+  let plans=[]; let err='';
+  try{ plans=await mrpPlans({drafts:true}); }catch(e){ err=String(e&&e.message||e); }
+  mrpPlanCache=plans;
+  const norm=x=>String(x||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const i=plans.findIndex(p=>norm((p.data&&p.data.ref)||p.ref)===norm(ref));
+  if(i>=0){ return viewMRPPlan(i); }
+  $('cp').innerHTML=`<div class="title">Demand Plot</div>
+    <button class="btn sec" onclick="renderMRP()">← Demand / MRP</button>
+    <button class="btn sec" onclick="renderDemandHistory()">📚 History</button><div class="sp"></div>`;
+  $('content').innerHTML=`<div class="repcard" style="border-left:4px solid var(--danger)">
+    <h3 style="margin:0 0 6px">No plot called <code>${esc(ref)}</code></h3>
+    <div class="hint" style="margin:0 0 10px">The link is good — this screen now opens demand plots by reference — but the database has no plot with that one.
+      ${err?`<br><b style="color:var(--danger)">The read itself failed:</b> <code>${esc(err.slice(0,160))}</code> — that is a permissions or connection problem, not a missing plot.`:''}</div>
+    <div class="hint" style="margin:0 0 10px"><b>The usual cause is a save that did not land.</b> A reference is reserved from the database BEFORE the plot is written, so
+      somebody can be handed <code>${esc(ref)}</code>, and see it on screen, while the write that follows is refused. Build 2026-10-04 reads every plot back after
+      saving and refuses to report success unless it is really there — but a plot saved before that build could have gone this way silently.</div>
+    ${plans.length?`<div style="overflow-x:auto"><table><thead><tr><th>Reference</th><th>Plan date</th><th>Saved</th><th>By</th><th>State</th><th></th></tr></thead><tbody>
+      ${plans.map((p,n)=>{ const d=p.data||{}; return `<tr><td><code>${esc(d.ref||p.ref||'—')}</code></td><td>${esc(p.plan_date||'')}</td>
+        <td class="mini">${esc(String(p.saved_at||'').slice(0,16).replace('T',' '))}</td><td class="mini">${esc(p.created_by||d.by||'')}</td>
+        <td>${d.locked===false?'<span class="badge b-open">Draft</span>':'<span class="badge b-confirmed">Locked</span>'}</td>
+        <td><span class="btn link" onclick="viewMRPPlan(${n})">View</span></td></tr>`; }).join('')}
+      </tbody></table></div><div class="mini" style="color:var(--muted);margin-top:7px">Every plot the database will show you, newest first.</div>`
+      :'<div class="empty">There are no demand plots at all, which means the read returned nothing — check the connection and your role.</div>'}
+  </div>`;
+}
 async function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p;
   const date=p.plan_date||p.date||''; const ref=d.ref||p.ref||''; window._viewPlan={date,ref,d};
   const lines=(d.lines||[]).filter(l=>l.final>0);
@@ -11448,6 +11759,18 @@ async function generatePOsFromMRP(){
    It reports on the role of whoever is signed in, because that is the only role
    the database will answer honestly for. To check another role, sign in as
    somebody who has it. */
+/* The probe row per module: something the table will accept, marked so the
+   clean-up can find it again, and harmless if a clean-up is ever missed. */
+const _AC_PROBE={
+  mrp:              { tbl:'mrp_plans',       clean:"ref=eq.__ACCESS_PROBE__",
+                      row:()=>({plan_date:todayISO(), ref:'__ACCESS_PROBE__', created_by:'access check', data:{locked:false, probe:true}}) },
+  count_sessions:   { tbl:'count_sessions',  clean:"count_ref=eq.__ACCESS_PROBE__",
+                      row:()=>({count_ref:'__ACCESS_PROBE__', location_code:'bulacan', count_date:todayISO(), status:'draft'}) },
+  purchase_orders:  { tbl:'purchase_orders', clean:"po_ref=eq.__ACCESS_PROBE__",
+                      row:()=>({po_ref:'__ACCESS_PROBE__', order_date:todayISO(), status:'draft'}) },
+  transfers:        { tbl:'transfers',       clean:"transfer_ref=eq.__ACCESS_PROBE__",
+                      row:()=>({transfer_ref:'__ACCESS_PROBE__', from_code:'bulacan', to_code:'pasig', transfer_date:todayISO(), status:'sent'}) }
+};
 function _acTableFor(mod){
   const m=MODELS[mod]; if(!m) return null;
   if(m.special || m.report) return null;          // a screen, not a table of its own
@@ -11472,7 +11795,26 @@ async function accessCheckRun(){
       if(/42P01|does not exist|PGRST205/i.test(msg)){ db=null; why='table not in this database'; }
       else { db=false; why=msg.slice(0,120); }
     }
-    rows.push({mod, tbl, nav, db, why}); done++;
+    /* READING IS NOT POSTING, AND POSTING IS THE COMPLAINT. The checker only
+       ever asked whether the database would SELECT, which is the half that was
+       already working — Customer Service could open Demand / MRP and see
+       everything, then have the save refused. The write is probed the way the
+       SQL file's PART C4 does it: insert a marked row, delete it again, two
+       statements, nothing left behind. Only on tables where a refused insert is
+       harmless and the shape is known. */
+    let wr=null, wwhy='';
+    if(db===true && _AC_PROBE[mod]){
+      const pr=_AC_PROBE[mod];
+      try{
+        await sb(encodeURIComponent(pr.tbl),{method:'POST',prefer:'return=minimal',body:JSON.stringify(pr.row())});
+        wr=true;
+      }catch(e){ const msg=String((e&&e.message)||e);
+        if(/row-level security|42501|permission denied/i.test(msg)){ wr=false; wwhy='the database refuses writes for '+role; }
+        else { wr=null; wwhy=msg.slice(0,110); } }
+      // clean up whatever landed, including anything a previous run left
+      try{ await sb(encodeURIComponent(pr.tbl)+'?'+pr.clean,{method:'DELETE',prefer:'return=minimal'}); }catch(e){}
+    }
+    rows.push({mod, tbl, nav, db, wr, wwhy, why}); done++;
   }
   hideBusy();
   window._acRows=rows; window._acRole=role;
@@ -11483,25 +11825,31 @@ function accessCheckDraw(){
   const bad=rows.filter(r=>r.nav===true && r.db===false);
   const open=rows.filter(r=>r.nav===false && r.db===true);
   const skip=rows.filter(r=>r.db===null);
+  const cantPost=rows.filter(r=>r.nav===true && r.wr===false);
   const line=r=>`<tr><td>${esc(MODELS[r.mod]?MODELS[r.mod].label:r.mod)}<div class="mini" style="color:var(--muted)"><code>${esc(r.tbl||r.mod)}</code></div></td>
     <td style="text-align:center">${r.nav?'<b style="color:#4e7a3e">yes</b>':'<span style="color:var(--muted)">no</span>'}</td>
     <td style="text-align:center">${r.db===true?'<b style="color:#4e7a3e">yes</b>':(r.db===false?'<b style="color:var(--danger)">refused</b>':'<span class="mini" style="color:var(--muted)">—</span>')}</td>
-    <td class="mini" style="color:var(--muted)">${esc(r.why||'')}</td></tr>`;
+    <td style="text-align:center">${r.wr===true?'<b style="color:#4e7a3e">yes</b>':(r.wr===false?'<b style="color:var(--danger)">refused</b>':'<span class="mini" style="color:var(--muted)">not probed</span>')}</td>
+    <td class="mini" style="color:var(--muted)">${esc(r.wwhy||r.why||'')}</td></tr>`;
   $('modal').innerHTML=`<div><h3>🔍 Navigation vs the database — role <b>${esc(role)}</b></h3>
     <p class="mini" style="color:var(--muted);margin:-2px 0 10px">Checked by reading one row from each module's table <b>as you are signed in now</b>, so it reports on <b>${esc(role)}</b> and no other role — the database will only answer honestly for the caller. To check another role, sign in as somebody who has it.
-      <b>Reads only.</b> It cannot tell you whether somebody can SAVE, only whether they can open the screen and see rows.</p>
+      <b>Post</b> is a real write — it inserts a marked row and deletes it again, on the four modules where that is safe. It is the column that answers "why could she not save the demand plot".</p>
     ${bad.length?`<div style="border:1px solid var(--danger);background:#fdf0ed;border-radius:6px;padding:9px 11px;margin-bottom:10px;font-size:12.5px">
       ⚠ <b>${bad.length} module(s) are in the menu but refused by the database.</b> ${esc(role)} opens these and gets an error or an empty list that looks like missing data.
       <div class="mini" style="margin-top:4px">${esc(bad.map(r=>(MODELS[r.mod]?MODELS[r.mod].label:r.mod)).join(' · '))}</div>
       <div class="mini" style="margin-top:4px">Either grant the role in RLS, or untick the module above so the sidebar stops offering it.</div></div>`:
       `<div style="border:1px solid #cfe0cf;background:#f1f7f1;border-radius:6px;padding:8px 11px;margin-bottom:10px;font-size:12.5px">✓ Nothing in ${esc(role)}'s menu is refused by the database.</div>`}
+    ${cantPost.length?`<div style="border:1px solid var(--danger);background:#fdf0ed;border-radius:6px;padding:9px 11px;margin-bottom:10px;font-size:12.5px">
+      ⛔ <b>${cantPost.length} module(s) ${esc(role)} can OPEN but cannot POST to.</b> This is the one that looks like the app is broken: the screen works, the numbers are there, and the save is refused.
+      <div class="mini" style="margin-top:4px">${esc(cantPost.map(r=>(MODELS[r.mod]?MODELS[r.mod].label:r.mod)).join(' · '))}</div>
+      <div class="mini" style="margin-top:4px">Fix: tick the module above, press <b>⇪ Publish to the database</b>, and make sure <code>sql/wr_posting_rights_20261004.sql</code> has been run once.</div></div>`:''}
     ${open.length?`<div style="border:1px solid #e0b400;background:#fff8e1;border-radius:6px;padding:9px 11px;margin-bottom:10px;font-size:12.5px">
       ${open.length} module(s) are <b>hidden from the menu but readable</b> by the database. That is normal — hiding tidies a sidebar, it is not a boundary. It matters only if you believed it was one.
       <div class="mini" style="margin-top:4px">${esc(open.map(r=>(MODELS[r.mod]?MODELS[r.mod].label:r.mod)).join(' · '))}</div></div>`:''}
     <div class="mscroll" style="max-height:400px;overflow:auto"><table class="stickyhead"><thead><tr>
-      <th>Module</th><th class="num">In menu</th><th class="num">Database</th><th>Note</th></tr></thead>
+      <th>Module</th><th class="num">In menu</th><th class="num" title="Can this role READ the table">Read</th><th class="num" title="Can this role actually SAVE a record — a real insert, removed again">Post</th><th>Note</th></tr></thead>
       <tbody>${rows.filter(r=>r.db!==null).map(line).join('')}
-      ${skip.length?`<tr><td colspan="4" class="mini" style="background:#f6f8f4;color:var(--muted);padding:6px 8px">${skip.length} screen(s) have no table of their own and were not probed: ${esc(skip.map(r=>(MODELS[r.mod]?MODELS[r.mod].label:r.mod)).join(', '))}</td></tr>`:''}
+      ${skip.length?`<tr><td colspan="5" class="mini" style="background:#f6f8f4;color:var(--muted);padding:6px 8px">${skip.length} screen(s) have no table of their own and were not probed: ${esc(skip.map(r=>(MODELS[r.mod]?MODELS[r.mod].label:r.mod)).join(', '))}</td></tr>`:''}
       </tbody></table></div>
     <div class="mfoot" style="margin-top:12px"><button class="btn sec" onclick="closeModal()">Close</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on');
@@ -11539,6 +11887,7 @@ async function renderUsers(){
     </div>
     <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn sec sm" onclick="accessCheckRun()" title="ask the database, as you are signed in now, which of these modules it will actually let you read">🔍 Check this against the database</button>
+      <button class="btn sec sm" onclick="publishAccess()" title="Write the resolved grid to Supabase, which is what the database reads to decide who may POST a record. Needed once after an upgrade, or any time the posting rules look out of step with this screen.">⇪ Publish to the database</button>
       <button class="btn sec sm" onclick="resetAccess()" title="drop every override and go back to the built-in defaults for all roles">↺ Back to built-in defaults</button></div></div>`;
   /* ---- Capabilities: panels, not screens -------------------------------
      These do not appear in the sidebar, so they cannot be granted by ticking a
@@ -11620,6 +11969,16 @@ async function setAccess(r,mod,on){
     +' — it applies to everyone; '+r+' sees it next time they reload.');
 }
 
+async function publishAccess(){
+  if(!(isLive()&&SUPA&&SUPA.token)){ toast('Sign in to Supabase first — there is nothing to publish to.',true); return; }
+  const eff=roleAccessEffective();
+  try{ await sb('app_config?on_conflict=key',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
+    body:JSON.stringify({key:'role_access_effective',value:eff})}); }
+  catch(e){ toast('Could not publish: '+e.message,true); return; }
+  const n=Object.keys(eff.roles).length, m=Object.keys(eff.roles[WR_ROLES[0]]||{}).length;
+  sysLog('users','access','⇪ Access grid published to the database by '+CURRENT_USER+' — '+n+' role(s) × '+m+' module(s)');
+  toast('Published — '+n+' role(s) × '+m+' module(s). The database now decides posting from this grid.');
+}
 async function setCap(r,cap,on){
   ACCESS[r]=ACCESS[r]||{}; ACCESS[r]['cap:'+cap]=on;
   const ok=await saveRoleAccess();
@@ -11790,18 +12149,73 @@ async function listForModel(model){
   }
   return await cachedList(model, ()=>db.list(model,{}));
 }
+/* ==== WHAT A RECEIPT IS ALLOWED TO POST ====================================
+   On 17 Sep a sticker PO was received and posted 580,000 to the ledger at the
+   breeding colony. Three separate things had to go wrong at once, and the
+   receipt checked none of them:
+
+     1 IT WAS A STICKER ORDER. Labels are not ledger stock at all — they live on
+       the product row as sticker_<site>_on_hand, per WR-ERP-Stickers-Are-Not-In-
+       The-Ledger. A [STICKERS] PO must never post a movement.
+     2 THE LINES NAME PRODUCT SKUs. po_lines.ingredient_sku held PKWMGCGD0500,
+       which is a finished pack, not something the kitchen cooks with.
+     3 THE QUANTITY WAS MULTIPLIED BY 1000, and this is the precise bug. The
+       kg→g conversion is skipped for a supply, but the test was a regex over
+       the ingredient's CATEGORY looking for "supply" or "supplement". Those 21
+       rows carry category 'Sticker' and is_supply = TRUE. The flag said supply;
+       the category string did not contain the word; the regex lost. 200 printed
+       labels were converted as 200 kilograms of food.
+
+       isSupplyItem() is the function that answers this question properly — it
+       reads the flag first and only falls back to text — and it was sitting
+       three thousand lines above, already used by the transfer path for exactly
+       this reason. The receipt simply never called it.
+
+   WHAT THE 21 ROWS ACTUALLY ARE, since it reads like a data error and is not:
+   a sticker PO's lines point at po_lines.ingredient_sku, which has a foreign
+   key to ingredients. Stickers are identified by the product they go on, so
+   wr_sticker_reorder.sql creates one ingredient row per labelled product,
+   keyed on the PRODUCT's SKU, category 'Sticker', is_supply true. They exist to
+   satisfy the foreign key. They are not food, they are not stock, and they must
+   never reach the ledger — see WR-ERP-Stickers-Are-Not-In-The-Ledger.
+                                                                              */
+function stickerPOBlocked(po){
+  return _isStickerPO(po)
+    ? 'This is a sticker order. Labels are counted on the product, per site, not in the stock ledger — '
+      +'receive them on the Sticker PO screen so they land on sticker_<site>_on_hand. '
+      +'Posting them here put 580,000 "grams" of finished product in the breeding colony on 17 Sep.'
+    : '';
+}
+/* Grams for food, the item's own unit for a supply, and NOTHING for a label or
+   an SKU the ingredient master has never heard of. The caller skips that line
+   and says why, rather than posting a number nobody can defend. */
+function receiptQty(item, recvQty){
+  if(!item) return {ok:false, why:'not in the ingredient master, so its unit is unknown'};
+  /* A LABEL IS NOT LEDGER STOCK AT ALL. Its count lives on the product row as
+     sticker_<site>_on_hand. Caught here as well as at the PO level, because the
+     rows exist whatever reference the order was given. */
+  if(_isLabelSupply(item)) return {ok:false, why:'a label — its count belongs on the product, not in the stock ledger'};
+  // isSupplyItem reads the is_supply FLAG first; the old category regex did not.
+  const isSup=isSupplyItem(item);
+  return {ok:true, isSup, g:(isSup?recvQty:recvQty*1000)};
+}
 // Receiving a PO adds raw stock at Bulacan and updates moving-average cost.
 async function postReceipt(po){ try{
+  const _blk=stickerPOBlocked(po);
+  if(_blk){ alert(_blk); sysLog('purchase_orders',po.po_ref,'⛔ receipt refused — sticker PO must not post to the ledger'); return; }
   if(await movementExists('PO '+po.po_ref)){ toast('This PO was already received — stock not posted again.',true); return; }
   const lines=await db.children(MODELS.purchase_orders.o2m, po.po_ref);
   const secure=await useSecure();
   const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i); let n=0, costErr=0;
   // per-location on-hand snapshot (bulacan only — receipts land at bulacan)
   const stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.ref_sku && s.location_code===planProduceLoc() && s.kind==='ingredient') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
+  const _skipped=[];
   for(const l of lines){ const recvKg=(l.received_kg!=null&&l.received_kg!=='')?(+l.received_kg||0):(+l.available_kg||+l.ordered_kg||0); if(!(recvKg>0)) continue;
     // Supplies are counted in whole units (scale 1), food ingredients in kg (×1000 → grams).
-    const isSup=/(supply|supplement)/i.test((im[l.ingredient_sku]||{}).category||'');
-    const g=isSup?recvKg:recvKg*1000, priceKg=Math.max(0,+l.price_kg||0);
+    const _q=receiptQty(im[l.ingredient_sku], recvKg);
+    if(!_q.ok){ _skipped.push({sku:l.ingredient_sku, qty:recvKg, why:_q.why}); continue; }
+    const isSup=_q.isSup;
+    const g=_q.g, priceKg=Math.max(0,+l.price_kg||0);
     const _exp=(window._recvExpiry&&window._recvExpiry[l.ingredient_sku])||null;
     await db.create('inventory_movements',{kind:'ingredient',ref_sku:l.ingredient_sku,location_code:'bulacan',qty:g,unit_cost:(isSup?priceKg:priceKg/1000),movement_type:'receipt',note:'PO '+po.po_ref, expiry_date:_exp});
     if(isSup){ n++; continue; }   // supplies carry no per-kg moving-average cost
@@ -11811,8 +12225,23 @@ async function postReceipt(po){ try{
       const newAvg=(ohG+g)>0?((ohG*oldAvg+g*priceKg)/(ohG+g)):priceKg;
       try{ await db.update('ingredients','sku',l.ingredient_sku,{moving_avg_cost_kg:Math.round(newAvg*100)/100,last_price_kg:priceKg}); stock[l.ingredient_sku]=ohG+g; }catch(e){ costErr++; } } }
     n++; }
-  sysLog('purchase_orders',po.po_ref,'📦 Received — '+n+' ingredient(s) posted to Bulacan stock by '+CURRENT_USER);
-  toast('Received · '+n+' item(s) added to stock'+(costErr?(' · ⚠ '+costErr+' cost update(s) failed'):''), costErr>0);
+  /* A LINE THAT WAS NOT POSTED HAS TO BE SAID OUT LOUD. The old code could not
+     reach this state — it posted everything, which is how the sticker lines got
+     in. Now a line it cannot price in a known unit is skipped, and skipping
+     silently would be the same failure wearing a different hat. */
+  if(_skipped.length){
+    sysLog('purchase_orders',po.po_ref,'⚠ '+_skipped.length+' line(s) NOT posted — '
+      +_skipped.map(x=>x.sku+' ('+x.why+')').join('; '));
+    alert(_skipped.length+' line(s) were NOT added to stock, because the ledger cannot tell what unit they are in:\n\n'
+      +_skipped.map(x=>'• '+x.sku+' — '+x.qty+' — '+x.why).join('\n')
+      +'\n\nAdd them to the ingredient master with the right category, or receive them on the screen they belong to. '
+      +'Nothing was guessed: posting an unknown unit as kilograms is what put 200,000 in the breeding colony on 17 Sep.');
+  }
+  sysLog('purchase_orders',po.po_ref,'📦 Received — '+n+' ingredient(s) posted to Bulacan stock by '+CURRENT_USER
+    +(_skipped.length?(' · '+_skipped.length+' skipped'):''));
+  toast('Received · '+n+' item(s) added to stock'
+    +(_skipped.length?(' · ⚠ '+_skipped.length+' skipped'):'')
+    +(costErr?(' · ⚠ '+costErr+' cost update(s) failed'):''), costErr>0||_skipped.length>0);
  }catch(e){ toast('Receive posting failed: '+e.message,true); } }
 // Confirming a transfer moves finished stock Bulacan → Pasig and flags any shortfall (Check 4).
 async function postTransfer(t){ try{
@@ -12365,14 +12794,23 @@ async function poReceiveApply(){
 // Post ONLY this batch's delta to the ledger (unique per-batch note) and roll moving-avg cost by the delta.
 async function postReceiptDelta(po, deltas, loc){
   loc=loc||'bulacan';
+  /* THIS is the path the 17 Sep sticker receipt took — it even accepts the
+     location as an argument, which is how 580,000 landed at 'breeders'. */
+  const _blk=stickerPOBlocked(po);
+  if(_blk){ alert(_blk); sysLog('purchase_orders',po.po_ref,'⛔ batch receipt refused — sticker PO must not post to the ledger');
+    return {n:0,costErr:0,failed:[],posted:0,blocked:_blk,skipped:[]}; }
   const secure=await useSecure();
   const ings=await listIngredients(); const im={}; ings.forEach(i=>im[i.sku]=i); let n=0, costErr=0;
   const failed=[]; let posted=0;
   const stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(s.ref_sku&&s.location_code===loc&&s.kind==='ingredient') stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
   const batchNote='PO '+po.po_ref+' R'+Date.now();   // unique per batch → no double-post guard needed
+  const skipped=[];
   for(const d of deltas){ const recvKg=+d.recvKg||0; if(!(recvKg>0)) continue;
-    const isSup=/(supply|supplement)/i.test((im[d.ingredient_sku]||{}).category||'');
-    const g=isSup?recvKg:recvKg*1000, priceKg=Math.max(0,+d.priceKg||0);
+    // an unknown SKU has an unknown unit — refuse rather than assume kilograms
+    const _q=receiptQty(im[d.ingredient_sku], recvKg);
+    if(!_q.ok){ skipped.push({sku:d.ingredient_sku, qty:recvKg, why:_q.why}); continue; }
+    const isSup=_q.isSup;
+    const g=_q.g, priceKg=Math.max(0,+d.priceKg||0);
     /* THIS `catch` USED TO BE A SILENT `continue`.
        A failed insert vanished — no counter, no toast, no log entry — and the
        caller then wrote "Batch receipt — 89.42 unit(s)" into the activity log
@@ -12390,7 +12828,7 @@ async function postReceiptDelta(po, deltas, loc){
       const newAvg=(ohG+g)>0?((ohG*oldAvg+g*priceKg)/(ohG+g)):priceKg;
       try{ await db.update('ingredients','sku',d.ingredient_sku,{moving_avg_cost_kg:Math.round(newAvg*100)/100,last_price_kg:priceKg}); stock[d.ingredient_sku]=ohG+g; }catch(e){ costErr++; } } }
     n++; }
-  return {n,costErr,failed,posted};
+  return {n,costErr,failed,posted,skipped};
 }
 async function _poReceiveApply(){
   const lines=formChildren||[]; const notes=[]; const _vars=[]; const deltas=[];
@@ -12461,10 +12899,27 @@ async function _poReceiveApply(){
     let _res=null;
     if(deltas.length){
       _res=await postReceiptDelta(formRec, deltas, loc);
+      /* REFUSED OUTRIGHT — a sticker PO. Leave the order exactly as it was: the
+         labels have genuinely arrived, they simply are not ledger stock, and
+         the Sticker PO screen is where they are booked in. */
+      if(_res.blocked){
+        sysLog('purchase_orders',formRec.po_ref,'⛔ Receipt refused by '+CURRENT_USER+' — sticker PO, nothing posted to the ledger');
+        return;
+      }
+      /* A LINE WHOSE UNIT IS UNKNOWN WAS SKIPPED, NOT POSTED. Said here as well
+         as in the log, because the whole fault on 17 Sep was a receipt that
+         reported success for quantities nobody could defend. */
+      if((_res.skipped||[]).length){
+        toast(_res.skipped.length+' line(s) were SKIPPED — not in the ingredient master, so their unit is unknown: '
+          +_res.skipped.map(x=>x.sku).join(', ')+'. Nothing was guessed.', true);
+        sysLog('purchase_orders',formRec.po_ref,'⚠ '+_res.skipped.length+' line(s) skipped — unknown unit: '
+          +_res.skipped.map(x=>x.sku).join(', '));
+      }
       /* NOTHING GOT IN. Do not close the PO, do not move its status, and do not
          write a log line that says a delivery arrived. Say what broke. */
       if(!_res.n){
-        toast('NOTHING was posted to stock — '+(( _res.failed[0]||{}).why||'the ledger refused every line')
+        toast('NOTHING was posted to stock — '+((_res.failed[0]||{}).why
+          || ((_res.skipped||[]).length?'every line is missing from the ingredient master, so none of their units are known':'the ledger refused every line'))
           +'. The order is unchanged; fix the cause and post again.', true);
         sysLog('purchase_orders',formRec.po_ref,'⛔ Receipt FAILED by '+CURRENT_USER+' — 0 of '
           +deltas.length+' line(s) reached stock · '+((_res.failed[0]||{}).why||'unknown'));
@@ -21402,6 +21857,16 @@ function _renderRows(lines){ const _lr2=l=>l.grank==null?500000:l.grank; const _
 function _countRenderRows(){ return _renderRows(countLines); }
 // Column spec for the weekly count sheet (headers 'SKU'/'Counted' keep the uploader parser working;
 // the '#' item-number column is ignored on re-upload).
+/* Which SKUs the count sheet will legitimately list twice. Computed once per
+   load from the two master lists rather than per row, because _cntCols runs for
+   every line of a 400-line sheet, the printed PDF and the Excel. */
+let _cntDual=null;
+function _cntDualSku(sku){ return !!(_cntDual && _cntDual.has(sku)); }
+function _cntDualBuild(ings, prods){
+  const i=new Set((ings||[]).map(x=>x.sku));
+  _cntDual=new Set((prods||[]).map(x=>x.sku).filter(x=>i.has(x)));
+  return _cntDual;
+}
 function _cntCols(){
   const cols=[
   {label:'#', width:6, pdfWidth:'auto', align:'right', val:(l,n)=>n},
@@ -21548,6 +22013,7 @@ async function countLoad(){
      archived item with a non-zero book qty comes back, and only those. */
   const _wantArch=sc.includes('Retired');
   const _allIngs=await db.list('ingredients',{}), _allProds=await db.list('products',{});
+  _cntDualBuild(_allIngs,_allProds);
   const wantIng=all||sc.includes('Ingredients'), wantSup=all||sc.includes('Supplies'), wantStk=all||sc.includes('Stickers'), wantProd=all||sc.includes('Sellable Products');
   const loc=(countRec.location_code||'bulacan');
   // Book qty must be THIS location's stock. Summing every location made a Bulacan
@@ -21555,7 +22021,24 @@ async function countLoad(){
   /* DEMO was skipped here, so every book qty in demo mode read 0 and the module
      could not be shown or tested without a live database. db.list falls back to
      the demo store cleanly, so the guard bought nothing. */
-  let stock={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if(String(s.location_code||'')!==loc) return; stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){}
+  /* ---- THE BOOK FIGURE IS PER KIND, AND THIS SUMMED ACROSS THEM ----------
+     stock_balance is keyed on (ref_sku, location, KIND), and this read dropped
+     the kind — so for a SKU that exists as BOTH an ingredient and a product the
+     book column showed the two balances added together, on both of that SKU's
+     lines. Twenty-one SKUs are in both tables (Wholesome Mix Pork, Duck Meat
+     Raw, Rabbit Ears and so on, because WR sells some raw ingredients as
+     finished packs), and on 3 Oct it cost real money: a sticker receipt had
+     wrongly put 200,000 against the INGREDIENT balance at breeders, both of
+     Pork's count lines read that 200,000 as their book, and both posted a
+     −200,000 adjustment. One phantom became three.
+     Two maps now, and every line reads the one its own kind belongs to. */
+  let stockIng={}, stockProd={};
+  try{ (await db.list('stock_balance',{})).forEach(s=>{ if(String(s.location_code||'')!==loc) return;
+    const t=(String(s.kind||'')==='product')?stockProd:stockIng;
+    t[s.ref_sku]=(t[s.ref_sku]||0)+(+s.on_hand||0); });}catch(e){}
+  /* Kept for the retired-item test below, which asks "does this hold anything
+     anywhere", a question the kind genuinely does not change. */
+  const stock={}; [stockIng,stockProd].forEach(m=>Object.keys(m).forEach(k=>{ stock[k]=(stock[k]||0)+m[k]; }));
   /* Retired items only come back when they still hold something. An archived
      line at zero is finished with; an archived line at 300 is a box on a shelf
      somebody still has to open. */
@@ -21582,13 +22065,13 @@ async function countLoad(){
       const isLbl=_isLabelSupply(i);
       if(!(wantSup || (isLbl && wantStk))) return;
       const g1=isLbl?'🏷 Stickers & labels':cl.g1, g2=isLbl?(i.category||'Labels'):cl.g2;
-      lines.push({ref_sku:i.sku,name:cl.name,book_qty:stock[i.sku]||0,counted_qty:'',cat:g2,
+      lines.push({ref_sku:i.sku,name:cl.name,book_qty:stockIng[i.sku]||0,counted_qty:'',kind:'ingredient',cat:g2,
         catrank:isLbl?_grank('Stickers'):_grank('Supplies'),g1,g2,
         lsG1:g1,lsG2:g2,lsRank:isLbl?900:cl.lsRank,grank:isLbl?900000+_so(i):cl.grank,
         uom:cl.uom,scale:cl.scale,form:cl.form,sort_order:i.sort_order,isLabel:isLbl});
       return; }
     if(!wantIng) return;
-    lines.push({ref_sku:i.sku, name:cl.name, book_qty:stock[i.sku]||0, counted_qty:'', cat:cl.g2, catrank:_grank(i.category), g1:cl.g1, g2:cl.g2, lsG1:cl.lsG1, lsG2:cl.lsG2, lsRank:cl.lsRank, grank:cl.grank, uom:cl.uom, scale:cl.scale, form:cl.form, sort_order:i.sort_order}); });
+    lines.push({ref_sku:i.sku, name:cl.name, book_qty:stockIng[i.sku]||0, counted_qty:'', kind:'ingredient', cat:cl.g2, catrank:_grank(i.category), g1:cl.g1, g2:cl.g2, lsG1:cl.lsG1, lsG2:cl.lsG2, lsRank:cl.lsRank, grank:cl.grank, uom:cl.uom, scale:cl.scale, form:cl.form, sort_order:i.sort_order}); });
   /* Products only, and only when asked: read the book figure from Shopify's
      physical count instead of ours. Anything Shopify does not carry falls back
      to the ledger and is counted in the banner — a SKU with no reading is not a
@@ -21617,7 +22100,7 @@ async function countLoad(){
     }catch(e){}
   }
   if(wantProd) prods.filter(p=>!isArchivedProd(p) || _wantArch).slice().sort(cmpItems).forEach(p=>{
-    const erpQ=stock[p.sku]||0;
+    const erpQ=stockProd[p.sku]||0;
     let bq=erpQ, srcTag='';
     if(_shopBook){
       if(_shopBook.phys[p.sku]!=null){
@@ -21625,7 +22108,7 @@ async function countLoad(){
         _shopMeta.matched++; srcTag='shopify';
       } else { _shopMeta.fellBack++; srcTag='erp-fallback'; }
     }
-    lines.push({ref_sku:p.sku,name:prodLabel(p,{noSku:true}),book_qty:bq,counted_qty:'',cat:(p.family||'Other'),catrank:_grank(p.family),g1:prodG1(p),g2:prodG2(p),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order,
+    lines.push({ref_sku:p.sku,name:prodLabel(p,{noSku:true}),book_qty:bq,counted_qty:'',kind:'product',cat:(p.family||'Other'),catrank:_grank(p.family),g1:prodG1(p),g2:prodG2(p),grank:_so(p),uom:'packs',scale:1,isProduct:true,box:(+p.box_size||1),sort_order:p.sort_order,
       bookSrc:srcTag, erpQty:erpQ,
       shopRaw:(_shopBook&&_shopBook.phys[p.sku]!=null)?(+_shopBook.phys[p.sku]||0):null,
       shopSince:(_shopBook&&_shopBook.after[p.sku])||0});
@@ -21648,7 +22131,27 @@ async function countLoad(){
        "20-Piece Meatball Packs — Sticker" seven times on a count sheet is seven
        rolls nobody can tell apart, and a label counted against the wrong variant
        is a label ordered for the wrong variant. */
-    lines.push({ref_sku:'STK-'+p.sku,name:prodLabel(p,{noSku:true})+' — Sticker',book_qty:bq,counted_qty:'',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',catrank:_grank(p.family)+0.5,g1:prodG1(p)+' — Stickers',g2:prodG2(p),grank:600000+_so(p),uom:'pcs',scale:1,sort_order:p.sort_order}); });
+    lines.push({ref_sku:'STK-'+p.sku,name:prodLabel(p,{noSku:true})+' — Sticker',book_qty:bq,counted_qty:'',kind:'sticker',sticker:true,product_sku:p.sku,sticker_field:'sticker_'+loc+'_on_hand',cat:(p.family||'Other')+' — Stickers',catrank:_grank(p.family)+0.5,g1:prodG1(p)+' — Stickers',g2:prodG2(p),grank:600000+_so(p),uom:'pcs',scale:1,sort_order:p.sort_order}); });
+  /* ONE SKU, TWO LINES, AND THEY MEAN DIFFERENT THINGS.
+     Twenty-one SKUs sit in both master tables. Every one of them is a LABEL:
+     a sticker PO's lines point at po_lines.ingredient_sku, which has a foreign
+     key to ingredients, and a sticker is identified by the product it goes on —
+     so wr_sticker_reorder.sql creates one ingredient row per labelled product,
+     keyed on that product's own SKU. "PKWMGCGD0500" therefore means the pack of
+     Wholesome Mix Pork on one line and the roll of labels for it on the other.
+
+     Two lines reading the same name is how one gets counted twice and the other
+     not at all. Not hypothetical: on 3 Oct both of Wholesome Mix Pork's lines
+     were filled in at breeders and both posted.
+
+     Named HERE rather than in the column spec, so the screen somebody types
+     into, the printed sheet they carry and the Excel all say the same thing. */
+  if(_cntDual && _cntDual.size) lines.forEach(l=>{
+    if(l.sticker || !_cntDualSku(l.ref_sku)) return;
+    if(l.kind==='product'){ l.name=(l.name||l.ref_sku)+' — packs'; return; }
+    if(l.kind!=='ingredient') return;
+    l.name=(l.name||l.ref_sku)+(l.isLabel?' — label roll':' — raw/processed');
+  });
   countLines=lines;
   await loadBins();
   const _sm=window._countShopMeta;
@@ -21675,7 +22178,22 @@ async function countSave(){
       // UPSERT the parent session first (a PATCH to a missing row succeeds with 0 rows and never
       // throws, so the old try-update/catch-create left no session → count_lines FK 23503).
       await sb('count_sessions?on_conflict=count_ref',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({count_ref:countRec.count_ref,location_code:countRec.location_code,count_date:countRec.count_date,status:countRec.status||'draft',counted_by:CURRENT_USER})});
-      await db.replaceChildren({model:'count_lines',fk:'count_ref'},countRec.count_ref, countLines.map(l=>({count_ref:countRec.count_ref,ref_sku:l.ref_sku,book_qty:+l.book_qty||0,counted_qty:l.counted_qty===''?null:+l.counted_qty})));
+      /* THE KIND HAS TO SURVIVE A SAVE. A draft reloaded tomorrow is approved
+         from count_lines, not from what countLoad put on screen today, so a
+         line that does not carry its own kind is back to guessing — and for the
+         21 SKUs that are both an ingredient and a product, guessing is what put
+         −400,000 packs of Wholesome Mix Pork in the breeding colony.
+         Older databases have no `kind` column: the write is retried without it
+         rather than failing the save, and those rows fall back as before. */
+      const _cl=countLines.map(l=>({count_ref:countRec.count_ref,ref_sku:l.ref_sku,kind:(l.kind||null),
+        book_qty:+l.book_qty||0,counted_qty:l.counted_qty===''?null:+l.counted_qty}));
+      try{ await db.replaceChildren({model:'count_lines',fk:'count_ref'},countRec.count_ref,_cl); }
+      catch(e){
+        if(!/kind/i.test(String(e&&e.message||e))) throw e;
+        window._cntNoKindCol=1;
+        await db.replaceChildren({model:'count_lines',fk:'count_ref'},countRec.count_ref,
+          _cl.map(({kind,...r})=>r));
+      }
     } else {
       DEMO.count_sessions=(DEMO.count_sessions||[]).filter(r=>r.count_ref!==countRec.count_ref); DEMO.count_sessions.push({...countRec,counted_by:CURRENT_USER});
       DEMO.count_lines=(DEMO.count_lines||[]).filter(r=>r.count_ref!==countRec.count_ref).concat(countLines.map(l=>({count_ref:countRec.count_ref,...l})));
@@ -21698,14 +22216,31 @@ async function _countApprove(){
   const cm=await prodCostMap(); let ings={}; try{ (await db.list('ingredients',{})).forEach(i=>ings[i.sku]=i); }catch(e){}
   let flags=0, failed=0;
   for(const l of countLines){ if(l.counted_qty===''||l.counted_qty==null) continue; const gap=(+l.counted_qty)-(+l.book_qty||0); if(Math.abs(gap)<0.0001) continue; flags++;
-    const isStk = l.sticker || String(l.ref_sku).startsWith('STK-');
+    const isStk = l.sticker || l.kind==='sticker' || String(l.ref_sku).startsWith('STK-');
     /* What the adjustment is WORTH. This used to post at unit_cost 0, and
        stock_balance values stock as SUM(qty × unit_cost) — so counting 100 kg
        down to 60 removed the 40 kg but left every peso of it on the books. A
        count that corrects an overstated opening would fix the quantity and
        leave the value overstated, which is the harder half to notice.
        Same figure the variance log already used; now the movement uses it too. */
-    const _kind = isStk ? 'sticker' : (prodSkus.has(l.ref_sku)?'product':'ingredient');
+    /* ---- THE LINE'S KIND IS THE LINE'S, NOT A LOOKUP -----------------------
+       This used to ask `prodSkus.has(l.ref_sku)`, which is a question about the
+       SKU and not about the row being counted. Twenty-one SKUs are in BOTH the
+       products and the ingredients table, so for every one of them the answer
+       was always 'product' — and an INGREDIENT line counted down to zero posted
+       its adjustment against the PRODUCT balance instead. The error was not
+       cancelled, it was duplicated with the sign flipped.
+
+       On 3 Oct that turned a wrong +200,000 on the ingredient side at breeders
+       into a wrong +200,000 AND a wrong −200,000, and because the same SKU was
+       listed twice on the sheet it posted the negative twice: −400,000.
+
+       countLoad now stamps every line with the kind it was loaded as, and that
+       is what posts. The fallback is only for a draft saved by an older build,
+       which has no kind on its rows. */
+    const _kind = isStk ? 'sticker'
+                : (l.kind==='ingredient' || l.kind==='product') ? l.kind
+                : (prodSkus.has(l.ref_sku)?'product':'ingredient');
     let uc=0;
     if(_kind==='ingredient') uc=(+(ings[l.ref_sku]||{}).moving_avg_cost_kg||+(ings[l.ref_sku]||{}).list_price_kg||0)/1000;
     else if(_kind==='product') uc=cm[l.ref_sku]||0;
@@ -21715,8 +22250,8 @@ async function _countApprove(){
       const field=l.sticker_field||('sticker_'+(countRec.location_code||'bulacan')+'_on_hand');
       try{ await db.update('products','sku',psku,{[field]:+l.counted_qty}); }catch(e){ failed++; }
     } else {
-      const kind = prodSkus.has(l.ref_sku)?'product':'ingredient';
-      try{ await db.create('inventory_movements',{kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:uc,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){ failed++; }
+      // the SAME kind the book figure was read from — see the note above
+      try{ await db.create('inventory_movements',{kind:_kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:uc,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){ failed++; }
     }
     const kind2=_kind;
     const gval=Math.round(gap*uc*100)/100;
