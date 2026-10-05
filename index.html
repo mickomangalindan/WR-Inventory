@@ -5631,7 +5631,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-06 23:05Z';
+const WR_BUILD='2026-10-07 04:10Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -9629,7 +9629,24 @@ function wdtPrint(which){
    actual demand (the `rawNeed + lead` term below), which is why a big order
    still buys everything it needs while the steady ceiling stays where it is.
    =========================================================================== */
-const RP_DEF={ on:1, review:7, leadMin:7, leadCap:30, cushion:0.5, win:60, procOn:1, shelfOn:1, minG:0 };
+/* `leadN` and `spike` were added 6 Oct after the 3 Oct orders came out at 79
+   days of cover on one line. Both are about the LEAD BUFFER, which is where
+   the over-buying was:
+
+   leadN  the number of genuine receipts a measured lead time needs before the
+          plan will believe it. Mayee Gajudo's 11-day lead was the p75 of three
+          receipts — 0, 2 and 11 days — so ONE late delivery became the
+          planning lead for the biggest supplier, and multiplied every line.
+          Below this count the lead falls back to the leadMin floor, exactly as
+          it did before any receipts existed.
+
+   spike  off by default. The buffer is now sized on the STEADY rate over the
+          lead time, which is what the rule's own description always said:
+          "what this week eats PLUS enough to last the lead time". The old
+          behaviour scaled it on this week's demand instead — so a week running
+          at 4x the steady rate bought 4x the buffer, and kept it long after
+          the week ended. Turn it back on to restore the old arithmetic. */
+const RP_DEF={ on:1, review:7, leadMin:7, leadCap:30, cushion:0.5, win:60, procOn:1, shelfOn:1, minG:0, leadN:5, spike:0 };
 let RP=Object.assign({},RP_DEF);
 try{ RP=Object.assign({},RP_DEF,JSON.parse(localStorage.getItem('wr_rawpar')||'{}')); }catch(e){}
 /* SETTINGS LIVE IN THE DATABASE, NOT IN A BROWSER.  The pack-request settings
@@ -9757,6 +9774,31 @@ async function rawParLeads(){
   try{
     const pos=await db.list('purchase_orders',{});
     const lines=await db.list('po_lines',{});
+    /* ---- THE RECEIPT LEDGER IS A RECEIPT STAMP -----------------------------
+       purchase_orders.received_at is only written by builds from 24 Sep
+       onwards, so it exists on FIVE orders. The other forty-two receipted
+       orders were being counted as "proxy" and set nothing — which is why the
+       whole lead-time system was running on a sample of five, and why one late
+       delivery could become the planning lead for the largest supplier.
+
+       But those receipts were posted, and posting one writes a movement whose
+       note carries the PO reference. The date that movement was created IS the
+       day the goods were booked in: the same event received_at records, in the
+       table that has always recorded it. That is not a proxy like updated_at,
+       which moves when somebody edits a PO weeks later; it cannot drift,
+       because a receipt is only ever posted once.
+
+       Sample goes from 5 to 47. Mayee Gajudo's lead reads p75 = 2 days off
+       seventeen deliveries instead of 11 off three. */
+    const ledRecv={};
+    try{ (await ledgerAll()).forEach(m=>{
+      if(!m || m.movement_type!=='receipt') return;
+      const mm=String(m.note||'').match(/PO\s+(PO-[^\s]+(?:\s+V[\d.]+)?)\s/);
+      if(!mm) return;
+      const ref=mm[1].trim(); const d=String(m.created_at||'').slice(0,10);
+      if(!d) return;
+      if(!ledRecv[ref] || d<ledRecv[ref]) ledRecv[ref]=d;   // the FIRST delivery
+    }); }catch(e){}
     const byRef={};
     (pos||[]).forEach(o=>{
       if(!o||!o.order_date) return;
@@ -9771,9 +9813,10 @@ async function rawParLeads(){
          opposite of the point. A dirty measurement is worse than an admitted
          gap, because it gets built into a par and never questioned. So the
          proxy rows are counted and reported, and they set nothing. */
-      if(!o.received_at){ O.proxy++; return; }
+      const stamp=o.received_at ? String(o.received_at).slice(0,10) : (ledRecv[o.po_ref]||'');
+      if(!stamp){ O.proxy++; return; }
       const a=new Date(String(o.order_date).slice(0,10)+'T00:00:00');
-      const b=new Date(String(o.received_at).slice(0,10)+'T00:00:00');
+      const b=new Date(stamp+'T00:00:00');
       if(isNaN(a)||isNaN(b)) return;
       const d=Math.round((b-a)/86400000);
       if(!(d>=0 && d<=60)) return;            // a negative or two-month lag is a typo, not a lead time
@@ -9791,14 +9834,40 @@ async function rawParLeads(){
   return O;
 }
 /* Which lead an ingredient is actually on, and where it came from. */
+/* A p75 OVER THREE NUMBERS IS NOT A MEASUREMENT. Mayee Gajudo's receipts were
+   0, 2 and 11 days; the p75 of those is 11, and that single late delivery
+   became the planning lead for the supplier behind most of the buying. Below
+   RP.leadN genuine receipts the lead falls back to the floor — which is what
+   the design already did before any receipts existed, and is the honest answer
+   while the sample is this thin. The count is reported either way, so a lead
+   on a thin sample is visible rather than silently believed. */
 function rawParLeadFor(it, O){
   const typed=+it.lead_time_days||0;
   if(typed>0) return {days:typed, src:'typed', n:null};
+  const need=Math.max(1,+RP.leadN||1);
+  /* THE FLOOR IS A FLOOR, NOT JUST A FALLBACK. A measured lead may EXTEND it —
+     that is the whole point of measuring — but it may not shrink it. The
+     all-suppliers pool currently reads a p75 of 2 days off five receipts that
+     are mostly same-day market runs; letting that set the buffer for a
+     supplier who takes a week would be the same mistake as the 11-day reading,
+     pointing the other way. A figure TYPED on the ingredient is exempt: that is
+     somebody stating a fact about one supplier, not an average standing in for
+     one. */
+  const floor=Math.max(0,+RP.leadMin||0);
+  const F=d=>Math.max(floor, +d||0);
   if(O){
-    if(O.p75Sku[it.sku]!=null) return {days:O.p75Sku[it.sku], src:'this ingredient', n:(O.bySku[it.sku]||[]).length};
+    const nSku=(O.bySku[it.sku]||[]).length;
+    if(O.p75Sku[it.sku]!=null && nSku>=need) return {days:F(O.p75Sku[it.sku]), src:'this ingredient', n:nSku};
     const sup=((it.supplier||'').trim()) || ((it.supplier1||'').trim());
-    if(sup && O.p75Sup[sup]!=null) return {days:O.p75Sup[sup], src:'supplier '+sup, n:(O.bySup[sup]||[]).length};
-    if(O.p75All!=null) return {days:O.p75All, src:'all suppliers', n:O.all.length};
+    const nSup=sup?(O.bySup[sup]||[]).length:0;
+    if(sup && O.p75Sup[sup]!=null && nSup>=need) return {days:F(O.p75Sup[sup]), src:'supplier '+sup, n:nSup};
+    const nAll=(O.all||[]).length;
+    if(O.p75All!=null && nAll>=need) return {days:F(O.p75All), src:'all suppliers', n:nAll};
+    /* Something was measured, but not enough of it. Say so by name rather than
+       reporting a bare "assumed", because "we have 3 receipts and need 5" is a
+       different fact from "we have never measured this". */
+    const best=Math.max(nSku, nSup, nAll);
+    if(best>0) return {days:Math.max(0,+RP.leadMin||0), src:'floor — only '+best+' receipt(s), '+need+' needed', n:best};
   }
   return {days:Math.max(0,+RP.leadMin||0), src:'assumed', n:null};
 }
@@ -9865,6 +9934,8 @@ function rpSettingsHtml(plan){
             ${n('Lead floor (d)','leadMin','used when an ingredient has no lead time typed')}
             ${n('Lead cap (d)','leadCap','protects against a lead time typed in error')}
             ${n('Window (d)','win','sales window the usage rate is read from',52)}
+            ${n('Lead needs n receipts','leadN','a measured lead time is only believed once this many genuine deliveries have been recorded against it. Below that the floor is used. Mayee Gajudo read 11 days off three receipts (0, 2, 11) — one late delivery, not a lead time.',46)}
+            <button class="btn sm ${(+RP.spike)?'':'sec'}" onclick="rpToggle('spike')" title="OFF (recommended): the lead-time buffer is sized on the steady weekly rate. ON: it is sized on THIS WEEK's demand, so a week running well above the steady rate buys a proportionally bigger buffer and keeps it afterwards — that is what put 79 days of cover on buffalo.">${(+RP.spike)?'✓ Buffer on the spike':'✕ Buffer on the steady rate'}</button>
             <button class="btn sm ${(+RP.procOn)?'':'sec'}" onclick="rpToggle('procOn')" title="count processed / part-prepped stock back as raw so it is not bought twice">${(+RP.procOn)?'✓':'✕'} Count WIP</button>
             <button class="btn sm ${(+RP.shelfOn)?'':'sec'}" onclick="rpToggle('shelfOn')" title="never hold more days than the ingredient keeps">${(+RP.shelfOn)?'✓':'✕'} Shelf-life cap</button>
             <button class="btn sm sec" onclick="rpWriteTargets()" title="fill par_g / reorder_g on the ingredient master with these computed figures, so Live Stock's low-stock alerts use the same numbers">📌 Write targets to Master Data</button>`:''}
@@ -10938,7 +11009,14 @@ async function renderMRP(){
          and must still be bought.  So the requirement is whichever is larger:
          the ceiling, or what this week actually eats plus enough to last the
          lead time.  A ceiling can never make us buy LESS than the week needs. */
-      leadBuf=Math.max(C.rop, rawNeed*(lead/7));
+      /* THE BUFFER COVERS THE LEAD TIME AT THE RATE WE ACTUALLY CONSUME.
+         C.rop IS that — steady use across the lead, with the cushion on top.
+         The old second term, rawNeed*(lead/7), read this week's demand as if
+         it carried on through the lead time: buffalo needed 61 kg in a week
+         whose steady rate is 13.9, so it bought 95.8 kg of buffer for a rate
+         that reverts, and left 79 days of cover behind. The week itself still
+         cannot go short, because rawNeed is added to the buffer in full. */
+      leadBuf=(+RP.spike) ? Math.max(C.rop, rawNeed*(lead/7)) : C.rop;
       target =Math.max(C.target, rawNeed + leadBuf);
       trigger=C.rop;
       /* ORDER ONLY THROUGH THE TRIGGER, THEN FILL TO THE TOP.  Without the
@@ -10978,6 +11056,7 @@ async function renderMRP(){
   let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">2 · Replenishment plan</h3>
     ${_puN?`<div class="hint" style="margin:0 0 6px">Processed stock counts: <b>${_puN} processed ingredient(s)</b> covered part of this demand from stock already made (${Object.keys(_pu).slice(0,3).map(k=>esc(ingName(k))+' '+(Math.round(_pu[k]/10)/100)+' kg').join(', ')}${_puN>3?', …':''}), so no raw is ordered for that portion.</div>`:''}
     ${rpSettingsHtml(plan)}
+    ${(+RP.spike)?`<div class="hint" style="border-left:4px solid var(--earth,#b5762a);margin:6px 0 0">The lead-time buffer is being sized on <b>this week's demand</b>, not on the steady rate. A week running above the normal rate will buy a proportionally bigger buffer and still be holding it weeks later — on 3 Oct that put <b>79 days</b> of cover on buffalo. Switch it to <b>steady rate</b> unless you have a reason.</div>`:''}
     <div class="hint" style="margin:0 0 8px">${RP_ON
       ? `Every ingredient has its <b>own</b> ceiling now, worked out from how fast it is actually used — not one 5 kg line for all of them.
          <b>Target</b> = daily use × (${Math.round(RP.review)} review days + that item's lead time) × ${(1+(+RP.cushion||0)).toFixed(2)} cushion, capped by shelf life.
@@ -11154,6 +11233,18 @@ async function mrpPlans(opts){
   if(isLive()){ try{ rows=await sb('mrp_plans?select=*&order=saved_at.desc&limit=30'); }catch(e){ return []; } }
   else rows=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]');
   rows=rows||[];
+  /* NEWEST SAVED FIRST, IN BOTH MODES. The live read orders by saved_at desc;
+     the demo read returned them in whatever order they were written. Every
+     caller that picks "the newest plot" then resolves a tie between two plots
+     for the SAME date differently depending on which mode it is in — which
+     means a headless test can prove the opposite of what the live app does.
+     That is the worst kind of green test, so the order is stated here once. */
+  rows=rows.slice().sort((a,b)=>{
+    const sa=String((a&&a.saved_at)||((a&&a.data)||{}).saved_at||(a&&a.created_at)||'');
+    const sb_=String((b&&b.saved_at)||((b&&b.data)||{}).saved_at||(b&&b.created_at)||'');
+    return sb_.localeCompare(sa)
+        || String(b&&(b.plan_date||b.date)||'').localeCompare(String(a&&(a.plan_date||a.date)||''));
+  });
   return withDrafts ? rows : rows.filter(p=>((p.data||p)||{}).locked!==false);
 }
 // Label a demand plot by its plan date. (Previously converted to the week's Monday via
