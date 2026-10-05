@@ -5089,19 +5089,31 @@ async function renderLiveStock(){
     ${(LS_Q||LS_FLAG)?`<button class="btn sec sm" onclick="lsClearFind()">✕ Clear</button>`:''}
     ${(LS_FROM||LS_TO)?`<button class="btn sec sm" onclick="LS_FROM='';LS_TO='';renderLiveStock()">↺ Live</button>`
       :`<span class="tagf" style="background:#e2f0e4;color:#2d5c22">LIVE · as at now</span>`}
-    <label class="mini" style="margin-left:8px" title="Bring back the ledger columns — Begin, In, Produced, Used, Transfers and Adjustments — for reconciling. Remembered on this browser."><input type="checkbox" ${LS_WORK?'checked':''} onchange="lsToggleWork(this.checked)"> Show working</label>
-    <div class="sp"></div><span style="color:var(--muted)">${LS_WORK?'begin + in + produced − used − sold ± moves = ending':'what is on hand now · what is on order · what sold'}</span>`;
+    <label class="mini" style="margin-left:8px" title="Bring back the ledger columns — Begin, In, Produced, Used, Sold, Transfers and Adjustments — for reconciling. Remembered on this browser."><input type="checkbox" ${LS_WORK?'checked':''} onchange="lsToggleWork(this.checked)"> Show working</label>
+    <div class="sp"></div><span style="color:var(--muted)">${LS_WORK?'begin + in + produced − used − sold ± moves = ending':'where the stock is · what is on the way · how long it lasts'}</span>`;
   /* ---- WHAT IS BOUGHT AND NOT YET HERE --------------------------------
      The same source the MRP nets against: lines on a PO at 'confirmed' or
      'partial', less whatever has already been received on them. It is NOT in
      the ledger and must never be added to on-hand — a kilo on a truck cannot be
      cooked. It earns a column because the question it answers ("do I need to
      order this again?") was being answered by guesswork. */
-  let onOrd={}, onOrdRef={}, onOrdEta={};
+  let onOrd={}, onOrdRef={}, onOrdEta={}, onOrdPO={}, onOrdSoft={};
   try{
+    /* ONE DEFINITION OF "ALREADY ASKED FOR", OR THE SCREENS WILL DISAGREE.
+       This column used to count confirmed and partly received orders only,
+       while the demand plot's Already-on-order subtraction counts every live
+       status — open, rfq, quoted, confirmed, partial. On 3 October that gap
+       was 415 kg sitting on RFQs: the plot knew about it and Live Stock printed
+       a dash, which is the exact shape of a second order going out for stock
+       that is already on its way. The same five statuses count here, and the
+       cell SAYS how much of it the supplier has not confirmed yet rather than
+       quietly treating a quotation request as a delivery. */
+    const PO_LIVE=['open','rfq','quoted','confirmed','partial'];
+    const PO_FIRM=['confirmed','partial'];
     const open={};
     (await db.list('purchase_orders',{})).forEach(o=>{ const st=String(o.status||'').toLowerCase();
-      if(st==='confirmed'||st==='partial') open[o.po_ref]={eta:String(o.expected_delivery||'').slice(0,10), sup:o.supplier_name||''}; });
+      if(PO_LIVE.includes(st)) open[o.po_ref]={eta:String(o.expected_delivery||'').slice(0,10), sup:o.supplier_name||'',
+        ord:String(o.order_date||o.created_at||'').slice(0,10), st, firm:PO_FIRM.includes(st)}; });
     if(Object.keys(open).length){
       const _i0=await listIngredients(); const _sup={}; _i0.forEach(i=>{ if(isSupplyItem(i)) _sup[i.sku]=1; });
       (await db.list('po_lines',{})).forEach(l=>{
@@ -5110,13 +5122,22 @@ async function renderLiveStock(){
         // supplies are held in whole units, food in grams — the same basis the row uses
         const q=_sup[l.ingredient_sku]?left:left*1000;
         onOrd[l.ingredient_sku]=(onOrd[l.ingredient_sku]||0)+q;
+        if(!open[l.po_ref].firm) onOrdSoft[l.ingredient_sku]=(onOrdSoft[l.ingredient_sku]||0)+q;
         (onOrdRef[l.ingredient_sku]=onOrdRef[l.ingredient_sku]||[]).push(l.po_ref);
+        /* EXPECTED DELIVERY IS ALMOST NEVER FILLED IN — the order date always is.
+           The cell used to print an ETA that was blank on nearly every PO, which
+           is how a column ends up looking empty while holding real stock. It now
+           leads with WHEN IT WAS ORDERED and how long that has been waiting, and
+           keeps the expected date for the POs that carry one. */
+        (onOrdPO[l.ingredient_sku]=onOrdPO[l.ingredient_sku]||[]).push(
+          {ref:l.po_ref, ord:open[l.po_ref].ord, eta:open[l.po_ref].eta, sup:open[l.po_ref].sup,
+           st:open[l.po_ref].st, firm:open[l.po_ref].firm, q:q});
         const e=open[l.po_ref].eta;
         if(e && (!onOrdEta[l.ingredient_sku] || e<onOrdEta[l.ingredient_sku])) onOrdEta[l.ingredient_sku]=e;
       });
     }
   }catch(e){}
-  window._lsOnOrder=onOrd; window._lsOnOrderRef=onOrdRef; window._lsOnOrderEta=onOrdEta;
+  window._lsOnOrder=onOrd; window._lsOnOrderRef=onOrdRef; window._lsOnOrderEta=onOrdEta; window._lsOnOrderPO=onOrdPO; window._lsOnOrderSoft=onOrdSoft;
   let mov=[],ings=[],prods=[]; try{mov=await ledgerAll();}catch(e){}
   /* A date window, not a filter on the ROW — an inventory balance is a running
      total, so hiding early movements would not narrow the view, it would give
@@ -5133,10 +5154,35 @@ async function renderLiveStock(){
   const matOf=(i)=>{ if(!i||!i.is_intermediate) return (i&&i.name)||''; const p=_procParent(i,_bs,_bn); return (p&&p.name)||i.name; };
 
   const acc={};
+  /* ---- WHERE THE STOCK IS, NOT JUST HOW MUCH ------------------------------
+     "All sites" used to collapse every location into one number, so a row
+     reading 54 could be 54 at the shop, 54 in the commissary freezer, or any
+     split of the two — and the split is the whole question when somebody is
+     deciding whether to move packs or make more. The per-site balance is kept
+     alongside the total and shown as its own column when the Site filter is on
+     All. Picking a single site leaves one column, because a breakdown of one
+     site is the same number printed twice. */
+  const locEnd={};
+  /* ---- WHAT IS ACTUALLY LEAVING ------------------------------------------
+     Cover days need a rate, and the rate has to be the one that empties THIS
+     shelf: packs leave the shop by sale, raw material leaves the kitchen by
+     issue to a batch, and stock leaves a single named site by transfer as well.
+     Measured over the 30 days up to whatever the window's end is, so a
+     back-dated view answers with that period's draw and not today's. */
+  const _end30=(LS_TO||new Date().toISOString().slice(0,10));
+  const _from30=new Date(new Date(_end30+'T00:00:00Z').getTime()-30*86400000).toISOString().slice(0,10);
+  const out30={};
   mov.forEach(v=>{ const loc=v.location_code||'bulacan'; if(LS_LOC!=='all' && loc!==LS_LOC) return;
     const sku=v.ref_sku; if(!sku) return; const key=sku+'|'+(LS_LOC==='all'?'*':loc);
     const a=acc[key]||(acc[key]={sku,begin:0,recv:0,prod:0,cons:0,tf:0,sold:0,back:0,adj:0,val:0});
     const q=+v.qty||0; let t=v.movement_type||'';
+    (locEnd[sku]=locEnd[sku]||{})[loc]=(locEnd[sku][loc]||0)+q;
+    if(String(v.created_at||'').slice(0,10)>=_from30){
+      const _t0=v.movement_type||'';
+      const _isOut=(_t0==='sale'||_t0==='issue_to_batch'||_t0==='processing_out'
+                    ||(LS_LOC!=='all' && _t0==='transfer_out'));
+      if(_isOut && q<0) out30[sku]=(out30[sku]||0)+(-q);
+    }
     // anything before the window opened IS the opening balance for this view
     if(_lsFrom && String(v.created_at||'').slice(0,10)<_lsFrom) t='opening';
     if(t==='opening') a.begin+=q;
@@ -5174,7 +5220,8 @@ async function renderLiveStock(){
     const par=isProd?(+it.par_packs||0):(+it.reorder_g||+it.par_g||0);
     const below=par>0 && end<par, neg=end< -0.0001;
     return {sku:a.sku, name, variant:(it.variant||''), g1, g2, grank, unit, div, kind, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf,
-            sold:a.sold, back:a.back, adj:a.adj, end, value:a.val, par, below, neg, sort_order:it.sort_order};
+            sold:a.sold, back:a.back, adj:a.adj, end, value:a.val, par, below, neg, sort_order:it.sort_order,
+            out30:(+out30[a.sku]||0), locEnd:(locEnd[a.sku]||{})};
   }).filter(r=> r.begin||r.recv||r.prod||r.cons||r.tf||r.sold||r.back||r.adj);
 
   /* ---- A PRODUCT NOBODY HAS MOVED YET IS STILL A PRODUCT --------------------
@@ -5204,7 +5251,8 @@ async function renderLiveStock(){
         rows.push({sku:p.sku, name:prodLabel({...p, sku:p.sku},{noSku:true}), variant:(p.variant||''),
           g1:G.g1, g2:G.g2, grank:G.rank, unit:'packs', div:1, kind:'product',
           begin:0, recv:0, prod:0, cons:0, tf:0, sold:0, back:0, adj:0, end:0, value:0,
-          par:+p.par_packs||0, below:false, neg:false, sort_order:p.sort_order, virgin:true});
+          par:+p.par_packs||0, below:false, neg:false, sort_order:p.sort_order, virgin:true,
+          out30:0, locEnd:{}});
       });
   }
 
@@ -5225,14 +5273,16 @@ async function renderLiveStock(){
     const _locs=(LS_LOC==='all') ? ((LOCS||[]).map(l=>l.code).filter(Boolean)) : [LS_LOC];
     const _sites=_locs.length?_locs:['bulacan'];
     prods.filter(p=>!isArchivedProd(p) && !isArchivedSticker(p) && !(p.is_custom||/^CUST-/.test(p.sku))).forEach(p=>{
-      let oh=0, par=0;
-      _sites.forEach(lc=>{ oh+=+p['sticker_'+lc+'_on_hand']||0; par+=+p['sticker_'+lc+'_par']||0; });
+      let oh=0, par=0; const _le={};
+      _sites.forEach(lc=>{ const _q=+p['sticker_'+lc+'_on_hand']||0; oh+=_q; par+=+p['sticker_'+lc+'_par']||0;
+        if(_q) _le[lc]=_q; });
       if(!(oh>0||par>0)) return;                       // never set up — not stock, just a blank field
       rows.push({sku:'STK-'+p.sku, name:prodLabel(p,{noSku:true})+' — Sticker', variant:'',
         g1:'🏷 Stickers & labels', g2:'Product labels', grank:900000+_so(p),
         unit:'pcs', div:1, kind:'sticker', noLedger:true,
         begin:oh, recv:0, prod:0, cons:0, tf:0, sold:0, back:0, adj:0,
-        end:oh, value:0, par, below:(par>0&&oh<par), neg:(oh<-0.0001), sort_order:p.sort_order});
+        end:oh, value:0, par, below:(par>0&&oh<par), neg:(oh<-0.0001), sort_order:p.sort_order,
+        out30:0, locEnd:_le});
     });
   }
   if(LS_CAT!=='all') rows=rows.filter(r=>r.kind===LS_CAT);
@@ -5254,6 +5304,121 @@ async function renderLiveStock(){
   window._lsPic=(!LS_TO);
   if(window._lsPic){ try{ await stockPicture(); }catch(e){ window._lsPic=false; } }
   drawLiveStock();
+}
+/* ---- THE SIMPLE VIEW'S FOUR ANSWERS ---------------------------------------
+   What is on each shelf · what is on the way · how long it lasts. Sold moved
+   under Show working: it is a sales figure sitting in the middle of a stock
+   report, and on a finished-goods row it was being read as a reason the shelf
+   is low rather than a fact about last month. */
+function lsLocShort(c){
+  const n=(typeof locName==='function'?locName(c):'')||c||'';
+  const parts=String(n).split(/\s*[-–]\s*/);
+  const tail=parts.length>1?parts[parts.length-1]:parts[0];
+  return (tail||String(c)).split(/\s+/)[0];
+}
+/* Only sites that are actually holding something, computed off the FULL row set
+   rather than the filtered one so the columns do not move about as somebody
+   types in the search box. A site that empties loses its column; a site that
+   starts holding stock gains one, without anybody editing this file. */
+/* A SITE EARNS A COLUMN BY HOLDING STOCK ACROSS THE BOARD, NOT ON ONE LINE.
+   The breeder colony holds exactly one thing — live rabbits — and giving it a
+   column printed a dash on 346 rows to say something true about 1. A site is a
+   column when it is carrying at least a twentieth of the rows that hold
+   anything; below that its stock is NOTED ON THE ROW instead, so nothing is
+   hidden and no column is empty. Nobody has to edit this when the colony grows
+   or the hub closes. */
+const LS_SITE_SHARE=0.05;
+function lsSiteSpread(){
+  const n={}, rows=(window._lsAll||[]);
+  let held=0;
+  rows.forEach(r=>{ const m=r.locEnd||{}; let any=false;
+    Object.keys(m).forEach(k=>{ if(Math.abs(+m[k]||0)>0.0001){ n[k]=(n[k]||0)+1; any=true; } });
+    if(any) held++; });
+  return {n, held};
+}
+function lsSiteCols(){
+  if(LS_LOC!=='all') return [];
+  const {n, held}=lsSiteSpread();
+  if(!held) return [];
+  const floor=Math.max(2, Math.ceil(held*LS_SITE_SHARE));
+  const hit={}; Object.keys(n).forEach(c=>{ if(n[c]>=floor) hit[c]=1; });
+  const pref=[];
+  try{ pref.push(planSellLoc()); (planSupplyLocs()||[]).forEach(c=>pref.push(c)); }catch(e){}
+  const all=((typeof LOCS!=='undefined'&&LOCS)||[]).map(l=>l.code).filter(Boolean);
+  const seen={}, out=[];
+  pref.concat(all).forEach(c=>{ if(c&&hit[c]&&!seen[c]){ seen[c]=1; out.push(c); } });
+  Object.keys(hit).forEach(c=>{ if(!seen[c]){ seen[c]=1; out.push(c); } });
+  /* ONE SITE IS NOT A SPLIT. If everything is standing in one place the
+     breakdown column holds the same number as the total, which is exactly the
+     empty, duplicated column this change exists to remove. */
+  return out.length>1?out:[];
+}
+/* What this row is holding at a site that did not earn a column. */
+function lsElsewhere(r,SITE){
+  const m=r.locEnd||{}; const out=[];
+  Object.keys(m).forEach(c=>{ const q=+m[c]||0;
+    if(Math.abs(q)>0.0001 && SITE.indexOf(c)<0) out.push({c,q}); });
+  return out;
+}
+/* COVER IS ONE DEFINITION FOR EVERY ROW: what is on hand divided by what has
+   been leaving, per day, over the last 30 days. A product whose business-wide
+   picture is already loaded keeps THAT number when the view is all-sites, so
+   this screen and Regular Packs cannot disagree about a pack's cover; a
+   single-site view, and every ingredient and supply, is answered from the
+   ledger in front of it. */
+function lsCoverDays(r){
+  if(!r) return null;
+  if(r.kind==='product' && LS_LOC==='all' && window._lsPic){
+    const sp=stockPicFor(r.sku); if(sp && sp.coverDays!=null) return {d:sp.coverDays, src:'pq', pct:sp.covPct};
+  }
+  const per=(+r.out30||0)/30;
+  if(!(per>0.0000001)) return {d:null, src:'led', pct:null};
+  return {d:Math.max(0,+r.end||0)/per, src:'led', pct:null};
+}
+function lsCoverCell(r){
+  const c=lsCoverDays(r);
+  if(!c) return '<span class="mini" style="color:var(--muted)">—</span>';
+  const why=(c.src==='pq')
+    ? 'Days of cover on the business-wide picture — the same figure Regular Packs and the demand target read.'
+    : 'On hand ÷ average daily outflow over the last 30 days'+(LS_LOC==='all'?' (sales and issues to batches).':' (sales, issues to batches and transfers out of this site).');
+  if(c.d==null) return `<span class="mini" style="color:var(--muted)" title="Nothing has left this shelf in the last 30 days, so there is no rate to divide by — that is not the same as endless cover.">no draw</span>`;
+  if(c.d>=900) return `<span class="mini" style="color:var(--muted)" title="${esc(why)}">no sales</span>`;
+  const d=Math.round(c.d*10)/10;
+  const col=d<7?'var(--danger)':(d<14?'var(--earth,#b5762a)':'#4e7a3e');
+  const pct=(c.pct==null)?'':`<div class="mini" title="everything we own against New Par + safety stock" style="color:${c.pct<0.6?'var(--danger)':(c.pct<1?'var(--earth,#b5762a)':'#4e7a3e')};font-weight:700">${Math.round(c.pct*100)}%</div>`;
+  return `<b style="color:${col}" title="${esc(why)}">${d>180?'180+':d}d</b>${pct}`;
+}
+/* ON ORDER, WITH THE DATE THAT IS ALWAYS THERE. Expected delivery is filled in
+   on almost no purchase order, so leading with it printed a blank line under
+   every figure. The order date is written the moment the PO is raised, and the
+   age next to it is the thing somebody is actually trying to work out: how long
+   this has been outstanding. */
+const PO_ST_LABEL={open:'open',rfq:'RFQ sent',quoted:'quoted',confirmed:'ordered',partial:'part received'};
+function lsOnOrderCell(r,qf){
+  const oo=+(window._lsOnOrder||{})[r.sku]||0;
+  if(!(oo>0)) return '<td class="num"><span class="mini" style="color:var(--muted)">—</span></td>';
+  const pos=((window._lsOnOrderPO||{})[r.sku]||[]).slice()
+    .sort((a,b)=>String(a.ord||'').localeCompare(String(b.ord||'')));
+  const refs=((window._lsOnOrderRef||{})[r.sku]||[]);
+  const eta=(window._lsOnOrderEta||{})[r.sku]||'';
+  const oldest=(pos.find(x=>x.ord)||{}).ord||'';
+  let age=null;
+  if(oldest){ const t=Date.parse(oldest+'T00:00:00Z');
+    if(!isNaN(t)) age=Math.max(0,Math.round((Date.now()-t)/86400000)); }
+  const tip=(pos.length?pos:refs.map(x=>({ref:x})))
+    .map(x=>x.ref+(x.st?(' · '+(PO_ST_LABEL[x.st]||x.st)):'')+(x.ord?(' · ordered '+x.ord):'')+(x.eta?(' · due '+x.eta):'')+(x.sup?(' · '+x.sup):''))
+    .join('\n');
+  const soft=+(window._lsOnOrderSoft||{})[r.sku]||0;
+  const sub=oldest
+    ? `<div class="mini" style="color:var(--muted)">${esc(oldest.slice(5))}${age!=null?(' · '+age+'d'):''}${eta?(' → '+esc(eta.slice(5))):''}</div>`
+    : (eta?`<div class="mini" style="color:var(--muted)">due ${esc(eta.slice(5))}</div>`:'');
+  /* An RFQ is not a delivery. It still counts here — ordering it again is the
+     expensive mistake — but the row says how much of it the supplier has not
+     agreed to yet, so nobody plans a kitchen week around a quotation request. */
+  const soft2=(soft>0.0001)
+    ? `<div class="mini" style="color:var(--earth,#b5762a)">${qf(soft,r.div)} not confirmed</div>` : '';
+  const late=(age!=null&&age>=14);
+  return `<td class="num" style="color:${late?'var(--earth,#b5762a)':'#3c6ea5'}" title="${esc(tip)}\n\nNot counted in On hand — it has not arrived.">${qf(oo,r.div)}${sub}${soft2}</td>`;
 }
 function drawLiveStock(){
   const pm=window._lsProdSet||{};
@@ -5299,14 +5464,26 @@ function drawLiveStock(){
      shape of the confusion this change exists to end. The simple view answers
      the question once. Show working brings the second reading back for anybody
      who needs to reconcile the two. */
-  const SPW=(SP&&LS_WORK)?SP:0;
+  /* SOLD IS A SALES FIGURE, AND IT WAS SITTING IN THE MIDDLE OF A STOCK REPORT.
+     On a finished-goods row it reads as the reason the shelf is low, which is
+     only sometimes true and never what this screen is for. It keeps its place
+     in the ledger equation under Show working, where Begin and the adjustments
+     already live, and the simple view answers the three questions it is for:
+     where the stock is, what is on the way, and how long it lasts. */
+  const _wsold=W?`<th class="num" title="Sold on Shopify, less anything refunded or returned">−Sold</th>`:'';
+  /* Current stock keeps its place under Show working; its old Cover twin is
+     gone, because Cover is now a column every row answers in the same words. */
+  const SPW=(SP&&LS_WORK)?1:0;
+  const SITE=lsSiteCols();
   const _wh=W?`<th class="num" title="The opening balance — the OLDEST number on this row, not what is in the freezer">Begin</th><th class="num" title="Delivered and booked in during the window — already inside On hand">+In</th><th class="num">+Prod</th><th class="num">−Used</th>`:'';
   const _wh2=W?`<th class="num">±Transfer</th><th class="num">±Adjust</th>`:'';
+  const _sh=SITE.map(c=>`<th class="num" title="What is at ${esc(locName(c)||c)} right now, straight from the ledger. The columns add up to On hand.">On hand<br><span class="mini" style="font-weight:400">${esc(lsLocShort(c))}</span></th>`).join('');
   h+=`<div class="repcard"><div style="overflow-x:auto"><table><thead><tr>
-    <th>Item</th><th>Unit</th>${_wh}<th class="num" title="Sold on Shopify, less anything refunded or returned">−Sold</th>${_wh2}<th class="num" title="What is in the freezer right now, straight from the ledger">On hand</th><th class="num" title="Bought and not yet delivered — open quantity on confirmed or partly received purchase orders. NOT included in On hand: it is not in the building.">On order</th>${SPW?`<th class="num" title="Finished packs only. Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. Business-wide, whatever the Site filter above says — the sellable half is by definition at the shop.">Current<br>stock</th><th class="num" title="Days the sellable shelf lasts · everything we own against New Par + safety stock">Cover<br>d · %</th>`:''}${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
-  /* 2 fixed (Item, Unit) + the working columns + Sold + On hand + On order
-     + the stock-picture pair + Value + Flag. Derived, never counted by hand. */
-  const NCOL=2 + (W?6:0) + 1 + 2 + SPW + (mh?0:1) + 1;
+    <th>Item</th><th>Unit</th>${_wh}${_wsold}${_wh2}${_sh}<th class="num" title="What is in the freezer right now, straight from the ledger${SITE.length?' — every site added together':''}">On hand${SITE.length?'<br><span class="mini" style="font-weight:400">total</span>':''}</th><th class="num" title="Bought and not yet delivered — open quantity on confirmed or partly received purchase orders, with the date it was ordered and how long it has been waiting. NOT included in On hand: it is not in the building.">On order<br><span class="mini" style="font-weight:400">ordered · age</span></th><th class="num" title="How many days the shelf lasts at the rate stock has been leaving it over the last 30 days.">Cover</th>${SPW?`<th class="num" title="Finished packs only. Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. Business-wide, whatever the Site filter above says — the sellable half is by definition at the shop.">Current<br>stock</th>`:''}${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
+  /* 2 fixed (Item, Unit) + the working columns (now carrying Sold) + one per
+     site + On hand + On order + Cover + Current stock + Value + Flag.
+     Derived, never counted by hand. */
+  const NCOL=2 + (W?7:0) + SITE.length + 3 + SPW + (mh?0:1) + 1;
   if(!rows.length) h+=`<tr><td colspan="${NCOL}" class="empty">${(LS_Q||LS_FLAG)?'Nothing matches that search.':(LS_ACT?'Nothing needs action ✅':'No stock movements yet.')}</td></tr>`;
   Object.keys(byG1).sort((a,b)=>_gmin(byG1[a])-_gmin(byG1[b])||cmpGroupKeys(a,b)).forEach(g1=>{
     const g1list=byG1[g1]; const gval=g1list.reduce((s,r)=>s+r.value,0);
@@ -5336,27 +5513,31 @@ function drawLiveStock(){
       h+=`<tr${cl} onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open item">
         <td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${r.noLedger?' · counted, not moved — no ledger history':''}${r.virgin?' · <span style="color:var(--earth,#b5762a)">nothing has moved yet — never received, made or counted</span>':''}</div></td><td class="mini">${esc(r.unit)}</td>
         ${W?`<td class="num">${qf(r.begin,r.div)}</td><td class="num">${r.recv?qf(r.recv,r.div):'—'}</td><td class="num">${r.prod?qf(r.prod,r.div):'—'}</td>
-        <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td>`:''}
+        <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td>
         <td class="num"${(r.sold||r.back)?' title="sold '+qf(r.sold,r.div)+(r.back?' · back '+qf(r.back,r.div):'')+'"':''}>${(r.sold||r.back)?qf(r.sold+r.back,r.div):'—'}</td>
-        ${W?`<td class="num">${r.tf?qf(r.tf,r.div):'—'}</td><td class="num">${r.adj?qf(r.adj,r.div):'—'}</td>`:''}
-        <td class="num" style="color:${endCol}"><b>${qf(r.end,r.div)}</b></td>
-        ${(()=>{ const oo=+(window._lsOnOrder||{})[r.sku]||0;
-          if(!(oo>0)) return '<td class="num"><span class="mini" style="color:var(--muted)">—</span></td>';
-          const refs=((window._lsOnOrderRef||{})[r.sku]||[]); const eta=(window._lsOnOrderEta||{})[r.sku]||'';
-          return `<td class="num" style="color:#3c6ea5" title="On ${esc(refs.join(', '))}${eta?(' · earliest expected '+esc(eta)):' · no expected date set'}. Not counted in On hand — it has not arrived.">${qf(oo,r.div)}${eta?`<div class="mini" style="color:var(--muted)">${esc(eta.slice(5))}</div>`:''}</td>`; })()}${SPW?(()=>{ const pic=(r.kind==='product')?stockPicFor(r.sku):null;
-          return `<td class="num">${pic?spStockCell(pic):'<span class="mini" style="color:var(--muted)">—</span>'}</td><td class="num">${pic?spCoverCell(pic):'<span class="mini" style="color:var(--muted)">—</span>'}</td>`; })():''}${mh?'':`<td class="num">${fmt(r.value)}</td>`}<td>${flag}</td></tr>`; });
+        <td class="num">${r.tf?qf(r.tf,r.div):'—'}</td><td class="num">${r.adj?qf(r.adj,r.div):'—'}</td>`:''}
+        ${SITE.map(c=>{ const q=+(r.locEnd||{})[c]||0;
+          if(!(Math.abs(q)>0.0001)) return '<td class="num"><span class="mini" style="color:var(--muted)">—</span></td>';
+          return `<td class="num" style="color:${q<-0.0001?'var(--danger)':'var(--ink)'}" title="at ${esc(locName(c)||c)}">${qf(q,r.div)}</td>`; }).join('')}
+        <td class="num" style="color:${endCol}"><b>${qf(r.end,r.div)}</b>${SITE.length?(()=>{ const el=lsElsewhere(r,SITE);
+          return el.length?`<div class="mini" style="color:var(--muted)" title="Held at a site that is not big enough to earn its own column — it is inside this total.">${el.map(x=>'incl. '+qf(x.q,r.div)+' '+esc(lsLocShort(x.c))).join(' · ')}</div>`:''; })():''}</td>
+        ${lsOnOrderCell(r,qf)}
+        <td class="num">${lsCoverCell(r)}</td>${SPW?(()=>{ const pic=(r.kind==='product')?stockPicFor(r.sku):null;
+          return `<td class="num">${pic?spStockCell(pic):'<span class="mini" style="color:var(--muted)">—</span>'}</td>`; })():''}${mh?'':`<td class="num">${fmt(r.value)}</td>`}<td>${flag}</td></tr>`; });
     });
   });
   h+=`</tbody></table></div>
     <div class="hint" style="margin-top:8px">
-      <b style="color:#3c6ea5">On order is NOT part of On hand.</b> It is stock that has been bought and has not arrived — open quantity on confirmed or partly received purchase orders — so adding the two together overstates the freezer by exactly the amount nobody can cook with yet. Hover a figure for the PO and its expected date.
-      <br><b>On hand</b> is what is in the freezer now, straight from the ledger.
+      <b style="color:#3c6ea5">On order is NOT part of On hand.</b> It is stock that has been asked for and has not arrived — the open quantity on live purchase orders — so adding the two together overstates the freezer by exactly the amount nobody can cook with yet. It counts every live purchase order — open, RFQ sent, quoted, ordered and part received — the same five the demand plot subtracts, so the two screens cannot disagree about what has already been asked for. The small line is the date it was <b>ordered</b> and how long it has been waiting, and <b style="color:var(--earth,#b5762a)">not confirmed</b> is the part the supplier has not yet agreed to. Hover for each PO, its status, supplier and expected date.
+      <br><b>On hand</b> is what is in the freezer now, straight from the ledger.${SITE.length?` The site columns — ${SITE.map(c=>'<b>'+esc(lsLocShort(c))+'</b>').join(', ')} — are the same figure split by where it is standing, and they add up to the total. A site holding stock on only a handful of rows does not get a column of dashes: its figure is noted under the total on the rows it affects. Pick a single Site above to drop the split.`:''}
+      <br><b>Cover</b> is how many days the shelf lasts at the rate stock has been leaving it over the last 30 days — sales for packs, issues to batches for raw material. <b style="color:var(--danger)">Under 7 days</b> is a this-week problem; <b>no draw</b> means nothing has left in 30 days, which is not the same as endless cover.
+      <br><b>−Sold</b> is under <b>Show working</b> with the rest of the ledger: it is a sales figure, and on a pack row it was being read as the reason the shelf is low.
       ${LS_WORK?'<b>Ending = Begin + In + Prod − Used ± Transfer ± Adjust</b> — the working is shown, and <b>+In</b> is already inside On hand.'
                :'<b>Begin</b> and the adjustments are hidden: Begin is the OLDEST figure on the row, and after a mass adjustment it is nowhere near what is on the shelf. Tick <b>Show working</b> above to bring the ledger back for reconciling.'}
-      Ingredients show in <b>kg</b>, finished goods in <b>packs</b>, supplies in their unit. Rows open the item; <b style="color:var(--earth,#b5762a)">⚠ reorder</b> = at/below reorder or PAR, <b style="color:var(--danger)">🔴 negative</b> = a ledger gap to fix. ${LS_LOC==='all'?'Showing every site combined — switch Site to split them.':''}
-    ${SPW?`<br><b>Current stock</b> and <b>Cover</b> are finished-goods columns and are <b>business-wide whatever the Site filter says</b> — the first figure is what <span style="color:#2f5d33">${esc(locName(planSellLoc()))}</span> can sell right now, the second is what is sitting <span style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</span>. They are the same numbers Regular Packs, the Weekly Demand Target and the Production Plan read, so the four screens cannot disagree about what current stock means.`
-      :(LS_WORK?'<br><b>Current stock</b> and <b>Cover</b> are hidden because the clock has been stopped at a past date — today’s shelf is not an answer to a question about last month.'
-               :'<br><b>Current stock</b> and <b>Cover</b> — the business-wide finished-goods reading — are under <b>Show working</b>, because two columns both called some version of “what we have” is what made this screen hard to read.')}</div></div>`;
+      Ingredients show in <b>kg</b>, finished goods in <b>packs</b>, supplies in their unit. Rows open the item; <b style="color:var(--earth,#b5762a)">⚠ reorder</b> = at/below reorder or PAR, <b style="color:var(--danger)">🔴 negative</b> = a ledger gap to fix. ${(LS_LOC==='all'&&!SITE.length)?'Showing every site combined — switch Site to look at one.':''}
+    ${SPW?`<br><b>Current stock</b> is a finished-goods column and is <b>business-wide whatever the Site filter says</b> — what <span style="color:#2f5d33">${esc(locName(planSellLoc()))}</span> can sell right now plus what is made and sitting <span style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</span>. It is the same number Regular Packs, the Weekly Demand Target and the Production Plan read, so the four screens cannot disagree about what current stock means.`
+      :(LS_WORK?'<br><b>Current stock</b> is hidden because the clock has been stopped at a past date — today’s shelf is not an answer to a question about last month.'
+               :'<br><b>Current stock</b> — the business-wide finished-goods reading — is under <b>Show working</b>, because two columns both called some version of “what we have” is what made this screen hard to read.')}</div></div>`;
   $('content').innerHTML=h;
   if(typeof applyStickyHeads==='function') applyStickyHeads($('content'));
   _lsFocus();
@@ -5450,7 +5631,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-06 15:05Z';
+const WR_BUILD='2026-10-06 17:40Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
