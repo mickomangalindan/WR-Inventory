@@ -804,11 +804,16 @@ const MODELS = {
 
   purchase_orders:{ label:'Purchase Orders & Payables', icon:'🧾', name:'po_ref', pk:'po_ref',
     status:{f:'status',stages:['open','rfq','quoted','confirmed','partial','received','cancelled']}, cancelable:true,
-    searchOn:['po_ref','supplier_name','status','created_by'],
+    searchOn:['po_ref','supplier_name','status','created_by','issued_by','received_by','paid_by'],
     fields:[
       {n:'po_ref',l:'PO Reference',t:'text'},{n:'supplier_name',l:'Vendor',t:'rel',rel:'suppliers'},
       {n:'order_date',l:'Order date',t:'date'},{n:'expected_delivery',l:'Expected delivery',t:'date'},{n:'received_at',l:'Received at',t:'text',ro:true},{n:'status',l:'Status',t:'select',o:['open','rfq','quoted','confirmed','partial','received','cancelled']},
-      {n:'created_by',l:'Created by',t:'text'},
+      {n:'created_by',l:'Raised by',t:'text'},
+      /* Read-only on purpose: these say what HAPPENED, and a field somebody can
+         retype is not a record of anything. They are stamped by the step. */
+      {n:'issued_by',l:'Issued by',t:'text',ro:true},
+      {n:'received_by',l:'Received by',t:'text',ro:true},
+      {n:'paid_by',l:'Paid by',t:'text',ro:true},
       {n:'discount',l:'Discount ₱',t:'currency'},{n:'delivery_fee',l:'Delivery fee ₱',t:'currency'},
       {n:'delivery_payee',l:'Delivery fee payable to',t:'select',o:['Supplier','Fleet service']},
       {n:'delivery_provider',l:'Fleet / courier name',t:'text'},
@@ -817,7 +822,9 @@ const MODELS = {
     // Discount, delivery fee, who the fee is owed to and the courier's name are NOT
     // repeated up here — they all live in the 💵 Payments & delivery section below,
     // which is where they are actually settled. One field, one place.
-    groups:[['po_ref','order_date'],['created_by','expected_delivery','received_at']], full:['supplier_name'],
+    /* The four names sit together, because the question anybody asks of a PO is
+       "who did this" and the answer is four people, not one. */
+    groups:[['po_ref','order_date'],['created_by','issued_by','received_by','paid_by'],['expected_delivery','received_at']], full:['supplier_name'],
     o2m:{ field:'lines', model:'po_lines', fk:'po_ref', label:'Order Lines',
           cols:[{n:'ingredient_sku',l:'Ingredient',t:'rel',rel:'ingredients'},{n:'ordered_kg',l:'Requested (kg)',t:'number'},{n:'available_kg',l:'Order qty · vendor avail (kg)',t:'number'},{n:'price_kg',l:'₱/kg',t:'number'},{n:'received_kg',l:'Received (kg)',t:'number',ro:true}] } },
 
@@ -3482,6 +3489,26 @@ function repSet(k,v){ repCfg[k]=v; renderReport(); }
    grouped like the count sheet (raw + its processed form together, products by family, supplies apart).
    Ending equals the ledger SUM(qty), so this both explains and cross-checks on-hand. */
 let LS_LOC='all', LS_ACT=false, LS_CAT='all';
+/* ---- WHAT THIS SCREEN IS FOR, AND WHAT IT WAS BEING READ AS --------------
+   Live Stock lays the whole ledger out: Begin, +In, +Prod, −Used, −Sold,
+   ±Transfer, ±Adjust, Ending. Nine numbers across, and the FIRST one is the
+   opening balance. After a mass adjustment the opening and the ending are far
+   apart, and people were reading Begin — the leftmost, largest figure — as what
+   is in the freezer. It is the oldest number on the row.
+
+   So the arithmetic is no longer the default. The screen opens on the four
+   things somebody actually came to find out: what is on hand, what is on its
+   way, what sold, what it is worth. "Show working" brings the ledger back for
+   whoever is reconciling, and the choice is remembered per browser so the
+   commissary keeps the short table and whoever is checking keeps the long one.
+
+   ON ORDER IS DELIBERATELY NOT ADDED TO ANYTHING. It is stock that has been
+   bought and has not arrived; adding it to on-hand would inflate the shelf by
+   exactly the amount nobody can cook with yet. It sits in its own column, and
+   the footer says so in as many words. */
+let LS_WORK=false;
+try{ LS_WORK=localStorage.getItem('wr_ls_work')==='1'; }catch(e){}
+function lsToggleWork(on){ LS_WORK=!!on; try{ localStorage.setItem('wr_ls_work',LS_WORK?'1':'0'); }catch(e){} renderLiveStock(); }
 /* Live Stock had category buttons and a site picker but no way to find ONE
    item among two hundred. The search reads the item's name, its code, its
    group and its base material, so "rabbit", "RASP", "meatballs" and "Gently
@@ -5062,7 +5089,34 @@ async function renderLiveStock(){
     ${(LS_Q||LS_FLAG)?`<button class="btn sec sm" onclick="lsClearFind()">✕ Clear</button>`:''}
     ${(LS_FROM||LS_TO)?`<button class="btn sec sm" onclick="LS_FROM='';LS_TO='';renderLiveStock()">↺ Live</button>`
       :`<span class="tagf" style="background:#e2f0e4;color:#2d5c22">LIVE · as at now</span>`}
-    <div class="sp"></div><span style="color:var(--muted)">begin + in + produced − used − sold ± moves = ending</span>`;
+    <label class="mini" style="margin-left:8px" title="Bring back the ledger columns — Begin, In, Produced, Used, Transfers and Adjustments — for reconciling. Remembered on this browser."><input type="checkbox" ${LS_WORK?'checked':''} onchange="lsToggleWork(this.checked)"> Show working</label>
+    <div class="sp"></div><span style="color:var(--muted)">${LS_WORK?'begin + in + produced − used − sold ± moves = ending':'what is on hand now · what is on order · what sold'}</span>`;
+  /* ---- WHAT IS BOUGHT AND NOT YET HERE --------------------------------
+     The same source the MRP nets against: lines on a PO at 'confirmed' or
+     'partial', less whatever has already been received on them. It is NOT in
+     the ledger and must never be added to on-hand — a kilo on a truck cannot be
+     cooked. It earns a column because the question it answers ("do I need to
+     order this again?") was being answered by guesswork. */
+  let onOrd={}, onOrdRef={}, onOrdEta={};
+  try{
+    const open={};
+    (await db.list('purchase_orders',{})).forEach(o=>{ const st=String(o.status||'').toLowerCase();
+      if(st==='confirmed'||st==='partial') open[o.po_ref]={eta:String(o.expected_delivery||'').slice(0,10), sup:o.supplier_name||''}; });
+    if(Object.keys(open).length){
+      const _i0=await listIngredients(); const _sup={}; _i0.forEach(i=>{ if(isSupplyItem(i)) _sup[i.sku]=1; });
+      (await db.list('po_lines',{})).forEach(l=>{
+        if(!(l.po_ref in open)) return;
+        const left=poRemainQty(l); if(!(left>0.0001)) return;
+        // supplies are held in whole units, food in grams — the same basis the row uses
+        const q=_sup[l.ingredient_sku]?left:left*1000;
+        onOrd[l.ingredient_sku]=(onOrd[l.ingredient_sku]||0)+q;
+        (onOrdRef[l.ingredient_sku]=onOrdRef[l.ingredient_sku]||[]).push(l.po_ref);
+        const e=open[l.po_ref].eta;
+        if(e && (!onOrdEta[l.ingredient_sku] || e<onOrdEta[l.ingredient_sku])) onOrdEta[l.ingredient_sku]=e;
+      });
+    }
+  }catch(e){}
+  window._lsOnOrder=onOrd; window._lsOnOrderRef=onOrdRef; window._lsOnOrderEta=onOrdEta;
   let mov=[],ings=[],prods=[]; try{mov=await ledgerAll();}catch(e){}
   /* A date window, not a filter on the ROW — an inventory balance is a running
      total, so hiding early movements would not narrow the view, it would give
@@ -5233,16 +5287,34 @@ function drawLiveStock(){
   const _lr=r=>r.grank==null?500000:r.grank;
   const _gmin=arr=>Math.min(...arr.map(_lr));
   const byG1={}; rows.forEach(r=>{ (byG1[r.g1]=byG1[r.g1]||[]).push(r); });
+  /* The ledger columns only when somebody has asked to see the working. The
+     span figures below are driven off this one flag so the group rows, the
+     empty state and the colspans cannot drift from the header. */
+  const W=LS_WORK?1:0;
+  /* CURRENT STOCK AND COVER GO BEHIND THE TOGGLE TOO, and that is not an
+     oversight. They are a SECOND reading of "what have we got": business-wide
+     whatever the Site filter says, finished goods only, sellable-plus-pipeline.
+     All of that is true and useful — and a column called "Current stock" sitting
+     next to a column called "On hand", holding a different number, is the exact
+     shape of the confusion this change exists to end. The simple view answers
+     the question once. Show working brings the second reading back for anybody
+     who needs to reconcile the two. */
+  const SPW=(SP&&LS_WORK)?SP:0;
+  const _wh=W?`<th class="num" title="The opening balance — the OLDEST number on this row, not what is in the freezer">Begin</th><th class="num" title="Delivered and booked in during the window — already inside On hand">+In</th><th class="num">+Prod</th><th class="num">−Used</th>`:'';
+  const _wh2=W?`<th class="num">±Transfer</th><th class="num">±Adjust</th>`:'';
   h+=`<div class="repcard"><div style="overflow-x:auto"><table><thead><tr>
-    <th>Item</th><th>Unit</th><th class="num">Begin</th><th class="num">+In</th><th class="num">+Prod</th><th class="num">−Used</th><th class="num" title="Sold on Shopify, less anything refunded or returned">−Sold</th><th class="num">±Transfer</th><th class="num">±Adjust</th><th class="num">Ending</th>${SP?`<th class="num" title="Finished packs only. Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. Business-wide, whatever the Site filter above says — the sellable half is by definition at the shop.">Current<br>stock</th><th class="num" title="Days the sellable shelf lasts · everything we own against New Par + safety stock">Cover<br>d · %</th>`:''}${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
-  if(!rows.length) h+=`<tr><td colspan="${(mh?11:12)+SP}" class="empty">${(LS_Q||LS_FLAG)?'Nothing matches that search.':(LS_ACT?'Nothing needs action ✅':'No stock movements yet.')}</td></tr>`;
+    <th>Item</th><th>Unit</th>${_wh}<th class="num" title="Sold on Shopify, less anything refunded or returned">−Sold</th>${_wh2}<th class="num" title="What is in the freezer right now, straight from the ledger">On hand</th><th class="num" title="Bought and not yet delivered — open quantity on confirmed or partly received purchase orders. NOT included in On hand: it is not in the building.">On order</th>${SPW?`<th class="num" title="Finished packs only. Current stock = what ${esc(locName(planSellLoc()))} can sell now + what is made and sitting at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}. Business-wide, whatever the Site filter above says — the sellable half is by definition at the shop.">Current<br>stock</th><th class="num" title="Days the sellable shelf lasts · everything we own against New Par + safety stock">Cover<br>d · %</th>`:''}${mh?'':'<th class="num">Value</th>'}<th>Flag</th></tr></thead><tbody>`;
+  /* 2 fixed (Item, Unit) + the working columns + Sold + On hand + On order
+     + the stock-picture pair + Value + Flag. Derived, never counted by hand. */
+  const NCOL=2 + (W?6:0) + 1 + 2 + SPW + (mh?0:1) + 1;
+  if(!rows.length) h+=`<tr><td colspan="${NCOL}" class="empty">${(LS_Q||LS_FLAG)?'Nothing matches that search.':(LS_ACT?'Nothing needs action ✅':'No stock movements yet.')}</td></tr>`;
   Object.keys(byG1).sort((a,b)=>_gmin(byG1[a])-_gmin(byG1[b])||cmpGroupKeys(a,b)).forEach(g1=>{
     const g1list=byG1[g1]; const gval=g1list.reduce((s,r)=>s+r.value,0);
-    h+=`<tr style="background:#e7f0e9"><td colspan="${10+SP}"><b>${esc(g1)}</b> <span class="mini">· ${g1list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
+    h+=`<tr style="background:#e7f0e9"><td colspan="${NCOL-(mh?1:2)}"><b>${esc(g1)}</b> <span class="mini">· ${g1list.length} item(s)</span></td>${mh?'':`<td class="num"><b>${fmt(gval)}</b></td>`}<td></td></tr>`;
     const byG2={}; g1list.forEach(r=>{ (byG2[r.g2]=byG2[r.g2]||[]).push(r); });
     Object.keys(byG2).sort((a,b)=>_gmin(byG2[a])-_gmin(byG2[b])||cmpGroupKeys(a,b)).forEach(g2=>{
     const list=byG2[g2].slice().sort((a,b)=>_lr(a)-_lr(b)||cmpItems(a,b));
-    h+=`<tr style="background:#f6f8f4"><td colspan="${(mh?11:12)+SP}" style="padding-left:24px">▸ <b>${esc(g2)}</b> <span class="mini">(${list.length})</span></td></tr>`;
+    h+=`<tr style="background:#f6f8f4"><td colspan="${NCOL}" style="padding-left:24px">▸ <b>${esc(g2)}</b> <span class="mini">(${list.length})</span></td></tr>`;
     list.forEach(r=>{ const endCol=r.neg?'var(--danger)':(r.below?'var(--earth,#b5762a)':'var(--ink)');
       /* THE SHOP'S OWN COUNT, WHEN IT DISAGREES WITH OURS.
          A row could show Ending 54 in one column and "33 Shopify" two columns
@@ -5263,18 +5335,28 @@ function drawLiveStock(){
       const model=pm[r.sku]?'products':'ingredients';
       h+=`<tr${cl} onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open item">
         <td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${r.noLedger?' · counted, not moved — no ledger history':''}${r.virgin?' · <span style="color:var(--earth,#b5762a)">nothing has moved yet — never received, made or counted</span>':''}</div></td><td class="mini">${esc(r.unit)}</td>
-        <td class="num">${qf(r.begin,r.div)}</td><td class="num">${r.recv?qf(r.recv,r.div):'—'}</td><td class="num">${r.prod?qf(r.prod,r.div):'—'}</td>
-        <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td>
+        ${W?`<td class="num">${qf(r.begin,r.div)}</td><td class="num">${r.recv?qf(r.recv,r.div):'—'}</td><td class="num">${r.prod?qf(r.prod,r.div):'—'}</td>
+        <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td>`:''}
         <td class="num"${(r.sold||r.back)?' title="sold '+qf(r.sold,r.div)+(r.back?' · back '+qf(r.back,r.div):'')+'"':''}>${(r.sold||r.back)?qf(r.sold+r.back,r.div):'—'}</td>
-        <td class="num">${r.tf?qf(r.tf,r.div):'—'}</td><td class="num">${r.adj?qf(r.adj,r.div):'—'}</td>
-        <td class="num" style="color:${endCol}"><b>${qf(r.end,r.div)}</b></td>${SP?(()=>{ const pic=(r.kind==='product')?stockPicFor(r.sku):null;
+        ${W?`<td class="num">${r.tf?qf(r.tf,r.div):'—'}</td><td class="num">${r.adj?qf(r.adj,r.div):'—'}</td>`:''}
+        <td class="num" style="color:${endCol}"><b>${qf(r.end,r.div)}</b></td>
+        ${(()=>{ const oo=+(window._lsOnOrder||{})[r.sku]||0;
+          if(!(oo>0)) return '<td class="num"><span class="mini" style="color:var(--muted)">—</span></td>';
+          const refs=((window._lsOnOrderRef||{})[r.sku]||[]); const eta=(window._lsOnOrderEta||{})[r.sku]||'';
+          return `<td class="num" style="color:#3c6ea5" title="On ${esc(refs.join(', '))}${eta?(' · earliest expected '+esc(eta)):' · no expected date set'}. Not counted in On hand — it has not arrived.">${qf(oo,r.div)}${eta?`<div class="mini" style="color:var(--muted)">${esc(eta.slice(5))}</div>`:''}</td>`; })()}${SPW?(()=>{ const pic=(r.kind==='product')?stockPicFor(r.sku):null;
           return `<td class="num">${pic?spStockCell(pic):'<span class="mini" style="color:var(--muted)">—</span>'}</td><td class="num">${pic?spCoverCell(pic):'<span class="mini" style="color:var(--muted)">—</span>'}</td>`; })():''}${mh?'':`<td class="num">${fmt(r.value)}</td>`}<td>${flag}</td></tr>`; });
     });
   });
   h+=`</tbody></table></div>
-    <div class="hint" style="margin-top:8px"><b>Ending = Begin + In + Prod − Used ± Transfer ± Adjust</b>, straight from the ledger — so it both explains and equals current on-hand. Ingredients show in <b>kg</b>, finished goods in <b>packs</b>, supplies in their unit. Rows open the item; <b style="color:var(--earth,#b5762a)">⚠ reorder</b> = at/below reorder or PAR, <b style="color:var(--danger)">🔴 negative</b> = a ledger gap to fix. ${LS_LOC==='all'?'Showing every site combined — switch Site to split them.':''}
-    ${SP?`<br><b>Current stock</b> and <b>Cover</b> are finished-goods columns and are <b>business-wide whatever the Site filter says</b> — the first figure is what <span style="color:#2f5d33">${esc(locName(planSellLoc()))}</span> can sell right now, the second is what is sitting <span style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</span>. They are the same numbers Regular Packs, the Weekly Demand Target and the Production Plan read, so the four screens cannot disagree about what current stock means.`
-      :'<br><b>Current stock</b> and <b>Cover</b> are hidden because the clock has been stopped at a past date — today’s shelf is not an answer to a question about last month.'}</div></div>`;
+    <div class="hint" style="margin-top:8px">
+      <b style="color:#3c6ea5">On order is NOT part of On hand.</b> It is stock that has been bought and has not arrived — open quantity on confirmed or partly received purchase orders — so adding the two together overstates the freezer by exactly the amount nobody can cook with yet. Hover a figure for the PO and its expected date.
+      <br><b>On hand</b> is what is in the freezer now, straight from the ledger.
+      ${LS_WORK?'<b>Ending = Begin + In + Prod − Used ± Transfer ± Adjust</b> — the working is shown, and <b>+In</b> is already inside On hand.'
+               :'<b>Begin</b> and the adjustments are hidden: Begin is the OLDEST figure on the row, and after a mass adjustment it is nowhere near what is on the shelf. Tick <b>Show working</b> above to bring the ledger back for reconciling.'}
+      Ingredients show in <b>kg</b>, finished goods in <b>packs</b>, supplies in their unit. Rows open the item; <b style="color:var(--earth,#b5762a)">⚠ reorder</b> = at/below reorder or PAR, <b style="color:var(--danger)">🔴 negative</b> = a ledger gap to fix. ${LS_LOC==='all'?'Showing every site combined — switch Site to split them.':''}
+    ${SPW?`<br><b>Current stock</b> and <b>Cover</b> are finished-goods columns and are <b>business-wide whatever the Site filter says</b> — the first figure is what <span style="color:#2f5d33">${esc(locName(planSellLoc()))}</span> can sell right now, the second is what is sitting <span style="color:var(--earth,#b5762a)">at ${esc(planSupplyLocs().map(locName).join(' / ')||'Bulacan')}</span>. They are the same numbers Regular Packs, the Weekly Demand Target and the Production Plan read, so the four screens cannot disagree about what current stock means.`
+      :(LS_WORK?'<br><b>Current stock</b> and <b>Cover</b> are hidden because the clock has been stopped at a past date — today’s shelf is not an answer to a question about last month.'
+               :'<br><b>Current stock</b> and <b>Cover</b> — the business-wide finished-goods reading — are under <b>Show working</b>, because two columns both called some version of “what we have” is what made this screen hard to read.')}</div></div>`;
   $('content').innerHTML=h;
   if(typeof applyStickyHeads==='function') applyStickyHeads($('content'));
   _lsFocus();
@@ -5368,7 +5450,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-05 09:30Z';
+const WR_BUILD='2026-10-06 15:05Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -10165,7 +10247,8 @@ async function renderMRP(){
     <button class="btn sec" onclick="saveMRPPlan()" title="Saving locks this week's demand — the Production Plan only takes targets from a saved (locked) plot">💾 Save plan (locks demand)</button>
     <button class="btn sec" onclick="renderDemandHistory()">📚 History</button>
     <button class="btn sec" onclick="openPlanLocs()">⚙ Planning locations</button>
-    <button class="wfbtn" onclick="generatePOsFromMRP()">🧾 Generate Draft POs</button>
+    ${canRaisePO()?`<button class="wfbtn" onclick="generatePOsFromMRP()" title="Opens the locked plot for this date and orders from its approved figures. This screen does not order on its own — the plot is the document everybody shares.">🧾 Order the locked plot</button>`
+      :`<span class="mini" style="color:var(--muted);margin-left:6px" title="Planning the week and buying it are two jobs. Lock the plot; Purchasing raises the orders from it.">🧾 Purchasing raises the orders</span>`}
     <div class="sp"></div><span style="color:var(--muted)">demand + lead time + PAR → replenishment → PO</span>`;
   const _allP=await db.list('products',{});
   const allBySku={}; _allP.forEach(p=>allBySku[p.sku]=p);
@@ -10896,7 +10979,9 @@ function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return'';
     ${unordered.length?`<div style="border:1px solid var(--danger);background:#fdf0ed;border-radius:6px;padding:10px 11px;margin:0 0 10px;font-size:12.5px">
       ⚠ <b>${unordered.length} locked plot(s) have no purchase order against them.</b> The week was planned and approved, and the ingredients were never bought.
       <div class="mini" style="margin-top:4px">${unordered.map(r=>esc(r.ref||r.date)+' · '+r.items+' line(s) · ₱'+Math.round(r.val).toLocaleString('en-PH')).join(' · ')}</div>
-      <div class="mini" style="margin-top:4px">Press <b>Order</b> on the row to raise them from the plot's own approved figures — it does not reopen or change the plot.</div></div>`:''}
+      <div class="mini" style="margin-top:4px">${canRaisePO()
+        ? 'Press <b>Order</b> on the row to raise them from the plot&rsquo;s own approved figures — it does not reopen or change the plot.'
+        : 'Raising the orders is Purchasing&rsquo;s step, so there is no <b>Order</b> button on your screen — tell them, or ask an Admin for Purchase Orders access.'}</div></div>`:''}
     <div style="overflow-x:auto"><table><thead><tr><th>Week</th><th>Reference</th><th>Plan date</th><th class="num">Items to order</th><th class="num">Est ₱</th><th class="num" title="Purchase orders raised from this plot">POs</th><th title="What the data checks said at the moment this plot was saved">Data</th><th></th></tr></thead><tbody>
     ${rows.map(r=>`<tr${r.draft?' style="background:#fffaf0"':''}><td>${esc(r.wk)}</td>
       <td>${r.draft?`<span class="badge b-open">Draft</span> <span class="mini" style="color:var(--muted)">not locked${r.by?' · '+esc(r.by):''}</span>`:`<code>${esc(r.ref||'—')}</code>`}</td>
@@ -10905,7 +10990,7 @@ function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return'';
         :(r.pos===null?'<span class="mini" style="color:var(--muted)">?</span>'
         :(r.pos>0?`<span style="color:#4e7a3e;font-weight:700">${r.pos}</span>`
                  :(r.items>0?'<b style="color:var(--danger)" title="This plot was locked and never ordered from">none</b>':'<span class="mini" style="color:var(--muted)">—</span>')))}</td>
-      <td>${r.draft?'<span class="mini" style="color:var(--muted)">—</span>':prPlotBadge(r.pf)}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span>${r.draft?'':` · <span class="btn link" onclick="planPOOpen(${r.i})" title="Raise the purchase orders this plot asked for, from its own approved figures. The plot is not changed or unlocked.">Order</span>`} · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
+      <td>${r.draft?'<span class="mini" style="color:var(--muted)">—</span>':prPlotBadge(r.pf)}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span>${(r.draft||!canRaisePO())?'':` · <span class="btn link" onclick="planPOOpen(${r.i})" title="Raise the purchase orders this plot asked for, from its own approved figures. The plot is not changed or unlocked.">Order</span>`} · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
     </tbody></table></div></div>`; }
 // Dedicated, VIEW-ONLY history of every saved demand plot (no reuse / no delete).
 async function renderDemandHistory(){
@@ -10919,7 +11004,7 @@ async function renderDemandHistory(){
     const lines=(d&&d.lines)||p.lines||[]; const items=lines.filter(l=>l.final>0); const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
     const by=(d&&d.by)||p.by||''; return {i,date,ref,items:items.length,val,by,wk:weekOf(date),pf:d}; });
   const body = rows.length
-    ? rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td>${prPlotBadge(r.pf)}</td><td class="mini">${esc(r.by||'')}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span>${(r.pf&&r.pf.locked===false)?'':` · <span class="btn link" onclick="planPOOpen(${r.i})">Order</span>`}</td></tr>`).join('')
+    ? rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td>${prPlotBadge(r.pf)}</td><td class="mini">${esc(r.by||'')}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span>${((r.pf&&r.pf.locked===false)||!canRaisePO())?'':` · <span class="btn link" onclick="planPOOpen(${r.i})">Order</span>`}</td></tr>`).join('')
     : '<tr><td colspan="8" class="empty">No saved demand plots yet.</td></tr>';
   $('content').innerHTML=`<div class="repcard"><h3 style="margin:0 0 6px">Saved demand plots ${isLive()?'· Supabase':''}</h3>
     <div class="hint" style="margin:0 0 10px">A read-only record of every demand plot you've saved. Open one to view its full replenishment plan — nothing here can be edited or deleted.</div>
@@ -11591,7 +11676,26 @@ async function openMRPPlanByRef(ref){
    was for this week or the last.
 
    Nothing is created until the quantities have been seen. */
+/* ---- RAISING AN ORDER IS PURCHASING'S STEP ------------------------------
+   The roles already say this: Customer Service holds Demand / MRP and not
+   Purchase Orders, Purchasing holds both. But module access only governs the
+   SIDEBAR, and both doors to raising a PO sit on screens Customer Service can
+   legitimately open — the demand screen and the saved plot. Without this check
+   she gets as far as filling in the order, and then the database refuses the
+   insert with a row-level-security error that explains nothing.
+
+   Checked up front, named as a step rather than a permission, because that is
+   what it is: planning the week and buying it are two jobs. */
+function canRaisePO(){ return roleCan(curRole(),'purchase_orders'); }
+function poStepRefused(what){
+  alert('Raising a purchase order is Purchasing\'s step, and your role ('+curRole()+') does not have Purchase Orders.\n\n'
+    +'You can plan the week and lock the plot; somebody in Purchasing turns it into orders. '
+    +(what?('('+what+')\n\n'):'\n')
+    +'If that is wrong, an Admin can tick Purchase Orders for '+curRole()+' in Users & Access and press Publish to the database.');
+  return false;
+}
 async function planPOOpen(i){
+  if(!canRaisePO()) return void poStepRefused('Order from a demand plot');
   const p=mrpPlanCache[i]; if(!p){ toast('Plot not found',true); return; }
   const d=p.data||p;
   if(d.locked===false){ toast('That is a draft, not a locked plot — lock it first and the buying list becomes a document.',true); return; }
@@ -11599,8 +11703,8 @@ async function planPOOpen(i){
   const lines=(d.lines||[]).filter(l=>+l.final>0);
   if(!lines.length){ alert('This plot has no ingredient lines, so there is nothing to order from it.\n\nThat happens when the plot was saved with demand but the replenishment side came out empty — every ingredient was already covered.'); return; }
 
-  showBusy('Reading what has arrived since this plot was locked…');
-  let since={}, already=[], err='';
+  showBusy('Reading what has arrived, and what is already on order…');
+  let since={}, onOrd={}, onOrdRef={}, already=[], err='';
   try{
     const lockedAt=String(d.saved_at||p.saved_at||'')||null;
     /* Received against each ingredient AFTER the plot was locked. Receipts only
@@ -11609,19 +11713,54 @@ async function planPOOpen(i){
       if(m.kind!=='ingredient' || m.movement_type!=='receipt') return;
       if(String(m.created_at||'')<=lockedAt) return;
       since[m.ref_sku]=(since[m.ref_sku]||0)+(+m.qty||0); }); }
+
+    const pos=await db.list('purchase_orders',{});
+
+    /* ---- WHAT HAS ALREADY BEEN ASKED FOR -------------------------------
+       The first version of this card subtracted DELIVERIES only, which is the
+       right answer when a plot is ordered days late and stock has arrived —
+       and the wrong answer when the orders exist but nothing has shipped. On
+       3 Oct exactly that happened: PO-10032026 V03.01 and V03.02 went out as
+       RFQs against buffalo, chicken liver and quail, and ordering the plot
+       would have asked for all three a second time.
+
+       So anything already ASKED FOR counts, whichever plot it was tagged to —
+       the supplier does not care which document we think it belongs to. Every
+       live status counts: open, rfq, quoted, confirmed, partial. Cancelled
+       does not, and neither does a fully received one (its goods are in the
+       "arrived" figure above if they landed after the lock).
+
+       poRemainQty is what keeps a PARTLY received order from being counted
+       twice: the delivered half is already in `since`, and only the remainder
+       is counted here. */
+    const LIVE=['open','rfq','quoted','confirmed','partial'];
+    const live={};
+    (pos||[]).forEach(o=>{ if(LIVE.includes(String(o.status||'').toLowerCase()))
+      live[o.po_ref]={ref:o.po_ref, sup:o.supplier_name||'', st:String(o.status||'').toLowerCase()}; });
+    if(Object.keys(live).length){
+      const sup={}; (await listIngredients()).forEach(x=>{ if(isSupplyItem(x)) sup[x.sku]=1; });
+      (await db.list('po_lines',{})).forEach(l=>{
+        if(!(l.po_ref in live)) return;
+        const left=poRemainQty(l); if(!(left>0.0001)) return;
+        onOrd[l.ingredient_sku]=(onOrd[l.ingredient_sku]||0)+(sup[l.ingredient_sku]?left:left*1000);
+        (onOrdRef[l.ingredient_sku]=onOrdRef[l.ingredient_sku]||[]).push(live[l.po_ref]);
+      });
+    }
+
     /* Has somebody already raised POs off this plot? The generator stamps the
        plot's iteration into the PO reference, so the same plot generating twice
        is visible without a new column anywhere. */
     const xx=_planXX(ref); const dd=_mmddyyyy(date);
-    if(xx) (await db.list('purchase_orders',{})).forEach(o=>{
+    if(xx) (pos||[]).forEach(o=>{
       if(String(o.po_ref||'').startsWith('PO-'+dd+' V'+xx+'.')) already.push(o); });
   }catch(e){ err=String(e&&e.message||e); }
   finally{ hideBusy(); }
 
   const rows=lines.map(l=>{
     const recv=Math.max(0, +since[l.sku]||0);
-    const left=Math.max(0, (+l.final||0)-recv);
-    return {...l, _recv:recv, _sugg:left};
+    const oo  =Math.max(0, +onOrd[l.sku]||0);
+    const left=Math.max(0, (+l.final||0)-recv-oo);
+    return {...l, _recv:recv, _oo:oo, _ooRef:(onOrdRef[l.sku]||[]), _sugg:left};
   });
   window._planPO={i, ref, date, rows, already, err};
   planPODraw();
@@ -11636,6 +11775,8 @@ function planPODraw(){
   const totVal=S.rows.reduce((a,r)=>a+((+r._sugg||0)/1000)*(+r.price||0),0);
   const nOrder=S.rows.filter(r=>+r._sugg>0).length;
   const covered=S.rows.filter(r=>+r._recv>0);
+  const asked=S.rows.filter(r=>+r._oo>0);
+  const fully=S.rows.filter(r=>+r._sugg<=0 && ((+r._recv>0)||(+r._oo>0)));
   const bySup={}; S.rows.filter(r=>+r._sugg>0).forEach(r=>{ const k=r.supplier||'(unassigned)'; (bySup[k]=bySup[k]||[]).push(r); });
 
   $('modal').innerHTML=`<div class="mwrap"><div class="mhead">🧾 Purchase orders from <code>${esc(S.ref||'this plot')}</code><span style="flex:1"></span>
@@ -11647,24 +11788,30 @@ function planPODraw(){
         ⚠ <b>${S.already.length} purchase order(s) already exist for this plot.</b> Generating again creates a second set, and the supplier gets asked twice.
         <div class="mini" style="margin-top:4px">${esc(S.already.map(o=>o.po_ref+(o.supplier_name?(' · '+o.supplier_name):'')).join(' · '))}</div>
         <div class="mini" style="margin-top:4px">If those are the ones that were missed, there is nothing to do here — open Purchasing and send them.</div></div>`:''}
+      ${asked.length?`<div style="border:1px solid #3c6ea5;background:#eef4fa;border-radius:6px;padding:10px 11px;margin-bottom:10px;font-size:12.5px">
+        <b>${asked.length} line(s) are ALREADY ON ORDER</b> — asked for on a purchase order that is still live, whichever plot it was tagged to. Those quantities are subtracted, so the supplier is not asked twice.
+        <div class="mini" style="margin-top:4px">${asked.slice(0,8).map(r=>esc(r.name||r.sku)+' — '+(Math.round(r._oo/10)/100)+' kg on '+[...new Set(r._ooRef.map(x=>x.ref))].join(', ')).join('<br>')}${asked.length>8?('<br>… and '+(asked.length-8)+' more'):''}</div></div>`:''}
+      ${fully.length?`<div style="border:1px solid #cfe0cf;background:#f1f7f1;border-radius:6px;padding:9px 11px;margin-bottom:10px;font-size:12.5px">
+        ✓ <b>${fully.length} line(s) need nothing</b> — already delivered or already on order in full. They are set to 0 and will not appear on any new PO.</div>`:''}
       ${covered.length?`<div style="border:1px solid #e0b400;background:#fff8e1;border-radius:6px;padding:10px 11px;margin-bottom:10px;font-size:12.5px">
         <b>${covered.length} line(s) have had stock delivered since this plot was locked.</b> The suggested quantity is the approved figure less what arrived.
         <div class="mini" style="margin-top:4px">Check these yourself: a delivery that was for the PREVIOUS week has been subtracted here too, and only you know which.</div></div>`:''}
       ${S.err?`<div class="hint" style="border-left:4px solid var(--danger);margin-bottom:10px"><b>Could not read the ledger</b> (${esc(S.err.slice(0,120))}), so nothing has been subtracted — every line shows the full approved quantity.</div>`:''}
       <div style="overflow-x:auto"><table><thead><tr>
-        <th>Ingredient</th><th>Supplier</th><th class="num">Approved</th><th class="num">Arrived since</th><th class="num">Order now (kg)</th><th class="num">Est ₱</th></tr></thead><tbody>
+        <th>Ingredient</th><th>Supplier</th><th class="num">Approved</th><th class="num" title="Delivered since this plot was locked">Arrived since</th><th class="num" title="Still owed on a live purchase order — open, RFQ sent, quoted, confirmed or partly received. Cancelled orders do not count.">Already on order</th><th class="num">Order now (kg)</th><th class="num">Est ₱</th></tr></thead><tbody>
         ${S.rows.map((r,n)=>`<tr${(+r._sugg>0)?'':' style="opacity:.45"'}>
           <td>${esc(r.name||r.sku)}<div class="mini"><code>${esc(r.sku)}</code></div></td>
           <td class="mini">${esc(r.supplier||'(unassigned)')}</td>
           <td class="num mini">${kg(r.final)}</td>
           <td class="num mini"${(+r._recv>0)?' style="color:#b5762a;font-weight:700"':''}>${(+r._recv>0)?kg(r._recv):'—'}</td>
+          <td class="num mini"${(+r._oo>0)?' style="color:#3c6ea5;font-weight:700"':''}${(+r._oo>0)?(' title="'+esc(r._ooRef.map(x=>x.ref+' · '+x.st+(x.sup?(' · '+x.sup):'')).join(' | '))+'"'):''}>${(+r._oo>0)?kg(r._oo):'—'}</td>
           <td class="num"><input type="number" step="any" inputmode="decimal" min="0" value="${kg(r._sugg)}"
               onchange="planPOSet(${n},this.value)" style="width:92px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
           <td class="num mini">${Math.round(((+r._sugg||0)/1000)*(+r.price||0)).toLocaleString('en-PH')}</td></tr>`).join('')}
       </tbody></table></div>
       <div class="pager">${nOrder} line(s) · ${kgf(totKg)} kg · est. ₱${Math.round(totVal).toLocaleString('en-PH')}
         · ${Object.keys(bySup).length} draft PO(s), one per supplier</div>
-      <div class="mini" style="color:var(--muted);margin-top:6px">Set a line to <b>0</b> to leave it out. Drafts are created open and unsent — nothing reaches a supplier until somebody sends it.</div>
+      <div class="mini" style="color:var(--muted);margin-top:6px"><b>Order now = Approved − Arrived since − Already on order</b>, floored at zero. Set a line to <b>0</b> to leave it out, or type over any figure. Drafts are created open and unsent — nothing reaches a supplier until somebody sends it.</div>
     </div>
     <div class="mfoot" style="display:flex;gap:8px;margin-top:12px">
       <button class="btn" onclick="planPOGenerate()" ${nOrder?'':'disabled'}>🧾 Create ${Object.keys(bySup).length} draft PO(s)</button>
@@ -11705,10 +11852,12 @@ async function planPOGenerate(){
         /* Say WHERE it came from and that it was raised late, because a PO with
            an order_date eight days before it exists will otherwise read as an
            overdue delivery on every screen that ages purchase orders. */
-        const trimmed=bySup[sup].filter(l=>+l._recv>0);
+        const trimmed=bySup[sup].filter(l=>(+l._recv>0)||(+l._oo>0));
         sysLog('purchase_orders',ref,'🧾 Raised from locked demand plot '+(S.ref||'')+' ('+S.date+') by '+CURRENT_USER
           +' — plot locked '+String((mrpPlanCache[S.i]&&(mrpPlanCache[S.i].saved_at))||'').slice(0,10)+', ordered today'
-          +(trimmed.length?('\n• reduced by stock received since the plot was locked: '+trimmed.map(l=>l.name+' −'+(Math.round(l._recv/10)/100)+' kg').join('; ')):''));
+          +(trimmed.length?('\n• reduced by what was already covered: '+trimmed.map(l=>l.name
+              +(+l._recv>0?(' −'+(Math.round(l._recv/10)/100)+' kg received'):'')
+              +(+l._oo>0?(' −'+(Math.round(l._oo/10)/100)+' kg already on order'):'')).join('; ')):''));
         made.push(ref+' · '+sup+' ('+bySup[sup].length+')');
       }catch(e){ toast('Could not create the PO for '+sup+': '+e.message, true); }
     }
@@ -11774,7 +11923,7 @@ async function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.
       <h4 style="margin:14px 0 6px">Replenishment (${lines.length} item(s) · est. ₱${Math.round(totVal).toLocaleString('en-PH')})</h4>
       <table><thead><tr>${_rc.map(c=>`<th${c.align==='right'?' class="num"':''}>${esc(c.label)}</th>`).join('')}</tr></thead><tbody>${lineRows}</tbody></table>
     </div>
-    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="printMRPPlan()">🖨 Print</button><button class="btn sec" onclick="downloadMRPPlan()">⬇ Download CSV</button>${lines.length?`<button class="btn sec" onclick="planPOOpen(${i})" title="Raise the purchase orders this plot asked for, from the plot's own approved figures. The plot is not changed or unlocked.">🧾 Generate purchase orders</button>`:''}<span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
+    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="printMRPPlan()">🖨 Print</button><button class="btn sec" onclick="downloadMRPPlan()">⬇ Download CSV</button>${(lines.length&&canRaisePO())?`<button class="btn sec" onclick="planPOOpen(${i})" title="Raise the purchase orders this plot asked for, from the plot's own approved figures. The plot is not changed or unlocked.">🧾 Generate purchase orders</button>`:''}<span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
   $('overlay').classList.add('on');
 }
 function _viewPlanRows(){ const v=window._viewPlan; if(!v)return[]; return (v.d.lines||[]).filter(l=>l.final>0); }
@@ -11879,44 +12028,91 @@ function downloadMRPPlan(){ const v=window._viewPlan; if(!v)return; const lines=
   const csv=aoa.map(r=>r.map(c=>/[",\n]/.test(String(c))?'"'+String(c).replace(/"/g,'""')+'"':c).join(',')).join('\n');
   dlBlob(csv,'WR_demand_'+(v.date||'plot')+'_'+(v.ref||'').replace(/[^\w.-]+/g,'_')+'.csv','text/csv'); toast('Downloaded'); }
 async function delMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; if(!confirm('Delete this saved demand plan? This cannot be undone.'))return; try{ if(isLive()&&p.id){ await sb('mrp_plans?id=eq.'+p.id,{method:'DELETE',prefer:'return=minimal'}); } else { const a=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]'); a.splice(i,1); localStorage.setItem('wr_mrp_plans',JSON.stringify(a)); } }catch(e){ toast(e.message,true); } renderMRP(); }
+/* ==================== WHAT THIS BUTTON USED TO DO ==========================
+   PO-MMDDYYYY V<XX>.<ZZ> — XX is the demand plot's iteration, which is what ties
+   an order back to the week it was approved for. If the plan had not been saved
+   IN THIS BROWSER, the old code did this:
+
+       let xx=window._mrpDPit;
+       if(!xx){ const g=await genRef('DP',...); xx=g.it; }   // mint a new one
+
+   It called genRef('DP') purely to obtain a number — consuming the demand-plot
+   counter and labelling the orders with a plot that was never created. On 3 Oct
+   it did exactly that: hey@ locked DP-10032026 [RAW] V02 at 08:39, the counter
+   ticked to 3 at 08:41:37.84, and 0.2 s later three POs appeared stamped
+   "Auto-generated from Demand Plot V03". There is no V03. There never was.
+   The log line was a false statement and I wrote it.
+
+   Worse than the phantom number: the orders came from whatever was in THAT
+   person's editor, which was not the plot somebody else had locked two minutes
+   earlier in a different browser. 14 of the plot's 19 lines — 415 kg — were
+   never ordered at all, and nothing said so.
+
+   So this button no longer invents anything:
+     * a locked plot for the date  -> use ITS iteration, and prefer ordering
+       from the plot itself, which uses the approved figures rather than a
+       recomputation of whatever is on screen
+     * no plot                     -> V00, which reads as "no plot behind this",
+       and the person has to confirm they mean an order nothing authorised
+   The DP counter is never touched here again. */
+/* ==================== THE PLOT IS THE ORDER, FULL STOP =====================
+   THE LOCKED PLOT IS SHARED. mrp_plans is a Supabase table: the moment one
+   person locks it, it is the same document for everybody. That was never the
+   problem, and an earlier note of mine saying "the demand editor is per-browser"
+   was read — fairly — as claiming otherwise. To be exact: the PLOT is shared;
+   the EDITOR is not. mrpDemand, mrpManual and window._mrpPlan are JavaScript
+   variables living in one tab.
+
+   And that is the whole bug. This button read window._mrpPlan — the pressing
+   user's own screen — while the shared, approved, complete plot sat one table
+   away. On 3 Oct that ordered 5 lines against a plot of 19 and left 415 kg
+   unbought.
+
+   So the button no longer computes anything. It finds the locked plot for the
+   date and hands over to the plot's own ordering flow, which reads the approved
+   figures and nets off what has arrived and what is already on order.
+
+   THERE IS NO "RECOMPUTE ANYWAY" OPTION, and removing it takes nothing away.
+   If today's numbers genuinely differ from the plot, the honest response is to
+   LOCK A NEW PLOT for today — a second document, visible, approved, orderable —
+   not to quietly buy different quantities against yesterday's. And an order that
+   answers to no plot at all has its own door: Purchasing → New purchase order. */
 async function generatePOsFromMRP(){
-  const lines=(window._mrpPlan||[]).filter(l=>l.final>0);
-  if(!lines.length){ toast('Nothing to order — set demand first',true); return; }
-  const bySup={}; lines.forEach(l=>{ const s=l.supplier||'(unassigned)'; (bySup[s]=bySup[s]||[]).push(l); });
-  const supList=Object.keys(bySup); const total=supList.length;
-  showBusy('Creating draft POs… (0 of '+total+')');
-  const refs=[];
-  try{
-    // XX = the demand plot's iteration; mint one now if the plan wasn't saved first
-    let xx=window._mrpDPit; if(!xx){ const g=await genRef('DP',{category:'RAW',date:MRPDATE}); xx=g.it; window._mrpDPit=xx; }
-    // taken refs, read once — so generating the same plot twice never lands on a
-    // live order and silently rewrites its lines
-    const _taken=new Set(); try{ (await db.list('purchase_orders',{})).forEach(o=>{ if(o&&o.po_ref) _taken.add(String(o.po_ref)); }); }catch(e){}
-    const _dd=_mmddyyyy(MRPDATE);
-    let zz=0, slot=0;
-    for(const sup of supList){ zz++;
-      setBusy('Creating draft PO '+zz+' of '+total+' — '+sup);
-      let ref='';
-      do{ slot++; ref='PO-'+_dd+' V'+_p2(xx)+'.'+_p2(slot); }while(_taken.has(ref)&&slot<99);
-      _taken.add(ref);   // PO-MMDDYYYY VXX.ZZ
-      const rec={po_ref:ref, supplier_name:(sup==='(unassigned)'?null:sup), order_date:MRPDATE, status:'open', created_by:CURRENT_USER};
-      try{
-        await db.create('purchase_orders', rec);
-        // ordered_kg holds kilos for food and WHOLE UNITS for a supply — the same
-        // basis receiving uses, so a box of masks is not received as 0.007 kg.
-        const pl=bySup[sup].map(l=>({po_ref:ref, ingredient_sku:l.sku,
-          ordered_kg: l.isSupply ? l.final : Math.round(l.final/10)/100,
-          price_kg:l.price, received_kg:0}));
-        await db.replaceChildren({model:'po_lines',fk:'po_ref'}, ref, pl);
-        const _rem=bySup[sup].filter(l=>l.remark).map(l=>l.name+' — '+l.remark);
-        sysLog('purchase_orders',ref,'🤖 Auto-generated from Demand Plot V'+_p2(xx)+' ('+MRPDATE+') by '+CURRENT_USER+(_rem.length?('\n• '+_rem.join('\n• ')):''));
-        refs.push(ref+' · '+sup+' ('+bySup[sup].length+')');
-      }catch(e){ toast(e.message,true); }
-    }
-  } finally { hideBusy(); }
-  toast('Created '+refs.length+' draft PO(s), grouped by default supplier');
-  openModel('purchase_orders');
+  if(!canRaisePO()) return void poStepRefused('Generate Draft POs');
+
+  /* The locked plot for this date. mrpPlanCache is loaded by renderMRP and
+     holds drafts too, so the lock is tested explicitly. */
+  const _plotIdx=(mrpPlanCache||[]).findIndex(q=>{
+    if(String(q.plan_date||q.date||'').slice(0,10)!==MRPDATE) return false;
+    const d=q.data||q;
+    return !!(d && d.locked!==false && d.ref && _planXX(d.ref));
+  });
+
+  if(_plotIdx<0){
+    const _draft=mrpDraftFor(MRPDATE);
+    alert('There is no locked demand plot for '+MRPDATE+', so there is nothing to order against.\n\n'
+      +(_draft ? 'There is a DRAFT for this date. A draft is not a document — lock it with “Save plan (locks demand)” and it becomes orderable.\n\n'
+               : '')
+      +'Purchase orders are raised from the plot, not from this screen: the plot holds the figures that were approved and everybody can see the same ones.\n\n'
+      +'Either:\n'
+      +'  • Save plan (locks demand), then press Order on the plot; or\n'
+      +'  • Purchasing → New purchase order, if you genuinely mean an order that stands on its own.');
+    sysLog('mrp', MRPDATE, '⛔ Generate POs refused for '+CURRENT_USER+' — no locked demand plot for this date');
+    return;
+  }
+
+  /* Hand straight over. No confirmation: there is nothing to decide between —
+     this IS ordering the week, and the plot is where the week lives. */
+  closeModal();
+  return planPOOpen(_plotIdx);
 }
+
+/* The old body, kept only for the plot flow's own use. Nothing calls it from
+   the demand screen any more. */
+/* The screen-side generator is GONE, not parked. Keeping it as dead code would
+   leave the exact routine that ordered 5 lines against a 19-line plot sitting in
+   the file for somebody to call again. Purchase orders are raised from the plot
+   — planPOOpen / planPOGenerate — and from nowhere else. */
 
 /* Users & Access */
 /* ==================== NAVIGATION vs THE DATABASE ==========================
@@ -12557,6 +12753,51 @@ async function poQuoteApply(){
   }catch(e){ toast(e.message,true); }
 }
 // STEP 3 — issue the final PO, with order qty based on the quoted availability (quoted → confirmed).
+/* ==================== WHO ACTUALLY DID IT ==================================
+   A purchase order carried one name — created_by — and the document printed it
+   as if that person had done everything. In practice the steps belong to
+   different people: one raises it from the demand plot, somebody else issues it
+   to the supplier, the commissary receives it, finance pays it. Every one of
+   those is a decision somebody is answerable for, and the PO recorded none of
+   them. "Who issued this?" had no answer anywhere except a system-log line
+   nobody reads.
+
+   Four columns, stamped automatically at the moment the step happens. Nothing
+   is gated on them — a role that can post can still act, which is the rule set
+   on 4 Oct — they simply record what happened.
+
+   Each stamp is its own call in its own try: a database that has not had the
+   migration run must not lose a real receipt because it could not record a
+   name. A missing column degrades to "not recorded", which is honest, rather
+   than to a failed receipt, which is expensive. */
+const PO_STEP={ issued:'issued_by', received:'received_by', paid:'paid_by', closed:'closed_by' };
+async function poStamp(ref, step, when){
+  const col=PO_STEP[step]; if(!col||!ref) return false;
+  const at=col.replace(/_by$/,'_at');
+  const body={}; body[col]=CURRENT_USER; if(when!==false) body[at]=new Date().toISOString();
+  if(!isLive()){
+    try{ const r=(DEMO.purchase_orders||[]).find(o=>o.po_ref===ref); if(r) Object.assign(r,body); }catch(e){}
+    try{ if(formRec&&formRec.po_ref===ref) Object.assign(formRec,body); }catch(e){}
+    return true;
+  }
+  try{
+    await sb('purchase_orders?po_ref=eq.'+encodeURIComponent(ref),
+      {method:'PATCH',prefer:'return=minimal',body:JSON.stringify(body)});
+    try{ if(formRec&&formRec.po_ref===ref) Object.assign(formRec,body); }catch(e){}
+    return true;
+  }catch(e){
+    /* Only the TIMESTAMP half is likely missing on an older schema — retry with
+       just the name before giving up, so a half-migrated database still records
+       who, even if it cannot record when. */
+    try{ const b2={}; b2[col]=CURRENT_USER;
+      await sb('purchase_orders?po_ref=eq.'+encodeURIComponent(ref),
+        {method:'PATCH',prefer:'return=minimal',body:JSON.stringify(b2)});
+      try{ if(formRec&&formRec.po_ref===ref) Object.assign(formRec,b2); }catch(e2){}
+      return true; }catch(e2){}
+    console.warn('po stamp failed', step, String(e&&e.message||e));
+    return false;
+  }
+}
 async function openPOConfirm(){
   if(formIsNew){ toast('Save the PO first',true); return; }
   const lines=formChildren||[];
@@ -12626,6 +12867,7 @@ async function poConfirmApply(){
     if(eta) formRec.expected_delivery=eta;
     const _upd={status:'confirmed'}; if(eta) _upd.expected_delivery=eta;
     await formUpdate('purchase_orders','po_ref',formRec.po_ref,_upd);
+    await poStamp(formRec.po_ref,'issued');     // the person who committed us to the supplier
     if(eta) changes.push('expected delivery '+eta);
     sysLog('purchase_orders',formRec.po_ref, (changes.length?('🧾 PO issued with adjustments — '+changes.join('; ')):'🧾 PO issued from quotation — qty = vendor availability')+' by '+CURRENT_USER);
     notifyRecordDone('purchase_orders', formRec.po_ref);   // issued → generate PDF → Drive → notify
@@ -12815,6 +13057,8 @@ async function paymentApply(){
   }
   try{
     await db.create('po_payments',{po_ref:formRec.po_ref, amount:_amt, method, paid_at, note, paid_by:CURRENT_USER, payee});
+    // the payment row already names the payer; this carries the latest onto the PO itself
+    await poStamp(formRec.po_ref,'paid');
     window._poPay = await poPayments(formRec.po_ref);
     const billable=poBillable(formRec,formChildren);
     // only what went to the SUPPLIER settles the supplier's bill
@@ -13131,6 +13375,11 @@ async function _poReceiveApply(){
         {method:'PATCH',prefer:'return=minimal',body:JSON.stringify({received_at:_ra})});
         formRec.received_at=_ra; }catch(e){}
     }
+    /* Stamped on EVERY receipt, not only the first: a PO received in batches is
+       often received by different people, and the name that matters when a
+       quantity is queried is whoever booked in the batch being queried. The log
+       keeps the full sequence; this column holds the most recent. */
+    await poStamp(formRec.po_ref,'received');
     /* WHAT WAS WRITTEN, NOT WHAT WAS TYPED. The log used to add up the boxes
        on the form; if the ledger rejected a line the log still claimed it. */
     const batchQty=_res?_res.posted:deltas.reduce((s,d)=>s+(+d.recvKg||0),0);
