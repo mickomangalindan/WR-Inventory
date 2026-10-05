@@ -5631,7 +5631,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-06 19:20Z';
+const WR_BUILD='2026-10-06 23:05Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -9656,14 +9656,47 @@ function rpReset(){ RP=Object.assign({},RP_DEF); saveRawPar(); toast('Raw par se
    and the "Raw input (what you buy)" text is the fallback for rows that never
    had one set.  Same resolution the demand roll-up uses — deliberately, so a
    target and a need can never disagree about which ingredient they mean. */
+/* ---- THE THING WE ACTUALLY BUY, HOWEVER MANY STEPS AWAY IT IS -------------
+   This walked ONE step and stopped, and that single step is why live goat was
+   never ordered. The goat chain is two:
+
+       OUT-GOAT-DEBONED-MEAT -> OUT-GOAT-WHOLE-DRESSED -> RAW-LIVE-GOAT
+
+   so the demand landed on the whole-dressed carcass, which is itself a
+   processed form, and the buying loop drops processed forms because they are
+   made rather than bought. Nobody was told. The 3 Oct plot carried 23.52 kg of
+   deboned goat meat and ordered no goat at all. Fourteen BOM ingredients sit on
+   a two-step chain -- every rabbit cut and both goat cuts.
+
+   THE YIELD IS NOT MULTIPLIED ALONG THE WAY, and that is the one thing to get
+   right here. A cut's yield_pct is stated against the ROOT, not against its
+   immediate parent -- the records say so themselves: every rabbit cut carries
+   live_yield_pct identical to its yield_pct, and _prodLiveAnimals() has always
+   read it that way ("the cut's own yield is stated against live weight").
+   Rabbit deboned meat is 32% of a LIVE rabbit, not 32% of the 50% carcass.
+   Compounding the two would have asked for twice the animals.
+
+   A one-step chain is unchanged: its parent is already the root. */
 function rawParRoot(it, bySku, byName){
   if(!it) return '';
   if(!isProcessedItem(it)) return it.sku;
-  const bySrc = (it.source_sku && bySku[it.source_sku]) ? bySku[it.source_sku] : null;
-  const ri=(it.raw_input||'').trim().toLowerCase();
-  const byRi = (ri && byName[ri] && byName[ri].sku!==it.sku) ? byName[ri] : null;
-  const parent = bySrc || byRi;
-  return parent ? parent.sku : it.sku;
+  const step=(x)=>{
+    const bySrc = (x.source_sku && bySku[x.source_sku]) ? bySku[x.source_sku] : null;
+    const ri=(x.raw_input||'').trim().toLowerCase();
+    const byRi = (ri && byName[ri] && byName[ri].sku!==x.sku) ? byName[ri] : null;
+    return bySrc || byRi;
+  };
+  let cur=it; const seen={}; seen[it.sku]=1;
+  for(let hop=0; hop<8; hop++){
+    const nx=step(cur);
+    if(!nx || seen[nx.sku]) break;          // no parent, or a loop in the master data
+    seen[nx.sku]=1; cur=nx;
+    if(!isProcessedItem(cur)) return cur.sku;   // reached something we buy
+  }
+  /* Every step was itself a processed form. Return the LAST one reached rather
+     than the item we started from, so the plan at least names the right place
+     the chain breaks -- and the unmapped warning names it. */
+  return cur.sku;
 }
 
 /* A STEADY WEEK, rolled up to the ingredient we buy.
@@ -10805,7 +10838,7 @@ async function renderMRP(){
      draws the processed bin first (that is the processed-first rule the kitchen
      already follows). Before this, the roll-up converted the whole recipe need to
      raw and ordered it, so every processed item held in stock was bought twice. */
-  const need={}, _unmapped={}, procUse={}, procAvail={};
+  const need={}, _unmapped={}, _noYield={}, procUse={}, procAvail={};
   ings.forEach(i=>{ if(isProcessedItem(i)) procAvail[i.sku]=Math.max(0, +stock[i.sku]||0); });
   boms.forEach(b=>{ const dem=+mrpDemand[b.product_sku]||0; if(!dem) return;
     const g=(+b.usable_g||0)*dem; if(!g) return;
@@ -10817,16 +10850,26 @@ async function renderMRP(){
       // draw the processed bin first; only the shortfall becomes raw to buy
       const take=Math.min(recipeG, procAvail[it.sku]||0);
       if(take>0){ procAvail[it.sku]-=take; procUse[it.sku]=(procUse[it.sku]||0)+take; recipeG-=take; }
-      const bySrc = it.source_sku && bySku[it.source_sku] ? bySku[it.source_sku] : null;
-      const ri=(it.raw_input||'').trim().toLowerCase(); const byRi = (ri && byName[ri] && byName[ri].sku!==it.sku) ? byName[ri] : null;
-      const parent = bySrc || byRi;
-      if(parent) rootSku=parent.sku; else _unmapped[it.name||b.ingredient_sku]=1;
+      /* rawParRoot walks the WHOLE chain now, not one step of it -- see the
+         comment on that function. The divisor stays this cut's own yield,
+         because a cut's yield is stated against the root. */
+      const root=rawParRoot(it,bySku,byName);
+      if(root && root!==it.sku && !isProcessedItem(bySku[root]||{})) rootSku=root;
+      else _unmapped[it.name||b.ingredient_sku]=1;
+      /* A YIELD OF ZERO IS NOT A YIELD OF 100%. With yield_pct blank the line
+         below divides by 1 and asks for one kilo of live animal per kilo of
+         cut -- a fifth of what the day needs, quietly. Goat raw meaty bones is
+         blank today and only escapes because its recipe is 0 g. The moment
+         somebody fills that recipe in, the plan under-orders and says nothing,
+         so it says something. */
+      if(rootSku!==b.ingredient_sku && !(+it.yield_pct>0)) _noYield[it.name||b.ingredient_sku]=1;
     }
     if(recipeG<=0) return;                                     // fully covered by processed stock
     need[rootSku]=(need[rootSku]||0)+(y>0? recipeG/y : recipeG);
   });
   window._mrpProcUse=procUse;
   window._mrpUnmapped=Object.keys(_unmapped);
+  window._mrpNoYield=Object.keys(_noYield);
   /* ---- WHAT IS ALREADY IN THE BUILDING ----------------------------------
      The rice analogy, in code.  Ten cups to fill, six in the jar, one already
      in the pot — you buy three, not four.  `procAvail` is what is left in the
@@ -10944,6 +10987,7 @@ async function renderMRP(){
          Typing a figure into <b>Par / week</b> or <b>Reorder</b> in Master Data overrides the sum for that one ingredient.`
       : `<b>Flat 5 kg rule (old).</b> Raws reorder when demand outstrips stock + on order, or ending stock is ≤ 5 kg, and top up to need + 5 kg + lead-time use. Every ingredient uses the same 5 kg whether it is a day of cover or a year of it.`}
       Order qty is then ± your manual adjustment and rounded up to the <b>min order</b> and a whole <b>ordering pack</b> (both per ingredient in Master Data). Processed forms (deboned, ground, liver…) roll up into the raw you actually buy. Supplier = each item's default.</div>
+    ${(window._mrpNoYield&&window._mrpNoYield.length)?`<div style="background:#fff8e1;border:1px solid #e0b400;border-radius:6px;padding:9px 11px;margin:0 0 10px;font-size:12.5px">⚠ These processed ingredients roll up to something we buy but carry <b>no yield %</b>, so the plan has had to assume 100% — one kilo of raw per kilo of cut, which for a carcass cut is a small fraction of the truth and <b>under-orders silently</b>: <b>${window._mrpNoYield.map(esc).join(', ')}</b>. Set <i>Yield %</i> on them (Ingredients → 🥩 Item &amp; yield), stated <b>against the thing we buy</b> — the live animal, not the dressed carcass.</div>`:''}
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
     <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Use / wk</th><th class="num">Need</th><th class="num">On hand</th><th class="num">WIP</th><th class="num">On order</th><th class="num">Have</th><th class="num" title="the ceiling — the most this ingredient is ever filled to">Target</th><th class="num" title="stock has to fall through this before anything is ordered">Trigger</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
   const _rowHtml=(l)=>`<tr><td>${esc(l.name)}
@@ -11964,14 +12008,118 @@ async function planPOOpen(i){
     const recv=Math.max(0, +since[l.sku]||0);
     const oo  =Math.max(0, +onOrd[l.sku]||0);
     const left=Math.max(0, (+l.final||0)-recv-oo);
+    const isSup=!!l.isSupply;
     const planP=+l.price||0, mp=+mprice[l.sku]||0;
     const price=mp>0?mp:planP;
-    return {...l, price, _planPrice:planP, _mPrice:mp,
+    /* TWO GRAMS OF DUCK IS NOT AN ORDER.
+       A PO line is stored to two decimals of a kilo, so every quantity that
+       has been through one loses up to 5 g in the rounding. Subtracting it
+       back out of the plot's own gram figure leaves a crumb — 2 g of duck,
+       4 g of pork — on EVERY line that is already fully on order. The card
+       then showed a dozen lines still "open", enabled the Create button and
+       would have raised a set of purchase orders reading 0.00 kg.
+       Snapping to the 10 g the line can actually carry removes exactly the
+       artefact and nothing real: the smallest orderable quantity, 0.01 kg,
+       survives. Supplies are whole units and are never snapped. */
+    const sugg=(isSup||!(left>0)) ? left : Math.round(left/10)*10;
+    return {...l, price, _planPrice:planP, _mPrice:mp, isSupply:isSup,
             _repriced:(mp>0 && Math.abs(mp-planP)>0.004),
-            _recv:recv, _oo:oo, _ooRef:(onOrdRef[l.sku]||[]), _sugg:left};
+            _recv:recv, _oo:oo, _ooRef:(onOrdRef[l.sku]||[]), _sugg:sugg};
   });
-  window._planPO={i, ref, date, rows, already, err};
+  window._planPO={i, ref, date, rows, already, err, since, onOrd, onOrdRef, mprice};
   planPODraw();
+}
+
+/* ---- ORDERING SOMETHING THE PLOT NEVER MENTIONED --------------------------
+   A locked plot is a snapshot, and a snapshot cannot grow a line. When live
+   goat turned out to have been missing from the roll-up, the other eighteen
+   lines had already been raised as purchase orders that morning -- so there
+   was no way to buy the goat THROUGH the plot: generating again would have
+   re-offered eighteen lines that were already on order and still not offered
+   the one that mattered.
+
+   A purchase order is a new document, not an amendment to the plot, so the
+   buyer may add a line to it. What is NOT allowed is pretending the plot
+   approved it: an added line shows no Approved figure, carries an "added"
+   tag, and is named separately in the system log on the PO. The plot is not
+   touched, reopened or re-locked. */
+async function planPOAddOpen(){
+  const S=window._planPO; if(!S) return;
+  if(!canRaisePO()) return void poStepRefused('Add a line to a purchase order');
+  let ings=[]; try{ ings=await listIngredients(); }catch(e){}
+  if(!ings.length){ toast('No master items loaded',true); return; }
+  const on={}; S.rows.forEach(r=>on[r.sku]=1);
+  window._paIngs=ings.filter(i=>i.active!==false && !on[i.sku] && !i.is_intermediate);
+  window._paSel={}; window._paQ='';
+  $('modal').innerHTML=`<div class="mwrap"><div class="mhead">＋ Add a line to this order<span style="flex:1"></span>
+      <button class="btn sm sec" onclick="planPODraw()">← Back</button></div>
+    <div class="mbody">
+      <div class="hint" style="margin:0 0 10px">Anything in the master that this plot did not ask for — an ingredient the roll-up missed, a supply, a top-up the buyer has decided on. It goes on the <b>purchase order</b>, not on the plot: the plot is a locked document and is not changed by this. The line is marked <b>added</b> and named in the order's log.</div>
+      <input id="pa_q" placeholder="🔎 search name / SKU / category…" oninput="window._paQ=this.value;planPOAddBody()"
+             style="width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:6px;margin:0 0 8px">
+      <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Item</th><th>Supplier</th><th class="num">₱/kg</th><th class="num" title="Still owed on a live purchase order">On order</th><th class="num">Order (kg)</th></tr></thead><tbody id="paBody"></tbody></table></div>
+    </div>
+    <div class="mfoot" style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn" onclick="planPOAddApply()">✅ Add to the order</button>
+      <button class="btn sec" onclick="planPODraw()">Cancel</button>
+      <span style="flex:1"></span><span class="mini" id="paCount" style="align-self:center;color:var(--muted)"></span></div></div>`;
+  modalWide(true); $('overlay').classList.add('on'); planPOAddBody();
+}
+function planPOAddBody(){
+  const S=window._planPO; if(!S) return;
+  const q=(window._paQ||'').toLowerCase().split(/\s+/).filter(Boolean);
+  const list=(window._paIngs||[]).filter(i=>{
+    if(!q.length) return true;
+    const t=[i.name,i.sku,i.category,i.raw_input,i.supplier,i.supplier1].filter(Boolean).join(' ').toLowerCase();
+    return q.every(w=>t.includes(w));
+  }).slice(0,300);
+  const kg=g=>Math.round((+g||0)/10)/100;
+  const body=list.map(i=>{
+    const _s1=(i.supplier1||'').trim();
+    const sup=(i.supplier||'').trim() || (/to be determined/i.test(_s1)?'':_s1);
+    const pr=+((S.mprice||{})[i.sku])||+i.list_price_kg||0;
+    const oo=+((S.onOrd||{})[i.sku])||0;
+    const v=(window._paSel&&window._paSel[i.sku]!=null)?window._paSel[i.sku]:'';
+    return `<tr><td>${esc(i.name||i.sku)}<div class="mini"><code>${esc(i.sku)}</code>${isSupplyLed(i)?' · <span style="color:var(--earth,#b5762a)">supply-led</span>':''}</div></td>
+      <td class="mini">${esc(sup||'(unassigned)')}</td>
+      <td class="num mini"${pr>0?'':' style="color:var(--danger)"'}>${pr>0?pr:'no price'}</td>
+      <td class="num mini"${oo>0?' style="color:#3c6ea5;font-weight:700"':''}>${oo>0?kg(oo):'—'}</td>
+      <td class="num"><input type="number" step="any" inputmode="decimal" min="0" value="${v}"
+        oninput="window._paSel['${esc(i.sku)}']=this.value===''?'':(+this.value||0);_paCount()"
+        style="width:92px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`;
+  }).join('');
+  const el=$('paBody'); if(el) el.innerHTML=body||'<tr><td colspan="5" class="empty">Nothing matches, or everything matching is already on the order.</td></tr>';
+  _paCount();
+}
+function _paCount(){ const sel=window._paSel||{}; const n=Object.keys(sel).filter(k=>+sel[k]>0).length;
+  const el=$('paCount'); if(el) el.textContent=n?(n+' line(s) to add'):''; }
+function planPOAddApply(){
+  const S=window._planPO; if(!S) return;
+  const sel=window._paSel||{}; const by={}; (window._paIngs||[]).forEach(i=>by[i.sku]=i);
+  let n=0;
+  Object.keys(sel).forEach(sku=>{
+    const qkg=+sel[sku]||0; if(!(qkg>0)) return;
+    const i=by[sku]; if(!i) return;
+    const _s1=(i.supplier1||'').trim();
+    const sup=(i.supplier||'').trim() || (/to be determined/i.test(_s1)?'':_s1);
+    const isSup=isSupplyItem(i);
+    S.rows.push({
+      sku, name:i.name||sku, supplier:sup,
+      price:+((S.mprice||{})[sku])||+i.list_price_kg||0,
+      _planPrice:0, _mPrice:+((S.mprice||{})[sku])||0, _repriced:false,
+      final:null, isSupply:isSup,
+      /* The buyer typed this figure, so it IS the order -- it is not netted
+         down behind their back. What is already on order is still SHOWN, in
+         its own column and in the blue banner, so the decision is informed. */
+      _recv:Math.max(0,+((S.since||{})[sku])||0),
+      _oo:Math.max(0,+((S.onOrd||{})[sku])||0),
+      _ooRef:((S.onOrdRef||{})[sku]||[]),
+      _sugg:isSup?qkg:qkg*1000, _added:true});
+    n++;
+  });
+  window._paSel={};
+  planPODraw();
+  toast(n?('Added '+n+' line(s) to this order'):'Nothing added');
 }
 // The plot's iteration number, out of its reference: DP-10032026 [RAW] V02 -> 02
 function _planXX(ref){ const m=String(ref||'').match(/V(\d+)\s*$/); return m?m[1]:''; }
@@ -11993,6 +12141,7 @@ function planPODraw(){
      by the supplier. */
   const repriced=S.rows.filter(r=>+r._sugg>0 && r._repriced);
   const unpriced=S.rows.filter(r=>+r._sugg>0 && !(+r.price>0));
+  const added=S.rows.filter(r=>r._added && +r._sugg>0);
 
   $('modal').innerHTML=`<div class="mwrap"><div class="mhead">🧾 Purchase orders from <code>${esc(S.ref||'this plot')}</code><span style="flex:1"></span>
       <button class="btn sm sec" onclick="closeModal()">✕ Close</button></div>
@@ -12018,13 +12167,16 @@ function planPODraw(){
         ⚠ <b>${unpriced.length} line(s) have no price at all</b> — neither the plot nor the ingredient master carries a ₱/kg for them, so the purchase order would go out valued at zero.
         <div class="mini" style="margin-top:4px">${unpriced.slice(0,8).map(r=>esc(r.name||r.sku)).join(' · ')}${unpriced.length>8?(' · … and '+(unpriced.length-8)+' more'):''}</div>
         <div class="mini" style="margin-top:4px">Set <b>₱/kg (raw)</b> on the ingredient (Ingredients → ₱ Costing) and reopen this card, or enter the price on the PO when the quotation comes back.</div></div>`:''}
+      ${added.length?`<div style="border:1px solid #3c6ea5;background:#eef4fa;border-radius:6px;padding:9px 11px;margin-bottom:10px;font-size:12.5px">
+        ＋ <b>${added.length} line(s) were added here</b>, not approved by the plot — they show no Approved figure and are named separately in the order's log.
+        <div class="mini" style="margin-top:4px">${added.map(r=>esc(r.name||r.sku)+' — '+kg(r._sugg)+' '+(r.isSupply?'unit(s)':'kg')).join('<br>')}</div></div>`:''}
       ${S.err?`<div class="hint" style="border-left:4px solid var(--danger);margin-bottom:10px"><b>Could not read the ledger</b> (${esc(S.err.slice(0,120))}), so nothing has been subtracted — every line shows the full approved quantity.</div>`:''}
       <div style="overflow-x:auto"><table><thead><tr>
         <th>Ingredient</th><th>Supplier</th><th class="num">Approved</th><th class="num" title="Delivered since this plot was locked">Arrived since</th><th class="num" title="Still owed on a live purchase order — open, RFQ sent, quoted, confirmed or partly received. Cancelled orders do not count.">Already on order</th><th class="num">Order now (kg)</th><th class="num">Est ₱</th></tr></thead><tbody>
         ${S.rows.map((r,n)=>`<tr${(+r._sugg>0)?'':' style="opacity:.45"'}>
-          <td>${esc(r.name||r.sku)}<div class="mini"><code>${esc(r.sku)}</code></div></td>
+          <td>${esc(r.name||r.sku)}<div class="mini"><code>${esc(r.sku)}</code>${r._added?` · <span class="tagf" style="background:#eef4fa;color:#2a4d7a">added</span> <span class="btn link mini" onclick="planPODrop('${esc(String(r.sku)).replace(/'/g,'&#39;')}')">remove</span>`:''}</div></td>
           <td class="mini">${esc(r.supplier||'(unassigned)')}</td>
-          <td class="num mini">${kg(r.final)}</td>
+          <td class="num mini"${r._added?' title="Not on the plot — added here by the buyer. The plot approved nothing for this line."':''}>${r._added?'—':kg(r.final)}</td>
           <td class="num mini"${(+r._recv>0)?' style="color:#b5762a;font-weight:700"':''}>${(+r._recv>0)?kg(r._recv):'—'}</td>
           <td class="num mini"${(+r._oo>0)?' style="color:#3c6ea5;font-weight:700"':''}${(+r._oo>0)?(' title="'+esc(r._ooRef.map(x=>x.ref+' · '+x.st+(x.sup?(' · '+x.sup):'')).join(' | '))+'"'):''}>${(+r._oo>0)?kg(r._oo):'—'}</td>
           <td class="num"><input type="number" step="any" inputmode="decimal" min="0" value="${kg(r._sugg)}"
@@ -12037,17 +12189,38 @@ function planPODraw(){
     </div>
     <div class="mfoot" style="display:flex;gap:8px;margin-top:12px">
       <button class="btn" onclick="planPOGenerate()" ${nOrder?'':'disabled'}>🧾 Create ${Object.keys(bySup).length} draft PO(s)</button>
+      <button class="btn sec" onclick="planPOAddOpen()" title="Order something this plot did not ask for. It goes on the purchase order, not on the plot.">＋ Add an item</button>
       <span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   modalWide(true); $('overlay').classList.add('on');
 }
 function planPOSet(n,v){ const S=window._planPO; if(!S||!S.rows[n]) return;
-  S.rows[n]._sugg=Math.max(0, (+v||0)*1000); planPODraw(); }
+  const r=S.rows[n];
+  /* A SUPPLY IS COUNTED IN WHOLE UNITS, NOT GRAMS — the same rule the plan
+     itself follows. Multiplying a box count by a thousand would order a
+     thousand boxes. */
+  r._sugg=Math.max(0, (+v||0)*(r.isSupply?1:1000)); planPODraw(); }
+/* Only a line added here can be removed. A plot line is set to 0 instead, which
+   leaves it visible and on the record as a deliberate zero. */
+function planPODrop(sku){ const S=window._planPO; if(!S) return;
+  S.rows=S.rows.filter(r=>!(r._added && String(r.sku)===String(sku)));
+  planPODraw(); }
 
 async function planPOGenerate(){
   const S=window._planPO; if(!S) return;
   const take=S.rows.filter(r=>+r._sugg>0);
   if(!take.length){ toast('Every line is zero — nothing to order',true); return; }
-  if(S.already.length && !confirm('There are already '+S.already.length+' purchase order(s) from this plot.\n\nCreate ANOTHER set? The supplier will be asked twice unless you cancel the old ones.')) return;
+  /* THE DUPLICATE WARNING HAS TO BE TRUE, OR IT GETS CLICKED THROUGH.
+     When the plot's own lines are all covered and the only thing being ordered
+     is a line the buyer added, nobody is being asked twice — saying so would
+     teach them to dismiss the warning on the day it matters. */
+  const fromPlot=take.filter(r=>!r._added);
+  if(S.already.length && fromPlot.length
+     && !confirm('There are already '+S.already.length+' purchase order(s) from this plot.\n\n'
+        +fromPlot.length+' of the line(s) you are about to order came from the plot itself.\n\n'
+        +'Create ANOTHER set? The supplier will be asked twice unless you cancel the old ones.')) return;
+  if(S.already.length && !fromPlot.length
+     && !confirm('This plot already has '+S.already.length+' purchase order(s), and every one of its own lines is covered.\n\n'
+        +'You are ordering only the '+take.length+' line(s) added here, which the plot never asked for. Nothing is ordered twice.\n\nGo ahead?')) return;
   const bySup={}; take.forEach(l=>{ const k=l.supplier||'(unassigned)'; (bySup[k]=bySup[k]||[]).push(l); });
   const sups=Object.keys(bySup);
   if(!confirm('Create '+sups.length+' draft purchase order(s) from '+(S.ref||'this plot')+'?\n\n'
@@ -12075,11 +12248,18 @@ async function planPOGenerate(){
            an order_date eight days before it exists will otherwise read as an
            overdue delivery on every screen that ages purchase orders. */
         const trimmed=bySup[sup].filter(l=>(+l._recv>0)||(+l._oo>0));
+        /* A LINE THE PLOT NEVER APPROVED IS NAMED AS SUCH, ON THE ORDER ITSELF.
+           Otherwise the log says "raised from DP-… V02" over a line that is
+           nowhere in DP-… V02, and the next person to reconcile the two has to
+           work out which of the documents is lying. */
+        const extra=bySup[sup].filter(l=>l._added);
         sysLog('purchase_orders',ref,'🧾 Raised from locked demand plot '+(S.ref||'')+' ('+S.date+') by '+CURRENT_USER
           +' — plot locked '+String((mrpPlanCache[S.i]&&(mrpPlanCache[S.i].saved_at))||'').slice(0,10)+', ordered today'
           +(trimmed.length?('\n• reduced by what was already covered: '+trimmed.map(l=>l.name
               +(+l._recv>0?(' −'+(Math.round(l._recv/10)/100)+' kg received'):'')
-              +(+l._oo>0?(' −'+(Math.round(l._oo/10)/100)+' kg already on order'):'')).join('; ')):''));
+              +(+l._oo>0?(' −'+(Math.round(l._oo/10)/100)+' kg already on order'):'')).join('; ')):'')
+          +(extra.length?('\n• ADDED BY '+CURRENT_USER+', not on the plot: '+extra.map(l=>l.name+' '
+              +(l.isSupply?(l._sugg+' '+'unit(s)'):((Math.round(l._sugg/10)/100)+' kg'))).join('; ')):''));
         made.push(ref+' · '+sup+' ('+bySup[sup].length+')');
       }catch(e){ toast('Could not create the PO for '+sup+': '+e.message, true); }
     }
