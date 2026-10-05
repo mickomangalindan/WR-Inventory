@@ -5631,7 +5631,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-06 17:40Z';
+const WR_BUILD='2026-10-06 19:20Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -11763,10 +11763,18 @@ async function _planRepRows(lines){
        whatever the plot itself remembered. */
     const i=bs[l.sku]||{sku:l.sku, name:l.name, category:'Ingredients'};
     let cl; try{ cl=_countIngClass(i,ctx); }catch(e){ cl={lsG1:'Other',lsG2:'Other',grank:500000,form:'raw'}; }
+    /* VALUE THE PLOT FOR WHOEVER IS LOOKING AT IT. The price stored on the line
+       is whatever the BUILDER could see, and cost is masked for the roles that
+       plan demand — so a plot built by Customer Service prints ₱0 on every
+       line, for everybody, including the buyer. The master is read here instead,
+       under the reader's own permissions: Purchasing and Finance get the real
+       figure, and anybody who is not allowed to see cost still sees nothing,
+       which is the point of the mask. */
+    const _p=Math.max(+i.list_price_kg||0, +l.price||0);
     return {...l, ref_sku:l.sku, name:l.name||i.name||l.sku,
             lsG1:cl.lsG1, lsG2:cl.lsG2, grank:cl.grank, form:cl.form,
             bin:binOf(l.sku,loc), _kg:(+l.final||0)/1000,
-            _peso:((+l.final||0)/1000)*(+l.price||0)};
+            price:_p, _peso:((+l.final||0)/1000)*_p};
   });
 }
 /* One column spec, so the modal, the printout and the download cannot drift —
@@ -11885,8 +11893,23 @@ async function planPOOpen(i){
   if(!lines.length){ alert('This plot has no ingredient lines, so there is nothing to order from it.\n\nThat happens when the plot was saved with demand but the replenishment side came out empty — every ingredient was already covered.'); return; }
 
   showBusy('Reading what has arrived, and what is already on order…');
-  let since={}, onOrd={}, onOrdRef={}, already=[], err='';
+  let since={}, onOrd={}, onOrdRef={}, already=[], err='', mprice={};
   try{
+    /* ---- PRICE THE ORDER AT ORDER TIME, NOT AT PLANNING TIME ------------
+       The plot stores a price per line, copied from the ingredient master by
+       whoever built the plot. Cost is hidden from the floor roles — by the
+       `_secure` view in the database AND by the field ACL in the app — so when
+       Customer Service builds the plot, `list_price_kg` comes back NULL and
+       every line is saved at zero. DP-10032026 [RAW] V02 is exactly that: 19
+       lines, 415 kg, ₱0.00, and the purchase orders raised from it inherited
+       the zero.
+
+       Planning a quantity and pricing an order are two different jobs held by
+       two different people. The plot owns the KILOS; the price is read fresh
+       here, by the person raising the order, who is allowed to see it. The
+       plot's own figure is only a fallback for an ingredient with no list
+       price at all. */
+    try{ (await listIngredients()).forEach(x=>{ const v=+x.list_price_kg||0; if(v>0) mprice[x.sku]=v; }); }catch(e){}
     const lockedAt=String(d.saved_at||p.saved_at||'')||null;
     /* Received against each ingredient AFTER the plot was locked. Receipts only
        — a transfer or a count correction is not a delivery against this order. */
@@ -11941,7 +11964,11 @@ async function planPOOpen(i){
     const recv=Math.max(0, +since[l.sku]||0);
     const oo  =Math.max(0, +onOrd[l.sku]||0);
     const left=Math.max(0, (+l.final||0)-recv-oo);
-    return {...l, _recv:recv, _oo:oo, _ooRef:(onOrdRef[l.sku]||[]), _sugg:left};
+    const planP=+l.price||0, mp=+mprice[l.sku]||0;
+    const price=mp>0?mp:planP;
+    return {...l, price, _planPrice:planP, _mPrice:mp,
+            _repriced:(mp>0 && Math.abs(mp-planP)>0.004),
+            _recv:recv, _oo:oo, _ooRef:(onOrdRef[l.sku]||[]), _sugg:left};
   });
   window._planPO={i, ref, date, rows, already, err};
   planPODraw();
@@ -11959,6 +11986,13 @@ function planPODraw(){
   const asked=S.rows.filter(r=>+r._oo>0);
   const fully=S.rows.filter(r=>+r._sugg<=0 && ((+r._recv>0)||(+r._oo>0)));
   const bySup={}; S.rows.filter(r=>+r._sugg>0).forEach(r=>{ const k=r.supplier||'(unassigned)'; (bySup[k]=bySup[k]||[]).push(r); });
+  /* A PO THAT TOTALS ZERO IS NOT A PO. Either the plot was built by somebody
+     who cannot see cost (so every line saved at ₱0) and the master has since
+     supplied the price — say so — or the ingredient genuinely has no list
+     price, and that has to be fixed before the order goes out, not discovered
+     by the supplier. */
+  const repriced=S.rows.filter(r=>+r._sugg>0 && r._repriced);
+  const unpriced=S.rows.filter(r=>+r._sugg>0 && !(+r.price>0));
 
   $('modal').innerHTML=`<div class="mwrap"><div class="mhead">🧾 Purchase orders from <code>${esc(S.ref||'this plot')}</code><span style="flex:1"></span>
       <button class="btn sm sec" onclick="closeModal()">✕ Close</button></div>
@@ -11977,6 +12011,13 @@ function planPODraw(){
       ${covered.length?`<div style="border:1px solid #e0b400;background:#fff8e1;border-radius:6px;padding:10px 11px;margin-bottom:10px;font-size:12.5px">
         <b>${covered.length} line(s) have had stock delivered since this plot was locked.</b> The suggested quantity is the approved figure less what arrived.
         <div class="mini" style="margin-top:4px">Check these yourself: a delivery that was for the PREVIOUS week has been subtracted here too, and only you know which.</div></div>`:''}
+      ${repriced.length?`<div style="border:1px solid #cfe0cf;background:#f1f7f1;border-radius:6px;padding:9px 11px;margin-bottom:10px;font-size:12.5px">
+        ₱ <b>${repriced.length} line(s) priced from the ingredient master</b>, not from the plot. Cost is hidden from the roles that plan demand, so a plot built by Customer Service or the Warehouse saves every line at ₱0. The kilos are the plot's; the price is today's list price, read by you.
+        <div class="mini" style="margin-top:4px">${repriced.slice(0,8).map(r=>esc(r.name||r.sku)+' — ₱'+(Math.round(r._planPrice*100)/100)+' → ₱'+(Math.round(r.price*100)/100)+'/kg').join('<br>')}${repriced.length>8?('<br>… and '+(repriced.length-8)+' more'):''}</div></div>`:''}
+      ${unpriced.length?`<div style="border:1px solid var(--danger);background:#fdf0ed;border-radius:6px;padding:10px 11px;margin-bottom:10px;font-size:12.5px">
+        ⚠ <b>${unpriced.length} line(s) have no price at all</b> — neither the plot nor the ingredient master carries a ₱/kg for them, so the purchase order would go out valued at zero.
+        <div class="mini" style="margin-top:4px">${unpriced.slice(0,8).map(r=>esc(r.name||r.sku)).join(' · ')}${unpriced.length>8?(' · … and '+(unpriced.length-8)+' more'):''}</div>
+        <div class="mini" style="margin-top:4px">Set <b>₱/kg (raw)</b> on the ingredient (Ingredients → ₱ Costing) and reopen this card, or enter the price on the PO when the quotation comes back.</div></div>`:''}
       ${S.err?`<div class="hint" style="border-left:4px solid var(--danger);margin-bottom:10px"><b>Could not read the ledger</b> (${esc(S.err.slice(0,120))}), so nothing has been subtracted — every line shows the full approved quantity.</div>`:''}
       <div style="overflow-x:auto"><table><thead><tr>
         <th>Ingredient</th><th>Supplier</th><th class="num">Approved</th><th class="num" title="Delivered since this plot was locked">Arrived since</th><th class="num" title="Still owed on a live purchase order — open, RFQ sent, quoted, confirmed or partly received. Cancelled orders do not count.">Already on order</th><th class="num">Order now (kg)</th><th class="num">Est ₱</th></tr></thead><tbody>
