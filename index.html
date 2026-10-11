@@ -5631,7 +5631,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-07 04:10Z';
+const WR_BUILD='2026-10-11 12:40Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -10196,6 +10196,45 @@ async function planReadyCheck(force){
     why:'A draft order has no CUST- SKU and no BOM, so it reaches no demand run. If any of these is actually confirmed, this week will be planned without it.',
     act:'Open Custom Orders', go:'custom_orders',
     rows: coDraft.slice(0,12).map(o=>o.ref+(o.who?' · '+o.who:'')+(o.need?' · needed '+o.need:''))});
+
+  /* ---- 5b · MADE AND NEVER HANDED OVER (check) ----------------------------
+     An order goes `completed` when it is PRODUCED, not when the customer has
+     it, so the only thing that takes custom packs out of stock is somebody
+     pressing 🚚 Hand over. Nobody has, since August. The ledger has been
+     accumulating packs made for named people who have almost certainly had
+     them — and every one of those packs holds a claim against that customer's
+     NEXT order, which is how a sheet comes to ask for 3 duck meatballs with 3
+     sitting at Pasig. */
+  let hoRows=[], hoPacks=0, hoStale=0, hoVal=0;
+  try{
+    const bal={}, cval={};
+    (await ledgerAll()).forEach(m=>{ const k=String(m.ref_sku||''); if(!/^CUST-/i.test(k)) return;
+      bal[k]=(bal[k]||0)+(+m.qty||0); cval[k]=(cval[k]||0)+(+m.qty||0)*(+m.unit_cost||0); });
+    const bb=window._coBestBefore||{};
+    const ords={}; (await db.list('custom_orders',{})).forEach(o=>{ ords[o.order_ref]=o; });
+    const bySku={}; (await db.list('custom_order_lines',{})).forEach(l=>{
+      if(l.product_sku && ords[l.order_ref]) (bySku[l.product_sku]=bySku[l.product_sku]||[]).push(ords[l.order_ref]); });
+    const today=todayISO();
+    Object.keys(bal).forEach(sku=>{ const q=bal[sku]; if(!(q>0.001)) return;
+      const os=bySku[sku]||[];
+      const done=[...new Set(os.filter(o=>coStat(o.status)==='completed').map(o=>o.order_ref))];
+      if(!done.length) return;                       // still an open job, not a missed handover
+      const who=[...new Set(os.map(o=>o.customer_name).filter(Boolean))].join(', ');
+      const exp=bb[sku]||''; const stale=!!(exp && exp<today);
+      hoPacks+=q; if(stale) hoStale+=q; hoVal+=Math.max(0,cval[sku]||0);
+      hoRows.push({sku, q, who, refs:done.join(', '), exp, stale}); });
+  }catch(e){}
+  hoRows.sort((a,b)=>b.q-a.q);
+  add({id:'coho', tier:'check', ok:!hoRows.length, n:hoRows.length,
+    label:'Custom packs have been handed over',
+    fact: hoRows.length
+      ? (_prN(hoPacks)+' pack(s) on '+hoRows.length+' recipe(s) are still in stock for orders marked completed'
+         +(hoVal>0?(' — '+fmt(hoVal)):'')+(hoStale>0?(', '+_prN(hoStale)+' past best-before'):''))
+      : 'nothing made for a named customer is sitting unhanded',
+    why:'An order is marked completed when it is PRODUCED, not when the customer has it — only 🚚 Hand over takes the packs out of stock. Until that is posted the packs inflate finished-goods value, and each one holds a claim against that customer\'s next order, so the kitchen is asked to make what is already on the shelf.',
+    act:'Open Custom Orders', go:'custom_orders',
+    rows: hoRows.slice(0,12).map(r=>r.q+' × '+r.sku+(r.who?' · '+r.who:'')+' · '+r.refs
+      +(r.exp?(r.stale?(' · BEST BEFORE '+r.exp+' — write off'):(' · best before '+r.exp)):''))});
 
   /* ---- 6 · PACKS IN TRANSIT (check) --------------------------------------
      Nothing posts when a transfer is SENT; both legs are written on Receive.
@@ -14863,6 +14902,29 @@ function _coNameSlug(desc, max, customer){
   /* one or two words, trimmed — enough to recognise, short enough to print */
   return _coSlug(use.slice(0,2).join(''), max||8);
 }
+/* THE OLD CUSTOMER'S NAME IS ALSO IN THE DESCRIPTION, and that is where it
+   survives a rename. Half the mixes are typed "Che Blaquera - GC BARF Duck Only
+   Meatballs", so duplicating for Bryan Yu with the customer field corrected
+   still minted CUST-BRYANY-CHEBLAQU-400 — the right prefix wrapped around the
+   wrong person — and the line went on reading Che's name on every sheet.
+   _coNameSlug strips the customer it is GIVEN, which on a copy is the new one.
+   So the description is rewritten before anything is minted from it. */
+function _coReDesc(desc, oldName, newName){
+  let d=String(desc||'').trim();
+  const o=String(oldName||'').trim();
+  if(!o) return d;
+  const q=t=>t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  const lead=new RegExp('^\\s*'+q(o)+'\\s*[-\u2013:]\\s*','i');
+  if(lead.test(d)) return (newName?newName+' - ':'')+d.replace(lead,'').trim();
+  const words=o.split(/\s+/).filter(Boolean).map(q);
+  if(words.length){
+    const any='(?:'+words.join('|')+')';
+    const lead2=new RegExp('^\\s*'+any+'(?:\\s+'+any+')*\\s*[-\u2013:]?\\s*','i');
+    const t=d.replace(lead2,'').trim();
+    if(t && t!==d) return (newName?newName+' - ':'')+t;
+  }
+  return d;
+}
 function coCustSku(customer, desc, packG, taken){
   const cust=_coSlug(customer,6) || 'CUST';
   const nm=_coNameSlug(desc,8,customer) || 'MIX';
@@ -14913,13 +14975,16 @@ async function coOpenDemand(){
      partially fulfilled one asks for the remainder, not the whole order.
      Attribution is soonest-needed-first, the same order coSyncStatuses uses,
      so two orders sharing a recipe cannot both claim the same packs. */
-  const made={};
+  const made={}; const _coBB={};
   try{ let rows;
     // prep batches carry kilos, not packs — they must never count as packs made
-    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
+    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind,best_before&status=eq.confirmed');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
-    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
+    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0);
+      const bb=String(b.best_before||'').slice(0,10);
+      if(bb && (!_coBB[b.product_sku] || bb>_coBB[b.product_sku])) _coBB[b.product_sku]=bb; });
   }catch(e){}
+  window._coBestBefore=_coBB;
   /* THE POOL IS DRAINED BY EVERY LOCKED ORDER, NOT ONLY THE OPEN ONES.
      A completed order's packs were made for that order. Leaving them in the
      pool made them credit against the SKU for ever, so the next order on the
@@ -14928,13 +14993,34 @@ async function coOpenDemand(){
      same soonest-needed-first order coSyncStatuses uses, and only the OPEN ones
      are asked what they still owe. */
   const pool={...made}, owed={}, ordq={};
+  /* ---- WHO IS HOLDING THE PACKS THAT ARE ALREADY MADE --------------------
+     A settled order drains the pool and then says nothing more, which is right
+     for the arithmetic and wrong on screen. Che Blaquera's 3 duck meatballs
+     were made on 7 Sep for CO-09042026-4166, moved to Pasig, and never handed
+     over; her next order, CO-09282026 V03, correctly owes 3 more. The picker
+     showed "3 in stock, awaiting handover" beside "3 still to make" on the SAME
+     row and left somebody to work out that those are two different orders'
+     packs. They are not interchangeable and the row has to say so, or the
+     kitchen makes 3 that already exist. */
+  const packHold={};
   const byNeed=(orders||[]).filter(o=>coIsLocked(o.status)).sort((a,b)=>
     String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))||String(a.order_ref).localeCompare(b.order_ref));
   byNeed.forEach(o=>{ (lines||[]).forEach(l=>{ if(l.order_ref!==o.order_ref||!l.product_sku) return;
     const q=+l.packs||0; if(!(q>0)) return;
     const take=Math.min(coClaimQty(l), pool[l.product_sku]||0);
     pool[l.product_sku]=(pool[l.product_sku]||0)-take;
-    if(!keep[o.order_ref]) return;                       // settled: it drained, it does not owe
+    if(!keep[o.order_ref]){
+      if(take>0){ const _bb=_coBB[l.product_sku]||'';
+        (packHold[l.product_sku]=packHold[l.product_sku]||[]).push(
+          {ref:o.order_ref, customer:o.customer_name||'', qty:take, status:coStat(o.status),
+           needed:String(o.needed_date||'').slice(0,10), bb:_bb,
+           /* A pack past its best-before is not stock the kitchen can skip
+              making. Netting it off would tell somebody to send a customer
+              food we would not eat ourselves. */
+           fresh: !!(_bb && _bb>=todayISO())});
+      }
+      return;                                            // settled: it drained, it does not owe
+    }
     owed[o.order_ref+'|'+l.product_sku]=(owed[o.order_ref+'|'+l.product_sku]||0)+(q-take);
     ordq[o.order_ref+'|'+l.product_sku]=(ordq[o.order_ref+'|'+l.product_sku]||0)+q;   // what the order asked for, made or not
   }); });
@@ -14971,6 +15057,7 @@ async function coOpenDemand(){
     e.orders.push({ref, customer:o.customer_name||'', packs:q, needed,
       ready:_rdy, status:coStat(o.status), plan_route:o.plan_route||'', fulfil_route:o.fulfil_route||''});
   });
+  window._coPackHold=packHold;
   return map; }
 // Flat {sku: packs} for the demand map.
 async function coOpenDemandMap(){ const m=await coOpenDemand(); const out={};
@@ -16487,19 +16574,53 @@ async function coDuplicateAsk(refEnc){
   try{ const ls=await db.children({model:'custom_order_lines',fk:'order_ref'}, ref);
     n=ls.length; nCust=ls.filter(l=>l.line_type==='custom').length; }catch(e){}
   const e=encodeURIComponent(ref);
+  let srcName=''; try{ srcName=((await db.list('custom_orders',{})).find(o=>o.order_ref===ref)||{}).customer_name||''; }catch(x){}
+  window._coDupSrcName=srcName;
+  /* ---- WHOSE ORDER IS THIS?  ASKED FIRST, BECAUSE THE SKU IS MINTED FROM IT.
+     A custom SKU carries the customer's name — CUST-BRYANY-GOATMEAT-500 — and
+     the fork path minted it from the SOURCE order's customer, because at that
+     moment nobody had said who the copy was for. Duplicating Jennie's order for
+     Bryan Yu produced CUST-JENNIE-BUFFALO5-500 on Bryan's order, and changing
+     the customer afterwards does not rename a SKU that already exists. So the
+     name is asked for here, before anything is minted. */
   $('modal').innerHTML='<div><h3>⧉ Duplicate '+esc(ref)+'</h3>'
     +'<p class="mini">'+n+' line(s)'+(nCust?(', '+nCust+' custom recipe'+(nCust>1?'s':'')):'')+'. '
     +(nCust?'What happens to the recipes is the whole question:':'No custom recipes here, so both options do the same thing.')+'</p>'
+    +'<label class="mini" style="display:block;margin:10px 0 3px;color:var(--muted)">Who is this copy for?</label>'
+    +'<input id="co_dupname" value="'+esc(srcName)+'" placeholder="customer name" oninput="coDupNameChk()" '
+      +'style="width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:6px">'
+    +'<div class="mini" style="color:var(--muted);margin-top:4px">A custom product code is built from this name. Get it right here and the new SKUs read <code>CUST-'+esc(_coSlug(srcName,6)||'CUST')+'-…</code>; change it afterwards and the code keeps whoever it was minted for.</div>'
+    +'<div id="co_dupwarn"></div>'
     +'<div style="display:flex;flex-direction:column;gap:10px;margin-top:10px">'
-    +'<button class="btn" style="text-align:left;padding:10px 12px;height:auto" onclick="coDuplicate(\''+e+'\',\'order\')">'
+    +'<button class="btn" id="co_dupkeep" style="text-align:left;padding:10px 12px;height:auto" onclick="coDuplicate(\''+e+'\',\'order\')">'
       +'<b>⧉ Duplicate order</b><div class="mini" style="font-weight:400;margin-top:2px">A repeat of the same thing. It keeps the SKUs this order already uses — one product, one recipe, one row on the production sheet, and two orders claiming it. Editing a recipe afterwards would change it for <b>both</b>, so the recipe is carried read-only.</div></button>'
     +'<button class="btn sec" style="text-align:left;padding:10px 12px;height:auto" onclick="coDuplicate(\''+e+'\',\'order+product\')">'
       +'<b>⧉ Duplicate order + product</b><div class="mini" style="font-weight:400;margin-top:2px">This order as a starting point for something new. It mints its own SKU on Lock even if you change nothing, so tweaking the recipe touches only this order. Two SKUs to make, count and label.</div></button>'
     +'</div><div class="mfoot" style="margin-top:12px"><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>';
-  modalWide(false); $('overlay').classList.add('on');
+  modalWide(false); $('overlay').classList.add('on'); coDupNameChk();
+}
+/* A DIFFERENT CUSTOMER IS NOT A REPEAT ORDER. Keeping the SKU is right when the
+   same person orders the same thing again — one product, two claims. For a
+   DIFFERENT person it hands them a code with somebody else's name on it, and
+   every count sheet, label and production row then reads that name. Say so, and
+   point at the fork. */
+function coDupNameChk(){
+  const el=$('co_dupname'); if(!el) return;
+  const now=(el.value||'').trim(), was=(window._coDupSrcName||'').trim();
+  const diff = now && was && _coSlug(now,6)!==_coSlug(was,6);
+  const w=$('co_dupwarn');
+  if(w) w.innerHTML = diff
+    ? `<div style="border:1px solid var(--earth,#b5762a);background:#fff8e1;border-radius:6px;padding:8px 10px;margin-top:8px;font-size:12.5px">
+        This is for <b>${esc(now)}</b>, not ${esc(was)}. <b>⧉ Duplicate order</b> would keep
+        <code>CUST-${esc(_coSlug(was,6)||'CUST')}-…</code> — ${esc(was)}'s code on ${esc(now)}'s packs, on every label and count sheet.
+        Use <b>⧉ Duplicate order + product</b> unless the two really are one product.</div>`
+    : '';
+  const b=$('co_dupkeep'); if(b) b.className = diff ? 'btn sec' : 'btn';
 }
 async function coDuplicate(refEnc, mode){
   mode=mode||'order+product';
+  /* Read the name BEFORE the modal goes, and before any SKU is minted from it. */
+  let newName=null; try{ const el=$('co_dupname'); if(el) newName=(el.value||'').trim(); }catch(e){}
   closeModal();
   const ref = refEnc ? decodeURIComponent(refEnc) : ((coRec&&coRec.order_ref)||'');
   if(!ref){ toast('Save this quote first, then duplicate it',true); return; }
@@ -16509,7 +16630,8 @@ async function coDuplicate(refEnc, mode){
   if(!src){ toast('Order '+ref+' not found',true); return; }
   try{ lines=await db.children({model:'custom_order_lines',fk:'order_ref'}, ref); }catch(e){ lines=[]; }
   if(!lines.length){ toast(ref+' has no saved lines to copy',true); return; }
-  coRec={ order_ref:'', customer_name:src.customer_name||'', contact:src.contact||'',
+  const custName=(newName!=null && newName!=='') ? newName : (src.customer_name||'');
+  coRec={ order_ref:'', customer_name:custName, contact:src.contact||'',
     order_date:todayISO(), delivery_date:'',
     lead_days:(src.lead_days==null||src.lead_days==='')?coLeadDefault():(+src.lead_days||0),
     needed_date:todayISO(), status:'draft',
@@ -16524,26 +16646,28 @@ async function coDuplicate(refEnc, mode){
      given its real code here and now. The SKU on the line IS the decision. */
   let _taken=new Set();
   if(!keepSku){ try{ _taken=new Set((await db.list('products',{})).map(p=>p.sku)); }catch(e){} }
+  const _renamed = !!(custName && src.customer_name && _coSlug(custName,6)!==_coSlug(src.customer_name,6));
   coLines=lines.map(l=>{
     const isCustom=(l.line_type==='custom');
     const rec=(typeof l.recipe==='string'?_coParse(l.recipe):(l.recipe||[]));
+    const desc=(isCustom && _renamed) ? _coReDesc(l.description, src.customer_name, custName) : (l.description||'');
     return { line_type:l.line_type||'product',
       /* Duplicate ORDER keeps the SKU, so the lock has nothing to mint and the
          two orders are two claims on one product. Duplicate ORDER + PRODUCT
          clears it and asks for a fresh one outright — see force_new_sku, which
          is what stops the recipe fingerprint quietly handing back the original. */
       product_sku: (isCustom && !keepSku)
-        ? (()=>{ const nu=coCustSku(src.customer_name, l.description, l.pack_size_g, _taken); _taken.add(nu); return nu; })()
+        ? (()=>{ const nu=coCustSku(custName, desc, l.pack_size_g, _taken); _taken.add(nu); return nu; })()
         : (l.product_sku||''),
       locked_recipe: (isCustom && keepSku) ? true : false,
-      description: l.description||'',
+      description: desc,
       recipe: isCustom ? (rec||[]).map(r=>({...r})) : [],
       pack_size_g:+l.pack_size_g||0, packs:+l.packs||0, unit_price:+l.unit_price||0 };
   });
   try{ await _coLoadStock(); }catch(e){}
   _coView='form'; state.model='custom_orders'; state.view='special'; renderSide(); drawCOForm();
   const nCustom=coLines.filter(l=>l.line_type==='custom').length;
-  toast('Copied '+ref+' — '+coLines.length+' line(s)'+(nCustom?(', '+nCustom+' recipe(s)'):'')
+  toast('Copied '+ref+' for '+(custName||'(no name)')+' — '+coLines.length+' line(s)'+(nCustom?(', '+nCustom+' recipe(s)'):'')
        +(nCustom?(keepSku?' · same product(s), recipe locked':' · new SKU(s) on Lock'):'')
        +'. Set the delivery date, edit what changed, then Save.');
 }
@@ -18979,7 +19103,29 @@ function drawKitchenCartBody(){
         ⏸ <b>${_ho.length} more order(s) · ${_hp} pack(s)</b> are not listed — their ingredients have not been bought yet.
         <span style="opacity:.8">Plan them in Demand / MRP, or route the order <b>Straight to production</b> if it is urgent.</span></td></tr>`; }
     co.forEach(r=>{
-      const rem=r.packs;
+      /* ---- PRODUCTION ASKS ONE QUESTION: WHAT HAS TO BE MADE? -------------
+         It does not care who a pack was promised to. A pack of this recipe
+         that already exists, is still in date, and has not left the building
+         does not need making again — whoever it was made for. The attribution
+         pool exists to decide which ORDER a pack settles against; using it to
+         decide what the KITCHEN makes double-counts real inventory, and Che
+         Blaquera's row proved it: 3 packs on the shelf at Pasig and the sheet
+         asking for 3 more.
+
+         Netted only where the answer is not a judgement call:
+           same customer  — then "whose pack is it" is moot, they are hers
+                            either way, and the open question is a handover
+                            not a production run;
+           still in date  — a pack past best-before is not stock, it is waste
+                            waiting to be written off, and skipping production
+                            on the strength of it would send somebody food we
+                            would not eat.
+         A different customer's packs are left alone and flagged, because that
+         is an allocation somebody has to decide, not arithmetic. */
+      const _hold=(window._coPackHold||{})[r.sku]||[];
+      const _mine=_hold.filter(x=>x.fresh && _coSlug(x.customer,12) && _coSlug(x.customer,12)===_coSlug(r.customers,12));
+      const _netOff=_mine.reduce((a,x)=>a+(+x.qty||0),0);
+      const rem=Math.max(0, r.packs-_netOff);
       const v=(window._kcQty&&window._kcQty[r.sku]!=null)?window._kcQty[r.sku]:'';
       const when=r.needed
         ? `<span style="color:${r.late?'var(--danger)':(r.soon?'var(--earth,#b5762a)':'var(--muted)')};font-weight:${r.late||r.soon?'700':'400'}">${esc(r.needed)}${r.late?' · OVERDUE':(r.soon?' · due soon':'')}</span>`
@@ -19000,7 +19146,21 @@ function drawKitchenCartBody(){
         <td>${prodLabelHtml(r.prod,{noSku:true})}<div class="mini"><code>${esc(r.sku)}</code></div>
           <div class="mini" style="color:#6b3f7a">${esc(r.customers||'Custom order')}${r.refs?' · '+esc(r.refs):''}</div>
           <div class="mini">make by ${when}</div></td>
-        <td class="num">${spStockCell(pic)}</td><td class="num">${spCoverCell(pic)}</td>
+        <td class="num">${spStockCell(pic)}${(()=>{ const h=_hold;
+          if(!h.length) return '';
+          const tip=esc(h.map(x=>x.ref+' · '+(x.customer||'')+' · '+x.qty+' pack(s) · '+x.status+(x.bb?(' · best before '+x.bb):' · no best-before')).join('\n'));
+          if(_netOff>0) return `<div class="mini" style="color:#4e7a3e;font-weight:700;margin-top:3px" title="${tip}
+&#10;Same customer and still in date, so these do not need making again — this is a handover, not a production run.">
+            ${_netOff} already made for ${esc(r.customers||'this customer')} — nothing to make</div>`;
+          const stale=h.filter(x=>!x.fresh);
+          const other=h.filter(x=>x.fresh);
+          const done=h.filter(x=>x.status==='completed');
+          const tot=h.reduce((a,x)=>a+(+x.qty||0),0);
+          return `<div class="mini" style="color:var(--danger);font-weight:700;margin-top:3px" title="${tip}
+&#10;Counted against that order, so this one cannot have them. If they were in fact delivered, hand that order over — the packs come out of stock and stop looking available.">
+            ${tot} belong to ${esc(h.map(x=>x.ref).join(', '))}${done.length?' — completed, never handed over':''}
+            ${stale.length?`<div style="font-weight:400">${stale.reduce((a,x)=>a+(+x.qty||0),0)} past best-before${stale[0].bb?(' ('+esc(stale[0].bb)+')'):''} — write off, do not count on them</div>`:''}
+            ${other.length?`<div style="font-weight:400">a different customer's — decide who gets them before making more</div>`:''}</div>`; })()}</td><td class="num">${spCoverCell(pic)}</td>
         <td class="num mini">${r.ordered}${covPill(covTag({target:r.ordered,kind:'order'}))}</td>
         <td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem||'—'}</td>
         <td><input type="number" step="any" inputmode="decimal" value="${v}" placeholder="${rem||0}"
