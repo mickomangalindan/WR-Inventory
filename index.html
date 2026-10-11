@@ -5631,7 +5631,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-11 12:40Z';
+const WR_BUILD='2026-10-11 20:30Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -10235,6 +10235,74 @@ async function planReadyCheck(force){
     act:'Open Custom Orders', go:'custom_orders',
     rows: hoRows.slice(0,12).map(r=>r.q+' × '+r.sku+(r.who?' · '+r.who:'')+' · '+r.refs
       +(r.exp?(r.stale?(' · BEST BEFORE '+r.exp+' — write off'):(' · best before '+r.exp)):''))});
+
+  /* ---- 5c · COMPLETED, BUT NOBODY MADE IT (stop) -------------------------
+     The one failure on this list where a customer is owed packs and NO screen
+     is asking for them. Completed is terminal and owes nothing, so the order
+     leaves the demand run, the production picker and the weekly target the
+     moment the status lands -- and the status is set from a pool shared with
+     every other order on the same recipe. A sooner order takes the packs, this
+     one is marked done on them, and the job quietly ceases to exist.
+
+     It is a `stop`, not a `check`: planning a week on top of it bakes the gap
+     in, because the packs that order needs are not in anybody's demand. */
+  let umRows=[], umPacks=0;
+  try{ await coOpenDemand();
+    Object.values(window._coUnmade||{}).forEach(u=>{
+      const short=u.lines.reduce((a,x)=>a+(+x.short||0),0); if(!(short>0.001)) return;
+      umPacks+=short;
+      umRows.push({ref:u.ref, who:u.customer, needed:u.needed, short,
+        what:u.lines.map(x=>_prN(x.short)+' × '+x.sku).join(', ')}); });
+  }catch(e){}
+  umRows.sort((a,b)=>b.short-a.short);
+  add({id:'counmade', tier:'stop', ok:!umRows.length, n:umRows.length,
+    label:'Every completed order was actually produced',
+    fact: umRows.length
+      ? (umRows.length+' order(s) read Completed with '+_prN(umPacks)+' pack(s) never made and never written off')
+      : 'no order is marked completed on packs it did not get',
+    why:'Completed means PRODUCED, and it is terminal — the order leaves the demand run, the picker and the weekly target. But the status is decided from a pool shared by every order on the same recipe, so a sooner order can take the packs and this one be marked done on them. Nothing was made for it, nothing was written off, and no screen is asking for it any more. The customer is still owed.',
+    act:'Open Custom Orders', go:'custom_orders',
+    rows: umRows.slice(0,12).map(r=>r.ref+(r.who?' · '+r.who:'')+(r.needed?' · needed '+r.needed:'')+' — '+r.what+' never made')});
+
+  /* ---- 5d · RECEIVED, BUT THESE LINES ARRIVED AT NOTHING (stop) ----------
+     The in-transit check below asks whether a transfer was received. It cannot
+     see the other shape: a transfer marked RECEIVED whose individual lines
+     received zero of what was sent. The out leg posts, the in leg never does,
+     and the packs leave the ledger entirely -- not in transit, not at either
+     site, simply gone.
+
+     DR-09262026 V01, Bulacan → Pasig, received 28 Sep: every regular line
+     landed, and eight custom lines received 0 of 462 packs sent — Jairus
+     Reyes's seven dogs at 60 each and Gabrielle Pacheco's 42. Every one of
+     those SKUs has a ledger balance of exactly zero. */
+  let rxRows=[], rxPacks=0;
+  try{
+    const tz={}; (await db.list('transfers',{})).forEach(t=>{ tz[t.transfer_ref]=t; });
+    const by={};
+    (await db.list('transfer_lines',{})).forEach(l=>{
+      const t=tz[l.transfer_ref]; if(!t || String(t.status||'')!=='received') return;
+      const sent=+l.sent_packs||0, got=+l.received_packs||0;
+      if(!(sent>0) || got>0) return;
+      /* A reason is an answer. A line handed to the customer from the sending
+         site was never going to arrive anywhere, and the out leg already took
+         the packs off that site -- the ledger is right and there is nothing to
+         chase. Only the unexplained ones belong on this list. */
+      if(l.direct_to_customer) return;
+      (by[l.transfer_ref]=by[l.transfer_ref]||{ref:l.transfer_ref, from:t.from_code, to:t.to_code,
+        when:String(t.received_at||t.transfer_date||'').slice(0,10), packs:0, skus:[]});
+      by[l.transfer_ref].packs+=sent; by[l.transfer_ref].skus.push(sent+' × '+l.product_sku); });
+    rxRows=Object.values(by); rxPacks=rxRows.reduce((a,r)=>a+r.packs,0);
+  }catch(e){}
+  rxRows.sort((a,b)=>b.packs-a.packs);
+  add({id:'trxzero', tier:'stop', ok:!rxRows.length, n:rxRows.length,
+    label:'Every received transfer actually received its lines',
+    fact: rxRows.length
+      ? (rxRows.length+' transfer(s) marked received have line(s) that got nothing — '+_prN(rxPacks)+' pack(s) left the ledger')
+      : 'no received transfer has a line that arrived at nothing',
+    why:'The out leg posts when a line is sent and the in leg only on receive. A line received as 0 on a transfer that is otherwise closed takes its packs out of the sending site and puts them nowhere — they are not in transit, not at either site, and no count will ever find them. Either they went straight to a customer and the order needs handing over, or the receive was missed and has to be posted.',
+    act:'Open Internal Transfer', go:'transfers',
+    rows: rxRows.slice(0,8).map(r=>r.ref+' · '+locName(r.from)+' → '+locName(r.to)+(r.when?' · '+r.when:'')
+      +' · '+_prN(r.packs)+' pack(s): '+r.skus.slice(0,8).join(', ')+(r.skus.length>8?' …':''))});
 
   /* ---- 6 · PACKS IN TRANSIT (check) --------------------------------------
      Nothing posts when a transfer is SENT; both legs are written on Receive.
@@ -14975,15 +15043,28 @@ async function coOpenDemand(){
      partially fulfilled one asks for the remainder, not the whole order.
      Attribution is soonest-needed-first, the same order coSyncStatuses uses,
      so two orders sharing a recipe cannot both claim the same packs. */
-  const made={}; const _coBB={};
+  /* ---- WHO THE PACKS WERE MADE FOR, IF ANYBODY WROTE IT DOWN -------------
+     `linked` is production that names its order. That is a FACT and it wins
+     outright. `made` is the rest -- batches from before the order_ref column
+     existed, or ones nobody could attribute -- and only those go into the
+     pool to be guessed over.
+
+     Keeping them apart is the whole point. A recorded link cannot be taken
+     away from its order by a sooner one, which is how Gabrielle Pacheco came
+     to be marked Completed on 42 packs made three days before she ordered. */
+  const made={}, linked={}, _coBB={};
   try{ let rows;
     // prep batches carry kilos, not packs — they must never count as packs made
-    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind,best_before&status=eq.confirmed');
+    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind,best_before,order_ref&status=eq.confirmed');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
-    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0);
+    (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{
+      const n=+b.good_packs||0;
+      if(b.order_ref) linked[b.order_ref+'|'+b.product_sku]=(linked[b.order_ref+'|'+b.product_sku]||0)+n;
+      else made[b.product_sku]=(made[b.product_sku]||0)+n;
       const bb=String(b.best_before||'').slice(0,10);
       if(bb && (!_coBB[b.product_sku] || bb>_coBB[b.product_sku])) _coBB[b.product_sku]=bb; });
   }catch(e){}
+  window._coLinked=linked;
   window._coBestBefore=_coBB;
   /* THE POOL IS DRAINED BY EVERY LOCKED ORDER, NOT ONLY THE OPEN ONES.
      A completed order's packs were made for that order. Leaving them in the
@@ -15003,13 +15084,40 @@ async function coOpenDemand(){
      packs. They are not interchangeable and the row has to say so, or the
      kitchen makes 3 that already exist. */
   const packHold={};
+  /* ---- COMPLETED MUST MEAN PRODUCED --------------------------------------
+     Status is set from the pool, and the pool is shared by every order on the
+     recipe. So an order can be marked completed on packs that a SOONER order
+     took, produce nothing itself, write nothing off, and -- because completed
+     is terminal and owes nothing -- drop out of the demand run, the picker and
+     the weekly target in the same move. A real customer is owed real packs and
+     no screen asks for them.
+
+     Gabrielle Pacheco, CO-09252026 V01: 42 packs of CUST-GABRIE-MIX-1000,
+     needed 6 Oct, reads Completed. One batch of 42 was ever made for that
+     recipe and CO-09282026 V01 (needed 28 Sep) has it. Nothing was made for
+     hers and nothing was written off.
+
+     Every settled line is therefore checked against its own production, and
+     the shortfall is published for the preflight to raise. This is a symptom,
+     not the disease: production_batches carries no order reference, so WHICH
+     order a batch belongs to is inferred from dates rather than recorded. */
+  const unmade={};
   const byNeed=(orders||[]).filter(o=>coIsLocked(o.status)).sort((a,b)=>
     String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))||String(a.order_ref).localeCompare(b.order_ref));
   byNeed.forEach(o=>{ (lines||[]).forEach(l=>{ if(l.order_ref!==o.order_ref||!l.product_sku) return;
     const q=+l.packs||0; if(!(q>0)) return;
-    const take=Math.min(coClaimQty(l), pool[l.product_sku]||0);
-    pool[l.product_sku]=(pool[l.product_sku]||0)-take;
+    /* ITS OWN PRODUCTION FIRST, AND THAT PART IS NOT NEGOTIABLE. Only what is
+       still unmet after the recorded link goes looking in the shared pool. */
+    const _own=Math.min(coClaimQty(l), +linked[o.order_ref+'|'+l.product_sku]||0);
+    const _rest=coClaimQty(l)-_own;
+    const take=_own + Math.min(_rest, pool[l.product_sku]||0);
+    pool[l.product_sku]=(pool[l.product_sku]||0)-Math.min(_rest, pool[l.product_sku]||0);
     if(!keep[o.order_ref]){
+      const _short=coClaimQty(l)-take;
+      if(_short>0.001){
+        const u=unmade[o.order_ref]=unmade[o.order_ref]||
+          {ref:o.order_ref, customer:o.customer_name||'', needed:String(o.needed_date||'').slice(0,10), lines:[]};
+        u.lines.push({sku:l.product_sku, short:_short, ordered:q, wo:+l.written_off_packs||0}); }
       if(take>0){ const _bb=_coBB[l.product_sku]||'';
         (packHold[l.product_sku]=packHold[l.product_sku]||[]).push(
           {ref:o.order_ref, customer:o.customer_name||'', qty:take, status:coStat(o.status),
@@ -15057,7 +15165,7 @@ async function coOpenDemand(){
     e.orders.push({ref, customer:o.customer_name||'', packs:q, needed,
       ready:_rdy, status:coStat(o.status), plan_route:o.plan_route||'', fulfil_route:o.fulfil_route||''});
   });
-  window._coPackHold=packHold;
+  window._coPackHold=packHold; window._coUnmade=unmade;
   return map; }
 // Flat {sku: packs} for the demand map.
 async function coOpenDemandMap(){ const m=await coOpenDemand(); const out={};
@@ -15130,7 +15238,7 @@ async function coPlanEvidence(){
   const plannedAll={}, demandAll={};
   const push=(m,sku,rec)=>{ (m[sku]=m[sku]||[]).push(rec); };
   try{ let rows;
-    if(isLive()) rows=await sb('production_batches?select=product_sku,status,planned_packs,good_packs,production_date,run_ref,batch_ref,kind,created_at&status=eq.draft');
+    if(isLive()) rows=await sb('production_batches?select=product_sku,status,planned_packs,good_packs,production_date,run_ref,batch_ref,kind,created_at,order_ref&status=eq.draft');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='draft');
     (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{
       if(!((+b.planned_packs||0)>0 || (+b.good_packs||0)>0)) return;     // a zero line plans nothing
@@ -17876,7 +17984,7 @@ async function prodLoadDraft(){
     const runRef=rows[0].run_ref; const mine=rows.filter(r=>r.run_ref===runRef);
     const pmap={}; (window._prodAllProducts||[]).forEach(p=>pmap[p.sku]=prodLabel(p,{noSku:true}));
     prodRunRef=runRef;
-    prodPlanLines=mine.map(r=>({product_sku:r.product_sku, name:pmap[r.product_sku]||r.product_sku, planned_packs:+r.planned_packs||0, good_packs:+r.good_packs||0, reject_packs:+r.reject_packs||0, waste_g:+r.waste_g||0, output_lot:r.output_lot||''}));
+    prodPlanLines=mine.map(r=>({product_sku:r.product_sku, name:pmap[r.product_sku]||r.product_sku, planned_packs:+r.planned_packs||0, good_packs:+r.good_packs||0, reject_packs:+r.reject_packs||0, waste_g:+r.waste_g||0, output_lot:r.output_lot||'', order_ref:r.order_ref||''}));
   }catch(e){}
 }
 /* The target is a RUNNING target, and this is where that is decided:
@@ -19103,29 +19211,27 @@ function drawKitchenCartBody(){
         ⏸ <b>${_ho.length} more order(s) · ${_hp} pack(s)</b> are not listed — their ingredients have not been bought yet.
         <span style="opacity:.8">Plan them in Demand / MRP, or route the order <b>Straight to production</b> if it is urgent.</span></td></tr>`; }
     co.forEach(r=>{
-      /* ---- PRODUCTION ASKS ONE QUESTION: WHAT HAS TO BE MADE? -------------
-         It does not care who a pack was promised to. A pack of this recipe
-         that already exists, is still in date, and has not left the building
-         does not need making again — whoever it was made for. The attribution
-         pool exists to decide which ORDER a pack settles against; using it to
-         decide what the KITCHEN makes double-counts real inventory, and Che
-         Blaquera's row proved it: 3 packs on the shelf at Pasig and the sheet
-         asking for 3 more.
+      /* ---- PRODUCTION ASKS ONE QUESTION, AND IT IS NOT ABOUT STOCK -------
+         WAS THIS LINE PRODUCED? That is the whole of it. Not whether packs
+         were handed over, not whether they were transferred, not where they
+         are sitting tonight. Every custom order line is its own commitment,
+         duplicates included -- a copy of an order is a second order, and the
+         customer is owed both.
 
-         Netted only where the answer is not a judgement call:
-           same customer  — then "whose pack is it" is moot, they are hers
-                            either way, and the open question is a handover
-                            not a production run;
-           still in date  — a pack past best-before is not stock, it is waste
-                            waiting to be written off, and skipping production
-                            on the strength of it would send somebody food we
-                            would not eat.
-         A different customer's packs are left alone and flagged, because that
-         is an allocation somebody has to decide, not arithmetic. */
+         `r.packs` already answers it: coOpenDemand gives each LINE what it
+         still owes after its own write-offs and its own attributed
+         production. Nothing further belongs on top of it.
+
+         Twice now this row has been netted against things that are not this
+         line's production -- first another order's packs of the same recipe,
+         then what happened to be on a shelf -- and both readings suppressed
+         real work. A pack another order owns is that order's, however fresh
+         it is and whoever it belongs to; a pack on the shelf is a logistics
+         fact, not a production one. The only safe subtraction is the one
+         already made upstream, per line. */
+      const pic=stockPicFor(r.sku);
       const _hold=(window._coPackHold||{})[r.sku]||[];
-      const _mine=_hold.filter(x=>x.fresh && _coSlug(x.customer,12) && _coSlug(x.customer,12)===_coSlug(r.customers,12));
-      const _netOff=_mine.reduce((a,x)=>a+(+x.qty||0),0);
-      const rem=Math.max(0, r.packs-_netOff);
+      const rem=Math.max(0, r.packs);
       const v=(window._kcQty&&window._kcQty[r.sku]!=null)?window._kcQty[r.sku]:'';
       const when=r.needed
         ? `<span style="color:${r.late?'var(--danger)':(r.soon?'var(--earth,#b5762a)':'var(--muted)')};font-weight:${r.late||r.soon?'700':'400'}">${esc(r.needed)}${r.late?' · OVERDUE':(r.soon?' · due soon':'')}</span>`
@@ -19141,26 +19247,24 @@ function drawKitchenCartBody(){
           <div style="margin-top:5px"><button class="btn sm" onclick="${arch?`coUnarchiveProduct('${esc(r.sku)}')`:`coRepairProduct('${esc(r.sku)}')`}">${arch?'♻ Bring this product back':'🛠 Create the product from this order'}</button></div></td></tr>`;
         return;
       }
-      const pic=stockPicFor(r.sku);
       body+=`<tr style="background:#fbf7fd">
         <td>${prodLabelHtml(r.prod,{noSku:true})}<div class="mini"><code>${esc(r.sku)}</code></div>
           <div class="mini" style="color:#6b3f7a">${esc(r.customers||'Custom order')}${r.refs?' · '+esc(r.refs):''}</div>
           <div class="mini">make by ${when}</div></td>
         <td class="num">${spStockCell(pic)}${(()=>{ const h=_hold;
           if(!h.length) return '';
+          /* A NOTE, NOT A VERDICT. Stock of this recipe can exist and still be
+             another order's, so the row says whose it is -- and stops there.
+             It does not subtract, it does not rule on handover, and it does
+             not demand a write-off. Production has already decided what to
+             make from this line's own production; this only explains why the
+             shelf is not empty while the sheet still asks for packs. */
           const tip=esc(h.map(x=>x.ref+' · '+(x.customer||'')+' · '+x.qty+' pack(s) · '+x.status+(x.bb?(' · best before '+x.bb):' · no best-before')).join('\n'));
-          if(_netOff>0) return `<div class="mini" style="color:#4e7a3e;font-weight:700;margin-top:3px" title="${tip}
-&#10;Same customer and still in date, so these do not need making again — this is a handover, not a production run.">
-            ${_netOff} already made for ${esc(r.customers||'this customer')} — nothing to make</div>`;
-          const stale=h.filter(x=>!x.fresh);
-          const other=h.filter(x=>x.fresh);
-          const done=h.filter(x=>x.status==='completed');
           const tot=h.reduce((a,x)=>a+(+x.qty||0),0);
-          return `<div class="mini" style="color:var(--danger);font-weight:700;margin-top:3px" title="${tip}
-&#10;Counted against that order, so this one cannot have them. If they were in fact delivered, hand that order over — the packs come out of stock and stop looking available.">
-            ${tot} belong to ${esc(h.map(x=>x.ref).join(', '))}${done.length?' — completed, never handed over':''}
-            ${stale.length?`<div style="font-weight:400">${stale.reduce((a,x)=>a+(+x.qty||0),0)} past best-before${stale[0].bb?(' ('+esc(stale[0].bb)+')'):''} — write off, do not count on them</div>`:''}
-            ${other.length?`<div style="font-weight:400">a different customer's — decide who gets them before making more</div>`:''}</div>`; })()}</td><td class="num">${spCoverCell(pic)}</td>
+          const refs=esc(h.map(x=>x.ref).join(', '));
+          return `<div class="mini" style="color:var(--muted);margin-top:3px" title="${tip}
+&#10;Another order's production. It does not change what this line has to make — that comes from this line's own confirmed packs.">
+            ${tot} made against ${refs}</div>`; })()}</td><td class="num">${spCoverCell(pic)}</td>
         <td class="num mini">${r.ordered}${covPill(covTag({target:r.ordered,kind:'order'}))}</td>
         <td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem||'—'}</td>
         <td><input type="number" step="any" inputmode="decimal" value="${v}" placeholder="${rem||0}"
@@ -19200,7 +19304,18 @@ function prodCartApply(){ const q=window._kcQty||{}; let n=0;
        rows on the run sheet, which is how the wrong bag gets made. prodLabel is
        the one place that decides how a product reads, and it appends the
        variant whenever the name does not already contain it. */
-    if(packs>0){ if(line){ line.good_packs=packs; } else { prodPlanLines.push({product_sku:sku,name:prodLabel(p,{noSku:true})||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:packs,reject_packs:0,waste_g:0,output_lot:''}); } n++; }
+    /* ---- STAMP WHO IT IS FOR, WHILE SOMEBODY STILL KNOWS -----------------
+       The picker is the one moment the order is in hand. Every later screen
+       has only a SKU, which is why attribution used to be reconstructed from
+       dates and got it wrong. The soonest-needed OPEN order on this recipe is
+       the default and is recorded as such; a run covering two orders is
+       tagged with the first and shows up in the unlinked report rather than
+       being silently split. */
+    const _due=(window._prodCoDue||{})[sku];
+    const _os=(_due&&_due.orders||[]).slice().sort((a,b)=>
+      String(a.needed||'9999').localeCompare(String(b.needed||'9999'))||String(a.ref).localeCompare(b.ref));
+    const _for=_os.length?_os[0].ref:'';
+    if(packs>0){ if(line){ line.good_packs=packs; if(_for) line.order_ref=_for; } else { prodPlanLines.push({product_sku:sku,name:prodLabel(p,{noSku:true})||sku,planned_packs:+prodTargetMap[sku]||0,good_packs:packs,reject_packs:0,waste_g:0,output_lot:'',order_ref:_for}); } n++; }
     else if(line){ prodPlanLines=prodPlanLines.filter(l=>l.product_sku!==sku); }
   });
   closeModal(); drawProdPlan(); prodPackTouch(); toast(n?('Cart applied · '+n+' product(s) in the plan'):'Plan cleared');
@@ -20933,7 +21048,11 @@ async function prodPersist(status, allowEmpty){
   const _now=new Date().toISOString();
   const recs=active.map((l,i)=>{
     const ref=prodRunRef+'/'+_p2(i+1);
+    /* order_ref travels with the batch or the link is lost at the one moment it
+       was known. Only custom lines carry one; a regular product belongs to the
+       shelf, not to a person. */
     const rec={batch_ref:ref, run_ref:prodRunRef, product_sku:l.product_sku, planned_packs:+l.planned_packs||0, good_packs:+l.good_packs||0, reject_packs:+l.reject_packs||0, waste_g:+l.waste_g||0, output_lot:l.output_lot||'', production_date:prodPlanDate, status, operator:CURRENT_USER};
+    if(l.order_ref && /^CUST-/i.test(String(l.product_sku||''))) rec.order_ref=l.order_ref;
     if(_stampCols){
       const s=_stamp[ref]||{};
       rec.scheduled_date = s.sd || prodPlanDate;
