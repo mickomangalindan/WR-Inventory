@@ -5631,7 +5631,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-11 20:30Z';
+const WR_BUILD='2026-10-12 09:15Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -15073,7 +15073,7 @@ async function coOpenDemand(){
      opened already paid for. The claim therefore runs over locked orders in the
      same soonest-needed-first order coSyncStatuses uses, and only the OPEN ones
      are asked what they still owe. */
-  const pool={...made}, owed={}, ordq={};
+  const pool={...made}, owed={}, ordq={}, madeq={};
   /* ---- WHO IS HOLDING THE PACKS THAT ARE ALREADY MADE --------------------
      A settled order drains the pool and then says nothing more, which is right
      for the arithmetic and wrong on screen. Che Blaquera's 3 duck meatballs
@@ -15131,6 +15131,7 @@ async function coOpenDemand(){
     }
     owed[o.order_ref+'|'+l.product_sku]=(owed[o.order_ref+'|'+l.product_sku]||0)+(q-take);
     ordq[o.order_ref+'|'+l.product_sku]=(ordq[o.order_ref+'|'+l.product_sku]||0)+q;   // what the order asked for, made or not
+    madeq[o.order_ref+'|'+l.product_sku]=(madeq[o.order_ref+'|'+l.product_sku]||0)+take;  // and what it actually got
   }); });
   /* ONE ENTRY PER ORDER+SKU, NOT PER LINE.
      `owed` is keyed by order+SKU and already holds the order's WHOLE claim on
@@ -15143,8 +15144,8 @@ async function coOpenDemand(){
     const cut=k.indexOf('|'); const ref=k.slice(0,cut), sku=k.slice(cut+1);
     const o=keep[ref]; if(!o) return;
     const needed=String(o.needed_date||o.order_date||'').slice(0,10);
-    const e=map[sku]=map[sku]||{packs:0,ordered:0,ready:0,held:0,needed:'',since:'',orders:[]};
-    e.packs+=q; e.ordered+=(+ordq[k]||q);
+    const e=map[sku]=map[sku]||{packs:0,ordered:0,made:0,ready:0,held:0,needed:'',since:'',orders:[]};
+    e.packs+=q; e.ordered+=(+ordq[k]||q); e.made+=(+madeq[k]||0);
     /* One SKU can be owed by two orders at different stages — ⧉ Duplicate makes
        that routine — so the split is per ORDER and then re-totalled, never a
        property of the SKU. `ready` is what the kitchen may start on; `held` is
@@ -15162,7 +15163,7 @@ async function coOpenDemand(){
        real customer's packs stopped being asked for. */
     const raised=String(o.order_date||'').slice(0,10);
     if(raised && (!e.since || raised>e.since)) e.since=raised;
-    e.orders.push({ref, customer:o.customer_name||'', packs:q, needed,
+    e.orders.push({ref, customer:o.customer_name||'', packs:q, made:(+madeq[k]||0), needed,
       ready:_rdy, status:coStat(o.status), plan_route:o.plan_route||'', fulfil_route:o.fulfil_route||''});
   });
   window._coPackHold=packHold; window._coUnmade=unmade;
@@ -19109,7 +19110,9 @@ function _coDueRows(){
     /* packs is already what is STILL OWED — coOpenDemand nets production — so
        nothing comes off it here. ordered/made are for reading. */
     const ordered=Math.max(+d.packs||0, +d.ordered||0);
-    return { sku, packs:+d.packs||0, ordered, made:ordered-(+d.packs||0), needed:d.needed||'',
+    /* `made` comes from the attribution when it is there, not from
+       ordered-minus-owed: subtraction hides a write-off as production. */
+    return { sku, packs:+d.packs||0, ordered, made:(d.made!=null?+d.made:ordered-(+d.packs||0)), needed:d.needed||'',
              orphan:!any[sku],                       // genuinely no row anywhere
              archived:(!have[sku] && !!any[sku]),    // there, but retired
              prod:have[sku]||any[sku]||null,
@@ -19204,6 +19207,18 @@ function drawKitchenCartBody(){
       🧑‍🍳 Custom orders owed · ${co.length} · ${co.reduce((a,r)=>a+r.packs,0)} pack(s)
       ${nLate?`<span style="color:var(--danger)"> · ${nLate} past the make-by date</span>`:''}
       <div class="mini" style="font-weight:400;opacity:.8">Somebody is waiting for these. Soonest first — read from the ORDERS, so a line appears here even if its product record is missing.</div></td></tr>`;
+    /* ---- A CUSTOM LINE ANSWERS ONE QUESTION: HAS IT BEEN MADE? ------------
+       So it gets its own headings. The shelf columns the rest of this table
+       carries -- current stock, cover, target from the plot -- are not
+       production's business for a custom order and every one of them has
+       misled somebody: cover is always blank, target only restates the order,
+       and the stock figure invited netting that suppressed real work twice.
+       Once a box leaves Bulacan it is Pasig's to account for, not the
+       kitchen's. Ordered, made, still to make. */
+    body+=`<tr style="background:#f3e8f7;color:#6b3f7a;font-size:11px;letter-spacing:.04em">
+      <td style="padding:4px 10px">FOR WHOM · BY WHEN</td><td class="num" style="padding:4px">ORDERED</td>
+      <td class="num" style="padding:4px">MADE</td><td class="num" style="padding:4px">OTHER ORDERS</td>
+      <td class="num" style="padding:4px">STILL TO MAKE</td><td class="num" style="padding:4px">PRODUCE</td></tr>`;
     const _held=window._prodCoHeld||{}; const _hs=Object.keys(_held);
     if(_hs.length){ const _hp=_hs.reduce((a,s)=>a+(+_held[s].packs||0),0);
       const _ho=[]; _hs.forEach(s=>(_held[s].orders||[]).forEach(o=>{ if(!_ho.some(x=>x.ref===o.ref)) _ho.push(o); }));
@@ -19251,22 +19266,19 @@ function drawKitchenCartBody(){
         <td>${prodLabelHtml(r.prod,{noSku:true})}<div class="mini"><code>${esc(r.sku)}</code></div>
           <div class="mini" style="color:#6b3f7a">${esc(r.customers||'Custom order')}${r.refs?' · '+esc(r.refs):''}</div>
           <div class="mini">make by ${when}</div></td>
-        <td class="num">${spStockCell(pic)}${(()=>{ const h=_hold;
-          if(!h.length) return '';
-          /* A NOTE, NOT A VERDICT. Stock of this recipe can exist and still be
-             another order's, so the row says whose it is -- and stops there.
-             It does not subtract, it does not rule on handover, and it does
-             not demand a write-off. Production has already decided what to
-             make from this line's own production; this only explains why the
-             shelf is not empty while the sheet still asks for packs. */
-          const tip=esc(h.map(x=>x.ref+' · '+(x.customer||'')+' · '+x.qty+' pack(s) · '+x.status+(x.bb?(' · best before '+x.bb):' · no best-before')).join('\n'));
-          const tot=h.reduce((a,x)=>a+(+x.qty||0),0);
-          const refs=esc(h.map(x=>x.ref).join(', '));
-          return `<div class="mini" style="color:var(--muted);margin-top:3px" title="${tip}
-&#10;Another order's production. It does not change what this line has to make — that comes from this line's own confirmed packs.">
-            ${tot} made against ${refs}</div>`; })()}</td><td class="num">${spCoverCell(pic)}</td>
-        <td class="num mini">${r.ordered}${covPill(covTag({target:r.ordered,kind:'order'}))}</td>
-        <td class="num mini" style="color:${rem>0?'var(--berry)':'#4e7a3e'}">${rem||'—'}</td>
+        <td class="num"><b>${r.ordered}</b></td>
+        <td class="num">${r.made>0?('<b>'+r.made+'</b>'):'<span class="mini" style="color:var(--muted)">none yet</span>'}</td>
+        <td class="num mini" style="color:var(--muted)">${(()=>{ const h=_hold;
+          /* The ONE thing left from the shelf, and it is a footnote, not a
+             number: packs of this recipe that exist but belong to another
+             order. It explains why stock is not empty while the sheet still
+             asks for packs. It does not subtract, it does not rule on
+             handover, best-before or location -- all of which are Pasig's
+             business once the box leaves Bulacan, and none of which change
+             whether this line has been made. */
+          if(!h.length) return '—';
+          return `<span title="${esc(h.map(x=>x.ref+' · '+(x.customer||'')+' · '+x.qty+' pack(s)').join('\n'))}">${h.reduce((a,x)=>a+(+x.qty||0),0)} made against ${esc(h.map(x=>x.ref).join(', '))}</span>`; })()}</td>
+        <td class="num" style="color:${rem>0?'var(--berry)':'#4e7a3e'}"><b>${rem||'—'}</b></td>
         <td><input type="number" step="any" inputmode="decimal" value="${v}" placeholder="${rem||0}"
           oninput="window._kcQty['${esc(r.sku)}']=this.value===''?'':(+this.value||0)"
           style="width:70px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td></tr>`;
@@ -23201,7 +23213,38 @@ function countSetBookSrc(v){
     : 'Book qty back to our own ledger — press ⬇ Load items to re-read');
 }
 function countUnitFor(cat){ if(cat==='Sellable Products') return {uom:'packs',scale:1}; if(cat==='Stickers') return {uom:'pcs',scale:1}; if(cat==='Supplies') return {uom:'pcs',scale:1}; return {uom:'kg',scale:1000}; }
+/* ---- ONE OPEN COUNT PER SITE AND SCOPE ----------------------------------
+   Three Pasig sheets were started and none finished. A draft writes nothing —
+   only an approved count posts a count_adjust — so an abandoned one is
+   harmless to stock and invisible in the data, which is exactly why they pile
+   up: nothing ever complains. The complaint goes here, at the moment somebody
+   is about to start a fourth.
+
+   It asks, it does not block. The previous sheet may be the one that should
+   be finished, or it may be dead and want cancelling, and only the person
+   looking at it knows which. */
+async function _countOpenDraft(){
+  if(!formIsNew && countRec.count_ref) return null;   // editing an existing sheet is not starting one
+  const site=countRec.location_code||'';
+  const sc=(countRec.scope||['All']);
+  try{
+    const rows=await db.list('count_sessions',{});
+    return (rows||[]).find(r=>{
+      if(String(r.status||'draft')!=='draft') return false;
+      if(String(r.location_code||'')!==site) return false;
+      if(countRec.count_ref && r.count_ref===countRec.count_ref) return false;
+      const rs=Array.isArray(r.scope)?r.scope:(r.scope?[r.scope]:['All']);
+      return rs.includes('All')||sc.includes('All')||rs.some(x=>sc.includes(x));
+    })||null;
+  }catch(e){ return null; }
+}
 async function countLoad(){
+  const _d=await _countOpenDraft();
+  if(_d && !confirm('⚠ '+locName(countRec.location_code||'')+' already has an unfinished count\n\n'
+      +'  '+_d.count_ref+'  ·  '+(_d.count_date||'no date')+'  ·  '+((Array.isArray(_d.scope)?_d.scope:[_d.scope||'All']).join(', '))+'\n\n'
+      +'Post it or cancel it first, or two sheets end up describing the same shelf on different days. '
+      +'A draft changes no stock, so nothing is lost either way.\n\nStart this one anyway?')) {
+    toast('Open '+_d.count_ref+' and post or cancel it first', true); return; }
   const sc=countRec.scope||['All'], all=sc.includes('All');
   /* ---- ARCHIVING SOMETHING SHOULD TAKE IT OFF THE COUNT SHEET --------------
      It did not. This screen read the WHOLE products and ingredients tables with
