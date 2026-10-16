@@ -3648,15 +3648,26 @@ let PQ_Q='', PQ_ONLY=true, PQ_GROUP='hier';
    not answerable from inputs alone. Off by default because the table is the
    busiest in the app and most days nobody needs to audit it — on when somebody
    does, and remembered per person. */
-/* ON BY DEFAULT. The working was built, buttoned and then left off, so the
-   question "where does this number come from" stayed unanswered for anyone who
-   never found the button. A to-order quantity that cannot be read back to the
-   sales rate it came from is a number people either trust blindly or ignore.
-   An explicit choice still wins — '0' means somebody turned it off. */
-let PQ_WORK=true;
+/* OFF BY DEFAULT, AND THAT WAS THE RIGHT ANSWER ALL ALONG.
+   It was switched on for a day on the reasoning that a to-order quantity
+   nobody can read back to a sales rate is a number people either trust blindly
+   or ignore. True — but a paragraph of prose repeated under all ninety rows is
+   not how that question gets answered. It made the table unreadable and
+   unusable: the one thing the screen is for is being read down a column and
+   copied into a sheet, and a sentence between every row destroys both.
+
+   The working is a DIAGNOSTIC — opened for one product when somebody asks why
+   — so it lives behind its button. The same figures belong in the CSV as
+   COLUMNS, which is where a spreadsheet can actually use them, and that is
+   where they now are. */
+let PQ_WORK=false;
 try{ const v=localStorage.getItem('wr_pq_work'); if(v!=null) PQ_WORK=(v==='1'); }catch(e){}
+/* One switch, two screens. The working is the same calculation on Regular
+   Packs and on Demand / MRP, so turning it off on one and finding it still on
+   the other would be its own small puzzle. Redraw whichever is open. */
 function pqWorkToggle(){ PQ_WORK=!PQ_WORK;
   try{ localStorage.setItem('wr_pq_work', PQ_WORK?'1':'0'); }catch(e){}
+  if(typeof state!=='undefined' && state.model==='mrp'){ renderMRP(); return; }
   pqDraw(); }
 function pqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0);
   try{ localStorage.setItem('wr_packreq',JSON.stringify(PQ)); }catch(e){} pqDraw(); }
@@ -4557,14 +4568,19 @@ function shLastPull(){
   if(!isFinite(t)) return {at:at, mins:null};
   return {at:at, mins:Math.max(0,Math.round((Date.now()-t)/60000))};
 }
+/* "14 min ago" answers is-it-fresh; the clock time answers which-pull, which
+   is the one somebody checking against Shopify's own screen actually needs.
+   Both, because they are different questions. */
 function shAgeText(){
   const L=shLastPull();
   if(!L.at) return 'no Shopify reading yet';
-  if(L.mins==null) return 'last pull '+esc(String(L.at).slice(0,16));
-  if(L.mins<1) return 'pulled just now';
-  if(L.mins<60) return 'pulled '+L.mins+' min ago';
-  const h=Math.floor(L.mins/60);
-  return 'pulled '+h+(h===1?' hour':' hours')+' ago';
+  let clock=''; try{ clock=new Date(L.at).toLocaleString('en-PH',
+    {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }catch(e){}
+  if(L.mins==null) return 'last pull '+String(L.at).slice(0,16);
+  const rel = L.mins<1 ? 'pulled just now'
+            : L.mins<60 ? ('pulled '+L.mins+' min ago')
+            : (()=>{ const h=Math.floor(L.mins/60); return 'pulled '+h+(h===1?' hour':' hours')+' ago'; })();
+  return rel+(clock?(' · '+clock):'');
 }
 /* The control itself. One function, so the two screens cannot drift apart on
    what the button does or what the age means. */
@@ -4626,6 +4642,7 @@ async function renderPackReq(){
   const built=await pqBuildRows();
   window._pqRows=built.rows; window._pqSrc=built.src; window._pqSnap=built.snap;
   pqDraw();
+  try{ shSyncAgeRefresh(); }catch(e){}      // same reason as renderMRP
 }
 
 function pqDraw(){
@@ -4902,12 +4919,25 @@ function _pqTable(){
   });
 }
 function pqCsv(){
-  const H=['Product','SKU','Sellable','Not yet sellable','Current stock','Days cover','Sold '+PQ.win+'d','Ave/day','Lead time','LT demand','Movement','Safety stock','ROP','PAR','New Par','Alert','To produce','Move','Make'];
+  /* EVERY STEP OF THE SUM, AS A COLUMN. The on-screen working says the same
+     thing in a sentence, which reads well once and is unusable ninety times.
+     In a sheet the planner wants to sort by Shortfall, filter on Deferred and
+     total the Rounding — so each step gets a column and the prose stays on
+     screen, behind its button, for the one product somebody is querying. */
+  const H=['Product','SKU','Sellable','Not yet sellable','Current stock','Days cover',
+           'Sold '+PQ.win+'d','Ave/day','Lead time','LT demand','Movement','Safety stock','ROP',
+           'PAR','New Par','Target','Shortfall','Rounding +','Cap applied','Deferred','Days to trigger',
+           'Cover after','Alert','To produce','Move','Make'];
   const q=v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+  const r2=v=>(v==null?'':Math.round((+v||0)*100)/100);
   const body=_pqTable().map(({r,c})=>[r.name,r.sku,Math.round(r.shop),Math.round(r.other),Math.round(c.cur),
     (c.cover==null||c.cover>=900)?'':Math.round(c.cover*10)/10, Math.round(r.sold),
-    Math.round(c.perDay*100)/100,c.lead,Math.round(c.ltd),c.move,Math.round(c.safety),Math.round(c.rop),
-    Math.round(c.par),Math.round(c.newPar),(c.alert?'Reorder Needed':'OK'),Math.round(c.produce),
+    r2(c.perDay),c.lead,Math.round(c.ltd),c.move,Math.round(c.safety),Math.round(c.rop),
+    Math.round(c.par),Math.round(c.newPar),r2(c.target),Math.round(c.rawNeed),
+    Math.round(c.padded||0),(c.capped?'yes':''),(c.deferred?'yes':''),
+    (c.deferDays==null||c.deferDays>=900)?'':Math.round(c.deferDays),
+    (c.coverAfter==null||c.coverAfter>=900)?'':Math.round(c.coverAfter),
+    (c.alert?'Reorder Needed':'OK'),Math.round(c.produce),
     Math.round(c.toMove),Math.round(c.toMake)].map(q).join(','));
   const blob=new Blob([[H.map(q).join(',')].concat(body).join('\n')],{type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
@@ -5742,7 +5772,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-16 16:40Z';
+const WR_BUILD='2026-10-16 22:15Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -10796,6 +10826,7 @@ async function renderMRP(){
     <button class="btn sec" onclick="saveMRPPlan()" title="Saving locks this week's demand — the Production Plan only takes targets from a saved (locked) plot">💾 Save plan (locks demand)</button>
     <button class="btn sec" onclick="renderDemandHistory()">📚 History</button>
     <button class="btn sec" onclick="openPlanLocs()">⚙ Planning locations</button>
+    <button class="btn sm ${PQ_WORK?'':'sec'}" onclick="pqWorkToggle()" title="Print the sum under every demand row — sales rate, trigger, target, what we hold, and what the rounding, the cap or the deferral did to it. The same working Regular Packs shows, from the same calculation.">${PQ_WORK?'✓':'🔍'} Show the working</button>
     ${shSyncBtn()}
     ${canRaisePO()?`<button class="wfbtn" onclick="generatePOsFromMRP()" title="Opens the locked plot for this date and orders from its approved figures. This screen does not order on its own — the plot is the document everybody shares.">🧾 Order the locked plot</button>`
       :`<span class="mini" style="color:var(--muted);margin-left:6px" title="Planning the week and buying it are two jobs. Lock the plot; Purchasing raises the orders from it.">🧾 Purchasing raises the orders</span>`}
@@ -11090,6 +11121,29 @@ async function renderMRP(){
      demand for it belong on the replacement instead". Stock left still sells,
      so the product stays in the table below and still takes a figure. */
   try{ await stockPicture(); }catch(e){}
+  /* The toolbar is written at the top of this function, before any of this has
+     run, so on a fresh load the strip said "no Shopify reading yet" over a feed
+     that was working perfectly. Refresh it once the reading exists. */
+  try{ shSyncAgeRefresh(); }catch(e){}
+  /* ---- WHERE DOES THE NUMBER IN THAT BOX COME FROM? ----------------------
+     Section 1 is an input grid, so it had no working to show — and that is
+     exactly the problem. 🧮 Pull the week fills those boxes from Regular
+     Packs' pqCalc, and once filled they are bare figures with nothing behind
+     them. Somebody is then asked to approve a week of production from numbers
+     that cannot be read back to the sales rate they came from.
+
+     So the same working Regular Packs prints is built here too, from the same
+     function, for every catalogue row — whether it was pulled or typed. The
+     planner can see what the shelf would have asked for even while overriding
+     it, and the two screens cannot disagree because there is one pqWorkLine.
+
+     Built once per render rather than per row: pqBuildRows reads stock and
+     sales and is not something to call 120 times down a table. */
+  window._mrpCalc={};
+  try{
+    const _b=await pqBuildRows();
+    (_b.rows||[]).forEach(r=>{ try{ window._mrpCalc[r.sku]={r, c:pqCalc(r)}; }catch(e){} });
+  }catch(e){}
   dh+=mrpPhaseHtml(prods, _allP);
   // demand card
   dh+=`<div class="repcard"${(coSkus.length||1)?' style="margin-top:14px"':''}>
@@ -11123,7 +11177,17 @@ async function renderMRP(){
      further up the page that has scrolled away. */
   const _demRow=p=>{
     const _to=(window._mrpPhase||{})[p.sku];
-    return `<tr${_to?' style="background:#fff8e1"':''}><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div>${_to?`<div class="mini" style="color:var(--earth,#b5762a)">🔻 phasing out → <b>${esc(_to.toName)}</b>${Math.abs(phaseRatio(_to.from,_to.to)-1)>1e-9?` · <span title="pack sizes differ — diverting converts by grams">1 : ${Math.round(phaseRatio(_to.from,_to.to)*100)/100}</span>`:''}</div>`:''}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="1" inputmode="numeric" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpSetDem('${p.sku}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}">${_to?`<div class="mini"><span class="btn link" onclick="mrpDivert('${esc(p.sku)}')" title="move this figure onto ${esc(_to.toName)}">→ divert</span></div>`:''}</td></tr>`;
+    return `<tr${_to?' style="background:#fff8e1"':''}><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div>${_to?`<div class="mini" style="color:var(--earth,#b5762a)">🔻 phasing out → <b>${esc(_to.toName)}</b>${Math.abs(phaseRatio(_to.from,_to.to)-1)>1e-9?` · <span title="pack sizes differ — diverting converts by grams">1 : ${Math.round(phaseRatio(_to.from,_to.to)*100)/100}</span>`:''}</div>`:''}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="1" inputmode="numeric" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpSetDem('${p.sku}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}">${_to?`<div class="mini"><span class="btn link" onclick="mrpDivert('${esc(p.sku)}')" title="move this figure onto ${esc(_to.toName)}">→ divert</span></div>`:''}</td></tr>${(()=>{
+      if(!PQ_WORK) return '';
+      const X=(window._mrpCalc||{})[p.sku]; if(!X) return '';
+      const asked=(window._mrpPulled&&window._mrpPulled.map&&window._mrpPulled.map[p.sku]);
+      const typed=+mrpDemand[p.sku]||0;
+      /* Say when the figure in the box is NOT what the shelf asked for. An
+         override is a decision somebody made and should read as one. */
+      const diff=(asked!=null && typed && Math.abs(typed-asked)>0.001)
+        ? ` &nbsp;•&nbsp; <b style="color:var(--earth,#b5762a)">typed ${typed}, the shelf asked for ${asked}</b>` : '';
+      return `<tr><td colspan="3" class="mini" style="background:#fbfbf8;color:var(--muted);border-top:0;padding:3px 10px 7px 26px;line-height:1.7">${pqWorkLine(X.r,X.c)}${diff}</td></tr>`;
+    })()}`;
   };
   // custom-order SKUs are planned in the card above, not here
   /* SUPPLY-LED PRODUCTS ARE NOT PLANNED HERE. Lamb and rabbit arrive when a
@@ -17370,10 +17434,16 @@ const FFCALC_URL='https://calc.wholesomerabbit.ph/';
 // In-app user guides — embedded like the calculator (iframe to files deployed alongside the app,
 // in a /guides folder). Add more entries here as you write more manuals.
 const GUIDES=[
-  {key:'wi', label:'📋 Weekly Inventory',            src:'guides/wr-weekly-inventory.html'},
-  {key:'wf', label:'🔄 Operating Workflow & Playbooks', src:'guides/wr-operating-workflow.html'}
+  {key:'wf', label:'🔄 Operating Workflow & Playbooks', src:'guides/wr-operating-workflow.html'},
+  {key:'wi', label:'📋 Weekly Inventory',            src:'guides/wr-weekly-inventory.html'}
 ];
-let _guideKey='wi';
+/* THE WORKFLOW GUIDE OPENS FIRST. It carries the role playbooks and the
+   "what changed recently" table, so it is the one a new starter and a returning
+   user both need before any single module. A third manual was drafted for the
+   October changes and thrown away: it duplicated four sections of this one and
+   would have contradicted it within a month. The changes went INTO the guides
+   that already describe those screens. */
+let _guideKey='wf';
 function setGuide(k){ _guideKey=k; renderGuides(); }
 function renderGuides(){
   const g=GUIDES.find(x=>x.key===_guideKey)||GUIDES[0];
@@ -27061,7 +27131,9 @@ const KB = {
        'Held means the order is older than the sync start and the opening count already has it',
        'Not stocked means ice, packaging or a made-to-order mix — a real sale that must not move a food balance',
        'Needs a decision is the only alarm: a Shopify code nobody has ruled on yet',
-       'The right-hand panel is what a future push WOULD publish; nothing writes to Shopify today'],
+       'The right-hand panel is what a future push WOULD publish; nothing writes to Shopify today',
+       '⚙ Manual pull points the 🔄 Sync Shopify button at the Apps Script web app, so a pull can be asked for on demand instead of waiting for the hourly job. Without it that button can only re-read what the last run saved.',
+       'WHAT YOU PASTE THERE IS PUBLIC. This app is served from GitHub Pages, so the address and the shared word can be read by anyone who views the page. The word is not a password — it only stops random scanners. The endpoint is built to be safe for a stranger to call: read-only against Shopify, writing only to shopify_inventory, and refusing to run twice inside 90 seconds.'],
     l:['ONE WAY ON PURPOSE. Phase 1 reads Shopify and writes stock. Phase 2 — publishing on-hand back as the sellable quantity — is a separate decision, so the Apps Script has no push function in it at all rather than a flag someone can flip.',
        'THE SYNC START DATE IS THE WHOLE BALL GAME. Every order shipped before the Pasig opening was counted is already inside that count. Posting it again would deduct the same packs twice and walk stock to nothing, so the database HOLDS anything older and says so. Held is the guard working, not a failure.',
        'DOUBLE-COUNTING IS THE OTHER RISK, so it is made impossible rather than unlikely. Every event carries Shopify\'s own order id and line id, and the database has a unique key on the pair — a retry, a re-run or a replayed webhook is refused, not deducted again.',
@@ -27076,6 +27148,9 @@ const KB = {
     h:['It lives in SALES, after Custom Orders — the bespoke orders are already committed, this is what is left to decide.',
        'Set the five levers on the toolbar: lead time · movement × · cycle days · sales window · case size. Movement can be overridden per product; leave the cell blank to use the global figure.',
        '📥 Shopify count loads a real count by hand (Shopify → Products → Inventory → Export). ☁ Send to Demand writes the request as demand for a plan date. ▶ Send to Production Plan puts it straight on the run.',
+       '🔄 Sync Shopify re-reads the Pasig figures and says how old the reading is — "pulled 14 min ago · Oct 16, 09:42". Red past 90 minutes means the hourly job has missed one. It says "screen only" when no manual-pull endpoint is set up, which means it can refresh THIS SCREEN but cannot make Shopify send a newer count.',
+       '🔍 Show the working prints the whole sum under a row — sold → per day → lead-time demand → safety → trigger → par → target → what we hold → shortfall, then what the rounding, the cap or the deferral did. Turn it on to answer ONE question about ONE product, then turn it off: a paragraph under every row makes the table unreadable.',
+       '⬇ CSV is the one to use for a spreadsheet. Every step of that same sum is a COLUMN — Target, Shortfall, Rounding +, Cap applied, Deferred, Days to trigger, Cover after — so you can sort, filter and total it. Prose on screen, columns in the sheet.',
        'Or pull it from the other end: Demand/MRP → 🧮 Pull the week loads the same answer into the plot, alongside the custom orders.'],
     l:['<b>Current stock</b> = <b>what the shop can sell</b> + <b>what is at the kitchen</b> — named by place, because "not yet sellable at Bulacan" reads as if it had failed to arrive there, when it is sitting in the freezer. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here both numbers come out of the ledger, and they are shown apart because the gap between them is a transfer somebody still has to do.',
        '<b>There is no Shopify inventory feed.</b> The Shopify sync is one way and pulls ORDERS — the token carries read_orders and read_products, nothing else. <code>wr_shopify_stock</code> is not a feed either: it is this ledger\'s own balance at the selling site, named for what WOULD be pushed if anything ever pushed. So <b>Sellable</b> is our ledger, kept current by the sales the sync posts.',
@@ -27162,6 +27237,9 @@ const KB = {
   mrp:{d:'Weekly replenishment planner: demand + lead time + PAR → order qty, then auto-create POs grouped by supplier.',
     h:['THE WEEK ARRIVES IN TWO HALVES, AND ONE BUTTON BRINGS BOTH. 🧮 Pull the week loads every locked custom order — committed, exactly as ordered, never rounded — and then the catalogue shortfall worked out from par, sales and what is on the shelf, rounded up to a minimum of 24 then steps of 12. A custom order always wins its SKU.',
        'Type over anything, or 📥 Import / ⬆ Paste a sheet by SKU. Adjust an ingredient with Manual ±kg.',
+       'Type over anything, or 📥 Import / ⬆ Paste a sheet by SKU. Adjust an ingredient with Manual ±kg. 🔍 Show the working prints the sum behind each figure and, where you have typed over a pulled number, says what the shelf had asked for. It is off by default on purpose — it is for querying one line, not for reading the table.',
+       '🔄 Sync Shopify sits on this toolbar too and shows the last inventory pull — "pulled 14 min ago · Oct 16, 09:42". Check it before you pull the week: every catalogue figure below is worked out from what Shopify last said was on the shelf, so a reading that is hours old quietly plans the week from yesterday.',
+       'A CUSTOM ORDER’S NOTES TRAVEL. Anything written on the order — the one-line Notes field, and any note on its thread that is still open — appears under that product here, in the production picker, on the production plan and on the printed Daily Production Sheet. Resolve a note to take it off the sheet. "No bones" has to reach the person holding the knife.',
        '💾 Save plan writes the plot — and until you do, none of this is planned. 🧾 Generate Draft POs turns the ingredient need into orders.',
        '⚠ “Demand exists on N date(s) you have not plotted” means rows are sitting in the demand table for a week nobody has planned. Open the date, or 🗑 Clear it if it was a trial.',
        '🗑 Clear demand for this date removes rows BY SOURCE — the custom order or sheet import that wrote them is never deleted, and the saved plot is a separate, deliberate tick.'],
