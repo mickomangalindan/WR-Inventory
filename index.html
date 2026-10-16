@@ -3648,8 +3648,13 @@ let PQ_Q='', PQ_ONLY=true, PQ_GROUP='hier';
    not answerable from inputs alone. Off by default because the table is the
    busiest in the app and most days nobody needs to audit it — on when somebody
    does, and remembered per person. */
-let PQ_WORK=false;
-try{ PQ_WORK=localStorage.getItem('wr_pq_work')==='1'; }catch(e){}
+/* ON BY DEFAULT. The working was built, buttoned and then left off, so the
+   question "where does this number come from" stayed unanswered for anyone who
+   never found the button. A to-order quantity that cannot be read back to the
+   sales rate it came from is a number people either trust blindly or ignore.
+   An explicit choice still wins — '0' means somebody turned it off. */
+let PQ_WORK=true;
+try{ const v=localStorage.getItem('wr_pq_work'); if(v!=null) PQ_WORK=(v==='1'); }catch(e){}
 function pqWorkToggle(){ PQ_WORK=!PQ_WORK;
   try{ localStorage.setItem('wr_pq_work', PQ_WORK?'1':'0'); }catch(e){}
   pqDraw(); }
@@ -4500,6 +4505,111 @@ function isArchivedProd(p){
   if(st==='ARCHIVED') return true;
   return false;
 }
+
+/* ===========================================================================
+   SYNC SHOPIFY NOW — two different stalenesses, and only one of them is free
+   ===========================================================================
+   The pull from Shopify is an hourly Apps Script job (`pullInventory`). The
+   browser cannot start it: a time-based trigger has no handle a web page can
+   pull. So "make sure everything is in sync" is really two questions, and they
+   want different answers.
+
+     1 · IS MY SCREEN STALE?  The stock picture is cached for 60 s and the
+         Shopify snapshot is read once per load, so a tab left open all morning
+         can be hours behind a table that is perfectly current. Re-reading
+         costs one Supabase query and needs nothing new. This always works.
+
+     2 · IS THE TABLE STALE?  Up to an hour, by design. Fixing that means
+         running pullInventory on demand, which means the Apps Script has to be
+         deployed as a Web App and the ERP given its URL. Until it is, the
+         button still does (1) and says plainly how old the data is, rather
+         than pretending it refreshed something it did not.
+
+   THE URL AND TOKEN ARE PUBLIC. This app is served from GitHub Pages — anything
+   it holds, anyone can read. The token is not authentication; it only stops
+   drive-by scanners. The endpoint is therefore built to be safe to call by a
+   stranger: it is read-only against Shopify, it writes only to a table this app
+   already reads, and it refuses to run twice inside 90 seconds. The worst a
+   stranger can do is make us read our own shop. Do NOT put anything there that
+   writes to Shopify, and never the Admin token itself. */
+let SHSYNC={url:'',token:''};
+async function loadShSync(){
+  try{ const v=JSON.parse(localStorage.getItem('wr_shsync')||'null'); if(v) SHSYNC={...SHSYNC,...v}; }catch(e){}
+  if(isLive()&&SUPA&&SUPA.token){ try{ const r=await sb("app_config?select=value&key=eq.shopify_sync");
+    if(r&&r[0]&&r[0].value){ SHSYNC={...SHSYNC,...r[0].value}; localStorage.setItem('wr_shsync',JSON.stringify(SHSYNC)); } }catch(e){} }
+}
+async function saveShSync(){
+  localStorage.setItem('wr_shsync',JSON.stringify(SHSYNC));
+  if(isLive()&&SUPA&&SUPA.token){ try{ await sb('app_config?on_conflict=key',{method:'POST',
+    prefer:'resolution=merge-duplicates,return=minimal',
+    body:JSON.stringify({key:'shopify_sync',value:SHSYNC})}); }
+  catch(e){ toast('Saved on this browser only — '+String(e&&e.message||e),true); return; } }
+  toast('Sync endpoint saved for everyone');
+}
+/* How old is the READING, not the screen. Null when nothing has ever been
+   pulled — which is a different thing from "pulled a long time ago" and the
+   caller says so. */
+function shLastPull(){
+  const p=(typeof _stockPic!=='undefined'&&_stockPic)?_stockPic:null;
+  const at=(p&&p.snap&&p.snap.at)||'';
+  if(!at) return {at:'', mins:null};
+  const t=new Date(at).getTime();
+  if(!isFinite(t)) return {at:at, mins:null};
+  return {at:at, mins:Math.max(0,Math.round((Date.now()-t)/60000))};
+}
+function shAgeText(){
+  const L=shLastPull();
+  if(!L.at) return 'no Shopify reading yet';
+  if(L.mins==null) return 'last pull '+esc(String(L.at).slice(0,16));
+  if(L.mins<1) return 'pulled just now';
+  if(L.mins<60) return 'pulled '+L.mins+' min ago';
+  const h=Math.floor(L.mins/60);
+  return 'pulled '+h+(h===1?' hour':' hours')+' ago';
+}
+/* The control itself. One function, so the two screens cannot drift apart on
+   what the button does or what the age means. */
+function shSyncBtn(){
+  const L=shLastPull();
+  const stale=(L.mins==null)||(L.mins>=90);          // the job is hourly; 90 min means it has missed one
+  const col=stale?'var(--danger)':'var(--muted)';
+  return `<button class="btn sec sm" id="sh_syncbtn" onclick="shSyncNow()"
+      title="Re-reads the Shopify figures.${SHSYNC.url?' Asks the Apps Script to pull from Shopify first, then re-reads.':' No pull endpoint is set up, so this re-reads what the hourly job last saved — it cannot make Shopify send a fresh count. Set one up on Shopify Sync → ⚙ Manual pull.'}">🔄 Sync Shopify</button>
+    <span class="mini" id="sh_syncage" style="color:${col}">${esc(shAgeText())}${SHSYNC.url?'':' · screen only'}</span>`;
+}
+function shSyncAgeRefresh(){
+  const e=$('sh_syncage'); if(!e) return;
+  const L=shLastPull(); const stale=(L.mins==null)||(L.mins>=90);
+  e.style.color=stale?'var(--danger)':'var(--muted)';
+  e.textContent=shAgeText()+(SHSYNC.url?'':' · screen only');
+}
+async function shSyncNow(){
+  const b=$('sh_syncbtn'); if(b){ b.disabled=true; b.textContent='⏳ Syncing…'; }
+  let pulled=false, why='';
+  if(SHSYNC.url){
+    try{
+      /* GET with no custom headers, so the browser sends no preflight — Apps
+         Script web apps do not answer OPTIONS, and a POST with a JSON content
+         type fails CORS before it ever reaches the script. */
+      const u=SHSYNC.url+(SHSYNC.url.indexOf('?')<0?'?':'&')+'token='+encodeURIComponent(SHSYNC.token||'');
+      const r=await fetch(u,{method:'GET',redirect:'follow'});
+      const t=await r.text();
+      let j=null; try{ j=JSON.parse(t); }catch(e){}
+      if(j && j.ok){ pulled=true; why=(j.written!=null?(j.written+' row(s)'):'')+(j.skipped?' · '+j.skipped:''); }
+      else why=(j&&(j.error||j.reason))||t.slice(0,140)||('HTTP '+r.status);
+    }catch(e){ why=String(e&&e.message||e); }
+  }
+  /* Whether or not the pull ran, re-read: that is the half that always works. */
+  try{ stockPicInvalidate(); }catch(e){}
+  try{ await stockPicture(true); }catch(e){}
+  if(b){ b.disabled=false; b.textContent='🔄 Sync Shopify'; }
+  shSyncAgeRefresh();
+  if(SHSYNC.url && pulled) toast('Pulled from Shopify'+(why?(' · '+why):'')+' · '+shAgeText());
+  else if(SHSYNC.url)      toast('Could not pull from Shopify — showing the last saved reading ('+shAgeText()+'). '+why, true);
+  else                     toast('Re-read the saved Shopify figures · '+shAgeText()
+                                 +'. No manual-pull endpoint is set up, so this cannot ask Shopify for a newer count.');
+  try{ if(typeof _lastModel!=='undefined' && _lastModel==='mrp') await renderMRP(); else await renderPackReq(); }catch(e){}
+}
+
 async function renderPackReq(){
   $('crumb').innerHTML='<b>Regular Packs</b>';
   $('cp').innerHTML=`<div class="title">Regular Packs <span onclick="openKB('packreq')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
@@ -4507,6 +4617,7 @@ async function renderPackReq(){
     <button class="btn sec sm" onclick="pqPrint()">🖨 Print</button>
     <button class="btn sec sm" onclick="pqCsv()">⬇ CSV</button>
     <button class="btn sec sm" onclick="pqShopImport()">📥 Shopify count</button>
+    ${shSyncBtn()}
     <button class="btn sm" onclick="pqToDemand()">☁ Send to Demand</button>
     <button class="btn sm" onclick="pqToPlan()">▶ Send to Production Plan</button>
     <div class="sp"></div><span style="color:var(--muted)">what the shop can sell, what is already made, and what is still owed</span>`;
@@ -5567,7 +5678,7 @@ function openSettings(){
 async function signIn(){ const email=($('s_email').value||'').trim(), pw=$('s_pw').value; if(!email||!pw){ toast('Enter email & password',true); return; }
   try{ const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    await loadFieldAcl(); await loadRoleAccess(); await loadAutos(); await loadProfiles(); await loadLocs(); await loadPlanCfg(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
+    await loadFieldAcl(); await loadRoleAccess(); await loadAutos(); await loadProfiles(); await loadLocs(); await loadPlanCfg(); await loadShSync(); toast('Signed in as '+email); updateMode(); renderUserSel(); renderSide(); closeModal(); openModel(state.model||'home');
   }catch(e){ toast(e.message,true); } }
 function signOut(){ if(SUPA){ delete SUPA.token; delete SUPA.uid; delete SUPA.email; delete SUPA.role; localStorage.setItem('wr_supa',JSON.stringify(SUPA)); }
   // purge cached record data on sign-out so nothing sensitive is left on a shared machine
@@ -5631,7 +5742,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-12 09:15Z';
+const WR_BUILD='2026-10-16 16:40Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -6192,7 +6303,7 @@ async function gateSignIn(){
   try{
     const j=await sbAuth(email,pw); SUPA.token=j.access_token; SUPA.uid=j.user&&j.user.id; SUPA.email=email; localStorage.setItem('wr_supa',JSON.stringify(SUPA));
     try{ const p=await sb('profiles?select=role,name&id=eq.'+SUPA.uid); if(p&&p[0]){ SUPA.role=p[0].role; if(p[0].name){CURRENT_USER=p[0].name; localStorage.setItem('wr_cur',CURRENT_USER);} localStorage.setItem('wr_supa',JSON.stringify(SUPA)); } }catch(e){}
-    await loadFieldAcl(); await loadRoleAccess(); await loadAutos(); await loadProfiles(); await loadLocs(); await loadPlanCfg(); hideGate(); updateMode(); renderUserSel(); renderSide(); bootRoute();
+    await loadFieldAcl(); await loadRoleAccess(); await loadAutos(); await loadProfiles(); await loadLocs(); await loadPlanCfg(); await loadShSync(); hideGate(); updateMode(); renderUserSel(); renderSide(); bootRoute();
   }catch(e){ $('g_err').textContent=e.message; }
 }
 
@@ -8795,6 +8906,51 @@ async function shPushCancel(id){
   catch(e){ toast('Could not cancel — '+saveErrMsg(e), true); }
   renderShopify();
 }
+
+/* The one screen where the endpoint belongs: the person who set up the Apps
+   Script is the person reading this page. */
+function shSyncSetup(){
+  $('modal').innerHTML=`<div><h3>⚙ Manual Shopify pull</h3>
+    <p class="mini">The hourly Apps Script job <code>pullInventory</code> is what keeps
+      <code>shopify_inventory</code> current. A web page cannot start a time-based trigger, so
+      <b>🔄 Sync Shopify</b> can only re-read what that job last saved — unless the script is also
+      deployed as a <b>Web App</b> and its address put here. Then the button asks for a pull first.</p>
+    <div class="hint"><b>Whatever you paste here is public.</b> This app is served from GitHub Pages,
+      so the address and the word below can be read by anyone who views the page. The word is not a
+      password — it only stops random scanners. Deploy an endpoint that is safe for a stranger to
+      call: read-only against Shopify, writing only to <code>shopify_inventory</code>, and refusing to
+      run twice in a row. <b>Never</b> expose anything that writes to Shopify, and never the Admin token.</div>
+    <label>Web app URL <span class="mini" style="color:var(--muted)">Apps Script → Deploy → New deployment → Web app → Execute as <b>Me</b>, Who has access <b>Anyone</b></span></label>
+    <input id="sh_url" value="${esc(SHSYNC.url||'')}" placeholder="https://script.google.com/macros/s/AKfy…/exec">
+    <label>Shared word <span class="mini" style="color:var(--muted)">must match SYNC_TOKEN in the script's Script Properties</span></label>
+    <input id="sh_tok" value="${esc(SHSYNC.token||'')}" placeholder="any hard-to-guess word">
+    <p class="mini" style="margin-top:10px">Leave both blank to turn the manual pull off. The button keeps working —
+      it just re-reads the saved figures and says how old they are.</p>
+    <div class="mfoot"><button class="btn" onclick="shSyncSetupSave()">Save</button>
+      <button class="btn sec" onclick="shSyncTest()">Test it</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  $('overlay').classList.add('on');
+}
+async function shSyncSetupSave(){
+  SHSYNC.url=String(($('sh_url')||{}).value||'').trim();
+  SHSYNC.token=String(($('sh_tok')||{}).value||'').trim();
+  await saveShSync(); closeModal(); renderShopify();
+}
+async function shSyncTest(){
+  const u=String(($('sh_url')||{}).value||'').trim();
+  const t=String(($('sh_tok')||{}).value||'').trim();
+  if(!u){ toast('Paste the web app URL first',true); return; }
+  toast('Calling it…');
+  try{
+    const r=await fetch(u+(u.indexOf('?')<0?'?':'&')+'token='+encodeURIComponent(t)+'&dry=1',{method:'GET',redirect:'follow'});
+    const txt=await r.text(); let j=null; try{ j=JSON.parse(txt); }catch(e){}
+    if(j&&j.ok) alert('It answered:\n\n'+JSON.stringify(j,null,2)+'\n\nSave it and the button can pull on demand.');
+    else alert('It answered, but not with ok:true —\n\n'+txt.slice(0,500)
+      +'\n\nA login page here means the deployment is not set to "Anyone". A token error means the word does not match SYNC_TOKEN.');
+  }catch(e){ alert('Could not reach it: '+String(e&&e.message||e)
+    +'\n\nUsually the deployment is not set to "Anyone", or the URL is the /dev one rather than /exec.'); }
+}
+
 async function renderShopify(){
   $('crumb').innerHTML='<b>Shopify sync</b>';
   $('cp').innerHTML=`<div class="title">Shopify sync <span onclick="openKB('shopify')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
@@ -8802,6 +8958,7 @@ async function renderShopify(){
       ${[7,14,30,90].map(n=>`<option value="${n}" ${_shDays===n?'selected':''}>${n} days</option>`).join('')}</select></label>
     <button class="btn sec sm" onclick="renderShopify()">↻ Refresh</button>
     <button class="btn sec sm" onclick="shCsv()">⬇ CSV</button>
+    <button class="btn sec sm" onclick="shSyncSetup()" title="Point the Sync Shopify button at the Apps Script web app so a pull can be asked for on demand, instead of waiting for the hourly job">⚙ Manual pull</button>
     <div class="sp"></div><span style="color:var(--muted)">one way — sales in, nothing pushed back</span>`;
   $('content').innerHTML='<div class="repcard"><div class="empty">Reading the sync…</div></div>';
   await shLoad();
@@ -9301,7 +9458,7 @@ async function renderWDT(){
     ${_wdtCo.map(c=>{ const late=c.needed&&c.needed<todayISO();
       return `<tr><td class="mini" style="white-space:nowrap;${late?'color:var(--danger);font-weight:700':''}">${esc(c.needed||'—')}${late?' · overdue':''}</td>
       <td><b>${esc(c.customer)}</b></td><td class="mini"><code>${esc(c.ref)}</code></td>
-      <td>${esc(c.product)}</td><td class="num"><b>${c.packs}</b></td><td class="num">${c.oh}</td>
+      <td>${esc(c.product)}${coNotesHtml(c.sku||'')}</td><td class="num"><b>${c.packs}</b></td><td class="num">${c.oh}</td>
       <td>${c.oh>=c.packs?'<span class="badge b-received">ready</span>':'<span class="badge b-open">to make</span>'}</td></tr>`; }).join('')
       ||'<tr><td colspan="7" class="empty">No custom orders owing packs.</td></tr>'}
     </tbody></table></div><div class="pager">${_wdtCo.length} order line(s)</div></div>`;
@@ -10639,6 +10796,7 @@ async function renderMRP(){
     <button class="btn sec" onclick="saveMRPPlan()" title="Saving locks this week's demand — the Production Plan only takes targets from a saved (locked) plot">💾 Save plan (locks demand)</button>
     <button class="btn sec" onclick="renderDemandHistory()">📚 History</button>
     <button class="btn sec" onclick="openPlanLocs()">⚙ Planning locations</button>
+    ${shSyncBtn()}
     ${canRaisePO()?`<button class="wfbtn" onclick="generatePOsFromMRP()" title="Opens the locked plot for this date and orders from its approved figures. This screen does not order on its own — the plot is the document everybody shares.">🧾 Order the locked plot</button>`
       :`<span class="mini" style="color:var(--muted);margin-left:6px" title="Planning the week and buying it are two jobs. Lock the plot; Purchasing raises the orders from it.">🧾 Purchasing raises the orders</span>`}
     <div class="sp"></div><span style="color:var(--muted)">demand + lead time + PAR → replenishment → PO</span>`;
@@ -15032,6 +15190,62 @@ async function coAddDemand(sku, qty, planDate){ qty=+qty||0; if(!(qty>0)||!sku) 
    That table is only a cache written at lock time: it can be missing (the write
    failed, or the order was loaded by SQL) or stale (needed_date moved later).
    Returns {sku: {packs, needed, orders:[{ref,customer,packs,needed}]}}.          */
+
+/* ===========================================================================
+   A NOTE ON AN ORDER IS AN INSTRUCTION TO THE KITCHEN
+   ===========================================================================
+   "no bones", "extra lean, she is on a diet", "deliver Friday not Thursday" —
+   written by whoever took the order, on the order, and then read by nobody,
+   because the kitchen never opens Custom Orders. It reads the production plan
+   and the sheet printed off it.
+
+   So the note travels. One loader, four readers: the production picker, the
+   plan card, the printed run sheet and the demand screen. One source, because
+   four screens each fetching their own notes is four chances to disagree about
+   which ones matter.
+
+   WHICH NOTES TRAVEL, AND WHY NOT ALL OF THEM.
+     · The one-line Notes field on the order always does. It is the summary,
+       and it is what CS has been using.
+     · From the thread, only notes that are STILL OPEN. A resolved note is
+       finished business, and carrying it onto a kitchen sheet would bury
+       today's instruction under last month's.
+     · Activities with a due date travel too, flagged — "thaw on Tuesday" is
+       exactly the kind of thing that must reach the run sheet.
+   Keyed by product SKU, because that is all the kitchen screens know. */
+async function coLoadNotes(orders){
+  const by={};
+  try{
+    let rows=[];
+    if(isLive()) rows=await sb('record_notes?select=record_pk,body,kind,resolved,due_at,author,created_at&model=eq.custom_orders&resolved=eq.false&limit=500');
+    else { let a=[]; try{ a=JSON.parse(localStorage.getItem('wr_notes')||'[]'); }catch(e){}
+      rows=a.filter(n=>n.model==='custom_orders' && !n.resolved); }
+    (rows||[]).forEach(n=>{ const r=String(n.record_pk||''); if(!r) return;
+      (by[r]=by[r]||[]).push({body:String(n.body||'').trim(), kind:n.kind||'', due:String(n.due_at||'').slice(0,10), author:n.author||''}); });
+  }catch(e){}
+  /* The order's own one-liner joins the front of its thread. */
+  (orders||[]).forEach(o=>{ const t=String(o.notes||'').trim(); if(!t) return;
+    (by[o.order_ref]=by[o.order_ref]||[]).unshift({body:t, kind:'order', due:'', author:''}); });
+  return by;
+}
+/* {sku: [{ref, customer, body, kind, due}]} — what every kitchen screen reads. */
+function coNotesFor(sku){ return (window._coNotes||{})[sku]||[]; }
+function coNoteCount(sku){ return coNotesFor(sku).length; }
+/* One line, for a table cell. Plain text, no markup, so it is safe to drop
+   into a print sheet or a title attribute. */
+function coNotesText(sku){
+  return coNotesFor(sku).map(n=>(n.due?('by '+n.due+': '):'')+n.body).join(' · ');
+}
+function coNotesHtml(sku, opt){
+  const ns=coNotesFor(sku); if(!ns.length) return '';
+  opt=opt||{};
+  const col=opt.print?'#6b3f7a':'var(--berry,#6b3f7a)';
+  return `<div class="mini" style="color:${col};margin-top:3px;line-height:1.5">`
+    + ns.map(n=>`📝 ${n.due?`<b>by ${esc(n.due)}</b> — `:''}${esc(n.body)}`
+          +(n.author&&!opt.print?` <span style="opacity:.6">— ${esc(String(n.author).split('@')[0])}</span>`:'')).join('<br>')
+    + `</div>`;
+}
+
 async function coOpenDemand(){
   const map={};
   let orders=[], lines=[];
@@ -15167,6 +15381,22 @@ async function coOpenDemand(){
       ready:_rdy, status:coStat(o.status), plan_route:o.plan_route||'', fulfil_route:o.fulfil_route||''});
   });
   window._coPackHold=packHold; window._coUnmade=unmade;
+  /* The kitchen's copy of what the customer asked for, keyed by SKU. Built
+     here because this is the one function that already holds every order and
+     every line, open and settled alike. */
+  try{
+    const byRef=await coLoadNotes(orders);
+    const byS={};
+    (lines||[]).forEach(l=>{ if(!l.product_sku) return;
+      const o=(orders||[]).find(x=>x.order_ref===l.order_ref);
+      if(!o || !coIsOpen(o.status)) return;            // a settled order's note is not today's work
+      (byRef[l.order_ref]||[]).forEach(n=>{
+        const a=byS[l.product_sku]=byS[l.product_sku]||[];
+        if(a.some(x=>x.ref===l.order_ref && x.body===n.body)) return;   // one line per note per order
+        a.push({ref:l.order_ref, customer:o.customer_name||'', ...n}); });
+    });
+    window._coNotes=byS;
+  }catch(e){ window._coNotes=window._coNotes||{}; }
   return map; }
 // Flat {sku: packs} for the demand map.
 async function coOpenDemandMap(){ const m=await coOpenDemand(); const out={};
@@ -15895,12 +16125,35 @@ function _coOrderTotal(o){ return o&&o._total!=null?o._total:0; }
 function coNew(){ coRec={order_ref:'', customer_name:'', contact:'', order_date:todayISO(),
     delivery_date:'', lead_days:coLeadDefault(), needed_date:todayISO(),
     status:'draft', notes:'', discount:0, delivery_fee:0, created_by:CURRENT_USER};
-  coLines=[]; _coView='form'; drawCOForm(); }
+  coLines=[]; formRec=coRec; formNotes=[]; formAtts=[]; window._attCtx=null;
+  _coView='form'; drawCOForm(); }
 async function coOpen(refEnc){ const ref=decodeURIComponent(refEnc);
   try{ const rows=await db.list('custom_orders',{}); coRec={...(rows.find(r=>r.order_ref===ref)||{})}; }catch(e){ coRec={}; }
   try{ coLines=(await db.children({model:'custom_order_lines',fk:'order_ref'}, ref)).map(l=>({...l, recipe:(typeof l.recipe==='string'?_coParse(l.recipe):(l.recipe||[]))})); }catch(e){ coLines=[]; }
   await _coLoadStock();
+  await coLoadTrail(ref);
   _coView='form'; drawCOForm(); }
+/* ---- A CUSTOM ORDER DESERVES THE SAME TRAIL AS EVERY OTHER RECORD --------
+   The form had a one-line `Notes` box writing to custom_orders.notes. One
+   line, one author, no date, overwritten by whoever typed last — which is a
+   field, not a conversation. Every other record in the app hangs its notes,
+   activities, @mentions and attachments off record_notes / record_attachments
+   keyed by (model, record_pk), and the custom order was simply never wired in.
+
+   So it is wired in, rather than widened: a second place to write a note about
+   an order is a second place to forget to look. The one-liner stays where it
+   is — it is a summary somebody may already rely on — and the thread sits
+   beside it, dated and attributable.
+
+   `_attCtx` points uploads at the order and rerenders the CO form rather than
+   renderForm(), which would redraw the generic record form over the top. */
+async function coLoadTrail(ref){
+  formRec=coRec; formTab=0;
+  const nu=!ref;
+  formNotes = nu ? [] : await notesForRecord('custom_orders', ref);
+  formAtts  = nu ? [] : await attsForRecord('custom_orders', ref);
+  window._attCtx = nu ? null : {model:'custom_orders', ref, rerender:drawCOForm};
+}
 // on-hand finished packs per product SKU (bulacan + pasig) — drives fulfilment tracking (#4)
 async function _coLoadStock(){ const m={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if((s.kind||'')==='product') m[s.ref_sku]=(m[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} window._coStock=m; return m; }
 // Fulfilment panel HTML + overall readiness for the open order.
@@ -16342,6 +16595,29 @@ async function coDeleteOrder(){
     hideBusy(); toast('Deleted'); coBackToList();
   }catch(e){ hideBusy(); toast(_coErr(e),true); }
 }
+/* ---- TYPING A DATE MUST NOT REBUILD THE PAGE UNDER YOUR HANDS -------------
+   Expected delivery and Lead time both called drawCOForm() on `oninput` --
+   on EVERY KEYSTROKE. That function replaces the whole form's innerHTML, so
+   the field being typed into was destroyed and recreated between characters:
+   focus was lost, the page jumped back to the top, and on the number field the
+   second digit of "14" often never landed at all. That is the auto-scroll the
+   kitchen reported, and it was a functional bug, not a cosmetic one.
+
+   Only two things actually depend on those fields -- the make-by date that
+   coSyncNeeded() derives, and the sentence under it. So only those two are
+   refreshed. The schedule card below is already eventually-consistent (coSched
+   caches on its own key and lands on the next render), so it is left alone. */
+function _coDateHint(){ const mk=String(coRec.needed_date||''), del=String(coRec.delivery_date||'');
+        if(!del) return '<div class="mini" style="color:var(--muted);margin-top:4px">Set an expected delivery date and production gets a deadline ahead of it, instead of hearing about the order on the day it is due.</div>';
+        if(mk && mk<todayISO()) return `<div class="hint" style="margin-top:6px;border-left:3px solid var(--danger)"><b>Already past the make-by date.</b> Delivery is ${esc(del)} and the kitchen needed ${esc(mk)} — that was ${esc(todayISO())>esc(mk)?'before today':'today'}. Either it goes out late, or the lead time has to come down and somebody has to know.</div>`;
+        if(mk===del) return '<div class="mini" style="color:var(--earth,#b5762a);margin-top:4px">Lead time is 0 — production is due the same day it ships. That works only if the packs are already in the freezer.</div>';
+        return `<div class="mini" style="color:var(--muted);margin-top:4px">Promised <b>${esc(del)}</b> · kitchen has until <b>${esc(mk)}</b>. Demand and the weekly target use the make-by date.</div>`;
+      }
+function coDatesTouch(){
+  coSyncNeeded();
+  const i=$('co_mkby'); if(i && i.value!==(coRec.needed_date||'')) i.value=coRec.needed_date||'';
+  const h=$('co_dateHint'); if(h) h.innerHTML=_coDateHint();
+}
 function drawCOForm(){
   const locked = coPastDraft(coRec.status);
   /* CAN IT ACTUALLY BE MADE NOW? Worked out once per order, in the background,
@@ -16390,7 +16666,7 @@ function drawCOForm(){
       <td class="num" id="coLT${i}">${wpeso(_coLineTotal(l))}</td>
       <td>${locked?'':`<span style="cursor:pointer;color:var(--danger)" onclick="coDelLine(${i})">✕</span>`}</td></tr>`;
   }).join('');
-  $('content').innerHTML=`<div class="formwrap wide"><div class="sheet">
+  $('content').innerHTML=`<div class="formwrap wide"><div class="sheet" style="flex:1;min-width:0">
     <div class="hd"><input class="ttl" value="${esc(coRec.order_ref||'')}" disabled placeholder="(reference set on save)"><div class="sub">Custom order ${badge}</div></div>
     <div class="groups">
       <div><div class="fld"><label>Customer</label><div class="val"><input ${dis} value="${esc(coRec.customer_name||'')}" oninput="coRec.customer_name=this.value" style="width:100%"></div></div>
@@ -16400,17 +16676,12 @@ function drawCOForm(){
           <option value="false" ${coRec.personalized_sticker?'':'selected'}>No — uses the shared Custom Name Sticker</option>
           <option value="true" ${coRec.personalized_sticker?'selected':''}>Yes — printed with the customer's name</option></select></div></div>
         <div class="fld"><label>Expected delivery <span class="mini" style="color:var(--muted)">what the customer was promised</span></label>
-          <div class="val"><input type="date" ${dis} value="${esc(coRec.delivery_date||'')}" oninput="coRec.delivery_date=this.value;coSyncNeeded();drawCOForm()"></div></div>
+          <div class="val"><input type="date" ${dis} value="${esc(coRec.delivery_date||'')}" oninput="coRec.delivery_date=this.value;coDatesTouch()"></div></div>
         <div class="fld"><label>Lead time (days) <span class="mini" style="color:var(--muted)">how long before delivery it must be made</span></label>
-          <div class="val"><input type="number" min="0" max="60" step="1" ${dis} value="${esc(coRec.lead_days==null||coRec.lead_days===''?coLeadDefault():coRec.lead_days)}" oninput="coRec.lead_days=this.value;coSyncNeeded();drawCOForm()"></div></div>
+          <div class="val"><input type="number" min="0" max="60" step="1" ${dis} value="${esc(coRec.lead_days==null||coRec.lead_days===''?coLeadDefault():coRec.lead_days)}" oninput="coRec.lead_days=this.value;coDatesTouch()"></div></div>
         <div class="fld"><label>Make by <span class="mini" style="color:var(--muted)">the production deadline — this is the demand week</span></label>
-          <div class="val"><input type="date" ${dis} value="${esc(coRec.needed_date||'')}" oninput="coRec.needed_date=this.value"></div></div></div>
-      ${(()=>{ const mk=String(coRec.needed_date||''), del=String(coRec.delivery_date||'');
-        if(!del) return '<div class="mini" style="color:var(--muted);margin-top:4px">Set an expected delivery date and production gets a deadline ahead of it, instead of hearing about the order on the day it is due.</div>';
-        if(mk && mk<todayISO()) return `<div class="hint" style="margin-top:6px;border-left:3px solid var(--danger)"><b>Already past the make-by date.</b> Delivery is ${esc(del)} and the kitchen needed ${esc(mk)} — that was ${esc(todayISO())>esc(mk)?'before today':'today'}. Either it goes out late, or the lead time has to come down and somebody has to know.</div>`;
-        if(mk===del) return '<div class="mini" style="color:var(--earth,#b5762a);margin-top:4px">Lead time is 0 — production is due the same day it ships. That works only if the packs are already in the freezer.</div>';
-        return `<div class="mini" style="color:var(--muted);margin-top:4px">Promised <b>${esc(del)}</b> · kitchen has until <b>${esc(mk)}</b>. Demand and the weekly target use the make-by date.</div>`;
-      })()}
+          <div class="val"><input type="date" id="co_mkby" ${dis} value="${esc(coRec.needed_date||'')}" oninput="coRec.needed_date=this.value"></div></div></div>
+      <div id="co_dateHint">${_coDateHint()}</div>
       ${(()=>{ const S=coSchedNow(); coSched();
         if(!coRec.needed_date || !(coLines||[]).length) return '';
         if(!S) return '<div class="mini" style="color:var(--muted);margin-top:4px">Working out when the ingredients have to be ordered…</div>';
@@ -16438,7 +16709,11 @@ function drawCOForm(){
         <div style="text-align:right;margin-top:8px;font-size:15px">Subtotal <b id="coSub">${wpeso(_coSubtotal())}</b> · <b>Total <span id="coTot">${wpeso(_coTotal())}</span></b></div></div>
     </div>
     ${locked?_coFulfilHtml().html:''}
-  </div></div>`;
+  </div>${coRec.order_ref?`<div class="sidecol">${notesPanelHtml()}${chatterHtml()}</div>`:''}</div>`;
+  /* Two columns only once the order exists — a quote with no reference has
+     nothing to hang a note on. Same rule the count form uses. */
+  const _w=$('content').firstElementChild;
+  if(_w && coRec.order_ref) _w.classList.add('formcols');
 }
 function coToticker(){ coLines.forEach((l,i)=>{ const el=$('coLT'+i); if(el) el.textContent=wpeso(_coLineTotal(l)); }); const s=$('coSub'); if(s)s.textContent=wpeso(_coSubtotal()); const t=$('coTot'); if(t)t.textContent=wpeso(_coTotal()); }
 function coAddProduct(){ coLines.push({line_type:'product', product_sku:'', description:'', recipe:[], pack_size_g:0, packs:1, unit_price:0}); drawCOForm(); }
@@ -16820,7 +17095,7 @@ async function coLock(){
         const key=_coRecipeKey(rows.map(r=>({ingredient_sku:r.ingredient_sku, grams:+r.usable_g||0})), +p.pack_g||0);
         if(!byRecipe[key]) byRecipe[key]=p.sku; });
     }catch(e){}
-    let made=0; const demErrs=[], prodErrs=[];
+    let made=0, bomMade=0; const demErrs=[], prodErrs=[], bomErrs=[];
     for(const l of coLines){
       if(l.line_type==='custom'){
         const recipe=(l.recipe||[]).filter(r=>r.ingredient_sku&&+r.grams>0);
@@ -16840,19 +17115,45 @@ async function coLock(){
                  || coCustSku(coRec.customer_name, l.description, l.pack_size_g, existProd);
         byRecipe[rkey]=byRecipe[rkey]||sku;
         l.product_sku=sku;
+        /* ---- A PRODUCT AND ITS RECIPE ARE TWO WRITES, AND TWO FAILURES ----
+           These used to share one `try` INSIDE the "is it new?" guard, and
+           both halves of that were wrong.
+
+           · Sharing the try made one message cover two faults. When the
+             product was created and the recipe was not, the alert still read
+             "the PRODUCT RECORD could not be created" — which the person then
+             dismissed, correctly, because the product was plainly there in the
+             picker. Eleven days and twelve lines went past on that wording.
+           · Sitting inside the guard meant a SKU that already existed could
+             never acquire a recipe. Re-locking the order, the obvious thing to
+             try, skipped the write entirely.
+
+           So: the product is created only when it is new, the recipe is
+           written whenever the product has none, and each reports its own
+           failure in its own words. */
         if(!existProd.has(sku)){
           const prec={sku, group_1:'Custom Orders', group_2:(coRec.customer_name||'Custom'), family:'Custom', variant:(l.description||'Custom meal'),
             name:(l.description||'Custom meal')+' · '+(l.pack_size_g||0)+'g', pack_g:+l.pack_size_g||0, box_size:1, status:'Active',
             animal:'Dog', sell_price:+l.unit_price||0, shelf_life_days:4, is_custom:true, feeding_style:'Mix'};
           /* THIS CATCH USED TO BE EMPTY, and that is how an order reached
              "Added in Demand" with no product behind it: the demand row and the
-             order line were written, the product was not, and NOTHING said so.
-             The kitchen then could not find it in the production picker and had
-             no way to learn why. A write that fails here is reported. */
-          try{ await db.create('products',prec); existProd.add(sku); made++;
-            const bom=recipe.map(r=>({product_sku:sku, ingredient_sku:r.ingredient_sku, usable_g:+r.grams||0}));
-            await db.replaceChildren({model:'bom_lines',fk:'product_sku'}, sku, bom);
-          }catch(e){ prodErrs.push(sku+': '+String((e&&e.message)||e).slice(0,120)); }
+             order line were written, the product was not, and NOTHING said so. */
+          try{ await db.create('products',prec); existProd.add(sku); made++; }
+          catch(e){ prodErrs.push(sku+': '+String((e&&e.message)||e).slice(0,120)); }
+        }
+        /* The recipe, every time the product carries none — whether it was
+           just minted or has been sitting there recipeless since a half-failed
+           lock. An existing recipe is never overwritten: somebody may have
+           edited it, and the order line is the older record. */
+        if(existProd.has(sku) && recipe.length){
+          try{
+            let has=[]; try{ has=await db.children({model:'bom_lines',fk:'product_sku'}, sku); }catch(e){}
+            if(!has.length){
+              const bom=recipe.map(r=>({product_sku:sku, ingredient_sku:r.ingredient_sku, usable_g:+r.grams||0}));
+              await db.replaceChildren({model:'bom_lines',fk:'product_sku'}, sku, bom);
+              bomMade++;
+            }
+          }catch(e){ bomErrs.push(sku+': '+String((e&&e.message)||e).slice(0,120)); }
         }
         if(!_coProd[sku]) _coProd[sku]={sku,name:prec2Name(l),group_1:'Custom Orders',group_2:coRec.customer_name||'Custom',pack_g:+l.pack_size_g||0,is_custom:true};
       }
@@ -16875,7 +17176,40 @@ async function coLock(){
         +'\n\nUntil that exists the kitchen cannot add it to a production plan. Open the production plan and press '
         +'"🔎 Search & add products" — the order is listed there with a button to build the missing record from it.');
     }
-    else toast('Order locked · '+made+' custom SKU(s) created · demand pushed'+(isLive()?' · saved to Supabase':' · local only'));
+    /* ---- AND THE RECIPE'S OWN FAILURE, IN ITS OWN WORDS ------------------
+       A product with no recipe is NOT a missing product. It is in the picker,
+       it can be put on a run, and it then contributes nothing to the prep list
+       and nothing to the deduction — invisible until the stock goes missing.
+       Saying "the product could not be created" about it is what made twelve
+       of these survive for eleven days. */
+    if(bomErrs.length){
+      sysLog('custom_orders',coRec.order_ref,'⚠ RECIPE not written for '+bomErrs.length+' SKU(s): '+bomErrs.join('; '));
+      alert('The order is locked and the products exist, but THE RECIPE could not be saved for '
+        +bomErrs.length+' line(s):\n\n'+bomErrs.join('\n')
+        +'\n\nThese will appear in the production picker and look normal. They are not: with no recipe '
+        +'nothing is weighed for them and nothing is deducted from stock. The production plan now names '
+        +'them in red. Press 🔒 Lock again — the recipe is still on the order line and locking will retry it.');
+    }
+    /* THE CHECK THAT WOULD HAVE CAUGHT ALL TWELVE. Asking afterwards whether
+       every custom line actually ended up with a recipe costs one query and
+       catches the case where nothing threw at all — the write that quietly
+       did nothing. */
+    let silent=[];
+    try{
+      const _bl=await db.list('bom_lines',{}); const _hasB={};
+      (_bl||[]).forEach(b=>{ if(b.product_sku) _hasB[b.product_sku]=1; });
+      silent=coLines.filter(l=>l.line_type==='custom' && l.product_sku && !_hasB[l.product_sku])
+                    .map(l=>l.product_sku);
+    }catch(e){}
+    if(silent.length && !bomErrs.length){
+      sysLog('custom_orders',coRec.order_ref,'⚠ locked with NO recipe on '+silent.length+' SKU(s): '+silent.join(', '));
+      alert('The order is locked, but '+silent.length+' line(s) have NO RECIPE behind them:\n\n'+silent.join('\n')
+        +'\n\nNothing reported an error, which means the write did nothing rather than failing. '
+        +'The kitchen will see these in the picker and get no ingredients for them. '
+        +'Open the order, check each recipe has ingredients and grams, and press 🔒 Lock again.');
+    }
+    if(!prodErrs.length && !bomErrs.length && !silent.length)
+      toast('Order locked · '+made+' custom SKU(s) created'+(bomMade?(' · '+bomMade+' recipe(s) written'):'')+' · demand pushed'+(isLive()?' · saved to Supabase':' · local only'));
     drawCOForm();
     /* ROUTING IS THE NEXT STEP, so it is asked here rather than waited for.
        A field on a form is a question nobody is being asked; a prompt at the
@@ -17955,7 +18289,11 @@ async function renderProdPlan(){
     window._prodSupOh=oh;
   }catch(e){ window._prodSupOh={}; }
   await prodPackSync();
-  try{ window._prodNeedRows=await prodNeedRows(); }catch(e){ window._prodNeedRows=[]; }
+  /* An empty prep list and a prep list that THREW look identical on screen,
+     and the difference is everything: one means nothing to weigh, the other
+     means the figures are missing. Record which. */
+  try{ window._prodNeedRows=await prodNeedRows(); window._prodNeedErr=''; }
+  catch(e){ window._prodNeedRows=[]; window._prodNeedErr=String((e&&e.message)||e).slice(0,200); }
   drawProdPlan();
 }
 // Load the most-recent SAVED DRAFT plan for the production date, so the plan/cart persist across browsers.
@@ -18073,8 +18411,27 @@ async function prodNeedRows(){
   const oh=window._prodSupOh||{};
   const ov=window._prodNeed||{};
   const agg={};
+  /* ---- A LINE WITH NO RECIPE LEAVES NO TRACE, AND THAT IS THE BUG ---------
+     This loop reads bm[sku] and walks it. When a product on the run has no BOM
+     rows the array is empty, the loop body never runs, and the line simply is
+     not in the prep list -- no ingredients to weigh, nothing to deduct, and
+     NOTHING ANYWHERE SAYING SO. The kitchen reported exactly this shape:
+     "bakit walang ingredients ng ibang custom order pero nakalagay naman sa
+     ERP", and the half that costs money is the second half -- the stock is
+     never drawn down, so the loss surfaces months later as a count variance
+     nobody can explain.
+
+     Silence is the defect. Whatever the reason a recipe is missing -- a lock
+     that half-failed, a product retired with its BOM, a line pointing at a
+     catalogue SKU that never had one -- the run must say the line is on it and
+     cannot be costed, rather than quietly leaving it out. */
+  const noBom=[];
   prodPlanLines.filter(l=>(+l.good_packs||0)>0).forEach(l=>{
     const packs=+l.good_packs||0;
+    if(!(bm[l.product_sku]||[]).length){
+      noBom.push({sku:l.product_sku, name:l.name||l.product_sku, packs,
+                  custom:/^CUST-/i.test(String(l.product_sku||''))});
+    }
     (bm[l.product_sku]||[]).forEach(line=>{
       const a=agg[line.ingredient_sku]=agg[line.ingredient_sku]||{sku:line.ingredient_sku, procG:0, forProducts:[], split:[]};
       const g=line.processed_g*packs;
@@ -18088,6 +18445,7 @@ async function prodNeedRows(){
       if(s) s.g+=g; else a.split.push({sku:l.product_sku, name:nm, packs, g});
     });
   });
+  window._prodNoBom=noBom;
   // output ingredients being made to stock need their raw too
   prodOutLines.filter(l=>(+l.needed_kg||0)>0).forEach(l=>{
     const a=agg[l.ingredient_sku]=agg[l.ingredient_sku]||{sku:l.ingredient_sku, procG:0, forProducts:[], split:[]};
@@ -18096,8 +18454,14 @@ async function prodNeedRows(){
     if(a.forProducts.indexOf('(to stock)')<0) a.forProducts.push('(to stock)');
     a.split.push({sku:'', name:'To stock (not for a product)', packs:0, g});
   });
+  /* A recipe may point at an ingredient that is no longer in the master. The
+     grams are still real and somebody still has to weigh them, so the row
+     stays and says the record is missing -- dropping it would hide the very
+     thing that needs fixing. */
+  const missIng=[];
   return Object.keys(agg).map(sku=>{
     const it=im[sku]||{}; const cl=_countIngClass(it,ctx)||{};
+    if(!im[sku]) missIng.push({sku, g:agg[sku].procG, forProducts:(agg[sku].forProducts||[]).slice(0,4)});
     const cat=_ksCat(cl.g1||it.category||'');
     const y=((+it.yield_pct||100)/100)||1;
     const base=agg[sku].procG;
@@ -18142,10 +18506,11 @@ async function prodNeedRows(){
       forProducts:agg[sku].forProducts,
       /* the per-product split, scaled if the needed qty was overridden — so an
          edit up or down still says where the extra (or the shortfall) lands */
+      missing: !im[sku],
       split:(agg[sku].split||[]).map(s=>({...s, useG:base>0?(s.g*(need/base)):s.g}))
                                 .sort((a,b)=>b.useG-a.useG)
     };
-  }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat) || b.needG-a.needG);
+  }).map(r=>{ window._prodMissIng=missIng; return r; }).sort((a,b)=>KSHEET_ORDER.indexOf(a.cat)-KSHEET_ORDER.indexOf(b.cat) || b.needG-a.needG);
 }
 /* The prep list, on screen, in the printed sheet's own colours and order. */
 function prodNeedSplitToggle(sku){ window._prodSplitOpen=window._prodSplitOpen||{};
@@ -18245,7 +18610,11 @@ async function prodNeedRefresh(){
   const wasIn=(a && a.tagName==='INPUT' && a.closest && a.closest('#needBody'));
   const mark=wasIn?String(a.getAttribute('oninput')||'').match(/prodNeedSet\('([^']+)'/):null;
   const keepSku=mark?mark[1]:'', keepVal=wasIn?a.value:'', keepPos=wasIn?a.selectionStart:0;
-  try{ window._prodNeedRows=await prodNeedRows(); }catch(e){ window._prodNeedRows=[]; }
+  /* An empty prep list and a prep list that THREW look identical on screen,
+     and the difference is everything: one means nothing to weigh, the other
+     means the figures are missing. Record which. */
+  try{ window._prodNeedRows=await prodNeedRows(); window._prodNeedErr=''; }
+  catch(e){ window._prodNeedRows=[]; window._prodNeedErr=String((e&&e.message)||e).slice(0,200); }
   const el=$('needBody'); if(el) el.innerHTML=prodNeedBody();
   const f=$('needFoot'); if(f) f.innerHTML=prodNeedFoot();
   if(keepSku && el){
@@ -18713,7 +19082,7 @@ function drawProdPlan(){
     ${prodPlanLines.map((l,i)=>{ const t=+prodTargetMap[l.product_sku]||0, p=+prodMadeMap[l.product_sku]||0; const rem=_prodRemain(l.product_sku,l.good_packs);
       const _tnote=covPill(covTagFor(l.product_sku), true);
       const _pic=stockPicFor(l.product_sku);
-      return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${(t||covTagFor(l.product_sku))?'':'<div class="mini" style="color:var(--muted)">no target</div>'}
+      return `<tr><td>${esc(l.name)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${(t||covTagFor(l.product_sku))?'':'<div class="mini" style="color:var(--muted)">no target</div>'}${coNotesHtml(l.product_sku)}
         ${(_pic&&_pic.toMove>0&&_pic.toMake<=0)?`<div class="mini" style="color:var(--earth,#b5762a)" title="the packs already exist at ${esc(locName(planProduceLoc()))} — this line needs a transfer, not a run">↦ ${_spN(_pic.toMove)} already made — transfer, don't produce</div>`:''}</td>
       <td class="num">${spStockCell(_pic)}</td>
       <td class="num">${spCoverCell(_pic)}</td>
@@ -18795,6 +19164,27 @@ function drawProdPlan(){
   /* The prep list, on the plan itself — the same numbers the kitchen sheet
      prints, in the same colours and the same order (item 5), with the needed
      quantity editable (item 2) and the two stock columns beside it (item 3). */
+  h+=`${(()=>{ const mi=(window._prodMissIng||[]);
+    if(!mi.length) return '';
+    return `<div class="hint" style="margin-top:14px;border-left:3px solid var(--danger)">
+      <b>${mi.length} ingredient(s) on this run are not in the ingredient master.</b>
+      The recipes still ask for them, so the grams below are real — but nothing can be
+      costed, yielded or deducted against a record that does not exist.
+      <div class="mini" style="margin-top:5px">${mi.map(x=>'• <code>'+esc(x.sku)+'</code> · '+_prN(Math.round(x.g))+' g'
+        +(x.forProducts.length?(' · for '+esc(x.forProducts.join(', '))):'')).join('<br>')}</div>
+      <div class="mini" style="margin-top:6px;color:var(--muted)">Usually the item was archived or deleted while recipes still pointed at it. Bring the ingredient back, or edit those recipes onto the item that replaced it.</div></div>`; })()}`;
+  h+=`${(()=>{ const nb=(window._prodNoBom||[]);
+    if(!nb.length) return '';
+    const packs=nb.reduce((a,x)=>a+(+x.packs||0),0);
+    const anyCust=nb.some(x=>x.custom);
+    return `<div class="hint" style="margin-top:14px;border-left:3px solid var(--danger)">
+      <b>${nb.length} line(s) on this run have no recipe — ${_prN(packs)} pack(s).</b>
+      They are NOT in the prep list below and nothing will be deducted for them, so the
+      ingredients they use will go missing quietly and turn up as a count variance later.
+      <div class="mini" style="margin-top:5px">${nb.map(x=>'• <b>'+esc(x.name)+'</b> <code>'+esc(x.sku)+'</code> · '+_prN(x.packs)+' pack(s)').join('<br>')}</div>
+      <div class="mini" style="margin-top:6px;color:var(--muted)">${anyCust
+        ? 'A custom SKU with no recipe usually means the order was locked before its BOM was written. Open the order and re-lock it, or use <b>🛠 Create the product from this order</b> in the picker — the recipe is still on the order line.'
+        : 'Open the product and add its recipe, or take the line off this run.'}</div></div>`; })()}`;
   h+=`<div class="repcard" style="margin-top:14px"><div class="repbar"><span>Ingredients needed — the prep list</span>
     <span style="color:var(--muted);font-size:12px">Grouped and coloured like the printed sheet. <b>Needed Qty</b> starts at the recipe figure and is <b>editable</b> — type over it to pull more or less. Open an ingredient to see which product each kilo is for.</span></div>
     <div style="overflow-x:auto" class="stickyhead"><table style="table-layout:fixed;min-width:920px">
@@ -19265,7 +19655,7 @@ function drawKitchenCartBody(){
       body+=`<tr style="background:#fbf7fd">
         <td>${prodLabelHtml(r.prod,{noSku:true})}<div class="mini"><code>${esc(r.sku)}</code></div>
           <div class="mini" style="color:#6b3f7a">${esc(r.customers||'Custom order')}${r.refs?' · '+esc(r.refs):''}</div>
-          <div class="mini">make by ${when}</div></td>
+          <div class="mini">make by ${when}</div>${coNotesHtml(r.sku)}</td>
         <td class="num"><b>${r.ordered}</b></td>
         <td class="num">${r.made>0?('<b>'+r.made+'</b>'):'<span class="mini" style="color:var(--muted)">none yet</span>'}</td>
         <td class="num mini" style="color:var(--muted)">${(()=>{ const h=_hold;
@@ -19572,6 +19962,10 @@ const KSHEET_CSS=`  :root{
   .mix-block .mix-title{font-size:17px;font-weight:800;margin:0 0 2px;}
   .mix-block .mix-prot{font-size:13px;font-weight:700;color:#1D9E75;margin:0 0 3px;letter-spacing:.01em}
   td.mix .prot{font-size:11px;font-weight:700;color:#1D9E75;margin-top:1px}
+  /* The customer's own instruction. Boxed and left-ruled so it cannot be read
+     as part of the product name on a sheet somebody is scanning at speed. */
+  td.mix .conote{font-size:11px;margin-top:3px;padding:3px 6px;border-left:3px solid #6b3f7a;
+    background:#f7f2f9;color:#4a2b56;line-height:1.45;break-inside:avoid}
   td.mix .sku{font-size:9.5px;font-family:ui-monospace,Menlo,Consolas,monospace;color:#6b675f;margin-top:1px;letter-spacing:.02em}
   .mix-block .mix-sub{color:var(--sub);font-size:11.5px;margin-bottom:8px;}
   .mix-block .mix-sub b{color:var(--ink);}
@@ -20010,7 +20404,10 @@ async function prodKitchenSheet(){
     (items.length?`<tr class="sec"><td colspan="3">Mga Produkto · Finished products</td></tr>`:'')
     + items.map(x=>{ const g=_grp(x);
       return `<tr>
-      <td class="mix">${g?esc2(g)+' — ':''}${esc2(x.name)}${(()=>{const pr=_ksProteins(x.ings,(x.name||"")+" "+(x.sku||"")); return pr?`<div class="prot">${esc2(pr)}</div>`:"";})()}<div class="sku">${esc2(x.sku)}</div></td>
+      <td class="mix">${g?esc2(g)+' — ':''}${esc2(x.name)}${(()=>{const pr=_ksProteins(x.ings,(x.name||"")+" "+(x.sku||"")); return pr?`<div class="prot">${esc2(pr)}</div>`:"";})()}<div class="sku">${esc2(x.sku)}</div>${(()=>{ const ns=coNotesFor(x.sku);
+        /* THE SHEET IS THE ONLY THING THE KITCHEN READS. A note that stays on
+           the order screen may as well not have been written. */
+        return ns.length?`<div class="conote">${ns.map(n=>'&#128221; '+(n.due?'<b>by '+esc2(n.due)+'</b> &mdash; ':'')+esc2(n.body)+(n.customer?(' <i>('+esc2(n.customer)+')</i>'):'')).join('<br>')}</div>`:''; })()}</td>
       <td class="num">${x.packs}</td>
       <td class="num">${x.packG} g</td></tr>`; }).join('')
     + (outItems.length?`<tr class="sec"><td colspan="3">Sangkap na iproseso · Processed ingredients — to stock, not to a pack</td></tr>`:'')
@@ -22871,7 +23268,15 @@ function _countIngClass(i, ctx){
       lsG1:'🧴 Kitchen Supplies', lsG2:(i.category||'Supplies'), lsRank:800,
       grank:800000, uom:(i.uom||'pcs'), scale:1, form:'supply'}; }
   const isProc=!!i.is_intermediate; const p=isProc?_procParent(i,ctx.bs,ctx.bn):null;
-  const base=(_matBase(p?p.name:i.name)||(p?p.name:i.name)); const bk=base.toLowerCase(); const hasPair=ctx.procBases.has(bk);
+  /* AN ITEM THAT IS NOT IN THE MASTER HAS NO NAME, AND THIS USED TO THROW.
+     `base` came out undefined and .toLowerCase() took the whole call down --
+     and because every caller of prodNeedRows wraps it in catch(e){ rows=[] },
+     ONE bom_line pointing at a deleted or archived ingredient emptied the
+     entire prep list for the whole run. Not one missing row: no ingredients at
+     all, no printed sheet, and nothing deducted. That is the fault the kitchen
+     reported as "walang ingredients ng ibang custom order". Classify what we
+     can and let the caller name what it cannot. */
+  const base=String(_matBase(p?p.name:i.name)||(p?p.name:i.name)||''); const bk=base.toLowerCase(); const hasPair=ctx.procBases.has(bk);
   // Raw items inherit the processed sibling's category so both land under the same group.
   const inheritedCat=(!isProc && ctx.procCat && ctx.procCat[bk]) ? ctx.procCat[bk] : null;
   const cat=inheritedCat||i.category||'Ingredients';
@@ -26830,7 +27235,7 @@ if(!DEMO.variance_log.length) DEMO.variance_log=[
   {id:2,check_type:'1 · 3-way match',source_ref:'WR-PO-0012',expected:5,actual:4.2,gap_qty:-0.8,gap_value:224,location:'bulacan',responsible_user:'Purchasing',status:'open',note:''}];
 applyStudio(); applyLean(); updateMode(); renderUserSel(); renderSide(); _watchSticky();
 try{ console.log('%cWR ERP build '+WR_BUILD,'font-weight:700'); }catch(e){}
-if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadRoleAccess(); loadAutos(); loadProfiles(); loadLocs(); loadPlanCfg(); }
+if(isLive() && SUPA && SUPA.token){ loadFieldAcl(); loadRoleAccess(); loadAutos(); loadProfiles(); loadLocs(); loadPlanCfg(); loadShSync(); }
 window.addEventListener('hashchange', onHashRoute);
 if(needAuth()) showGate(); else bootRoute();
 </script>
