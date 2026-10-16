@@ -3648,27 +3648,16 @@ let PQ_Q='', PQ_ONLY=true, PQ_GROUP='hier';
    not answerable from inputs alone. Off by default because the table is the
    busiest in the app and most days nobody needs to audit it — on when somebody
    does, and remembered per person. */
-/* OFF BY DEFAULT, AND THAT WAS THE RIGHT ANSWER ALL ALONG.
-   It was switched on for a day on the reasoning that a to-order quantity
-   nobody can read back to a sales rate is a number people either trust blindly
-   or ignore. True — but a paragraph of prose repeated under all ninety rows is
-   not how that question gets answered. It made the table unreadable and
-   unusable: the one thing the screen is for is being read down a column and
-   copied into a sheet, and a sentence between every row destroys both.
-
-   The working is a DIAGNOSTIC — opened for one product when somebody asks why
-   — so it lives behind its button. The same figures belong in the CSV as
-   COLUMNS, which is where a spreadsheet can actually use them, and that is
-   where they now are. */
-let PQ_WORK=false;
-try{ const v=localStorage.getItem('wr_pq_work'); if(v!=null) PQ_WORK=(v==='1'); }catch(e){}
-/* One switch, two screens. The working is the same calculation on Regular
-   Packs and on Demand / MRP, so turning it off on one and finding it still on
-   the other would be its own small puzzle. Redraw whichever is open. */
-function pqWorkToggle(){ PQ_WORK=!PQ_WORK;
-  try{ localStorage.setItem('wr_pq_work', PQ_WORK?'1':'0'); }catch(e){}
-  if(typeof state!=='undefined' && state.model==='mrp'){ renderMRP(); return; }
-  pqDraw(); }
+/* THE COLUMNS ARE THE EXPLANATION.
+   A "show the working" row printed the whole sum as a sentence under every
+   product — sold, rate, lead-time demand, safety, trigger, par, target, what
+   we hold, shortfall, rounding. Every figure in it was already a COLUMN on
+   this table, so the paragraph said nothing the row did not, at ninety times
+   the height, and it made the one thing the screen is for — reading down a
+   column and copying it out — impossible.
+   It is gone from both screens. Demand / MRP now carries the same columns
+   Regular Packs does, and the CSV carries the steps that have no column of
+   their own (Target, Shortfall, Rounding, Cap, Deferred, Cover after). */
 function pqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0);
   try{ localStorage.setItem('wr_packreq',JSON.stringify(PQ)); }catch(e){} pqDraw(); }
 function pqReset(){ PQ=Object.assign({},PQ_DEF); PQ_MOVE={};
@@ -3688,38 +3677,6 @@ function _transferStamp(t){
   if(!m) return '';
   try{ const dt=new Date(+m[1], +m[2]-1, +m[3], 0, 0, 0, 0);
     return isNaN(dt.getTime()) ? '' : dt.toISOString(); }catch(e){ return ''; }
-}
-/* The sum, in words, with this row's own numbers in it. Every clause is the
-   line of pqCalc immediately above it, in the same order, so a figure that
-   looks wrong can be traced to the step that produced it rather than argued
-   about. Deferral and the cap explain themselves here too — a product that
-   drops off the ask has to say why, or it looks like the screen forgot it. */
-function pqWorkLine(r, c){
-  const n0=v=>Math.round(+v||0).toLocaleString('en-PH');
-  /* A slow mover's rate is 0.03 a day. Printed to one decimal that is "0", and
-     a working line that reads "lead 8d × 0 = 0.3" is worse than no working
-     line at all. Small numbers get the digits they need. */
-  const n1=v=>{ const x=+v||0; const dp = Math.abs(x)>=1 ? 1 : (Math.abs(x)>=0.1 ? 2 : 3);
-    return (Math.round(x*Math.pow(10,dp))/Math.pow(10,dp)).toLocaleString('en-PH',{maximumFractionDigits:dp}); };
-  const P=[];
-  P.push(`<b>${n0(r.sold)}</b> sold in ${PQ.win}d → <b>${n1(c.perDay)}</b>/day`);
-  P.push(`lead ${PQ.lead}d × ${n1(c.perDay)} = <b>${n1(c.ltd)}</b>`
-        +` · safety ×${(PQ_MOVE[r.sku]!=null?PQ_MOVE[r.sku]:PQ.move)} = <b>${n1(c.safety)}</b>`
-        +` → trigger <b>${n1(c.rop)}</b>`);
-  P.push(`par ${PQ.cycle}d = ${n1(c.par)}`+((c.minOn&&(+PQ.parCase)&&PQ.cs)?` → case of ${PQ.cs} → <b>${n0(c.newPar)}</b>`:` → <b>${n0(c.newPar)}</b>`)
-        +` · target ${n0(c.newPar)} + ${n1(c.safety)} = <b>${n1(c.target)}</b>`);
-  P.push(`have <b>${n0(c.cur)}</b> (${n0(r.shop)} sellable + ${n0(r.other)} at the kitchen)`
-        +` → shortfall ${n1(c.target)} − ${n0(c.cur)} = <b>${n0(c.rawNeed)}</b>`);
-  if(c.deferred){
-    P.push(`<b style="color:#4e7a3e">waiting</b> — ${n0(c.cur)} is still above the trigger ${n1(c.rop)}`
-      +(c.deferDays!=null&&c.deferDays<900?`, about <b>${Math.round(c.deferDays)} day(s)</b> before it is due`:'')
-      +`. Topping it up now would ask for ${n0(c.rawNeed)} and the floor would lift that to ${n0(Math.max(c.rawNeed,PQ.minPacks))}.`);
-  } else if(c.produce>0){
-    if(c.padded>0) P.push(`case of ${PQ.cs}${PQ.minPacks?` and the ${PQ.minPacks}-pack floor`:''} lifted ${n0(c.rawNeed)} → <b>${n0(c.produce)}</b> (+${n0(c.padded)})`);
-    if(c.capped)  P.push(`<b style="color:var(--earth,#b5762a)">cap</b> — ${PQ.capDays}d of cover is ${n0(c.perDay*PQ.capDays)} packs, so the run came down to <b>${n0(c.produce)}</b>`);
-    if(c.coverAfter!=null&&c.coverAfter<900) P.push(`leaves <b>${Math.round(c.coverAfter)}</b> day(s) of cover`);
-  }
-  return P.join(' &nbsp;•&nbsp; ');
 }
 const _pqCeil=(v,step)=>{ const s=+step||0; if(!(s>0)) return Math.ceil(v); return Math.ceil(v/s)*s; };
 
@@ -4723,7 +4680,6 @@ function pqDraw(){
       <input value="${esc(PQ_Q)}" placeholder="Search…" oninput="PQ_Q=this.value;pqDraw()"
         style="min-width:180px;padding:5px 8px;border:1px solid var(--line);border-radius:6px">
       <label class="mini"><input type="checkbox" ${PQ_ONLY?'checked':''} onchange="PQ_ONLY=this.checked;pqDraw()"> only what needs producing</label>
-      <button class="btn sm ${PQ_WORK?'':'sec'}" onclick="pqWorkToggle()" title="print the sum under every row \u2014 sales rate, trigger, target, what we hold, and what the rounding, the cap or the deferral did to it">${PQ_WORK?'\u2713':'\ud83d\udd0d'} Show the working</button>
       <span style="flex:1"></span>
       <span class="mini" style="color:var(--muted)">lead ${PQ.lead}d · move ×${PQ.move} · cycle ${PQ.cycle}d · window ${PQ.win}d${PQ.minOn?(' · min '+PQ.minPacks+'/'+PQ.cs):' · no rounding'}</span>
     </div>
@@ -4876,7 +4832,6 @@ function pqDraw(){
           : ''}`:'<span class="mini" style="color:var(--muted)">—</span>'}</td>
         <td class="mini">${(!c.toMove&&!c.toMake)?'<span style="color:var(--muted)">—</span>'
           :`${c.toMove>0?`<b style="color:var(--earth,#b5762a)">MOVE ${k0(c.toMove)}</b>`:''}${(c.toMove>0&&c.toMake>0)?'<br>':''}${c.toMake>0?`<b style="color:var(--berry)">MAKE ${k0(c.toMake)}</b>`:''}${(c.toMove>0&&!c.toMake)?'<div style="color:var(--muted)">already made — just transfer it</div>':''}`}</td></tr>`;
-      if(PQ_WORK) h+=`<tr><td colspan="${span}" class="mini" style="background:#fbfbf8;color:var(--muted);border-top:0;padding:3px 10px 7px 26px;line-height:1.7">${pqWorkLine(r,c)}</td></tr>`;
       });
     });
   });
@@ -5772,7 +5727,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-16 22:15Z';
+const WR_BUILD='2026-10-17 07:10Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -10826,7 +10781,6 @@ async function renderMRP(){
     <button class="btn sec" onclick="saveMRPPlan()" title="Saving locks this week's demand — the Production Plan only takes targets from a saved (locked) plot">💾 Save plan (locks demand)</button>
     <button class="btn sec" onclick="renderDemandHistory()">📚 History</button>
     <button class="btn sec" onclick="openPlanLocs()">⚙ Planning locations</button>
-    <button class="btn sm ${PQ_WORK?'':'sec'}" onclick="pqWorkToggle()" title="Print the sum under every demand row — sales rate, trigger, target, what we hold, and what the rounding, the cap or the deferral did to it. The same working Regular Packs shows, from the same calculation.">${PQ_WORK?'✓':'🔍'} Show the working</button>
     ${shSyncBtn()}
     ${canRaisePO()?`<button class="wfbtn" onclick="generatePOsFromMRP()" title="Opens the locked plot for this date and orders from its approved figures. This screen does not order on its own — the plot is the document everybody shares.">🧾 Order the locked plot</button>`
       :`<span class="mini" style="color:var(--muted);margin-left:6px" title="Planning the week and buying it are two jobs. Lock the plot; Purchasing raises the orders from it.">🧾 Purchasing raises the orders</span>`}
@@ -11132,10 +11086,10 @@ async function renderMRP(){
      them. Somebody is then asked to approve a week of production from numbers
      that cannot be read back to the sales rate they came from.
 
-     So the same working Regular Packs prints is built here too, from the same
-     function, for every catalogue row — whether it was pulled or typed. The
-     planner can see what the shelf would have asked for even while overriding
-     it, and the two screens cannot disagree because there is one pqWorkLine.
+     So Demand / MRP reads the same pqCalc Regular Packs does and prints it as
+     the same COLUMNS, rather than as a figure with no provenance. One
+     calculation, two screens, and the planner can see what the shelf holds
+     while deciding whether to override it.
 
      Built once per render rather than per row: pqBuildRows reads stock and
      sales and is not something to call 120 times down a table. */
@@ -11166,7 +11120,15 @@ async function renderMRP(){
       <span class="mini" style="color:var(--muted)">${esc(held.slice(0,8).map(k=>nm[k]||k).join(' · '))}${held.length>8?' …':''}</span>
       <span class="btn link" style="margin-left:6px" onclick="_mrpDrop={};renderMRP()">↺ offer them again</span></div>`; })();
   dh+=`<h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3>
-    <table><thead><tr><th>Product</th><th>SKU</th><th class="num">Demand</th></tr></thead><tbody>`;
+    <div style="overflow-x:auto" class="stickyhead"><table style="min-width:1180px"><thead><tr>
+      <th>Product</th><th>SKU</th>
+      <th class="num" title="Shopify&#39;s sellable count at Pasig">At Pasig Hub<div class="mini" style="font-weight:400;opacity:.75">sellable</div></th>
+      <th class="num" title="made and not yet moved to the shop">At Bulacan<div class="mini" style="font-weight:400;opacity:.75">produced</div></th>
+      <th class="num">Current stock</th><th class="num">Days cover</th>
+      <th class="num">Sold ${PQ.win}d</th><th class="num">Ave/day</th><th class="num">LT demand</th>
+      <th class="num">Safety</th><th class="num">ROP</th><th class="num">PAR</th><th class="num">New Par</th>
+      <th class="num">Coverage %</th><th class="num" title="what Regular Packs would ask for at the current settings">To produce</th>
+      <th class="num">Demand</th></tr></thead><tbody>`;
   /* Name + Variant, then the code beneath. "Rabbit Meat (GC)" exists at 250 g
      and 500 g and they are different rows to plan — the variant is the only
      thing that tells them apart. */
@@ -11175,19 +11137,32 @@ async function renderMRP(){
      flagged where the planner is typing, with the replacement named, so the
      choice is visible at the moment it is being made rather than in a card
      further up the page that has scrolled away. */
+  const DEMCOLS=16;
+  /* The same figures Regular Packs prints, in the same order, because they are
+     the same calculation. A planner reads what the shelf holds and what it
+     would ask for in COLUMNS, beside the box they are typing in. A number with
+     no provenance is one people either trust blindly or ignore — and the
+     provenance belongs in cells, not in a paragraph under every row. */
+  const _demCells=sku=>{
+    const X=(window._mrpCalc||{})[sku];
+    if(!X) return '<td class="num mini" style="color:var(--muted)" colspan="13">—</td>';
+    const r=X.r, c=X.c, n0=v=>Math.round(+v||0).toLocaleString('en-PH');
+    const n2=v=>{ const x=+v||0; const d=Math.abs(x)>=1?1:2;
+      return (Math.round(x*Math.pow(10,d))/Math.pow(10,d)).toLocaleString('en-PH',{maximumFractionDigits:d}); };
+    const cov=(c.covPct==null)?'—':Math.round(c.covPct*100)+'%';
+    return `<td class="num">${n0(r.shop)}</td><td class="num">${n0(r.other)}</td>`
+      +`<td class="num"><b>${n0(c.cur)}</b></td>`
+      +`<td class="num" style="color:${c.alert?'var(--danger)':'var(--muted)'}">${(c.cover==null||c.cover>=900)?'—':n2(c.cover)}</td>`
+      +`<td class="num">${n0(r.sold)}</td><td class="num">${n2(c.perDay)}</td><td class="num">${n0(c.ltd)}</td>`
+      +`<td class="num">${n0(c.safety)}</td><td class="num">${n0(c.rop)}</td><td class="num">${n0(c.par)}</td>`
+      +`<td class="num">${n0(c.newPar)}</td><td class="num">${cov}</td>`
+      +`<td class="num" style="color:${c.produce>0?'var(--berry)':'var(--muted)'}"><b>${c.produce>0?n0(c.produce):'—'}</b>`
+      +`${c.deferred?'<div class="mini" style="color:#4e7a3e;font-weight:400">waiting</div>':''}`
+      +`${c.capped?'<div class="mini" style="color:var(--earth,#b5762a);font-weight:400">capped</div>':''}</td>`;
+  };
   const _demRow=p=>{
     const _to=(window._mrpPhase||{})[p.sku];
-    return `<tr${_to?' style="background:#fff8e1"':''}><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div>${_to?`<div class="mini" style="color:var(--earth,#b5762a)">🔻 phasing out → <b>${esc(_to.toName)}</b>${Math.abs(phaseRatio(_to.from,_to.to)-1)>1e-9?` · <span title="pack sizes differ — diverting converts by grams">1 : ${Math.round(phaseRatio(_to.from,_to.to)*100)/100}</span>`:''}</div>`:''}</td><td><code>${esc(p.sku)}</code></td><td class="num"><input type="number" step="1" inputmode="numeric" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpSetDem('${p.sku}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}">${_to?`<div class="mini"><span class="btn link" onclick="mrpDivert('${esc(p.sku)}')" title="move this figure onto ${esc(_to.toName)}">→ divert</span></div>`:''}</td></tr>${(()=>{
-      if(!PQ_WORK) return '';
-      const X=(window._mrpCalc||{})[p.sku]; if(!X) return '';
-      const asked=(window._mrpPulled&&window._mrpPulled.map&&window._mrpPulled.map[p.sku]);
-      const typed=+mrpDemand[p.sku]||0;
-      /* Say when the figure in the box is NOT what the shelf asked for. An
-         override is a decision somebody made and should read as one. */
-      const diff=(asked!=null && typed && Math.abs(typed-asked)>0.001)
-        ? ` &nbsp;•&nbsp; <b style="color:var(--earth,#b5762a)">typed ${typed}, the shelf asked for ${asked}</b>` : '';
-      return `<tr><td colspan="3" class="mini" style="background:#fbfbf8;color:var(--muted);border-top:0;padding:3px 10px 7px 26px;line-height:1.7">${pqWorkLine(X.r,X.c)}${diff}</td></tr>`;
-    })()}`;
+    return `<tr${_to?' style="background:#fff8e1"':''}><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div>${_to?`<div class="mini" style="color:var(--earth,#b5762a)">🔻 phasing out → <b>${esc(_to.toName)}</b>${Math.abs(phaseRatio(_to.from,_to.to)-1)>1e-9?` · <span title="pack sizes differ — diverting converts by grams">1 : ${Math.round(phaseRatio(_to.from,_to.to)*100)/100}</span>`:''}</div>`:''}</td><td><code>${esc(p.sku)}</code></td>${_demCells(p.sku)}<td class="num"><input type="number" step="1" inputmode="numeric" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpSetDem('${p.sku}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}">${_to?`<div class="mini"><span class="btn link" onclick="mrpDivert('${esc(p.sku)}')" title="move this figure onto ${esc(_to.toName)}">→ divert</span></div>`:''}</td></tr>`;
   };
   // custom-order SKUs are planned in the card above, not here
   /* SUPPLY-LED PRODUCTS ARE NOT PLANNED HERE. Lamb and rabbit arrive when a
@@ -11211,7 +11186,7 @@ async function renderMRP(){
        instead of padding the catalogue with products nobody is ordering. */
     const _slTyped=_supLed.filter(p=>(+mrpDemand[p.sku]||0)>0).length;
     dh=dh.replace('<tbody>','<tbody>'+
-      '<tr><td colspan="3" style="background:#fff8e1;border-left:3px solid #e0b400;padding:0">'
+      '<tr><td colspan="'+DEMCOLS+'" style="background:#fff8e1;border-left:3px solid #e0b400;padding:0">'
       +'<details'+(_slTyped?' open':'')+'><summary style="padding:8px 10px;cursor:pointer">'
       +'<b>'+_supLed.length+' supply-led product(s)</b> — rabbit, lamb and the like, planned only by hand'
       +(_slTyped?(' · <b style="color:var(--berry)">'+_slTyped+' typed for this week</b>'):'')
@@ -11220,10 +11195,10 @@ async function renderMRP(){
       +'<table style="width:100%"><tbody>'+_supLed.map(_demRow).join('')+'</tbody></table></details></td></tr>');
   }
   hierGroups(pgRows(catalogue),{g1:'_g1',g2:'_g2'}).forEach(G=>{
-    dh+=`<tr style="background:#e7f0e9"><td colspan="3"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
-    G.subs.forEach(S=>{ dh+=`<tr style="background:#f6f8f4"><td colspan="3" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(_demRow).join(''); });
+    dh+=`<tr style="background:#e7f0e9"><td colspan="${DEMCOLS}"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
+    G.subs.forEach(S=>{ dh+=`<tr style="background:#f6f8f4"><td colspan="${DEMCOLS}" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(_demRow).join(''); });
   });
-  dh+='</tbody></table></div>';
+  dh+='</tbody></table></div></div>';
   // ---- Ingredient need, ROLLED UP to the purchasable ingredient -------------
   // We only buy the whole-dressed / raw (WD) form; processed forms (deboned, ground,
   // liver, secreting organs…) are made from it. So a recipe's need for a processed
@@ -27149,8 +27124,8 @@ const KB = {
        'Set the five levers on the toolbar: lead time · movement × · cycle days · sales window · case size. Movement can be overridden per product; leave the cell blank to use the global figure.',
        '📥 Shopify count loads a real count by hand (Shopify → Products → Inventory → Export). ☁ Send to Demand writes the request as demand for a plan date. ▶ Send to Production Plan puts it straight on the run.',
        '🔄 Sync Shopify re-reads the Pasig figures and says how old the reading is — "pulled 14 min ago · Oct 16, 09:42". Red past 90 minutes means the hourly job has missed one. It says "screen only" when no manual-pull endpoint is set up, which means it can refresh THIS SCREEN but cannot make Shopify send a newer count.',
-       '🔍 Show the working prints the whole sum under a row — sold → per day → lead-time demand → safety → trigger → par → target → what we hold → shortfall, then what the rounding, the cap or the deferral did. Turn it on to answer ONE question about ONE product, then turn it off: a paragraph under every row makes the table unreadable.',
-       '⬇ CSV is the one to use for a spreadsheet. Every step of that same sum is a COLUMN — Target, Shortfall, Rounding +, Cap applied, Deferred, Days to trigger, Cover after — so you can sort, filter and total it. Prose on screen, columns in the sheet.',
+       'THE COLUMNS ARE THE WORKING. Read a row left to right and you have the whole sum: Sold 60d → Ave/day → LT demand → Safety → ROP → PAR → New Par → Coverage % → To produce. Nothing is hidden behind a button and nothing is explained in a paragraph.',
+       '⬇ CSV carries a few more steps that have no column of their own — Target, Shortfall, Rounding +, Cap applied, Deferred, Days to trigger, Cover after — so a spreadsheet can sort, filter and total them.',
        'Or pull it from the other end: Demand/MRP → 🧮 Pull the week loads the same answer into the plot, alongside the custom orders.'],
     l:['<b>Current stock</b> = <b>what the shop can sell</b> + <b>what is at the kitchen</b> — named by place, because "not yet sellable at Bulacan" reads as if it had failed to arrive there, when it is sitting in the freezer. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here both numbers come out of the ledger, and they are shown apart because the gap between them is a transfer somebody still has to do.',
        '<b>There is no Shopify inventory feed.</b> The Shopify sync is one way and pulls ORDERS — the token carries read_orders and read_products, nothing else. <code>wr_shopify_stock</code> is not a feed either: it is this ledger\'s own balance at the selling site, named for what WOULD be pushed if anything ever pushed. So <b>Sellable</b> is our ledger, kept current by the sales the sync posts.',
@@ -27237,7 +27212,7 @@ const KB = {
   mrp:{d:'Weekly replenishment planner: demand + lead time + PAR → order qty, then auto-create POs grouped by supplier.',
     h:['THE WEEK ARRIVES IN TWO HALVES, AND ONE BUTTON BRINGS BOTH. 🧮 Pull the week loads every locked custom order — committed, exactly as ordered, never rounded — and then the catalogue shortfall worked out from par, sales and what is on the shelf, rounded up to a minimum of 24 then steps of 12. A custom order always wins its SKU.',
        'Type over anything, or 📥 Import / ⬆ Paste a sheet by SKU. Adjust an ingredient with Manual ±kg.',
-       'Type over anything, or 📥 Import / ⬆ Paste a sheet by SKU. Adjust an ingredient with Manual ±kg. 🔍 Show the working prints the sum behind each figure and, where you have typed over a pulled number, says what the shelf had asked for. It is off by default on purpose — it is for querying one line, not for reading the table.',
+       'Type over anything, or 📥 Import / ⬆ Paste a sheet by SKU. Adjust an ingredient with Manual ±kg. Section 1 now carries the same columns as Regular Packs — Pasig, Bulacan, current stock, days cover, sold, ave/day, LT demand, safety, ROP, PAR, New Par, coverage % and what the shelf would ask for — so you can see what you are overriding without leaving the screen.',
        '🔄 Sync Shopify sits on this toolbar too and shows the last inventory pull — "pulled 14 min ago · Oct 16, 09:42". Check it before you pull the week: every catalogue figure below is worked out from what Shopify last said was on the shelf, so a reading that is hours old quietly plans the week from yesterday.',
        'A CUSTOM ORDER’S NOTES TRAVEL. Anything written on the order — the one-line Notes field, and any note on its thread that is still open — appears under that product here, in the production picker, on the production plan and on the printed Daily Production Sheet. Resolve a note to take it off the sheet. "No bones" has to reach the person holding the knife.',
        '💾 Save plan writes the plot — and until you do, none of this is planned. 🧾 Generate Draft POs turns the ingredient need into orders.',
