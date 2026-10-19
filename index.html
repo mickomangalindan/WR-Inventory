@@ -3242,7 +3242,11 @@ function renderLines(){
          the name does not, while RAW-BEEF-LIVER next to "Beef liver" says nothing. */
       const skuHint=(v&&_rel==='products')?`<div class="mini"><code>${esc(v)}</code></div>`:'';
       return `<td><span style="display:inline-flex;gap:3px;align-items:center;max-width:100%"><select data-col="${esc(c.n)}" onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}><option value="">—</option>${relOptsHTML(opts,v,true)}</select><button type="button" class="iconbtn" ${ro} title="Browse — search, filter and read it grouped the way the count sheet reads" aria-label="Browse" onclick="relPickCell(${i},'${c.n}','${_rel}')">🔎</button></span>${skuHint}</td>`;}
-    if(c.t==='select')return `<td><select data-col="${esc(c.n)}" onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}>${(c.o||[]).map(op=>`<option ${v===op?'selected':''}>${op}</option>`).join('')}</select></td>`;
+    /* `v==null && k===0` marks the first option when the row has no value yet,
+       so what is on screen and what is in the record cannot disagree. New rows
+       are seeded by _lineDefaults; this covers a row that arrived from anywhere
+       else with the column missing. */
+    if(c.t==='select')return `<td><select data-col="${esc(c.n)}" onchange="lSet(${i},'${c.n}',this.value);renderLines()" ${ro}>${(c.o||[]).map((op,k)=>`<option ${(v===op||((v==null||v==='')&&k===0))?'selected':''}>${op}</option>`).join('')}</select></td>`;
     // Transfer "Sent" packs: case-packed finished goods entered as boxes + loose packs (like receiving & count).
     if(c.n==='sent_packs' && !ro){ const box=(PM[ln.product_sku]||{}).box||1;
       if(box>1){ const tot=(v===''||v==null)?null:+v; const bx=(ln._sbx!=null&&ln._sbx!=='')?ln._sbx:(tot!=null?Math.floor(tot/box):''); const lo=(ln._slo!=null&&ln._slo!=='')?ln._slo:(tot!=null?(tot-Math.floor(tot/box)*box):'');
@@ -3285,10 +3289,35 @@ function renderLines(){
 function trSetBoxLoose(i,boxV,looseV){ const l=formChildren[i]; const box=((window._prodLineMap||{})[l.product_sku]||{}).box||1;
   if(boxV!=null) l._sbx=(boxV===''?'':(+boxV||0)); if(looseV!=null) l._slo=(looseV===''?'':(+looseV||0));
   if((l._sbx===''||l._sbx==null)&&(l._slo===''||l._slo==null)){ l.sent_packs=''; } else { l.sent_packs=(+l._sbx||0)*box+(+l._slo||0); } }
+/* ---- A NEW LINE MUST START WITH WHAT IT IS ALREADY SHOWING --------------
+   A dropdown with no value renders its FIRST option — the browser has to show
+   something — but nothing is selected, so the row's field stays undefined, and
+   `onchange` never fires because picking the value already on screen is not a
+   change. The person sees "product", the record has nothing.
+
+   On a transfer that is fatal rather than untidy. _o2mNormalise writes an
+   explicit NULL for a column the form owns but the row has not set, and
+   transfer_lines.kind will not take one, so PostgREST rejects the WHOLE batch
+   — every line in the save, not just the blank one. replaceChildren inserts
+   before it deletes (deliberately, so a failed save can never empty a record),
+   so the old lines survive and the new ones vanish without trace. That is
+   exactly DR-10172026 V06: thirteen lines typed, one line left, and the same
+   thing the kitchen hits every time it adds a product by hand.
+
+   So a new line is seeded with the defaults it is already displaying. */
+function _lineDefaults(o2m){
+  const row={};
+  ((o2m&&o2m.cols)||[]).forEach(c=>{
+    if(!c || !c.n) return;
+    if(c.t==='select' && Array.isArray(c.o) && c.o.length) row[c.n]=c.o[0];
+  });
+  return row;
+}
 function addLine(){
   if(state.model==='purchase_orders' && poLinesLocked(formRec)){
     toast('This order has been issued — add what arrived in 📦 Receive the rest instead, so it posts to stock and is priced.',true); return; }
-  formChildren.push({}); renderLines(); }
+  const m=MODELS[state.model]||{};
+  formChildren.push(_lineDefaults(m.o2m)); renderLines(); }
 function delLine(i){
   if(state.model==='purchase_orders' && poLinesLocked(formRec)){
     toast('This order has been issued — its lines cannot be removed. Cancel the order if it is wrong.',true); return; }
@@ -3384,6 +3413,11 @@ async function saveForm(){
            is a 400 of its own. It is no value, which is NULL. */
         m.o2m.cols.forEach(c=>{ if(c.t!=='number') return;
           row[c.n]=(row[c.n]===''||row[c.n]==null)?null:+row[c.n]; });
+        /* A select the row never set would go to the database as an explicit
+           NULL and take the whole batch down with it — see _lineDefaults. Fill
+           it with the option the form has been showing all along. */
+        m.o2m.cols.forEach(c=>{ if(c.t!=='select' || !Array.isArray(c.o) || !c.o.length) return;
+          if(row[c.n]===''||row[c.n]==null) row[c.n]=c.o[0]; });
         Object.keys(row).forEach(k=>{ if(k.charAt(0)==='_') delete row[k]; });
         return row;});
       /* A form whose lines are empty is only ever ONE of two things: a record
@@ -5162,7 +5196,7 @@ async function psCanMake(){
      ready to make — so they are collected separately and kept OUT of the
      ingredient sum. Summing ingredients for food nobody has bought for would
      report a shortage against work that is not authorised. */
-  const hold=sheet.filter(r=>(+r.coHeldPacks||0)>0);
+  const hold=sheet.filter(r=>(+r.coHeldPacks||0)>0 || r.coParked);
   if(!go.length && !hold.length){ toast('Nothing is still to make'); return; }
   $('modal').innerHTML=`<div><h3>🥩 Can we make it?</h3><p class="mini">Reading the recipes against ${esc(locName(planProduceLoc()||'bulacan'))}…</p></div>`;
   $('overlay').classList.add('on');
@@ -5210,10 +5244,11 @@ async function psCanMake(){
       <th>Product</th><th class="num">Still to produce</th><th>Right now</th></tr></thead>
       <tbody>${go.map(line).join('')||'<tr><td colspan="3" class="mini">Nothing released for production.</td></tr>'}</tbody></table></div>
     ${hold.length?`<div class="hint" style="margin-top:10px;border-left-color:var(--earth,#b5762a)">
-      <b>⏸ ${hold.length} custom line(s) are not yet for production</b> and are deliberately left out of the sum — nothing has been bought for them.
+      <b>⏸ ${hold.length} custom line(s) are not for production this week</b> and are deliberately left out of the sum — buying meat for work nobody authorised is how a week goes wrong.
       <div class="mini" style="margin-top:4px">${hold.map(r=>{
+        if(r.coParked) return `${esc(r.name)} — <b>parked</b>, left out of ${esc(r.coParkedPlot||'the plot')} on purpose · ${num(r.coParkedPacks)} pack(s)`;
         const hh=(r.coOrders||[]).filter(o=>!o.ready);
-        return `${esc(r.name)} — ${hh.map(o=>esc(o.ref)+(o.who?' · '+esc(o.who):'')+' · '+num(o.packs)+' pack(s)').join('; ')||num(r.coHeldPacks)+' pack(s)'}`; }).join('<br>')}</div></div>`:''}
+        return `${esc(r.name)} — ${hh.map(o=>esc(o.ref)+(o.who?' · '+esc(o.who):'')+' · '+num(o.packs)+' pack(s)').join('; ')||num(r.coHeldPacks)+' pack(s)'} · still to be planned in`; }).join('<br>')}</div></div>`:''}
     <div style="display:flex;gap:8px;margin-top:14px">
       <button class="btn sec" onclick="closeModal()">Close</button>
       <button class="btn sec" onclick="closeModal();openModel('production')">Open Production</button>
@@ -5819,7 +5854,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-17 19:30Z';
+const WR_BUILD='2026-10-19 21:05Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -7667,6 +7702,14 @@ async function wdtSheetLoad(){
             coOrders:((custBy[sku]||{}).orders||[]).map(o=>({ref:o.ref, who:o.customer||'', packs:+o.packs||0,
               made:+o.made||0, needed:o.needed||'', ready:!!o.ready, route:String(o.plan_route||''), status:o.status||''})),
             coHeldPacks:+((custBy[sku]||{}).held)||0,
+            /* LEFT OUT OF THE NEWEST PLOT ON PURPOSE. planTargets returns no
+               row for a parked recipe, so `still` lands at 0 by itself and the
+               packs are already out of the figure the kitchen works to. This
+               is what makes that visible instead of looking like an order that
+               quietly vanished. */
+            coParked:!!((window._wdtT||{}).parked||{})[sku],
+            coParkedPacks:(((window._wdtT||{}).parked||{})[sku] ? (+((custBy[sku]||{}).packs)||0) : 0),
+            coParkedPlot:(((window._wdtT||{}).parked||{})[sku] ? (((window._wdtT||{}).plot||{}).ref || ((window._wdtT||{}).plot||{}).date || '') : ''),
             madeDay:madeDay[sku]||{},
             isCustom:/^CUST-/.test(sku)};
   });
@@ -7744,6 +7787,9 @@ function wdtDays(sku, btn){
    waiting packs out of Still, which is correct and invisible. This says it. */
 function _wdtRelease(r){
   const os=(r&&r.coOrders)||[]; if(!os.length) return '';
+  /* Parked beats the per-order release: the plot's decision covers the whole
+     recipe, so saying "▶ ready" underneath it would contradict it. */
+  if(r.coParked) return `<div class="mini" style="color:var(--earth,#b5762a)" title="Customer service was offered this recipe when the plot was pulled and left it out. That holds for this week only — the next pull offers it again. Its packs are deliberately not in Still to make, and no meat is bought for it.">⏸ <b>parked</b> — left out of ${esc(r.coParkedPlot||'the newest plot')} on purpose${r.coParkedPacks?(' · '+num(r.coParkedPacks)+' pack(s)'):''}${os.length?(' · '+os.map(o=>esc(o.ref)).join(' · ')):''}</div>`;
   const held=os.filter(o=>!o.ready), go=os.filter(o=>o.ready);
   let h='';
   if(go.length) h+=`<div class="mini" style="color:#4e7a3e">▶ ${go.map(o=>esc(o.ref)+(o.route==='now'?' (make now)':'')).join(' · ')}</div>`;
@@ -7768,6 +7814,9 @@ function _wdtSheetHtml(){
   let h=`<div class="smart" style="margin:8px 0">
       <div class="stile"><div class="v" style="color:${owed?'var(--berry)':'#4e7a3e'}">${owed}</div><div class="l">Still to make</div></div>
       <div class="stile"><div class="v" style="color:${blocked?'var(--danger)':'#4e7a3e'}">${blocked}</div><div class="l">Blocked — ingredient short</div></div>
+      ${(()=>{ const pk=all.filter(r=>r.coParked); if(!pk.length) return '';
+        const q=pk.reduce((n,r)=>n+(+r.coParkedPacks||0),0);
+        return `<div class="stile"><div class="v" style="color:var(--earth,#b5762a)">${num(q)}</div><div class="l">Parked on purpose<div class="mini" style="font-weight:400">${pk.length} recipe(s) left out of this plot · not in Still to make</div></div></div>`; })()}
       ${restated?`<div class="stile"><div class="v" style="color:var(--muted)">${restated}</div><div class="l">Asked again<div class="mini" style="font-weight:400">not counted twice</div></div></div>`:''}
       <div class="stile"><div class="v">${all.length}</div><div class="l">Products in the window</div></div>
     </div>
@@ -7777,6 +7826,7 @@ function _wdtSheetHtml(){
       <b>Priority is by cover</b> — what is on hand divided by how fast it sells, so low stock and fast moving are one question. Rows are in that order, and <b>Can make?</b> allocates ingredients down that order, so an ingredient shared by several products is never claimed twice.<br>
       <b>Made opens day by day.</b> The ▾ under the figure lists the runs that built it, dated — the calendar the Production Schedule used to carry, now one click from the row it explains.<br>
       <b>⏸ not yet for production</b> under a custom line means that order still has to be planned into a week: nothing has been bought for it, so its packs are deliberately not in Still to make. An order planned in — or routed <b>Make now</b> on purpose — reads ▶.<br>
+      <b>⏸ parked</b> is the other half of that, and it is a DECISION rather than a backlog: the pull offered this recipe and customer service left it out. It holds for this week only — the next pull offers it again — and its packs are out of Still to make and out of 🥩 Can we make it? until it comes back.<br>
       <b>Current stock is two places, not three numbers.</b> The first is what <b style="color:#2f5d33">${esc(locName(planSellLoc()))}</b> can sell right now — the Shopify reading plus every movement posted at the shop since it was taken. The second is what is made and sitting <b style="color:var(--earth,#b5762a)">at ${esc(planPullLabel(', '))}</b> — real stock, one transfer away. Stock held with a consignee or as breeders is listed as <i>not ours</i> and never added. They add to Current stock; the Shopify figure printed under them is already <i>inside</i> Sellable and is shown so it can be checked, not so it can be added again.
       ${_wdtPicSrc?`<br><span style="color:var(--muted)">Sellable read from ${esc(_wdtPicSrc)}.</span>`
         :`<br><span style="color:var(--earth,#b5762a)">Showing a back-dated sheet, so the columns fall back to the ledger at both sites — a live Shopify reading cannot describe a past day.</span>`}</div>
@@ -10008,7 +10058,25 @@ function wdtPrint(which){
           behaviour scaled it on this week's demand instead — so a week running
           at 4x the steady rate bought 4x the buffer, and kept it long after
           the week ended. Turn it back on to restore the old arithmetic. */
-const RP_DEF={ on:1, review:7, leadMin:7, leadCap:30, cushion:0.5, win:60, procOn:1, shelfOn:1, minG:0, leadN:5, spike:0 };
+/* minCoverD — HOW SMALL A LINE IS, IS THE WRONG QUESTION.
+   This shipped first as a floor in KILOS: do not raise a line under 1 kg.
+   The purchase history killed it in a day. We really do buy 20 g of chicken
+   liver, 380 g of squash, 440 g of beef spleen — single-market runs for organ
+   meat where a small line is the normal line. A weight floor would have
+   blocked every one of them.
+
+   The right question is the one Zeus asked: WILL IT LAST UNTIL THE NEXT BUY?
+   The plot runs weekly, so an ingredient that still has more than a week of
+   cover left AFTER this week's production comes out of it does not need
+   buying today — next Saturday's plot will catch it, and by then the figure
+   is worth a trip. Under that, order, however small the quantity.
+
+   8 days is the floor, not the whole rule. Eight is right when the goods
+   arrive the same day they are bought, which is what a market run is. An
+   ingredient with a 7-day lead and a 7-day review must be ordered while it
+   still holds 14 days, or it runs dry waiting for the van — so the real
+   threshold is whichever is larger, and the screen names which one applied. */
+const RP_DEF={ on:1, review:7, leadMin:7, leadCap:30, cushion:0.5, win:60, procOn:1, shelfOn:1, minG:0, leadN:5, spike:0, minCoverD:8 };
 let RP=Object.assign({},RP_DEF);
 try{ RP=Object.assign({},RP_DEF,JSON.parse(localStorage.getItem('wr_rawpar')||'{}')); }catch(e){}
 /* SETTINGS LIVE IN THE DATABASE, NOT IN A BROWSER.  The pack-request settings
@@ -10297,6 +10365,7 @@ function rpSettingsHtml(plan){
             ${n('Lead cap (d)','leadCap','protects against a lead time typed in error')}
             ${n('Window (d)','win','sales window the usage rate is read from',52)}
             ${n('Lead needs n receipts','leadN','a measured lead time is only believed once this many genuine deliveries have been recorded against it. Below that the floor is used. Mayee Gajudo read 11 days off three receipts (0, 2, 11) — one late delivery, not a lead time.',46)}
+            ${n('Buy under (days)','minCoverD','order only when what is left AFTER this week\'s production runs out within this many days. The plot runs weekly, so anything with more cover than that is caught by next week\'s plot. An item whose review + lead time is longer uses that instead, so a slow supplier is never left to run dry. 0 = raise every line however much cover it has.',40)}
             <button class="btn sm ${(+RP.spike)?'':'sec'}" onclick="rpToggle('spike')" title="OFF (recommended): the lead-time buffer is sized on the steady weekly rate. ON: it is sized on THIS WEEK's demand, so a week running well above the steady rate buys a proportionally bigger buffer and keeps it afterwards — that is what put 79 days of cover on buffalo.">${(+RP.spike)?'✓ Buffer on the spike':'✕ Buffer on the steady rate'}</button>
             <button class="btn sm ${(+RP.procOn)?'':'sec'}" onclick="rpToggle('procOn')" title="count processed / part-prepped stock back as raw so it is not bought twice">${(+RP.procOn)?'✓':'✕'} Count WIP</button>
             <button class="btn sm ${(+RP.shelfOn)?'':'sec'}" onclick="rpToggle('shelfOn')" title="never hold more days than the ingredient keeps">${(+RP.shelfOn)?'✓':'✕'} Shelf-life cap</button>
@@ -11503,7 +11572,7 @@ async function renderMRP(){
      rather than made, a raw with healthy stock you want to top up anyway. The
      quantity is in the ITEM'S OWN unit (kg for food, the uom for supplies), which
      is why the row carries `unit` from here on. */
-  const _supLedIng=[];
+  const _supLedIng=[]; const _rpTooSmall=[];
   ings.forEach(it=>{
     const added=+mrpAdd[it.sku]||0;
     const sup=isSupplyItem(it);
@@ -11562,12 +11631,33 @@ async function renderMRP(){
     const moq=(+it.min_order_kg||0)*1000;
     // round up to satisfy the min order AND land on a whole ordering-pack multiple (#4)
     let final=subtotal<=0?0:roundOrderKg(subtotal/1000, +it.min_order_kg||0, +it.pack_size_kg||0)*1000;
+    /* ---- WILL IT LAST UNTIL THE NEXT BUY? -------------------------------
+       NOT "is the line big enough" — see minCoverD. Cover here is NOT the
+       cover printed beside the row: that one is `avail ÷ steady daily rate`
+       and knows nothing about this week's production. This nets the week's
+       own requirement off first, because a kilo earmarked for Saturday's run
+       is not cover, it is already spoken for.
+
+       Suppressed only when the stock left after that still outlasts the next
+       buying round AND the lead time. A quantity typed by hand, or an item
+       added to the plot by name, is never suppressed — that is a buyer making
+       a deliberate call and the plan has no business overruling it. */
+    const coverAfter = (C.perDay>0) ? ((avail-rawNeed)/C.perDay) : null;
+    const needDays   = Math.max(0,+RP.minCoverD||0, (+RP.review||0) + (+lead||0));
+    let tooSmall=false;
+    if(final>0 && coverAfter!=null && needDays>0 && coverAfter>=needDays
+       && manualKg<=0 && added<=0 && !sup){
+      tooSmall=true; final=0; }
     // A supply is counted in whole units, not grams, and is never rounded to a pack size.
     if(sup) final=added;
     else if(added>0) final=final + added*1000;
     // default supplier: the ingredient's own default, else fall back to Supplier 1 from the master (ignore "to be determined")
     const _s1=(it.supplier1||'').trim(); const defSup=(it.supplier||'').trim() || (/to be determined/i.test(_s1)?'':_s1);
-    plan.push({sku:it.sku,name:it.name,rawNeed,par:buf,leadBuf,lead,oh,inc,wip,target,trigger,
+    if(tooSmall) _rpTooSmall.push({sku:it.sku, name:it.name,
+      wanted:Math.round(subtotal)/1000, days:Math.round(coverAfter*10)/10,
+      needDays:Math.round(needDays*10)/10, lead,
+      byLead:(((+RP.review||0)+(+lead||0)) > (+RP.minCoverD||0))});
+    plan.push({sku:it.sku,name:it.name,rawNeed,par:buf,leadBuf,lead,oh,inc,wip,target,trigger,tooSmall,coverAfter,needDays,
       perWeek:C.perWeek,perDay:C.perDay,capped:C.capped,shelf:C.shelf,manualPar:C.manual,leadKnown:C.leadKnown,leadSrc:C.leadSrc,leadN:C.leadN,
       cover:(C.perDay>0?(avail/C.perDay):null),coverAfter:(C.perDay>0?(Math.max(avail,target)/C.perDay):null),
       eta:(onOrderEta[it.sku]||''),base,endInv,lowStock,manualKg,moq,final,
@@ -11575,11 +11665,15 @@ async function renderMRP(){
       remark:(mrpRemarks[it.sku]||''),supplier:defSup,price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
   });
   plan.sort((a,b)=>b.final-a.final);
-  window._mrpPlan=plan; window._mrpSupLedIng=_supLedIng;
+  window._mrpPlan=plan; window._mrpSupLedIng=_supLedIng; window._rpTooSmall=_rpTooSmall;
   const _pu=window._mrpProcUse||{}; const _puN=Object.keys(_pu).length;
   let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">2 · Replenishment plan</h3>
     ${_puN?`<div class="hint" style="margin:0 0 6px">Processed stock counts: <b>${_puN} processed ingredient(s)</b> covered part of this demand from stock already made (${Object.keys(_pu).slice(0,3).map(k=>esc(ingName(k))+' '+(Math.round(_pu[k]/10)/100)+' kg').join(', ')}${_puN>3?', …':''}), so no raw is ordered for that portion.</div>`:''}
     ${rpSettingsHtml(plan)}
+    ${(window._rpTooSmall||[]).length?`<div class="hint" style="margin:6px 0 0">
+      <b>${window._rpTooSmall.length} line(s) can wait for next week's plot</b> and are not on the plan below — each still has enough left, after this week's production, to outlast the next buying round.
+      <div class="mini" style="margin-top:3px">${window._rpTooSmall.slice(0,8).map(x=>esc(x.name)+' — '+x.wanted+' kg wanted, but '+x.days+' days still left after this week'+(x.byLead?(' · needs '+x.needDays+' days because its lead time is '+x.lead+'d'):(' · the floor is '+x.needDays+' days'))).join('<br>')}${window._rpTooSmall.length>8?('<br>…and '+(window._rpTooSmall.length-8)+' more'):''}</div>
+      <div class="mini" style="margin-top:3px;color:var(--muted)">Type a quantity against any of them to buy it anyway — a figure you type is never held back. The threshold is <b>Buy under (days)</b> above, or review + the item's own lead time, whichever is longer.</div></div>`:''}
     ${(+RP.spike)?`<div class="hint" style="border-left:4px solid var(--earth,#b5762a);margin:6px 0 0">The lead-time buffer is being sized on <b>this week's demand</b>, not on the steady rate. A week running above the normal rate will buy a proportionally bigger buffer and still be holding it weeks later — on 3 Oct that put <b>79 days</b> of cover on buffalo. Switch it to <b>steady rate</b> unless you have a reason.</div>`:''}
     <div class="hint" style="margin:0 0 8px">${RP_ON
       ? `Every ingredient has its <b>own</b> ceiling now, worked out from how fast it is actually used — not one 5 kg line for all of them.
@@ -12167,8 +12261,12 @@ async function mrpPullPackReq(){
      only when somebody types it in on purpose (the meat has landed) — and then
      the plot IS its production target. A retiring line is planned on the
      phasing-out card and diverted onto its replacement. */
-  let _slSet=new Set();
-  try{ const _pAll=(await db.list('products',{}))||[];
+  let _slSet=new Set(); let _pAll=[];
+  /* `_pAll` was a const INSIDE this try, so it existed only inside the braces.
+     Reading it further down threw a ReferenceError that no demo path reached —
+     the audit was green and the pull would have died on the first live click.
+     Declared out here so both uses share one read of the table. */
+  try{ _pAll=(await db.list('products',{}))||[];
     _slSet=new Set(_pAll.filter(p=>isSupplyLed(p)||isPhasingOut(p)).map(p=>p.sku)); }catch(e){}
   const _catAll=(built.rows||[]).map(r=>({r,c:pqCalc(r)}))
     .filter(x=>x.c.produce>0 && co[x.r.sku]==null && !_slSet.has(x.r.sku));
@@ -12216,6 +12314,25 @@ async function mrpPullPackReq(){
     map:{}, names:{} };
   cat.forEach(x=>{ window._mrpPulled.map[x.r.sku]=demSnap(x.c.produce);
                    window._mrpPulled.names[x.r.sku]=x.r.name||x.r.sku; });
+  /* ---- A CUSTOM ORDER IS A JUDGEMENT TOO --------------------------------
+     Everything above this line was built for the CATALOGUE, and custom SKUs
+     were written straight into the editor without ever being OFFERED. So
+     mrpOmissions() — which walks this map — could not see one, a plot's
+     omitted[] could never contain a CUST- code, and a custom order customer
+     service left out on purpose left no trace at all.
+
+     That is the same fault the comment above describes, in the one place it
+     matters most: a catalogue line nobody plans is a shelf that runs low, a
+     custom line nobody plans is a named person waiting on a date. Worse, an
+     order that was on an EARLIER plot keeps its "Added in Demand" status, so
+     after being parked it still read ▶ ready for production on the weekly
+     sheet and still counted in Still to make.
+
+     Offering them fixes both: zero one and the save says what is being left
+     out, the plot carries the answer, and planTargets reads it back. */
+  const _coNm={}; try{ (_pAll||[]).forEach(p=>{ if(p&&p.sku) _coNm[p.sku]=prodLabel(p,{noSku:true})||p.sku; }); }catch(e){}
+  coSkus.forEach(sk=>{ window._mrpPulled.map[sk]=Math.max(0,Math.round(+co[sk]||0));
+                       window._mrpPulled.names[sk]=_coNm[sk]||sk; });
 
   let nCo=0, nCat=0;
   coSkus.forEach(sk=>{ mrpDemand[sk]=Math.max(0,Math.round(+co[sk]||0)); nCo++; });   // never rounded
@@ -15337,6 +15454,110 @@ async function coSched(){
   try{ drawCOForm(); }catch(e){}   // one redraw; the key now matches, so no loop
   return out;
 }
+/* ---- THE DATES A LOCKED ORDER COMMITS TO -------------------------------
+   Zeus, 19 Oct: "i think we have 15 days max then we compute back. 15 days is
+   ample time. we can always use an ingredient in advance so production may
+   start, and will later be ordered."
+
+   Fifteen days is the OUTER promise, and everything else is worked back from
+   it so the promise is one the kitchen can actually keep:
+
+     promise   lock + 15 calendar days — what the customer is told
+     ready     the last Bulacan → Pasig Saturday ON OR BEFORE the promise, so
+               the packs are at the selling site before the customer expects
+               them rather than on the day
+     make by   the day before that van
+     buy by    the next Saturday from the lock — that is when the plot runs and
+               the ingredients are actually bought. Locked ON a Saturday with
+               no plot saved yet, the order makes that same week's demand;
+               once a plot exists the ingredients for it were already bought,
+               so the order rolls to the Saturday after.
+     start     buy + 8, the usual wait for meat to land
+
+   AND THE ONE CASE THAT MATTERS: when buy + 8 lands after make-by, production
+   has to start before its ingredients arrive. That is not an error — it is
+   Zeus's own "use an ingredient in advance" — but the kitchen must be TOLD,
+   not have the date quietly clamped, because starting early means drawing on
+   stock already in the freezer and somebody has to confirm it is there. */
+const CO_PROMISE_DAYS=15;   // the outer promise, in calendar days from the lock
+const CO_BUY_TO_START=8;    // meat ordered Saturday is usually in hand by then
+function _coAddDays(iso, n){
+  const t=new Date(String(iso||'')+'T00:00:00');
+  if(isNaN(t.getTime())) return '';
+  t.setDate(t.getDate()+(+n||0));
+  return isoLocal(t);
+}
+/* The Saturday on or after `iso` when `inclusive`, strictly after it otherwise. */
+function _coNextSat(iso, inclusive){
+  const t=new Date(String(iso||'')+'T00:00:00');
+  if(isNaN(t.getTime())) return '';
+  const dow=t.getDay();                       // 6 = Saturday
+  let add=(6-dow+7)%7;
+  if(add===0 && !inclusive) add=7;
+  t.setDate(t.getDate()+add);
+  return isoLocal(t);
+}
+/* The Saturday on or before `iso` — the last delivery run that beats a date. */
+function _coPrevSat(iso){
+  const t=new Date(String(iso||'')+'T00:00:00');
+  if(isNaN(t.getTime())) return '';
+  t.setDate(t.getDate()-((t.getDay()+1)%7));
+  return isoLocal(t);
+}
+/* Worked out from the lock date alone, so it is testable without a database.
+   `plotAlready` says a demand plot has already been saved for the lock week —
+   the caller asks mrpPlans(), this stays pure. */
+function coDeriveDates(lockISO, plotAlready){
+  const lock=String(lockISO||'').slice(0,10);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(lock)) return null;
+  const promise = _coAddDays(lock, CO_PROMISE_DAYS);
+  const ready   = _coPrevSat(promise);
+  const makeBy  = _coAddDays(ready, -1);
+  const buyBy   = _coNextSat(lock, !plotAlready);
+  const start   = _coAddDays(buyBy, CO_BUY_TO_START);
+  return {promise, ready, makeBy, buyBy, start,
+          /* WHICH MODE THE ORDER IS IN, not a warning. Only a Saturday lock
+             with no plot yet can be made from meat bought for it; every other
+             lock day runs ahead of its own purchase, which is normal here and
+             is why Zeus said "we can always use an ingredient in advance". The
+             form says which, so the kitchen knows whether to expect a delivery
+             or to draw on the freezer. */
+          fromStock: !!(start && makeBy && start > makeBy),
+          /* the van beats the promise, which is the whole point of working
+             back from it; false would mean the chain cannot keep the promise */
+          readyInTime: !!(ready && promise && ready <= promise)};
+}
+/* Fill the schedule on an order that has none, from the day it is locked.
+   Asks the database one question — has a demand plot already been saved for
+   this week — because that decides whether a Saturday lock makes this week's
+   buying round or the next one. */
+async function coStampDates(){
+  if(!coRec) return null;
+  const lock=todayISO();
+  let plotAlready=false;
+  try{
+    /* only matters when the lock IS a Saturday: a plot already saved means the
+       ingredients for this week were bought before this order existed */
+    const t=new Date(lock+'T00:00:00');
+    if(t.getDay()===6){
+      const plans=(await mrpPlans().catch(()=>[]))||[];
+      plotAlready=plans.some(x=>{
+        const d=String(x.plan_date||x.date||'').slice(0,10);
+        return d && d>=lock && !!((x.data||x)||{}).locked;
+      });
+    }
+  }catch(e){}
+  const D=coDeriveDates(lock, plotAlready);
+  if(!D) return null;
+  const set=(k,v)=>{ if(v && (coRec[k]==null || coRec[k]==='')) coRec[k]=v; };
+  set('delivery_date', D.promise);
+  set('ready_date',    D.ready);
+  set('needed_date',   D.makeBy);
+  set('buy_by',        D.buyBy);
+  set('prod_start',    D.start);
+  coRec._dateMode = D.fromStock ? 'stock' : 'purchase';
+  return D;
+}
 /* Recompute needed_date from the promise. Called when either half changes. */
 function coSyncNeeded(){
   if(!coRec) return;
@@ -16929,6 +17150,26 @@ async function coDeleteOrder(){
    coSyncNeeded() derives, and the sentence under it. So only those two are
    refreshed. The schedule card below is already eventually-consistent (coSched
    caches on its own key and lands on the next render), so it is left alone. */
+/* What the four dates mean together, in one short paragraph — and above all
+   WHICH MODE the order is in. A line that starts before its own purchase is
+   made out of the freezer; one that starts after is made out of the delivery.
+   Those are different jobs for the kitchen and only one of them needs somebody
+   to check the stock is really there. */
+function _coScheduleHint(){
+  const buy=String(coRec.buy_by||''), start=String(coRec.prod_start||'');
+  const mk=String(coRec.needed_date||''), ready=String(coRec.ready_date||''), del=String(coRec.delivery_date||'');
+  if(!buy && !start && !ready) return '';
+  const fromStock = !!(start && mk && start > mk);
+  const late      = !!(ready && del && ready > del);
+  return `<div class="hint" style="margin-top:6px${late?';border-left:3px solid var(--danger)':''}">
+    ${buy?`Ingredients join the <b>${esc(buy)}</b> buying round.`:''}
+    ${start?` Production starts <b>${esc(start)}</b>.`:''}
+    ${mk?` It must be made by <b>${esc(mk)}</b>`:''}${ready?`, for the <b>${esc(ready)}</b> van to ${esc(locName(planSellLoc()))}`:''}${del?`, ahead of the <b>${esc(del)}</b> promise.`:'.'}
+    ${fromStock?`<div class="mini" style="color:var(--earth,#b5762a);margin-top:4px"><b>Made from stock on hand.</b> Production starts before this order's own meat is due, so the kitchen draws on what is already in the freezer and the ${esc(buy||'next')} purchase replaces it. Check the ingredients are there — 🥩 Can we make it? on the Weekly Demand Target answers it.</div>`
+      :`<div class="mini" style="color:#4e7a3e;margin-top:4px"><b>Made from its own purchase.</b> The meat is bought for this order and lands before production starts.</div>`}
+    ${late?`<div class="mini" style="color:var(--danger);margin-top:4px"><b>The van is after the promise.</b> ${esc(ready)} is later than ${esc(del)}, so the customer would be told a date the delivery cannot meet. Move the promise, or move the order onto an earlier van.</div>`:''}
+  </div>`;
+}
 function _coDateHint(){ const mk=String(coRec.needed_date||''), del=String(coRec.delivery_date||'');
         if(!del) return '<div class="mini" style="color:var(--muted);margin-top:4px">Set an expected delivery date and production gets a deadline ahead of it, instead of hearing about the order on the day it is due.</div>';
         if(mk && mk<todayISO()) return `<div class="hint" style="margin-top:6px;border-left:3px solid var(--danger)"><b>Already past the make-by date.</b> Delivery is ${esc(del)} and the kitchen needed ${esc(mk)} — that was ${esc(todayISO())>esc(mk)?'before today':'today'}. Either it goes out late, or the lead time has to come down and somebody has to know.</div>`;
@@ -17003,6 +17244,14 @@ function drawCOForm(){
           <div class="val"><input type="number" min="0" max="60" step="1" ${dis} value="${esc(coRec.lead_days==null||coRec.lead_days===''?coLeadDefault():coRec.lead_days)}" oninput="coRec.lead_days=this.value;coDatesTouch()"></div></div>
         <div class="fld"><label>Make by <span class="mini" style="color:var(--muted)">the production deadline — this is the demand week</span></label>
           <div class="val"><input type="date" id="co_mkby" ${dis} value="${esc(coRec.needed_date||'')}" oninput="coRec.needed_date=this.value"></div></div></div>
+      <div>
+        <div class="fld"><label>Buy ingredients by <span class="mini" style="color:var(--muted)">the Saturday this order joins the buying round</span></label>
+          <div class="val"><input type="date" value="${esc(coRec.buy_by||'')}" oninput="coRec.buy_by=this.value;coDatesTouch()"></div></div>
+        <div class="fld"><label>Production starts <span class="mini" style="color:var(--muted)">about 8 days after the meat is ordered</span></label>
+          <div class="val"><input type="date" value="${esc(coRec.prod_start||'')}" oninput="coRec.prod_start=this.value;coDatesTouch()"></div></div>
+        <div class="fld"><label>Ready at ${esc(locName(planSellLoc()))} <span class="mini" style="color:var(--muted)">the Bulacan van before the promise</span></label>
+          <div class="val"><input type="date" value="${esc(coRec.ready_date||'')}" oninput="coRec.ready_date=this.value;coDatesTouch()"></div></div>
+        ${_coScheduleHint()}</div>
       <div id="co_dateHint">${_coDateHint()}</div>
       ${(()=>{ const S=coSchedNow(); coSched();
         if(!coRec.needed_date || !(coLines||[]).length) return '';
@@ -17483,6 +17732,10 @@ async function coLock(){
       if(_de) demErrs.push(_de);
     }
     coRec.status='for_production';
+    /* ---- THE DATES, FILLED ONCE, AT THE LOCK --------------------------
+       Only ever fills a box that is EMPTY. A date somebody typed is a
+       decision, and re-deriving it on every lock would quietly undo them. */
+    try{ await coStampDates(); }catch(e){}
     await coSave();   // persists lines (with product_sku) + header with status confirmed
     await db.update('custom_orders','order_ref',coRec.order_ref,{status:'for_production'});
     coRec.status='for_production';
@@ -19061,6 +19314,7 @@ async function planTargets(opt){
 
   let co={}; try{ co=await coOpenDemand(); }catch(e){ co={}; }
   const heldCo={};                       // owed, but not yet buyable — see coReadyToMake
+  const parked={};                       // left out of the newest plot on purpose
   const ref=P?(P.ref||P.date):'';
   const rows=[], by={}, seen={}, noTargets={};
   const push=r=>{ rows.push(r); by[r.sku]=r; seen[r.sku]=1; };
@@ -19075,6 +19329,24 @@ async function planTargets(opt){
       extra:0, kind:'', remark:[], custom:isC};
     if(isC){
       const d=co[sku]; if(!d||!(+d.packs>0)) return;          // produced, completed or cancelled — not here at all
+      /* ---- PARKED ON PURPOSE ---------------------------------------------
+         The newest plot was offered this recipe and customer service left it
+         out. That is a decision, not an oversight, and it holds for THAT WEEK
+         — next pull offers it again and the decision is made afresh, exactly
+         as a catalogue omission behaves. Its packs leave the figure the
+         kitchen works to and are reported on their own, because meat must not
+         be bought, and a day must not be planned, for work nobody authorised.
+         Parking is per RECIPE: two orders sharing a SKU are parked together,
+         which is the same grain the plot itself records. */
+      const _parked = !!(P && P.omit && P.omit[sku]);
+      if(_parked){
+        const h=(heldCo[sku]=heldCo[sku]||{sku, packs:0, orders:[], parked:false});
+        h.parked=true; h.packs+=(+d.packs||0);
+        h.plotRef=(P&&(P.ref||P.date))||'';
+        (d.orders||[]).forEach(o=>h.orders.push({...o, parked:true}));
+        parked[sku]=true;
+        return;
+      }
       /* ONLY WHAT THE KITCHEN MAY ACTUALLY START. An order still waiting to be
          planned into a week has had no ingredients bought for it; putting it on
          the production target invites a run that cannot be finished. What is
@@ -19138,7 +19410,7 @@ async function planTargets(opt){
       made:Math.max(0,(+d.ordered||0)-(+d.packs||0)), extra:0, kind:'order', custom:true,
       remark:[(who||'custom order')+' · no product record', d.needed?('make by '+d.needed+(d.needed<today?' — OVERDUE':'')):''].filter(Boolean)});
   });
-  return {rows, by, plot:P, ref, from:P?from:'', plotFrom:P?P.from:'', to, ageDays, made, madeRun, co, heldCo, noT, noTargets, nm};
+  return {rows, by, plot:P, ref, from:P?from:'', plotFrom:P?P.from:'', to, ageDays, made, madeRun, co, heldCo, parked, noT, noTargets, nm};
 }
 /* The Made window's From. Session only, never stored: each new day it goes
    back to the automatic default. */
