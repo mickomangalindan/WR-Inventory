@@ -5854,7 +5854,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-19 21:05Z';
+const WR_BUILD='2026-10-28 14:20Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -6137,7 +6137,20 @@ let NOTIF = JSON.parse(localStorage.getItem('wr_notif')||'null') || Object.fromE
      produce   the single site the kitchen draws from and posts output to.
    Default: supply = [bulacan], produce = bulacan — Bulacan only, which is what
    the production side always assumed.                                          */
-const PLAN_CFG_DEFAULT={supply:['bulacan'], produce:'bulacan'};
+/* ---- THE WEEK'S RHYTHM, WHICH IS NOT ONE DAY ANY MORE -------------------
+   The custom-order schedule shipped with Saturday hardcoded twice: the day the
+   ingredients are bought, and the day the van runs to the shop. Those were the
+   same day until October, when demand planning and ordering moved to Thu–Fri
+   to line up with live-animal slaughtering. The van did not move with it — of
+   the Bulacan→Pasig transfers since September, 13 are Saturday and 3 Friday.
+
+   Two different days now, so two settings. buyDow is the day the plot is
+   pulled and the POs are raised; vanDow is the day finished packs travel.
+   JS weekdays: 0 Sun … 5 Fri, 6 Sat.
+
+   They live HERE, in app_config, not in localStorage — the per-browser
+   mistake has cost this app real confusion twice already. */
+const PLAN_CFG_DEFAULT={supply:['bulacan'], produce:'bulacan', buyDow:5, vanDow:6};
 let PLAN_CFG = JSON.parse(localStorage.getItem('wr_plancfg')||'null') || {...PLAN_CFG_DEFAULT};
 /* ---- THE SITE LIST, READ FROM THE DATABASE --------------------------------
    Six screens hard-coded ['bulacan','pasig'] and a LOCS variable existed that
@@ -6195,6 +6208,9 @@ async function savePlanCfg(){
     catch(e){ toast('Saved on this device; sync failed: '+e.message,true); return false; } }
   return true; }
 function planSupplyLocs(){ const a=(PLAN_CFG&&PLAN_CFG.supply)||[]; return a.length?a.map(String):['bulacan']; }
+const DOW_NAME=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+function planBuyDow(){ const n=+((PLAN_CFG||{}).buyDow); return (n>=0&&n<=6)?n:5; }   // Friday
+function planVanDow(){ const n=+((PLAN_CFG||{}).vanDow); return (n>=0&&n<=6)?n:6; }   // Saturday
 /* ---- THE SITES THAT CAN ACTUALLY APPEAR IN THE PIPELINE COLUMN -------------
    `supply` is a list somebody ticks, and the SELL site can be ticked on it —
    Pasig is, today. That is harmless to the arithmetic, because the ledger walk
@@ -6242,8 +6258,20 @@ async function openPlanLocs(){
     </tbody></table></div>
     ${window._locsErr?`<div style="margin-top:10px;padding:9px 11px;border:1px solid var(--danger);background:#fdf0ed;border-radius:6px;font-size:12.5px">
       <b>This is not the real site list.</b> public.locations could not be read (${esc(window._locsErr)}), so every screen — including the Internal Transfer dropdowns — is falling back to <code>bulacan</code> and <code>pasig</code>. A site you added will not appear anywhere until this is fixed: run <code>sql/wr_locations_read.sql</code> in Supabase.</div>`:''}
+    <div style="margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px">
+      <div style="font-weight:700;margin-bottom:3px">The week's rhythm</div>
+      <p class="mini" style="margin:0 0 7px;color:var(--muted)">A custom order's schedule is worked back from these two days. They used to be the same day; ordering has since moved to line up with the slaughter schedule while the van stayed where it was, so they are set separately. Changing them moves the dates on orders locked from now on — it never rewrites a date already on an order.</p>
+      <label class="mini" style="margin-right:14px">Ingredients are bought on
+        <select onchange="PLAN_CFG.buyDow=+this.value" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+          ${DOW_NAME.map((n,i)=>`<option value="${i}" ${planBuyDow()===i?'selected':''}>${n}</option>`).join('')}
+        </select></label>
+      <label class="mini">The van to ${esc(locName(planSellLoc()))} runs on
+        <select onchange="PLAN_CFG.vanDow=+this.value" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
+          ${DOW_NAME.map((n,i)=>`<option value="${i}" ${planVanDow()===i?'selected':''}>${n}</option>`).join('')}
+        </select></label>
+    </div>
     <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12.5px">
-      Applies to: Demand/MRP on-hand &amp; reorder, the production shortage check, the raw-stock guard, the Internal Transfer dropdowns, and the weekly count's book quantity.</div>
+      Applies to: Demand/MRP on-hand &amp; reorder, the production shortage check, the raw-stock guard, the Internal Transfer dropdowns, the weekly count's book quantity, and a custom order's buying round and van.</div>
     <div style="display:flex;gap:8px;margin-top:14px"><button class="btn" onclick="planLocsApply()">✅ Save</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
   $('overlay').classList.add('on'); }
 function planTickSupply(code,on){ const a=new Set(planSupplyLocs()); if(on) a.add(code); else a.delete(code);
@@ -15463,15 +15491,18 @@ async function coSched(){
    it so the promise is one the kitchen can actually keep:
 
      promise   lock + 15 calendar days — what the customer is told
-     ready     the last Bulacan → Pasig Saturday ON OR BEFORE the promise, so
-               the packs are at the selling site before the customer expects
-               them rather than on the day
+     ready     the last Bulacan → Pasig VAN DAY on or before the promise, so the
+               packs are at the selling site before the customer expects them
+               rather than on the day. The buying day and the van day are set in
+               ⚙ Planning locations and are NOT the same day any more: ordering
+               moved to Thu–Fri for the slaughter schedule, the van stayed on
+               Saturday.
      make by   the day before that van
-     buy by    the next Saturday from the lock — that is when the plot runs and
-               the ingredients are actually bought. Locked ON a Saturday with
-               no plot saved yet, the order makes that same week's demand;
-               once a plot exists the ingredients for it were already bought,
-               so the order rolls to the Saturday after.
+     buy by    the next BUYING DAY from the lock — when the plot runs and the
+               ingredients are actually bought. Locked on that day with no plot
+               saved yet, the order makes that same round; once a plot exists
+               its ingredients were bought before the order existed, so it waits
+               for the next one.
      start     buy + 8, the usual wait for meat to land
 
    AND THE ONE CASE THAT MATTERS: when buy + 8 lands after make-by, production
@@ -15487,21 +15518,24 @@ function _coAddDays(iso, n){
   t.setDate(t.getDate()+(+n||0));
   return isoLocal(t);
 }
-/* The Saturday on or after `iso` when `inclusive`, strictly after it otherwise. */
-function _coNextSat(iso, inclusive){
+/* The next `dow` on or after `iso` when `inclusive`, strictly after otherwise.
+   Took a hardcoded Saturday until the buying day moved to Friday — see
+   PLAN_CFG_DEFAULT. Both ends of the chain now name the day they mean. */
+function _coNextDow(iso, dow, inclusive){
   const t=new Date(String(iso||'')+'T00:00:00');
   if(isNaN(t.getTime())) return '';
-  const dow=t.getDay();                       // 6 = Saturday
-  let add=(6-dow+7)%7;
+  dow=((+dow||0)%7+7)%7;
+  let add=(dow-t.getDay()+7)%7;
   if(add===0 && !inclusive) add=7;
   t.setDate(t.getDate()+add);
   return isoLocal(t);
 }
-/* The Saturday on or before `iso` — the last delivery run that beats a date. */
-function _coPrevSat(iso){
+/* The last `dow` on or before `iso` — the final run that still beats a date. */
+function _coPrevDow(iso, dow){
   const t=new Date(String(iso||'')+'T00:00:00');
   if(isNaN(t.getTime())) return '';
-  t.setDate(t.getDate()-((t.getDay()+1)%7));
+  dow=((+dow||0)%7+7)%7;
+  t.setDate(t.getDate()-((t.getDay()-dow+7)%7));
   return isoLocal(t);
 }
 /* Worked out from the lock date alone, so it is testable without a database.
@@ -15511,9 +15545,9 @@ function coDeriveDates(lockISO, plotAlready){
   const lock=String(lockISO||'').slice(0,10);
   if(!/^\d{4}-\d{2}-\d{2}$/.test(lock)) return null;
   const promise = _coAddDays(lock, CO_PROMISE_DAYS);
-  const ready   = _coPrevSat(promise);
+  const ready   = _coPrevDow(promise, planVanDow());
   const makeBy  = _coAddDays(ready, -1);
-  const buyBy   = _coNextSat(lock, !plotAlready);
+  const buyBy   = _coNextDow(lock, planBuyDow(), !plotAlready);
   const start   = _coAddDays(buyBy, CO_BUY_TO_START);
   return {promise, ready, makeBy, buyBy, start,
           /* WHICH MODE THE ORDER IS IN, not a warning. Only a Saturday lock
@@ -15536,10 +15570,10 @@ async function coStampDates(){
   const lock=todayISO();
   let plotAlready=false;
   try{
-    /* only matters when the lock IS a Saturday: a plot already saved means the
-       ingredients for this week were bought before this order existed */
+    /* only matters when the lock IS the buying day: a plot already saved means
+       the ingredients for this round were bought before this order existed */
     const t=new Date(lock+'T00:00:00');
-    if(t.getDay()===6){
+    if(t.getDay()===planBuyDow()){
       const plans=(await mrpPlans().catch(()=>[]))||[];
       plotAlready=plans.some(x=>{
         const d=String(x.plan_date||x.date||'').slice(0,10);
@@ -16134,7 +16168,25 @@ function coClaimPlans(ev, orders, lines, fulfilled){
     }
     return got>0 ? Object.assign({}, first, {claimed:got, short:Math.max(0, claim-got)}) : null;
   };
-  (orders||[]).filter(o=>coIsLocked(o.status))
+  /* ---- A FINISHED ORDER OWNS ITS PACKS, NOT A FUTURE WEEK'S PLAN -------
+     This used to walk every LOCKED order, and `locked` includes completed —
+     which is right for coClaimPacks, where a finished order's own production
+     is genuinely its own and must leave the pool before a live order can take
+     it. It is wrong here. A plan is a statement about work still to come, and
+     an order that was finished in September cannot hold a claim on a plot
+     saved in October.
+
+     Jairus Reyes is the case. CO-09182026 V01 (completed, needed 26 Sep) and
+     CO-10202026 V01 (live, needed 4 Nov) share CUST-JAIRUS-YOSHI499-499.
+     Sorted soonest-needed-first the SEPTEMBER order claimed all 60 packs of
+     DP-10232026's demand, and the live order was left with only a bare demand
+     row — which can never promote it past "For Demand Planning", because the
+     status rule deliberately refuses to call a row a plan. So an order that
+     WAS on the plot, and whose meat WAS ordered, read "not planned yet" on
+     every screen and sat in the unplanned queue.
+
+     Open orders only. Settled ones keep their packs and give up their plans. */
+  (orders||[]).filter(o=>coIsOpen(o.status))
     .sort((a,b)=>String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))
                  ||String(a.order_ref).localeCompare(String(b.order_ref)))
     .forEach(o=>{
@@ -17633,7 +17685,17 @@ async function coSave(){
     const hdr={order_ref:coRec.order_ref, customer_name:coRec.customer_name||'', contact:coRec.contact||'', order_date:coRec.order_date||todayISO(),
       delivery_date:coRec.delivery_date||null,
       lead_days:(coRec.lead_days==null||coRec.lead_days==='')?coLeadDefault():(+coRec.lead_days||0),
-      needed_date:coProduceBy(coRec)||coRec.needed_date||coRec.order_date||todayISO(), status:coRec.status||'draft', notes:coRec.notes||'', discount:+coRec.discount||0, delivery_fee:+coRec.delivery_fee||0, personalized_sticker:!!coRec.personalized_sticker, created_by:coRec.created_by||CURRENT_USER};
+      needed_date:coProduceBy(coRec)||coRec.needed_date||coRec.order_date||todayISO(), status:coRec.status||'draft', notes:coRec.notes||'', discount:+coRec.discount||0, delivery_fee:+coRec.delivery_fee||0, personalized_sticker:!!coRec.personalized_sticker, created_by:coRec.created_by||CURRENT_USER,
+      /* ---- THE SCHEDULE HAS TO BE IN THE WHITELIST ---------------------
+         This object is an explicit field list, and the three dates coStampDates()
+         works out at the lock were not in it. So every lock filled them on the
+         record in memory, the form showed them, and the save quietly dropped
+         them — Jairus Reyes' CO-10202026 V01 was locked on 20 Oct with all three
+         blank in the database and all three visibly blank on the screen.
+         A whitelist is the right shape here; forgetting to extend it is the
+         cost, and the only defence is remembering that adding a field to the
+         form means adding it HERE too. */
+      buy_by:coRec.buy_by||null, prod_start:coRec.prod_start||null, ready_date:coRec.ready_date||null};
     const exists=(await db.list('custom_orders',{})).some(o=>o.order_ref===coRec.order_ref);
     if(exists) await db.update('custom_orders','order_ref',coRec.order_ref,hdr); else await db.create('custom_orders',hdr);
     await _coSaveLines();
