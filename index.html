@@ -5854,7 +5854,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-28 14:20Z';
+const WR_BUILD='2026-10-28 17:10Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -6150,7 +6150,8 @@ let NOTIF = JSON.parse(localStorage.getItem('wr_notif')||'null') || Object.fromE
 
    They live HERE, in app_config, not in localStorage — the per-browser
    mistake has cost this app real confusion twice already. */
-const PLAN_CFG_DEFAULT={supply:['bulacan'], produce:'bulacan', buyDow:5, vanDow:6};
+const PLAN_CFG_DEFAULT={supply:['bulacan'], produce:'bulacan',
+  buyDow:5, vanDow:6, promiseDays:15, buyToStart:8, coLead:3};
 let PLAN_CFG = JSON.parse(localStorage.getItem('wr_plancfg')||'null') || {...PLAN_CFG_DEFAULT};
 /* ---- THE SITE LIST, READ FROM THE DATABASE --------------------------------
    Six screens hard-coded ['bulacan','pasig'] and a LOCS variable existed that
@@ -6211,6 +6212,20 @@ function planSupplyLocs(){ const a=(PLAN_CFG&&PLAN_CFG.supply)||[]; return a.len
 const DOW_NAME=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 function planBuyDow(){ const n=+((PLAN_CFG||{}).buyDow); return (n>=0&&n<=6)?n:5; }   // Friday
 function planVanDow(){ const n=+((PLAN_CFG||{}).vanDow); return (n>=0&&n<=6)?n:6; }   // Saturday
+/* ---- ONE HOME FOR THE SCHEDULE, AND IT IS NOT A BROWSER ------------------
+   These five knobs decide every date a locked custom order commits to, and
+   until now they lived in three places: two were hardcoded constants nobody
+   could change without a build, the default lead time was in localStorage —
+   so two people reading the same order could derive different dates — and only
+   the two weekdays were in app_config.
+
+   All five are in app_config now, which is shared, and all five are editable
+   from ⚙ Schedule on the Custom Orders screen. That matters beyond tidiness:
+   the person who owns a promise to a customer is customer service, and
+   customer service cannot open Demand / MRP, where the only settings dialog
+   used to be. A setting you cannot reach is a setting somebody works around. */
+function coPromiseDays(){ const n=+((PLAN_CFG||{}).promiseDays); return (n>=0&&n<=120)?n:15; }
+function coBuyToStart(){  const n=+((PLAN_CFG||{}).buyToStart);  return (n>=0&&n<=60)?n:8; }
 /* ---- THE SITES THAT CAN ACTUALLY APPEAR IN THE PIPELINE COLUMN -------------
    `supply` is a list somebody ticks, and the SELL site can be ticked on it —
    Pasig is, today. That is harmless to the arithmetic, because the ledger walk
@@ -6260,15 +6275,8 @@ async function openPlanLocs(){
       <b>This is not the real site list.</b> public.locations could not be read (${esc(window._locsErr)}), so every screen — including the Internal Transfer dropdowns — is falling back to <code>bulacan</code> and <code>pasig</code>. A site you added will not appear anywhere until this is fixed: run <code>sql/wr_locations_read.sql</code> in Supabase.</div>`:''}
     <div style="margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px">
       <div style="font-weight:700;margin-bottom:3px">The week's rhythm</div>
-      <p class="mini" style="margin:0 0 7px;color:var(--muted)">A custom order's schedule is worked back from these two days. They used to be the same day; ordering has since moved to line up with the slaughter schedule while the van stayed where it was, so they are set separately. Changing them moves the dates on orders locked from now on — it never rewrites a date already on an order.</p>
-      <label class="mini" style="margin-right:14px">Ingredients are bought on
-        <select onchange="PLAN_CFG.buyDow=+this.value" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
-          ${DOW_NAME.map((n,i)=>`<option value="${i}" ${planBuyDow()===i?'selected':''}>${n}</option>`).join('')}
-        </select></label>
-      <label class="mini">The van to ${esc(locName(planSellLoc()))} runs on
-        <select onchange="PLAN_CFG.vanDow=+this.value" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
-          ${DOW_NAME.map((n,i)=>`<option value="${i}" ${planVanDow()===i?'selected':''}>${n}</option>`).join('')}
-        </select></label>
+      <p class="mini" style="margin:0;color:var(--muted)">Ingredients are bought on <b>${esc(DOW_NAME[planBuyDow()])}</b> and the van to ${esc(locName(planSellLoc()))} runs on <b>${esc(DOW_NAME[planVanDow()])}</b>.
+        Those two days, and the three figures that go with them, are set in one place — <b>Custom Orders → ⚙ Schedule</b> — because the person who owns a promise to a customer is customer service, and customer service cannot open this screen. Two copies of a control is two answers waiting to disagree.</p>
     </div>
     <div style="margin-top:10px;padding:8px 10px;background:#f6f8f4;border-radius:8px;font-size:12.5px">
       Applies to: Demand/MRP on-hand &amp; reorder, the production shortage check, the raw-stock guard, the Internal Transfer dropdowns, the weekly count's book quantity, and a custom order's buying round and van.</div>
@@ -15414,13 +15422,21 @@ function coClaimPacks(orders, lines, made){
    needs. needed_date stays the PRODUCTION deadline, which is what demand, MRP
    and the weekly target already read — it is simply derived now, and still
    editable when one order genuinely needs moving. */
+/* THE DEFAULT LEAD TIME USED TO BE PER BROWSER. localStorage meant the figure
+   that turns a customer's promise into a production deadline could differ
+   between two people looking at the same order. It is in app_config now; the
+   old localStorage value is still read once, as a migration, so nobody's
+   setting is silently reset. */
 let CO_LEAD_DEF=3;
 try{ const v=localStorage.getItem('wr_co_lead'); if(v!=null && v!=='') CO_LEAD_DEF=Math.max(0,Math.min(60,+v||0)); }catch(e){}
-function coLeadDefault(){ return CO_LEAD_DEF; }
-function coSetLeadDefault(n){
-  CO_LEAD_DEF=Math.max(0,Math.min(60,+n||0));
-  try{ localStorage.setItem('wr_co_lead',String(CO_LEAD_DEF)); }catch(e){}
-  toast('Default lead time is now '+CO_LEAD_DEF+' day(s) — it applies to new orders, not existing ones.');
+function coLeadDefault(){
+  const n=+((PLAN_CFG||{}).coLead);
+  return (n>=0&&n<=60)?n:CO_LEAD_DEF;
+}
+async function coSetLeadDefault(n){
+  PLAN_CFG.coLead=Math.max(0,Math.min(60,+n||0));
+  await savePlanCfg();
+  toast('Default lead time is now '+coLeadDefault()+' day(s) — it applies to new orders, not existing ones.');
 }
 function coMinusDays(iso, days){
   const t=new Date(String(iso||'')+'T00:00:00');
@@ -15510,8 +15526,10 @@ async function coSched(){
    Zeus's own "use an ingredient in advance" — but the kitchen must be TOLD,
    not have the date quietly clamped, because starting early means drawing on
    stock already in the freezer and somebody has to confirm it is there. */
+/* Kept as the fallbacks the accessors use — the live figures are coPromiseDays()
+   and coBuyToStart(), set in ⚙ Schedule and stored in app_config. */
 const CO_PROMISE_DAYS=15;   // the outer promise, in calendar days from the lock
-const CO_BUY_TO_START=8;    // meat ordered Saturday is usually in hand by then
+const CO_BUY_TO_START=8;    // the usual wait for ordered meat to land
 function _coAddDays(iso, n){
   const t=new Date(String(iso||'')+'T00:00:00');
   if(isNaN(t.getTime())) return '';
@@ -15544,11 +15562,11 @@ function _coPrevDow(iso, dow){
 function coDeriveDates(lockISO, plotAlready){
   const lock=String(lockISO||'').slice(0,10);
   if(!/^\d{4}-\d{2}-\d{2}$/.test(lock)) return null;
-  const promise = _coAddDays(lock, CO_PROMISE_DAYS);
+  const promise = _coAddDays(lock, coPromiseDays());
   const ready   = _coPrevDow(promise, planVanDow());
   const makeBy  = _coAddDays(ready, -1);
   const buyBy   = _coNextDow(lock, planBuyDow(), !plotAlready);
-  const start   = _coAddDays(buyBy, CO_BUY_TO_START);
+  const start   = _coAddDays(buyBy, coBuyToStart());
   return {promise, ready, makeBy, buyBy, start,
           /* WHICH MODE THE ORDER IS IN, not a warning. Only a Saturday lock
              with no plot yet can be made from meat bought for it; every other
@@ -15591,6 +15609,99 @@ async function coStampDates(){
   set('prod_start',    D.start);
   coRec._dateMode = D.fromStock ? 'stock' : 'purchase';
   return D;
+}
+/* ---- THE FIVE FIGURES EVERY LOCKED ORDER IS DATED FROM ------------------
+   On the Custom Orders screen deliberately. Customer service owns the promise
+   to the customer and cannot open Demand / MRP, where the only settings dialog
+   lived — so until now the person responsible for the date could not see the
+   rule that produced it. The worked example underneath is the whole point: a
+   number in a box means nothing, five dates for a lock made today mean
+   everything, and they move as you change the figures. */
+function openCoSched(){
+  window._coSchedDraft={
+    promiseDays:coPromiseDays(), buyDow:planBuyDow(),
+    buyToStart:coBuyToStart(), vanDow:planVanDow(), coLead:coLeadDefault()};
+  drawCoSched();
+  $('overlay').classList.add('on');
+}
+function coSchedSet(k,v){
+  const d=window._coSchedDraft||{}; d[k]=Math.max(0,+v||0); window._coSchedDraft=d; drawCoSched();
+}
+/* The worked example runs the REAL deriver against the draft, by swapping the
+   config in and straight back out. A preview computed by a second copy of the
+   arithmetic is a preview that can disagree with what the save does. */
+function _coSchedPreview(){
+  const d=window._coSchedDraft||{};
+  const keep={promiseDays:PLAN_CFG.promiseDays, buyDow:PLAN_CFG.buyDow,
+              buyToStart:PLAN_CFG.buyToStart, vanDow:PLAN_CFG.vanDow};
+  try{
+    PLAN_CFG.promiseDays=d.promiseDays; PLAN_CFG.buyDow=d.buyDow;
+    PLAN_CFG.buyToStart=d.buyToStart;   PLAN_CFG.vanDow=d.vanDow;
+    return coDeriveDates(todayISO(), false);
+  } finally { Object.assign(PLAN_CFG, keep); }
+}
+function drawCoSched(){
+  const d=window._coSchedDraft||{};
+  const P=_coSchedPreview()||{};
+  const n=(l,k,hint,max)=>`<label class="mini" style="display:block;margin-bottom:7px">${l}
+    <input type="number" min="0" max="${max||120}" step="1" value="${d[k]}" oninput="coSchedSet('${k}',this.value)"
+      style="width:72px;padding:4px 6px;border:1px solid var(--line);border-radius:5px;margin:0 6px">
+    <span style="color:var(--muted)">${hint}</span></label>`;
+  const day=(l,k,hint)=>`<label class="mini" style="display:block;margin-bottom:7px">${l}
+    <select onchange="coSchedSet('${k}',this.value)" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px;margin:0 6px">
+      ${DOW_NAME.map((x,i)=>`<option value="${i}" ${+d[k]===i?'selected':''}>${x}</option>`).join('')}
+    </select><span style="color:var(--muted)">${hint}</span></label>`;
+  const row=(l,v,note)=>`<tr><td class="mini" style="color:var(--muted)">${l}</td><td><b>${esc(v||'—')}</b>${note?`<div class="mini" style="color:var(--muted)">${note}</div>`:''}</td></tr>`;
+  $('modal').innerHTML=`<div><h3>⚙ Schedule — what a locked order commits to</h3>
+    <p class="mini" style="color:var(--muted);margin:-2px 0 12px">These five figures decide every date on a custom order. They are stored
+      <b>in the database, not on this computer</b>, so everybody derives the same dates. Changing them moves the dates on orders locked
+      <b>from now on</b> — a date already on an order is a decision somebody made and is never rewritten.</p>
+    <div style="display:flex;gap:22px;flex-wrap:wrap">
+      <div style="min-width:290px;flex:1">
+        ${n('Promise the customer','promiseDays','calendar days from the lock',120)}
+        ${day('Ingredients are bought on','buyDow','the day the plot is pulled and POs are raised')}
+        ${n('Production starts','buyToStart','days after the meat is ordered',60)}
+        ${day('The van to '+esc(locName(planSellLoc()))+' runs on','vanDow','when finished packs travel')}
+        ${n('Default lead time','coLead','days between a promise and its make-by, on a new quote',60)}
+      </div>
+      <div style="min-width:280px;flex:1">
+        <div class="mini" style="font-weight:700;margin-bottom:4px">An order locked today would read:</div>
+        <table style="width:100%">${
+          row('Buy ingredients by', P.buyBy)+
+          row('Production starts', P.start)+
+          row('Make by', P.makeBy)+
+          row('Ready at '+esc(locName(planSellLoc())), P.ready)+
+          row('Promise the customer', P.promise)}</table>
+        <div class="hint" style="margin-top:8px">${P.fromStock
+          ? '<b style="color:var(--earth,#b5762a)">Made from stock on hand.</b> Production would start before this order\'s own meat is due, so the kitchen draws on the freezer and the purchase replaces it.'
+          : '<b style="color:#4e7a3e">Made from its own purchase.</b> The meat is bought for the order and lands before production starts.'}</div>
+        ${P.ready && P.promise && P.ready>P.promise ? `<div class="hint" style="margin-top:6px;border-left:3px solid var(--danger)"><b>The van lands after the promise.</b> With these figures the customer would be told a date the delivery cannot meet — lengthen the promise, or move the van.</div>`:''}
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn" onclick="coSchedSave()">💾 Save for everybody</button>
+      <button class="btn sec" onclick="closeModal()">Cancel</button>
+      <span style="flex:1"></span>
+      <button class="btn sec" onclick="coSchedReset()" title="back to the shipped defaults">↺ Defaults</button></div></div>`;
+}
+function coSchedReset(){
+  window._coSchedDraft={promiseDays:PLAN_CFG_DEFAULT.promiseDays, buyDow:PLAN_CFG_DEFAULT.buyDow,
+    buyToStart:PLAN_CFG_DEFAULT.buyToStart, vanDow:PLAN_CFG_DEFAULT.vanDow, coLead:PLAN_CFG_DEFAULT.coLead};
+  drawCoSched();
+}
+async function coSchedSave(){
+  const d=window._coSchedDraft||{};
+  PLAN_CFG.promiseDays=Math.max(0,Math.min(120,+d.promiseDays||0));
+  PLAN_CFG.buyToStart =Math.max(0,Math.min(60,+d.buyToStart||0));
+  PLAN_CFG.coLead     =Math.max(0,Math.min(60,+d.coLead||0));
+  PLAN_CFG.buyDow     =Math.max(0,Math.min(6,+d.buyDow||0));
+  PLAN_CFG.vanDow     =Math.max(0,Math.min(6,+d.vanDow||0));
+  const ok=await savePlanCfg();
+  sysLog('custom_orders','(schedule)','⚙ Schedule defaults changed by '+CURRENT_USER
+    +' — promise '+PLAN_CFG.promiseDays+'d, buy '+DOW_NAME[planBuyDow()]
+    +', start +'+PLAN_CFG.buyToStart+'d, van '+DOW_NAME[planVanDow()]+', lead '+PLAN_CFG.coLead+'d');
+  if(ok) toast('Schedule saved for everybody');
+  closeModal(); try{ renderCustomOrders(); }catch(e){}
 }
 /* Recompute needed_date from the promise. Called when either half changes. */
 function coSyncNeeded(){
@@ -16658,6 +16769,7 @@ async function renderCustomOrders(){
     <button class="btn" onclick="coNew()">＋ New quote</button>
     <button class="btn sec" onclick="coImportOpen()">📥 Import from sheet</button>
     <button class="btn sec" onclick="coCalcImportOpen()" title="paste the Kitchen Batch from calc.wholesomerabbit.ph — the computed pack, not the profile">🧮 From calculator</button>
+    <button class="btn sec" onclick="openCoSched()" title="the five figures every locked order's dates are worked out from — promise, buying day, production wait, van day and lead time">⚙ Schedule</button>
     <div class="sp"></div><span style="color:var(--muted)">CS quotes → lock → sellable SKU + BOM + demand</span>`;
   let orders=[]; let _tblErr=''; try{ orders=await db.list('custom_orders',{}); }catch(e){ _tblErr=String(e&&e.message||e); }
   let lc={}, lt={}, byOrder={}; try{ (await db.list('custom_order_lines',{})).forEach(l=>{ lc[l.order_ref]=(lc[l.order_ref]||0)+1; lt[l.order_ref]=(lt[l.order_ref]||0)+(+l.packs||0)*(+l.unit_price||0); if(l.product_sku){ (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); } }); }catch(e){ _tblErr=_tblErr||String(e&&e.message||e); }
