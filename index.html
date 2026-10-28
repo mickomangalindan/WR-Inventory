@@ -5854,7 +5854,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-28 19:40Z';
+const WR_BUILD='2026-10-28 22:05Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -15444,8 +15444,19 @@ function coMinusDays(iso, days){
   t.setDate(t.getDate()-(+days||0));
   return isoLocal(t);
 }
-/* The production deadline for an order. Explicitly stored needed_date wins so
-   a deliberate override is never silently undone; otherwise it is derived. */
+/* The production deadline for an order: the promise less the lead time.
+
+   THIS COMMENT USED TO CLAIM "explicitly stored needed_date wins so a
+   deliberate override is never silently undone". It never did. With a delivery
+   date present this ALWAYS returns delivery − lead, so a Make by somebody
+   typed was overwritten by the next coSyncNeeded() and again by every save —
+   type 30 Oct on an order promised 4 Nov and 4 Nov came straight back, with no
+   message. A comment that describes the behaviour somebody wished for is worse
+   than no comment: it stops the next reader looking.
+
+   The behaviour is unchanged and correct — one number, derived. What changed is
+   the Make by BOX: it now sets the lead time to match, so a typed deadline
+   sticks without a second source of truth. See coSetMakeBy. */
 function coProduceBy(o){
   o=o||{};
   const del=String(o.delivery_date||'').slice(0,10);
@@ -15702,6 +15713,53 @@ async function coSchedSave(){
     +', start +'+PLAN_CFG.buyToStart+'d, van '+DOW_NAME[planVanDow()]+', lead '+PLAN_CFG.coLead+'d');
   if(ok) toast('Schedule saved for everybody');
   closeModal(); try{ renderCustomOrders(); }catch(e){}
+}
+/* ---- A MAKE BY YOU CAN TYPE HAS TO STICK -------------------------------
+   Zeus, 28 Oct: "why is that when i change the [make by], it doesnt reflect in
+   production."
+
+   Because it could not. coProduceBy() derives the deadline as promise − lead,
+   and every path recomputed it: coSyncNeeded() on each keystroke elsewhere,
+   coSave() and coSaveDates() on the way to the database. The box accepted a
+   date and nothing downstream ever saw it.
+
+   The tempting fix is an override flag — "this make-by was set by hand, leave
+   it alone". That is a second source of truth, and the moment the promise
+   moves the two disagree with nobody to arbitrate.
+
+   So the typed Make by sets the LEAD TIME instead. Pull the deadline five days
+   earlier on an order promised the 4th and the lead becomes 5. One number
+   still drives everything, the figure on screen is the figure that saves, and
+   changing the promise afterwards moves the deadline with it — which is what
+   a lead time is for.
+
+   A Make by AFTER the promise is the one case that cannot be expressed: no
+   lead time produces it. The lead clamps at 0, the deadline snaps to the
+   promise, and the hint underneath says production is then due the same day it
+   ships — visible, rather than silently wrong. */
+function coSetMakeBy(v){
+  if(!coRec) return;
+  const mk=String(v||'').slice(0,10);
+  const del=String(coRec.delivery_date||'').slice(0,10);
+  /* A date that does not PARSE must change nothing. 2026-13-45 passes the
+     shape test and then Date.parse hands back NaN — an earlier version fell
+     back to 0 there, which silently reset a correct lead time to zero and made
+     the deadline the delivery day. Work the number out first, and only commit
+     if it came out a number. */
+  let days=null;
+  if(mk && del && /^\d{4}-\d{2}-\d{2}$/.test(mk)){
+    const a=Date.parse(del+'T00:00:00'), b=Date.parse(mk+'T00:00:00');
+    if(isFinite(a) && isFinite(b)) days=Math.round((a-b)/864e5);
+  }
+  if(days!=null){
+    coRec.needed_date=mk;
+    coRec.lead_days=Math.max(0, Math.min(60, days));
+  } else if(!mk || !del){
+    /* no promise to measure against, or the box was cleared — the typed value
+       is all there is, and coSyncNeeded puts the promise back if one exists */
+    coRec.needed_date=mk;
+  }
+  coDatesTouch();
 }
 /* Recompute needed_date from the promise. Called when either half changes. */
 function coSyncNeeded(){
@@ -17343,6 +17401,10 @@ function _coDateHint(){ const mk=String(coRec.needed_date||''), del=String(coRec
 function coDatesTouch(){
   coSyncNeeded();
   const i=$('co_mkby'); if(i && i.value!==(coRec.needed_date||'')) i.value=coRec.needed_date||'';
+  /* the lead box has to follow too, or typing a Make by leaves two numbers on
+     screen that disagree about the same order */
+  const L=$('co_lead'); const _ld=(coRec.lead_days==null||coRec.lead_days==='')?coLeadDefault():coRec.lead_days;
+  if(L && String(L.value)!==String(_ld)) L.value=_ld;
   const h=$('co_dateHint'); if(h) h.innerHTML=_coDateHint();
   const sh=$('co_schedHint'); if(sh) sh.innerHTML=_coScheduleHint();
   /* A LOCKED ORDER HAS NO SAVE BUTTON, so an edited date had nowhere to go —
@@ -17449,9 +17511,9 @@ function drawCOForm(){
         <div class="fld"><label>Expected delivery <span class="mini" style="color:var(--muted)">what the customer was promised</span></label>
           <div class="val"><input type="date" ${dis} value="${esc(coRec.delivery_date||'')}" oninput="coRec.delivery_date=this.value;coDatesTouch()"></div></div>
         <div class="fld"><label>Lead time (days) <span class="mini" style="color:var(--muted)">how long before delivery it must be made</span></label>
-          <div class="val"><input type="number" min="0" max="60" step="1" ${dis} value="${esc(coRec.lead_days==null||coRec.lead_days===''?coLeadDefault():coRec.lead_days)}" oninput="coRec.lead_days=this.value;coDatesTouch()"></div></div>
+          <div class="val"><input type="number" id="co_lead" min="0" max="60" step="1" ${dis} value="${esc(coRec.lead_days==null||coRec.lead_days===''?coLeadDefault():coRec.lead_days)}" oninput="coRec.lead_days=this.value;coDatesTouch()"></div></div>
         <div class="fld"><label>Make by <span class="mini" style="color:var(--muted)">the production deadline — this is the demand week</span></label>
-          <div class="val"><input type="date" id="co_mkby" ${dis} value="${esc(coRec.needed_date||'')}" oninput="coRec.needed_date=this.value"></div></div></div>
+          <div class="val"><input type="date" id="co_mkby" ${dis} value="${esc(coRec.needed_date||'')}" oninput="coSetMakeBy(this.value)"></div></div></div>
       <div>
         <div class="fld"><label>Buy ingredients by <span class="mini" style="color:var(--muted)">the Saturday this order joins the buying round</span></label>
           <div class="val"><input type="date" value="${esc(coRec.buy_by||'')}" oninput="coRec.buy_by=this.value;coDatesTouch()"></div></div>
