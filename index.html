@@ -5854,7 +5854,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-28 17:10Z';
+const WR_BUILD='2026-10-28 19:40Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -17344,6 +17344,49 @@ function coDatesTouch(){
   coSyncNeeded();
   const i=$('co_mkby'); if(i && i.value!==(coRec.needed_date||'')) i.value=coRec.needed_date||'';
   const h=$('co_dateHint'); if(h) h.innerHTML=_coDateHint();
+  const sh=$('co_schedHint'); if(sh) sh.innerHTML=_coScheduleHint();
+  /* A LOCKED ORDER HAS NO SAVE BUTTON, so an edited date had nowhere to go —
+     the boxes accepted typing and threw it away on the next redraw. The order
+     is now marked dirty and 💾 Save dates lights up; see coSaveDates. */
+  if(coRec) coRec._dateDirty=true;
+  const b=$('co_saveDates');
+  if(b){ b.className='wfbtn'; b.textContent='💾 Save dates'; }
+}
+/* ---- RESCHEDULING A LOCKED ORDER -------------------------------------
+   A locked order's LINES are fixed on purpose: the SKUs exist, the BOMs exist,
+   the packs are in demand, and rewriting them would move work the kitchen may
+   already have started. Its DATES are a different thing entirely — a van
+   missed, a customer who asked for it a week later, a make-by pulled forward
+   to catch an earlier run. That is routine, and it must not require unlocking
+   an order just to change a date.
+
+   Until now there was no way to do it at all. The toolbar renders 💾 Save
+   quote only while the order is a draft, so on a locked order the five date
+   boxes accepted typing and discarded it on the next redraw, with no error
+   and no clue — which is exactly what Zeus hit on CO-10202026 V01.
+
+   This writes the SIX date fields and nothing else. Not the lines, not the
+   status, not the customer. needed_date is re-derived through coProduceBy so
+   the promise and the production deadline cannot drift apart. */
+async function coSaveDates(){
+  if(!coRec || !coRec.order_ref){ toast('Save the quote first',true); return; }
+  const hdr={
+    delivery_date: coRec.delivery_date||null,
+    lead_days: (coRec.lead_days==null||coRec.lead_days==='')?coLeadDefault():(+coRec.lead_days||0),
+    needed_date: coProduceBy(coRec)||coRec.needed_date||null,
+    buy_by: coRec.buy_by||null,
+    prod_start: coRec.prod_start||null,
+    ready_date: coRec.ready_date||null };
+  try{
+    await db.update('custom_orders','order_ref',coRec.order_ref,hdr);
+    coRec.needed_date=hdr.needed_date; coRec._dateDirty=false;
+    sysLog('custom_orders',coRec.order_ref,'📅 Dates changed by '+CURRENT_USER
+      +' — buy '+(hdr.buy_by||'—')+', start '+(hdr.prod_start||'—')
+      +', make by '+(hdr.needed_date||'—')+', van '+(hdr.ready_date||'—')
+      +', promised '+(hdr.delivery_date||'—'));
+    toast('Dates saved · '+coRec.order_ref);
+    drawCOForm();
+  }catch(e){ toast(_coErr(e),true); }
 }
 function drawCOForm(){
   const locked = coPastDraft(coRec.status);
@@ -17360,6 +17403,7 @@ function drawCOForm(){
   $('crumb').innerHTML=`<b>Custom Orders</b> / ${esc(coRec.order_ref||'New quote')}`;
   $('cp').innerHTML=`<div class="title">Custom Orders</div>
     ${!locked?`<button class="btn sec" onclick="coSave()">💾 Save quote</button><button class="wfbtn" onclick="coLock()">🔒 Lock order</button>`:''}
+    ${locked&&coRec.order_ref?`<button id="co_saveDates" class="btn sec" onclick="coSaveDates()" title="a locked order's LINES are fixed, but its schedule is not — rescheduling is normal and must not need an unlock">💾 Save dates</button>`:''}
     ${coIsOpen(coRec.status)?`<button class="btn sec" onclick="coFulfil()">✓ Mark completed</button>`:''}
     ${(locked&&coRec.order_ref)?`<button class="btn sec" onclick="coHandover()" title="the customer has it — take the packs out of stock where they are standing. Nothing goes to the shop; a custom mix is never sold there.">🚚 Hand over</button>`:''}
     ${(locked&&coIsOpen(coRec.status)&&coRec.order_ref)?`<button class="btn sec" onclick="coCloseOut()" title="stop it asking for packs that are never going to be made — records what was produced and writes off the rest">📕 Close out</button>`:''}
@@ -17415,7 +17459,7 @@ function drawCOForm(){
           <div class="val"><input type="date" value="${esc(coRec.prod_start||'')}" oninput="coRec.prod_start=this.value;coDatesTouch()"></div></div>
         <div class="fld"><label>Ready at ${esc(locName(planSellLoc()))} <span class="mini" style="color:var(--muted)">the Bulacan van before the promise</span></label>
           <div class="val"><input type="date" value="${esc(coRec.ready_date||'')}" oninput="coRec.ready_date=this.value;coDatesTouch()"></div></div>
-        ${_coScheduleHint()}</div>
+        <div id="co_schedHint">${_coScheduleHint()}</div></div>
       <div id="co_dateHint">${_coDateHint()}</div>
       ${(()=>{ const S=coSchedNow(); coSched();
         if(!coRec.needed_date || !(coLines||[]).length) return '';
