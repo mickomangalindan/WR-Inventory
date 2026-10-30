@@ -5854,7 +5854,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-28 22:05Z';
+const WR_BUILD='2026-10-30 05:20Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -12415,10 +12415,24 @@ async function mrpClearSettled(){
   try{ drows=await db.list('demand',{}); cOrders=await db.list('custom_orders',{}); cLines=await db.list('custom_order_lines',{}); }
   catch(e){ toast('Could not read the demand table — '+saveErrMsg(e), true); return; }
   const openRef={}; (cOrders||[]).forEach(o=>{ if(coIsOpen(o.status)) openRef[o.order_ref]=true; });
-  const ownerOf={}; (cLines||[]).forEach(l=>{ if(l.product_sku && !ownerOf[l.product_sku]) ownerOf[l.product_sku]=l.order_ref; });
-  const kill=(drows||[]).filter(r=>{ const own=ownerOf[r.sku]; return own && !openRef[own] && r.id!=null; });
+  /* ---- ONE SKU, SEVERAL ORDERS. THE FIRST ONE IS NOT THE OWNER. ----------
+     This used to keep ONE owner per SKU — whichever order happened to be read
+     first — and clear the row when THAT order was settled. Custom SKUs are
+     shared on purpose: the recipe fingerprint gives two orders for the same
+     mix at the same pack size one product, and the live data has a SKU shared
+     by five orders. So the first-seen owner was close to arbitrary, and it
+     went wrong in both directions: a settled first-owner cleared a row that an
+     OPEN order still needed, and an open first-owner kept a row alive for an
+     order that finished weeks ago.
+
+     A cache row is settled only when NOTHING still open uses that SKU. Every
+     order using it is kept, so the confirm names all of them rather than one. */
+  const usedBy={}; (cLines||[]).forEach(l=>{ if(!l.product_sku||!l.order_ref) return;
+    (usedBy[l.product_sku]=usedBy[l.product_sku]||new Set()).add(l.order_ref); });
+  const stillOpen=sku=>[...(usedBy[sku]||[])].some(ref=>openRef[ref]);
+  const kill=(drows||[]).filter(r=>r.id!=null && (usedBy[r.sku]||[]).size>0 && !stillOpen(r.sku));
   if(!kill.length){ toast('Nothing settled to clear'); return; }
-  const orders=[...new Set(kill.map(r=>ownerOf[r.sku]))];
+  const orders=[...new Set(kill.flatMap(r=>[...(usedBy[r.sku]||[])]))].sort();
   if(!confirm('Clear '+kill.length+' settled demand row(s)?\n\n'
     +'They belong to these finished orders:\n  '+orders.join('\n  ')
     +'\n\nThe ORDERS are not touched — only the cache rows they left in the demand table. '
@@ -16919,18 +16933,66 @@ async function coLoadTrail(ref){
   formAtts  = nu ? [] : await attsForRecord('custom_orders', ref);
   window._attCtx = nu ? null : {model:'custom_orders', ref, rerender:drawCOForm};
 }
-// on-hand finished packs per product SKU (bulacan + pasig) — drives fulfilment tracking (#4)
-async function _coLoadStock(){ const m={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if((s.kind||'')==='product') m[s.ref_sku]=(m[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){} window._coStock=m; return m; }
+/* ---- ON HAND IS NOT THE SAME QUESTION AS "MINE" ------------------------
+   This loads the finished packs sitting in the freezer, per SKU, across both
+   sites. That is a true number and it is NOT this order's number.
+
+   Two orders from the same customer for the same mix at the same pack size
+   get the SAME SKU — deliberately, because the recipe fingerprint is what
+   stops one mix being made twice. So the pool is shared, and the Fulfilment
+   panel used to read it straight:
+
+       const made = +stock[l.product_sku] || 0;
+
+   CO-10192026 ordered 2 Cookable Duck. Seven were in the freezer, most of
+   them made for CO-10302026. The panel said 7 produced against 2 ordered,
+   every row went green, the card said READY FOR DELIVERY and offered to
+   notify CS — while the status badge on the very same screen, which is
+   computed per order, said "Partially Fulfilled (4 of 7 packs produced)".
+   Two numbers for one order, on one screen, and the wrong one was the one
+   with the button under it. Somebody hands over another order's packs.
+
+   The per-order answer already existed. coClaimPacks allocates the pool to
+   the locked orders in needed-date order, oldest first, which is the same
+   rule the demand run and the production queue use. It is loaded here, beside
+   the stock, so the panel reads an allocation instead of a shelf.           */
+async function _coLoadStock(){
+  const m={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if((s.kind||'')==='product') m[s.ref_sku]=(m[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
+  window._coStock=m;
+  /* who else is entitled to the same pool, and how much of it is this order's */
+  window._coClaimAll={}; window._coShare={};
+  try{
+    const [ords, lns]=await Promise.all([db.list('custom_orders',{}), db.list('custom_order_lines',{})]);
+    window._coClaimAll=coClaimPacks(ords, lns, m)||{};
+    const open={}; (ords||[]).forEach(o=>{ if(coIsLocked(o.status)) open[o.order_ref]=o; });
+    (lns||[]).forEach(l=>{ if(!l||!l.product_sku||!open[l.order_ref]) return;
+      (window._coShare[l.product_sku]=window._coShare[l.product_sku]||[]).push(l.order_ref); });
+    Object.keys(window._coShare).forEach(k=>{ window._coShare[k]=[...new Set(window._coShare[k])]; });
+  }catch(e){}
+  return m;
+}
 // Fulfilment panel HTML + overall readiness for the open order.
 function _coFulfilHtml(){
   const stock=window._coStock||{}; const wl=coLines.filter(l=>l.product_sku);
-  const rows=wl.map(l=>{ const ord=+l.packs||0; const made=+stock[l.product_sku]||0; const pct=ord>0?Math.min(100,Math.round(made/ord*100)):0;
+  /* THIS ORDER'S SHARE, not the shelf. See _coLoadStock. Absent means not
+     worked out yet, and the honest answer to that is 0 — a panel that guesses
+     high is a panel that tells CS to collect somebody else's packs. */
+  const claim=((window._coClaimAll||{})[coRec.order_ref]||{}).bySku||{};
+  const mine=l=>+claim[l.product_sku]||0;
+  const rows=wl.map(l=>{ const ord=+l.packs||0; const made=mine(l); const pct=ord>0?Math.min(100,Math.round(made/ord*100)):0;
     const st=(ord>0&&made>=ord)?{t:'Ready',c:'#2f7d33'}:(made>0?{t:'In production',c:'var(--earth,#b5762a)'}:{t:'Pending',c:'var(--danger)'});
-    return `<tr><td>${esc(l.description||l.product_sku)}<div class="mini"><code>${esc(l.product_sku)}</code></div></td><td class="num">${ord}</td><td class="num">${made}</td><td><b style="color:${st.c}">${st.t}</b> <span class="mini">${pct}%</span></td></tr>`; }).join('');
-  const allReady = wl.length>0 && wl.every(l=>(+l.packs||0)>0 && (+stock[l.product_sku]||0)>=(+l.packs||0));
+    /* When the freezer holds more than this order is owed, say so and name who
+       else is waiting on it — otherwise the figure looks simply wrong to
+       anybody who has just counted the shelf. */
+    const onHand=+stock[l.product_sku]||0;
+    const others=((window._coShare||{})[l.product_sku]||[]).filter(r=>r!==coRec.order_ref);
+    const share=(onHand>made&&others.length)
+      ? `<div class="mini" style="color:var(--muted)">${onHand} on hand for this SKU — shared with ${others.map(r=>esc(r)).join(', ')}</div>` : '';
+    return `<tr><td>${esc(l.description||l.product_sku)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${share}</td><td class="num">${ord}</td><td class="num">${made}</td><td><b style="color:${st.c}">${st.t}</b> <span class="mini">${pct}%</span></td></tr>`; }).join('');
+  const allReady = wl.length>0 && wl.every(l=>(+l.packs||0)>0 && mine(l)>=(+l.packs||0));
   const html=`<div class="repcard" style="margin:12px 0 0"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
       <h3 style="margin:0">🏭 Fulfilment</h3>${allReady?'<span class="badge b-received">READY FOR DELIVERY</span>':'<span class="badge b-open">in production</span>'}
-      <span style="flex:1"></span><span class="mini">Produced = finished packs on hand · needed by <b>${esc(coRec.needed_date||'—')}</b></span>
+      <span style="flex:1"></span><span class="mini">Produced = packs <b>allocated to this order</b> · needed by <b>${esc(coRec.needed_date||'—')}</b></span>
       ${allReady?'<button class="btn sm" onclick="coNotifyReady()">📣 Notify CS ready</button>':''}</div>
     <div style="overflow-x:auto"><table><thead><tr><th>Item</th><th class="num">Ordered</th><th class="num">Produced</th><th>Status</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="empty">Lock the order to create its SKUs, then production output shows here.</td></tr>'}</tbody></table></div>
     ${coRec.ready_notified?('<div class="mini" style="margin-top:6px;color:#2f7d33">📣 CS notified ready at '+esc(String(coRec.ready_notified).replace('T',' ').slice(0,16))+'</div>'):''}
@@ -21185,6 +21247,22 @@ function _ksProteins(ings, hint){
   return names.join(' + ');
 }
 const _ksKg=g=>(Math.round((+g||0))/1000).toFixed(3)+' kg';
+/* ---- A BLANK RECIPE MUST NOT PRINT AS A TIDY EMPTY TABLE ----------------
+   The kitchen reads this sheet and nothing else. A mix whose product carries
+   no bom_lines used to come out fully formed — title, pack size, packs
+   planned, prep notes, tracking boxes — with an EMPTY ingredient table. It
+   does not look broken. It looks like a mix with nothing in it, and the team
+   reported it as "we can not see the recipe in the daily production sheet".
+
+   The planning screen already warned about these lines. The printed sheet,
+   which is the thing carried into the kitchen, said nothing at all. So the
+   gap is printed where the ingredients should have been, in both languages,
+   with what to do about it — and it cannot be weighed past by accident. */
+const _ksNoRecipe=(cols,sku)=>`<tr><td colspan="${cols}" style="background:#fdecea !important;color:#8a2b1c;padding:8px 6px;line-height:1.5">
+  <b>⚠ WALANG RECIPE ANG PRODUKTONG ITO · THIS PRODUCT HAS NO RECIPE.</b><br>
+  Huwag timbangin ito — walang listahan ng sangkap. <i>Do not weigh this mix: no ingredient list exists for it.</i><br>
+  <span style="font-size:9.5px">Buksan ang order sa ERP at i-lock itong muli, o gamitin ang <b>Create the product from this order</b> &mdash;
+  nasa order line pa rin ang recipe. <i>Re-lock the custom order, or use "Create the product from this order"; the recipe is still on the order line.</i>${sku?' <code>'+esc(sku)+'</code>':''}</span></td></tr>`;
 // Tagalog prep notes, keyed off the feeding format exactly as the dashboard does,
 // plus any either/or ingredient (a "/" in the name) and a bone-handling reminder.
 function _ksPrepNotes(fmt, ings){
@@ -21297,6 +21375,16 @@ async function prodKitchenSheet(){
   const cover=`<div id="coverSheet"><div class="cover">
     <div class="cover-title"><h1>Wholesome Rabbit — Daily Production Sheet</h1>
       <div class="meta">${esc2(_kbLongDate(prodPlanDate))}${prodRunRef?' · '+esc2(prodRunRef):''}</div></div>
+    ${(()=>{ /* page one, before anybody starts weighing */
+      const nr=items.filter(x=>!(x.ings||[]).length);
+      if(!nr.length) return '';
+      return `<div class="cover-sec" style="border:2px solid #8a2b1c;background:#fdecea">
+        <h3 style="color:#8a2b1c">&#9888; ${nr.length} mix(es) on this sheet have NO RECIPE</h3>
+        <div style="font-size:11px;line-height:1.6">Hindi ito pwedeng timbangin — walang listahan ng sangkap.
+          <i>These cannot be weighed: no ingredient list exists for them.</i> Ipaalam sa opisina bago magsimula.
+          <i>Tell the office before starting.</i>
+          <div style="margin-top:5px">${nr.map(x=>'&bull; <b>'+esc2(x.name)+'</b> <code>'+esc2(x.sku)+'</code> &middot; '+x.packs+' pack(s)'+(x.orderRef?' &middot; '+esc2(x.orderRef):'')).join('<br>')}</div>
+        </div></div>`; })()}
     <div class="cover-sec"><h3>Today's Production Summary</h3>
       <table class="day-summary"><thead><tr><th>Mix</th><th class="num">Pack Qty</th><th class="num">Pack Size</th></tr></thead>
         <tbody>${summaryRows}</tbody></table>
@@ -21450,7 +21538,7 @@ async function prodKitchenSheet(){
             <div><b>${esc2(x.name)}</b> <span class="ingred-note">· ${x.packs} × ${Math.round(x.packG)}g${(multiRef&&x.orderRef)?' · '+esc2(x.orderRef):''}</span></div>
             <table class="ingred"><thead><tr><th>Ingredient</th><th class="num">Per pack</th><th class="num">Total</th></tr></thead>
               <tbody>${x.ings.map(i=>`<tr><td><span class="ingred-name">${_ksDot(i.cat)}${esc2(i.name)}${i.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span></td>
-                <td class="num">${Math.round(i.grams)}g</td><td class="num">${_ksKg(i.grams*x.packs)}</td></tr>`).join('')}</tbody>
+                <td class="num">${Math.round(i.grams)}g</td><td class="num">${_ksKg(i.grams*x.packs)}</td></tr>`).join('')||_ksNoRecipe(3,x.sku)}</tbody>
               <tfoot><tr class="totals-row"><td>Total</td><td class="num">${Math.round(x.perPack)}g</td><td class="num"><b>${_ksKg(x.perPack*x.packs)}</b></td></tr></tfoot>
             </table></div>`).join('')
         + `</div></div>`;
@@ -21510,7 +21598,7 @@ async function prodKitchenSheet(){
         <div class="ingred-col">
           <table class="ingred">
             <thead><tr><th>Ingredient</th><th class="num">Per Pack</th><th class="num">Total Needed</th></tr></thead>
-            <tbody>${rows}</tbody>
+            <tbody>${rows||_ksNoRecipe(3,x.sku)}</tbody>
             <tfoot>
               <tr class="totals-row"><td>Total per pack</td><td class="num">${_ksKg(x.packG)}</td><td class="num">—</td></tr>
               <tr class="totals-row"><td>Total — all ${x.packs} packs</td><td class="num">—</td><td class="num">${_ksKg(totalPackGrams)}</td></tr>
