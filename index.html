@@ -5854,7 +5854,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-30 05:20Z';
+const WR_BUILD='2026-10-30 12:40Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -8280,7 +8280,8 @@ async function wdtLoad(){
     else rows=(DEMO.demand||[]).filter(r=>String(r.plan_date||'')===String(date));
     (rows||[]).forEach(r=>{ const q=+r.qty||0; if(q>0 && !(dem[r.sku]>=q)){ dem[r.sku]=Math.max(dem[r.sku]||0,q); src[r.sku]=(src[r.sku]||[]).concat(['demand table']); } });
   }catch(e){}
-  const co=await coOpenDemand().catch(()=>({}));
+  let co={}, coOK=true;
+  try{ co=await coOpenDemand(); }catch(e){ co={}; coOK=false; }
   /* An open custom order is owed until it is made — it does not belong to a
      week. Mixing it into a weekly target meant one row of the number obeyed
      different rules than the rest, with nothing on screen saying so. In WEEK
@@ -8292,6 +8293,40 @@ async function wdtLoad(){
     if(_wdtMode==='week'){ carry[sku]=+co[sku].packs||0; return; }
     dem[sku]=co[sku].packs; src[sku]=(src[sku]||[]).concat(['custom order']);
   });
+  /* ---- A CLOSED ORDER MUST NOT KEEP ASKING ------------------------------
+     Three sources feed this target and only the third knew about status:
+
+       1. the locked plot   plot.data.demand is a SNAPSHOT of the week it was
+                            pulled. Close an order afterwards and the plot
+                            still carries its packs, for ever.
+       2. the demand table  a cache coAddDemand writes at lock time. Nothing
+                            removes it when the order closes.
+       3. custom orders     coOpenDemand, which filters on coIsOpen — correct.
+
+     So a closed-out order kept being asked for, which is exactly what was
+     reported on 30 Oct. The Production Plan never had this problem: it reads
+     custom SKUs from coOpenDemand alone and drops anything settled.
+
+     For a CUST- SKU the OPEN ORDERS ARE THE AUTHORITY on how many are owed.
+     A plot or a cache row may remember more; it may never ask for more. So
+     every custom line is capped at what is actually still owed, and a SKU
+     nothing open owes leaves the target altogether.
+
+     Only when coOpenDemand actually answered. If it threw, the honest move is
+     to leave the figure alone — dropping every custom line because a read
+     failed would hide real work rather than stale work. */
+  if(coOK){
+    const _capCustom=(bag)=>{ Object.keys(bag).forEach(sku=>{
+      if(!/^CUST-/i.test(sku)) return;
+      const owed=+((co[sku]||{}).packs)||0;
+      if(!(owed>0)){ delete bag[sku];
+        if(src[sku]) src[sku]=src[sku].concat(['dropped — no open order owes it']);
+        return; }
+      if((+bag[sku]||0)>owed){ bag[sku]=owed;
+        src[sku]=(src[sku]||[]).concat(['capped at what open orders owe']); }
+    }); };
+    _capCustom(dem); _capCustom(carry);
+  }
   // produced so far this week comes off the target
   /* One window, both sides. FROM defaults to the plot's week, TO to the as-of
      date (or open). Anything made inside it counts — including products nobody
@@ -11444,6 +11479,26 @@ async function renderMRP(){
       ✋ <b>${held.length} line(s) you took out stay out of the next pull.</b>
       <span class="mini" style="color:var(--muted)">${esc(held.slice(0,8).map(k=>nm[k]||k).join(' · '))}${held.length>8?' …':''}</span>
       <span class="btn link" style="margin-left:6px" onclick="_mrpDrop={};renderMRP()">↺ offer them again</span></div>`; })();
+  /* ---- AND LINES IN THIS EDITOR FOR ORDERS THAT ARE FINISHED ------------
+     The plot you are editing is a SNAPSHOT. Close an order after it was
+     pulled and its packs stay in this document, which is the one the meat is
+     bought from — so a closed order can still cost money weeks later.
+
+     The Weekly Demand Target caps custom lines at what open orders owe, but
+     it is a report. This is somebody's working document, so it is NOT edited
+     behind their back: the lines are named, and removing them is a press. */
+  dh+=(()=>{
+    const coA=window._mrpCoAll||{}, nm=window._mrpNm||{};
+    const dead=Object.keys(mrpDemand||{}).filter(sku=>
+      /^CUST-/i.test(String(sku)) && (+mrpDemand[sku]||0)>0 && !(+((coA[sku]||{}).packs)>0));
+    if(!dead.length) return '';
+    window._mrpDeadCo=dead;
+    const packs=dead.reduce((a,k)=>a+(+mrpDemand[k]||0),0);
+    return `<div style="margin:8px 0;padding:8px 10px;border-left:3px solid var(--danger);background:#fdecea;border-radius:6px;font-size:12.5px">
+      📕 <b>${dead.length} line(s) here belong to orders that are already finished — ${_prN(packs)} pack(s).</b>
+      Nothing is owed for them, but they are still in this plot, so ingredients would be bought for them.
+      <div class="mini" style="margin-top:4px">${dead.slice(0,10).map(k=>'• '+esc(nm[k]||k)+' <code>'+esc(k)+'</code> · '+_prN(+mrpDemand[k]||0)+' pack(s)').join('<br>')}${dead.length>10?'<br>…':''}</div>
+      <span class="btn link" style="margin-top:4px;display:inline-block" onclick="mrpDropSettled()">🧹 Take them out of this plot</span></div>`; })();
   dh+=`<h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3>
     <div style="overflow-x:auto" class="stickyhead"><table style="min-width:1180px"><thead><tr>
       <th>Product</th><th>SKU</th>
@@ -12040,6 +12095,21 @@ function mrpOmissions(){
   return out;
 }
 /* Drop every line the pull did not offer. Nothing else is touched. */
+/* Remove the finished orders' lines from the plot being edited. It touches
+   this editor only: no order, no cache row and no saved plot is changed, and
+   nothing is written until the plot itself is saved. */
+function mrpDropSettled(){
+  const dead=window._mrpDeadCo||[];
+  if(!dead.length){ toast('Nothing settled in this plot'); return; }
+  const nm=window._mrpNm||{};
+  if(!confirm('Take '+dead.length+' line(s) out of this plot?\n\n'
+    +dead.slice(0,12).map(k=>'  '+(nm[k]||k)).join('\n')+(dead.length>12?'\n  …':'')
+    +'\n\nTheir orders are finished, so nothing is owed for them. The ORDERS are not touched, '
+    +'and nothing is saved until you save the plot.')) return;
+  dead.forEach(sku=>{ delete mrpDemand[sku]; _mrpDrop[sku]=1; });
+  toast(dead.length+' settled line(s) taken out — save the plot to keep it');
+  renderMRP();
+}
 function mrpDropExtra(){
   const O=mrpOmissions(); if(!O.extra.length){ toast('Nothing to remove'); return; }
   const packs=O.extra.reduce((a,x)=>a+x.qty,0);
@@ -15410,19 +15480,60 @@ function coPastDraft(s){ return coStat(s)!=='draft'; }
 function coClaimQty(l){ return Math.max(0, (+l.packs||0) - (+l.written_off_packs||0)); }
 /* Attribute produced packs to the orders entitled to them.
    `orders` and `lines` as loaded; returns {ref:{ord,got}} for the locked ones. */
-function coClaimPacks(orders, lines, made){
-  const pool={...(made||{})}, out={};
+/* `handed` is optional: {order_ref:{sku:packs}} already given to the customer.
+   WITHOUT IT A DELIVERED ORDER CLAIMS FOR EVER. coClaimQty knows about packs
+   that were never MADE (written_off_packs) and nothing knew about packs that
+   were made and then GONE. Jairus is the case that showed it: 420 packs made
+   24-25 Sep for CO-09182026, delivered, then 420 made again on 30 Oct for
+   CO-10202026. Against a pool of what is on the shelf, the September order —
+   earlier needed_date, and completed still counts as locked, by design —
+   took all 420 of October's packs, and the live order read 0 produced with a
+   van due. Somebody reads that and makes them a third time.
+
+   Netting off what an order has already received is the whole fix. It is
+   only as good as the handover record, though: a delivery entered as a plain
+   transfer out of Bulacan leaves no handover to subtract, which is exactly
+   how September was recorded. See sql/wr_one_legged_transfers_20261030.sql. */
+function coClaimPacks(orders, lines, made, handed){
+  const pool={...(made||{})}, out={}, H=handed||{};
   const byOrder={}; (lines||[]).forEach(l=>{ if(l&&l.product_sku) (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
   (orders||[]).filter(o=>coIsLocked(o.status))
     .sort((a,b)=>String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))
                  ||String(a.order_ref).localeCompare(String(b.order_ref)))
     .forEach(o=>{ let ord=0, got=0; const bySku={};
+      const gone={...((H[o.order_ref])||{})};
       (byOrder[o.order_ref]||[]).forEach(l=>{ const q=+l.packs||0; if(!(q>0)) return;
-        ord+=q; const take=Math.min(coClaimQty(l), pool[l.product_sku]||0);
+        ord+=q;
+        /* what it is still entitled to: ordered, less what was written off,
+           less what it has already walked out of the door with */
+        const had=Math.min(coClaimQty(l), +gone[l.product_sku]||0);
+        gone[l.product_sku]=(+gone[l.product_sku]||0)-had;
+        const want=Math.max(0, coClaimQty(l)-had);
+        const take=Math.min(want, pool[l.product_sku]||0);
         pool[l.product_sku]=(pool[l.product_sku]||0)-take; got+=take;
         bySku[l.product_sku]=(bySku[l.product_sku]||0)+take; });
       out[o.order_ref]={ord,got,bySku};
     });
+  return out;
+}
+/* Packs already handed to a customer, per order and SKU, read back out of the
+   ledger. coHandover posts a `sale` movement and writes nothing on the line,
+   so the order reference lives in the note and this is the only way back to
+   it. The prefix is matched exactly: a genuine shop sale of a custom pack is
+   not a handover and must not cancel an order's claim. */
+const CO_HANDOVER_NOTE='Custom order handover ';
+function coHandedBack(movs){
+  const out={};
+  (movs||[]).forEach(m=>{
+    if(!m || (m.kind||'')!=='product' || (m.movement_type||'')!=='sale') return;
+    const note=String(m.note||'');
+    if(note.indexOf(CO_HANDOVER_NOTE)!==0) return;
+    const ref=note.slice(CO_HANDOVER_NOTE.length).trim();
+    if(!ref || !m.ref_sku) return;
+    const q=Math.abs(+m.qty||0); if(!(q>0)) return;
+    (out[ref]=out[ref]||{});
+    out[ref][m.ref_sku]=(out[ref][m.ref_sku]||0)+q;
+  });
   return out;
 }
 /* ---- DELIVERY IS NOT THE SAME DAY AS PRODUCTION -----------------------
@@ -16963,7 +17074,9 @@ async function _coLoadStock(){
   window._coClaimAll={}; window._coShare={};
   try{
     const [ords, lns]=await Promise.all([db.list('custom_orders',{}), db.list('custom_order_lines',{})]);
-    window._coClaimAll=coClaimPacks(ords, lns, m)||{};
+    let handed={}; try{ handed=coHandedBack(await ledgerAll()); }catch(e){}
+    window._coHanded=handed;
+    window._coClaimAll=coClaimPacks(ords, lns, m, handed)||{};
     const open={}; (ords||[]).forEach(o=>{ if(coIsLocked(o.status)) open[o.order_ref]=o; });
     (lns||[]).forEach(l=>{ if(!l||!l.product_sku||!open[l.order_ref]) return;
       (window._coShare[l.product_sku]=window._coShare[l.product_sku]||[]).push(l.order_ref); });
