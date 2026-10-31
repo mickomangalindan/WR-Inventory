@@ -4185,6 +4185,7 @@ async function pqBuildRows(){
      everywhere else as one pipeline figure. */
   const ohBy={};
   (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
+    if(!erpOwnsRow(v)) return;   // the shop's shelf is Shopify's; custom packs there are out of the ERP too
     const L=String(v.location_code||''); const q=+v.qty||0;
     const o=ohBy[v.ref_sku]=ohBy[v.ref_sku]||{sellAt:0, sellAfter:0, other:0, cons:0, all:0, sites:{}, consSites:{}, at:{}};
     o.all+=q; o.at[L]=(o.at[L]||0)+q;
@@ -5033,6 +5034,7 @@ async function psMovementLoad(){
   const acc={};
   mov.forEach(v=>{
     const sku=v.ref_sku; if(!sku) return;
+    if(!erpOwnsRow(v)) return;   // ONE LEDGER PER LOCATION
     if(PS_LOC!=='all' && String(v.location_code||'')!==PS_LOC) return;
     if(kindOf(sku)!==PS_CAT) return;
     const d=String(v.created_at||v.movement_date||'').slice(0,10);
@@ -5370,6 +5372,7 @@ async function renderLiveStock(){
      clock. Both blank = everything up to now, which is what "live" means and
      is the right default: the question this screen answers is "what is in the
      freezer right now", and any other default answers a question nobody asked. */
+  mov=mov.filter(erpOwnsRow);          // one ledger per location — products at the shop are Shopify's
   if(LS_TO)   mov=mov.filter(v=>String(v.created_at||'').slice(0,10)<=LS_TO);
   const _lsFrom=LS_FROM||''; try{ings=await listIngredients();}catch(e){} try{prods=await db.list('products',{});}catch(e){}
   const im={}; ings.forEach(i=>im[i.sku]=i); const pm={}; prods.forEach(p=>pm[p.sku]=p);
@@ -5479,6 +5482,30 @@ async function renderLiveStock(){
       });
   }
 
+  /* ---- THE SHOP'S PRODUCTS ARE SHOPIFY'S ---------------------------------
+     With the sell site's product movements filtered out above, a product row
+     here is Bulacan's ledger and nothing else. Viewing the shop (or All), the
+     shop's packs are added from Shopify — read-only, labelled, valued at cost
+     per pack. No reading is said out loud as "no Shopify reading", never as 0
+     pretending to be a count. A back-dated window cannot be answered: Shopify
+     gives today's figure only, so the shop's products are simply not shown. */
+  if(!LS_TO && (LS_LOC==='all' || LS_LOC===planSellLoc())){
+    let _pic=null; try{ _pic=await stockPicture(); }catch(e){}
+    let _cpp={}; try{ _cpp=await prodCostMap(); }catch(e){}
+    const _onlyShop=(LS_LOC===planSellLoc());
+    rows.forEach(r=>{
+      if(r.kind!=='product') return;
+      const p=pm[r.sku]||{}; if(p.is_custom||/^CUST-/i.test(String(r.sku))) return;   // custom packs never reach Shopify
+      const sp=(_pic&&_pic.by)?_pic.by[r.sku]:null;
+      const q=(sp && sp.shopQ!=null) ? Math.max(0,+sp.shopQ||0) : null;
+      if(_onlyShop){
+        Object.assign(r,{begin:0,recv:0,prod:0,cons:0,tf:0,sold:0,back:0,adj:0,end:(q||0),value:(q||0)*(+_cpp[r.sku]||0)});
+      } else if(q){ r.end+=q; r.value+=q*(+_cpp[r.sku]||0); }
+      r.shop=true; r.shopQ=q; r.noShop=(q==null); r.virgin=false;
+      r.neg=r.end< -0.0001; r.below=(r.par>0 && r.end<r.par);
+    });
+    if(_onlyShop) rows=rows.filter(r=>r.kind!=='product' || r.shop);   // no custom-pack rows at the shop
+  }
   /* ---- LABEL STOCK IS NOT IN THE LEDGER ------------------------------------
      This screen is built entirely from inventory_movements, and a product's
      label stock is not a movement — it is a column on the product, one per
@@ -5591,7 +5618,7 @@ function lsElsewhere(r,SITE){
    ledger in front of it. */
 function lsCoverDays(r){
   if(!r) return null;
-  if(r.kind==='product' && LS_LOC==='all' && window._lsPic){
+  if(r.kind==='product' && (LS_LOC==='all' || LS_LOC===planSellLoc())){
     const sp=stockPicFor(r.sku); if(sp && sp.coverDays!=null) return {d:sp.coverDays, src:'pq', pct:sp.covPct};
   }
   const per=(+r.out30||0)/30;
@@ -5657,16 +5684,11 @@ function drawLiveStock(){
     ${kpi('⚠ Below reorder/PAR', nBelow, 'need replenishing', nBelow?'var(--earth,#b5762a)':'')}
     ${kpi('🔴 Negative', nNeg, 'ledger to investigate', nNeg?'var(--danger)':'')}
     ${mh?'':kpi('Stock value', fmt(totVal), 'at moving-avg cost', 'var(--berry)')}
-    ${(()=>{ if(!window._lsPic) return '';
-       let n=0, tot=0;
-       rows.forEach(r=>{ if(r.kind!=='product') return; const sp=stockPicFor(r.sku);
-         if(!sp || sp.shopQ==null) return;
-         const led=(LS_LOC===planSellLoc())?r.end:(+sp.sellable||0);
-         const g=led-sp.shopQ; if(Math.abs(g)>=1){ n++; tot+=g; } });
-       if(!n) return '';
-       return kpi('⚠ Disagree with Shopify', n,
-         (tot>0?'ledger reads '+Math.round(tot)+' HIGHER in total':'ledger reads '+Math.abs(Math.round(tot))+' lower in total'),
-         'var(--danger)'); })()}
+    ${(()=>{ /* There is no second ledger to disagree with — see ONE LEDGER PER
+            LOCATION. What can still go wrong is a product Shopify has no reading
+            for, and that is worth a tile: the shelf is unknown, not zero. */
+       const n=rows.filter(r=>r.kind==='product' && r.shop && r.noShop).length;
+       return n ? kpi('⚠ No Shopify reading', n, 'shelf unknown — check the inventory feed', 'var(--danger)') : ''; })()}
   </div>`;
 
   const qf=(v,div)=> div===1000? (Math.round(v/1000*100)/100).toLocaleString('en-PH',{maximumFractionDigits:2}) : num(Math.round(v));
@@ -5723,18 +5745,14 @@ function drawLiveStock(){
          that have not posted, or an adjustment somebody made on one side only.
          Either way it is the most useful thing on the row and it was the one
          thing the row did not say. */
-      const _sp=(r.kind==='product')?stockPicFor(r.sku):null;
-      const _shows=_sp && _sp.shopQ!=null && (LS_LOC===planSellLoc()||LS_LOC==='all');
-      const _led=_shows ? ((LS_LOC===planSellLoc()) ? r.end : (+_sp.sellable||0)) : null;
-      const _gap=_shows ? Math.round((_led-_sp.shopQ)*100)/100 : 0;
-      const _drift=_shows && Math.abs(_gap)>=1;
-      const flag=_drift
-        ? `<span style="color:var(--danger);font-weight:700" title="Our ledger at ${esc(locName(planSellLoc()))} says ${num(Math.round(_led))}; Shopify's own count says ${num(Math.round(_sp.shopQ))}. They describe the same packs on the same shelf, so one of them is wrong.${salesFeedStale()?' The sales feed has not posted for '+Math.floor(salesFeedStale().days)+' day(s), which would explain a ledger that reads HIGH.':''}">⚠ ${_gap>0?'+':''}${num(_gap)} vs Shopify</span>`
+      /* The "vs Shopify" drift flag is gone with the second ledger it compared. */
+      const flag=(r.shop && r.noShop)
+        ? `<span style="color:var(--danger);font-weight:700" title="Shopify is the only record of the shop's shelf and has no reading for this product. Check the product exists in Shopify and that the inventory feed is running.">no Shopify reading</span>`
         : (r.neg?'<span style="color:var(--danger);font-weight:700">🔴 negative</span>':(r.below?'<span style="color:var(--earth,#b5762a);font-weight:700">⚠ reorder</span>':'<span class="mini" style="color:var(--ok)">ok</span>'));
       const cl=r.below||r.neg?' style="cursor:pointer"':' style="cursor:pointer"';
       const model=pm[r.sku]?'products':'ingredients';
       h+=`<tr${cl} onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open item">
-        <td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${r.noLedger?' · counted, not moved — no ledger history':''}${r.virgin?' · <span style="color:var(--earth,#b5762a)">nothing has moved yet — never received, made or counted</span>':''}</div></td><td class="mini">${esc(r.unit)}</td>
+        <td>${esc(r.name)}<div class="mini" style="color:var(--muted)"><code>${esc(r.sku)}</code>${r.noLedger?' · counted, not moved — no ledger history':''}${r.virgin?' · <span style="color:var(--earth,#b5762a)">nothing has moved yet — never received, made or counted</span>':''}${(r.shop&&!r.noShop)?' · <span title="The shop\'s packs come from Shopify, never from this ledger">'+(LS_LOC===planSellLoc()?'from Shopify':'incl. '+num(Math.round(r.shopQ||0))+' at the shop, from Shopify')+'</span>':''}</div></td><td class="mini">${esc(r.unit)}</td>
         ${W?`<td class="num">${qf(r.begin,r.div)}</td><td class="num">${r.recv?qf(r.recv,r.div):'—'}</td><td class="num">${r.prod?qf(r.prod,r.div):'—'}</td>
         <td class="num">${r.cons?qf(r.cons,r.div):'—'}</td>
         <td class="num"${(r.sold||r.back)?' title="sold '+qf(r.sold,r.div)+(r.back?' · back '+qf(r.back,r.div):'')+'"':''}>${(r.sold||r.back)?qf(r.sold+r.back,r.div):'—'}</td>
@@ -5854,7 +5872,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-30 12:40Z';
+const WR_BUILD='2026-10-31 09:30Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -6257,6 +6275,33 @@ function planSellLoc(){
   const p=planProduceLoc();
   return (p==='pasig') ? 'bulacan' : 'pasig';   // the historical default, stated out loud
 }
+/* ===========================================================================
+   ONE LEDGER PER LOCATION. THE ERP HOLDS NO PRODUCT STOCK AT THE SHOP.
+   ===========================================================================
+   Internal agreement for every user, restated by Zeus on 31 Oct 2026:
+
+     · finished products at the SELL site (Pasig) live in SHOPIFY, only
+     · finished products everywhere else (Bulacan) live in this ledger
+     · ingredients and supplies live in this ledger at every site
+
+   The ERP used to keep a second product ledger at Pasig — transfer_in on
+   receipt, sales from the order sync, counts, openings — and Live Stock then
+   showed both: our figure with "+27 vs Shopify" beside it, 23 negatives, and a
+   card reading "ledger reads 1528 HIGHER in total". Two ledgers for one shelf
+   means every user has to decide which one to believe, and the Weekly Demand
+   Target quietly believed the wrong one and under-produced.
+
+   So: nothing WRITES a product movement at the sell site any more, and nothing
+   ADDS one into an on-hand balance. Old rows stay in the table untouched — they
+   are history, not stock — and sale movements are still read as SALES (the
+   feed's age, sold columns, velocity), never as a balance.
+
+   A product that leaves Bulacan for the shop is a transfer_out at Bulacan and
+   nothing else. From then on it is Shopify's. */
+function erpHoldsProducts(loc){ return String(loc||'') !== String(planSellLoc()); }
+/* A stock_balance row or a ledger movement the ERP owns as STOCK. False only
+   for a product at the sell site. Use it on every on-hand sum. */
+function erpOwnsRow(r){ return !(r && String(r.kind||'')==='product' && !erpHoldsProducts(r.location_code)); }
 function planLocLabel(){ const a=planSupplyLocs(); return a.length===1?a[0]:(a.length+' locations: '+a.join(', ')); }
 async function openPlanLocs(){
   await loadLocs();
@@ -7539,11 +7584,14 @@ async function wdtSheetLoad(){
       const d=String(m.created_at||m.production_date||'').slice(0,10);
       const q=+m.qty||0, sku=m.ref_sku;
       if(d && d>asOf) return;
-      onHand[sku]=(onHand[sku]||0)+q;
-      if(!d || d<start){ beg[sku]=(beg[sku]||0)+q; return; }
+      /* A shop sale is still a SALE and counts as sold. It is never stock: the
+         shop's balance is Shopify's — see ONE LEDGER PER LOCATION. */
+      const _own=erpOwnsRow(m);
+      if(_own) onHand[sku]=(onHand[sku]||0)+q;
+      if(!d || d<start){ if(_own) beg[sku]=(beg[sku]||0)+q; return; }
       const t=String(m.movement_type||'');
       if(t==='sale'||t==='refund'||t==='return') sold[sku]=(sold[sku]||0)+q;
-      else if(t!=='production'&&t!=='batch_output') other[sku]=(other[sku]||0)+q;
+      else if(t!=='production'&&t!=='batch_output'){ if(_own) other[sku]=(other[sku]||0)+q; }
     });
   }catch(e){}
 
@@ -8264,11 +8312,19 @@ async function wdtLoad(){
        different question than the one asked. */
     if(histor){ (await ledgerAll()).forEach(m=>{
         if(m.kind!=='product') return;
+        if(!erpOwnsRow(m)) return;       // the shop's packs are Shopify's; no history exists for them here
         const d=String(m.created_at||m.production_date||'').slice(0,10);
         if(d && d>asOf) return;
         stock[m.ref_sku]=(stock[m.ref_sku]||0)+(+m.qty||0); }); }
-    else if(isLive()) (await db.list('stock_balance',{})).forEach(b=>{ if(b.kind==='product') stock[b.ref_sku]=(stock[b.ref_sku]||0)+(+b.on_hand||0); });
-    else (DEMO.inventory_movements||[]).forEach(m=>{ if(m.kind==='product') stock[m.ref_sku]=(stock[m.ref_sku]||0)+(+m.qty||0); });
+    /* THIS SUMMED stock_balance FOR EVERY PRODUCT AT EVERY SITE — the shop's own
+       ERP ledger included, which read ~1528 packs above Shopify on 31 Oct. The
+       cover column is on hand ÷ remaining, so an inflated on-hand made every row
+       look covered and the week under-produced. Every other planning screen
+       reads the one stock picture (Shopify at the shop, our ledger at Bulacan);
+       this one now does too. */
+    else { const PIC=await stockPicture().catch(()=>null);
+      if(PIC && PIC.by) Object.keys(PIC.by).forEach(k=>{ stock[k]=+((PIC.by[k]||{}).current)||0; });
+      else (await ledgerAll()).forEach(m=>{ if(m.kind==='product' && erpOwnsRow(m)) stock[m.ref_sku]=(stock[m.ref_sku]||0)+(+m.qty||0); }); }
   }catch(e){}
   // 1 · the locked plot for this week, 2 · the demand table, 3 · custom orders
   const dem={}, src={};
@@ -10710,7 +10766,7 @@ async function planReadyCheck(force){
   let hoRows=[], hoPacks=0, hoStale=0, hoVal=0;
   try{
     const bal={}, cval={};
-    (await ledgerAll()).forEach(m=>{ const k=String(m.ref_sku||''); if(!/^CUST-/i.test(k)) return;
+    (await ledgerAll()).forEach(m=>{ const k=String(m.ref_sku||''); if(!/^CUST-/i.test(k)) return; if(!erpOwnsRow(m)) return;
       bal[k]=(bal[k]||0)+(+m.qty||0); cval[k]=(cval[k]||0)+(+m.qty||0)*(+m.unit_cost||0); });
     const bb=window._coBestBefore||{};
     const ords={}; (await db.list('custom_orders',{})).forEach(o=>{ ords[o.order_ref]=o; });
@@ -10890,6 +10946,7 @@ async function planReadyCheck(force){
   let negIng=[], negFg=[];
   try{ (await db.list('stock_balance',{})).forEach(s=>{ const q=+s.on_hand||0;
     if(!(q<0)) return;
+    if(!erpOwnsRow(s)) return;   // the shop's old product ledger is history, not stock — it cannot block a run
     if(String(s.kind||'')==='product'){ if(q<-0.5) negFg.push({sku:s.ref_sku, loc:s.location_code||'', q}); }
     else { if(q<-50) negIng.push({sku:s.ref_sku, loc:s.location_code||'', q}); }   // under 50 g is weigh-scale dust
   }); }catch(e){}
@@ -11154,7 +11211,7 @@ async function renderMRP(){
   // Only the locations configured as SUPPLY. Summing every location counted
   // consignee stock as available and under-ordered.
   let stock={};
-  if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(!planCountsLoc(s.location_code)) return; stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
+  if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(!planCountsLoc(s.location_code)) return; if(!erpOwnsRow(s)) return; stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);});}catch(e){} }
   else { (DEMO.inventory_movements||[]).forEach(mv=>{ if(mv.kind!=='ingredient'||!planCountsLoc(mv.location_code)) return; stock[mv.ref_sku]=(stock[mv.ref_sku]||0)+(+mv.qty||0); }); }
   window._mrpStock=stock;
   /* SCHEDULED INCOMING — bought but not yet received. Without this the plan
@@ -13936,7 +13993,11 @@ async function postTransfer(t){ try{
        one pack too many, where an overstated shelf makes none at all. */
     const _mvAt=_transferStamp(t);
     if(sent>0) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:from,qty:-sent*mult,unit_cost:uc,movement_type:'transfer_out',note:'Transfer '+t.transfer_ref,...(_mvAt?{created_at:_mvAt}:{})});
-    if(recv>0) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:to,qty:recv*mult,unit_cost:uc,movement_type:'transfer_in',note:'Transfer '+t.transfer_ref,...(_mvAt?{created_at:_mvAt}:{})});
+    /* ONE LEDGER PER LOCATION: a product arriving at the shop is Shopify's from
+       that moment — warehouse uploads it there — so no transfer_in is posted.
+       The transfer_out at Bulacan above still posts, and the sent/received
+       check below still runs: a van shortfall is a real loss either way. */
+    if(recv>0 && (kind!=='product' || erpHoldsProducts(to))) await db.create('inventory_movements',{kind,ref_sku:l.product_sku,location_code:to,qty:recv*mult,unit_cost:uc,movement_type:'transfer_in',note:'Transfer '+t.transfer_ref,...(_mvAt?{created_at:_mvAt}:{})});
     const gap=sent-recv; if(Math.abs(gap)>0.0001){ flags++; try{ await db.create('variance_log',{check_type:'4 · Transfer',source_ref:t.transfer_ref,expected:sent,actual:recv,gap_qty:-gap,gap_value:Math.round(uc*mult*gap*100)/100,location:'in-transit',responsible_user:CURRENT_USER,status:'open',note:l.product_sku+' sent '+sent+' vs received '+recv}); }catch(e){} }
     n++; }
   sysLog('transfers',t.transfer_ref,'🚚 Received — '+n+' line(s) posted; '+flags+' shortfall(s) flagged by '+CURRENT_USER); toast('Transfer posted · '+flags+' shortfall(s)');
@@ -14842,7 +14903,6 @@ async function renderDashboard(){
   stockRows.forEach(s=>{ if(s.kind!=='ingredient') return;
     stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0);
     const v=+s.stock_value||0; stockVal+=v; siteVal[s.location_code]=(siteVal[s.location_code]||0)+v; });
-  const fgValLedger=stockRows.filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.stock_value||0),0);
   /* ---- WHAT THE SHOP ITSELF SAYS IT HAS -------------------------------------
      Every figure on this page is the ERP LEDGER, valued at cost. The ledger only
      loses a pack when a sale posts to it, and Shopify's sales have not been
@@ -14854,16 +14914,8 @@ async function renderDashboard(){
      Shopify row and is not a discrepancy). */
   let _sp=null; try{ _sp=await stockPicture(); }catch(e){}
   const _sellLoc=planSellLoc();
-  let shopRead=0, ledgerCmp=0, driftPacks=0, driftVal=0, noRead=0;
-  if(_sp&&_sp.by){
-    const ledSell={}; stockRows.forEach(s=>{ if(s.kind==='product' && String(s.location_code||'')===_sellLoc)
-      ledSell[s.ref_sku]=(ledSell[s.ref_sku]||0)+(+s.on_hand||0); });
-    Object.keys(_sp.by).forEach(k=>{ const r=_sp.by[k]||{};
-      if(r.shopQ==null){ if((ledSell[k]||0)>0) noRead++; return; }
-      shopRead+=Math.max(0,+r.shopQ||0); ledgerCmp+=(+ledSell[k]||0); });
-    driftPacks=Math.round(ledgerCmp-shopRead);
-    driftVal=packsCostAvg(fgValLedger, stockRows)*driftPacks;
-  }
+  /* The drift between our ledger at the shop and Shopify is gone with the
+     ledger — see ONE LEDGER PER LOCATION. */
   const rawVal=stockRows.filter(s=>s.kind==='ingredient').reduce((a,s)=>a+(+s.stock_value||0),0);
   const packsLedger=stockRows.filter(s=>s.kind==='product').reduce((a,s)=>a+(+s.on_hand||0),0);
   const rawItems=new Set(stockRows.filter(s=>s.kind==='ingredient'&&(+s.on_hand||0)!==0).map(s=>s.ref_sku)).size;
@@ -14882,15 +14934,18 @@ async function renderDashboard(){
      A SKU Shopify does not carry — a custom order awaiting handover, a retired
      code — keeps its ledger quantity, because there is no reading to prefer. */
   const fgQty={}; stockRows.forEach(s=>{ if(s.kind!=='product') return;
+    if(!erpOwnsRow(s)) return;      // the shop's ledger rows are not stock
     const o=fgQty[s.ref_sku]=fgQty[s.ref_sku]||{sell:0, other:0, bySite:{}};
     const L=String(s.location_code||''); const q=+s.on_hand||0;
-    if(L===_sellLoc) o.sell+=q; else { o.other+=q; o.bySite[L]=(o.bySite[L]||0)+q; } });
+    o.other+=q; o.bySite[L]=(o.bySite[L]||0)+q; });
+  /* every product Shopify reads, even one with nothing at Bulacan */
+  if(_sp&&_sp.by) Object.keys(_sp.by).forEach(k=>{ if(!fgQty[k]) fgQty[k]={sell:0, other:0, bySite:{}}; });
   let fgVal=0, packs=0, fgNoRead=0; const fgSkuSet=new Set();
   Object.keys(fgQty).forEach(k=>{ const o=fgQty[k];
     const pic=(_sp&&_sp.by&&_sp.by[k])||null;
     const read=(pic && pic.shopQ!=null);
-    if(!read && o.sell>0) fgNoRead++;
-    const sellQ=read?Math.max(0,+pic.shopQ||0):o.sell;
+    if(!read && pic && !pic.isCust) fgNoRead++;
+    const sellQ=read?Math.max(0,+pic.shopQ||0):0;     // no reading = unknown, never our ledger
     const q=sellQ+o.other; const c=+costBy[k]||0; const v=q*c;
     stock[k]=(stock[k]||0)+q;                       // the shelf every tile on this page reads
     fgVal+=v; packs+=q; if(q!==0) fgSkuSet.add(k);
@@ -15028,18 +15083,7 @@ async function renderDashboard(){
 
   /* The gap between the two ways of counting Pasig, stated where the money is
      read rather than left to be discovered in a stock report. */
-  const _drCard=(driftPacks>20 && shopRead>0) ? `<div class="card" style="margin-bottom:14px;border-left:4px solid var(--danger)">
-      <h2 style="margin:0 0 6px">⚠ The ledger at ${esc(locName(_sellLoc))} is above the shop's own count</h2>
-      <div style="font-size:13px;line-height:1.6">
-        The figures above are valued <b>at cost</b>, and <b>${esc(locName(_sellLoc))} is counted from Shopify</b> — the same rule the production screens follow.
-        Our own ledger at ${esc(locName(_sellLoc))} says <b>${Math.round(ledgerCmp).toLocaleString()}</b> pack(s) where Shopify says <b>${Math.round(shopRead).toLocaleString()}</b>:
-        <b style="color:var(--danger)">${driftPacks.toLocaleString()} pack(s)</b> on our books that are not on the shelf${mh?'':` (about <b>${wpeso(driftVal)}</b>, which is why the value here is lower than the stock report's <b>${wpeso(fgValLedger)}</b>)`}.
-        <div class="mini" style="margin-top:6px;color:var(--muted)">A pack leaves the ledger only when a SALE posts to it. The last sale posted was
-          <b>${esc((_sp&&_sp.lastSale)||'—')}</b>${(_sp&&_sp.saleAgeDays!=null)?` (${Math.round(_sp.saleAgeDays)} day(s) ago)`:''}, so every sale since then is still sitting in the ledger as stock.
-          Fix the sales feed and post the missing sales; a count and an opening correction does the same job in one step.
-          ${fgNoRead?(fgNoRead+' SKU(s) have no Shopify row (custom orders awaiting handover, retired codes) and keep their ledger quantity.'):''}</div>
-        <div style="margin-top:8px"><button class="btn sec sm" onclick="openModel('stock_balance')">Open Live Stock</button>
-          <button class="btn sec sm" onclick="openModel('variances')">Variances</button></div></div></div>` : '';
+  const _drCard='';   // removed with the shop's second ledger — see ONE LEDGER PER LOCATION
   /* The same preflight the demand run shows, as one tile. It sits above the
      KPIs on purpose: every number below it is only as good as the feeds the
      tile is reporting on, and finding that out after reading the dashboard is
@@ -15480,60 +15524,19 @@ function coPastDraft(s){ return coStat(s)!=='draft'; }
 function coClaimQty(l){ return Math.max(0, (+l.packs||0) - (+l.written_off_packs||0)); }
 /* Attribute produced packs to the orders entitled to them.
    `orders` and `lines` as loaded; returns {ref:{ord,got}} for the locked ones. */
-/* `handed` is optional: {order_ref:{sku:packs}} already given to the customer.
-   WITHOUT IT A DELIVERED ORDER CLAIMS FOR EVER. coClaimQty knows about packs
-   that were never MADE (written_off_packs) and nothing knew about packs that
-   were made and then GONE. Jairus is the case that showed it: 420 packs made
-   24-25 Sep for CO-09182026, delivered, then 420 made again on 30 Oct for
-   CO-10202026. Against a pool of what is on the shelf, the September order —
-   earlier needed_date, and completed still counts as locked, by design —
-   took all 420 of October's packs, and the live order read 0 produced with a
-   van due. Somebody reads that and makes them a third time.
-
-   Netting off what an order has already received is the whole fix. It is
-   only as good as the handover record, though: a delivery entered as a plain
-   transfer out of Bulacan leaves no handover to subtract, which is exactly
-   how September was recorded. See sql/wr_one_legged_transfers_20261030.sql. */
-function coClaimPacks(orders, lines, made, handed){
-  const pool={...(made||{})}, out={}, H=handed||{};
+function coClaimPacks(orders, lines, made){
+  const pool={...(made||{})}, out={};
   const byOrder={}; (lines||[]).forEach(l=>{ if(l&&l.product_sku) (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
   (orders||[]).filter(o=>coIsLocked(o.status))
     .sort((a,b)=>String(a.needed_date||'9999').localeCompare(String(b.needed_date||'9999'))
                  ||String(a.order_ref).localeCompare(String(b.order_ref)))
     .forEach(o=>{ let ord=0, got=0; const bySku={};
-      const gone={...((H[o.order_ref])||{})};
       (byOrder[o.order_ref]||[]).forEach(l=>{ const q=+l.packs||0; if(!(q>0)) return;
-        ord+=q;
-        /* what it is still entitled to: ordered, less what was written off,
-           less what it has already walked out of the door with */
-        const had=Math.min(coClaimQty(l), +gone[l.product_sku]||0);
-        gone[l.product_sku]=(+gone[l.product_sku]||0)-had;
-        const want=Math.max(0, coClaimQty(l)-had);
-        const take=Math.min(want, pool[l.product_sku]||0);
+        ord+=q; const take=Math.min(coClaimQty(l), pool[l.product_sku]||0);
         pool[l.product_sku]=(pool[l.product_sku]||0)-take; got+=take;
         bySku[l.product_sku]=(bySku[l.product_sku]||0)+take; });
       out[o.order_ref]={ord,got,bySku};
     });
-  return out;
-}
-/* Packs already handed to a customer, per order and SKU, read back out of the
-   ledger. coHandover posts a `sale` movement and writes nothing on the line,
-   so the order reference lives in the note and this is the only way back to
-   it. The prefix is matched exactly: a genuine shop sale of a custom pack is
-   not a handover and must not cancel an order's claim. */
-const CO_HANDOVER_NOTE='Custom order handover ';
-function coHandedBack(movs){
-  const out={};
-  (movs||[]).forEach(m=>{
-    if(!m || (m.kind||'')!=='product' || (m.movement_type||'')!=='sale') return;
-    const note=String(m.note||'');
-    if(note.indexOf(CO_HANDOVER_NOTE)!==0) return;
-    const ref=note.slice(CO_HANDOVER_NOTE.length).trim();
-    if(!ref || !m.ref_sku) return;
-    const q=Math.abs(+m.qty||0); if(!(q>0)) return;
-    (out[ref]=out[ref]||{});
-    out[ref][m.ref_sku]=(out[ref][m.ref_sku]||0)+q;
-  });
   return out;
 }
 /* ---- DELIVERY IS NOT THE SAME DAY AS PRODUCTION -----------------------
@@ -17044,39 +17047,38 @@ async function coLoadTrail(ref){
   formAtts  = nu ? [] : await attsForRecord('custom_orders', ref);
   window._attCtx = nu ? null : {model:'custom_orders', ref, rerender:drawCOForm};
 }
-/* ---- ON HAND IS NOT THE SAME QUESTION AS "MINE" ------------------------
-   This loads the finished packs sitting in the freezer, per SKU, across both
-   sites. That is a true number and it is NOT this order's number.
+/* ---- THE FULFILMENT PANEL ANSWERS "HAS IT BEEN MADE?" -------------------
+   The rule for a custom line, settled by Zeus: it answers only HAS THIS BEEN
+   MADE. So "Produced" is confirmed PRODUCTION allocated to this order — the
+   same pool, and the same oldest-promise-first allocation (coClaimPacks), that
+   the demand run and the production queue already use.
 
-   Two orders from the same customer for the same mix at the same pack size
-   get the SAME SKU — deliberately, because the recipe fingerprint is what
-   stops one mix being made twice. So the pool is shared, and the Fulfilment
-   panel used to read it straight:
-
-       const made = +stock[l.product_sku] || 0;
-
-   CO-10192026 ordered 2 Cookable Duck. Seven were in the freezer, most of
-   them made for CO-10302026. The panel said 7 produced against 2 ordered,
-   every row went green, the card said READY FOR DELIVERY and offered to
-   notify CS — while the status badge on the very same screen, which is
-   computed per order, said "Partially Fulfilled (4 of 7 packs produced)".
-   Two numbers for one order, on one screen, and the wrong one was the one
-   with the button under it. Somebody hands over another order's packs.
-
-   The per-order answer already existed. coClaimPacks allocates the pool to
-   the locked orders in needed-date order, oldest first, which is the same
-   rule the demand run and the production queue use. It is loaded here, beside
-   the stock, so the panel reads an allocation instead of a shelf.           */
+   It used to read the freezer instead, twice over:
+     · 28 Oct: total on-hand per SKU, so CO-10192026 showed 7 Duck "produced"
+       against 2 ordered — packs made for CO-10302026 on the shared SKU — with
+       READY FOR DELIVERY and a Notify CS button under the wrong number.
+     · 30 Oct: on-hand allocated per order. Better, but a shelf is the wrong
+       question: once packs leave, an older order still "owns" them and takes
+       the next batch made for the same customer (Jairus, 420 packs). Patching
+       that needed a record of every delivery — a second answer to a question
+       production already answers.
+   Production does not move when a pack is delivered, so the answer cannot be
+   stolen by the next order. The shelf is still shown, for Bulacan only — the
+   shop's packs are not ERP stock (ONE LEDGER PER LOCATION).                  */
 async function _coLoadStock(){
-  const m={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if((s.kind||'')==='product') m[s.ref_sku]=(m[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
+  const m={}; try{ (await db.list('stock_balance',{})).forEach(s=>{ if((s.kind||'')==='product' && erpOwnsRow(s)) m[s.ref_sku]=(m[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
   window._coStock=m;
-  /* who else is entitled to the same pool, and how much of it is this order's */
-  window._coClaimAll={}; window._coShare={};
+  window._coClaimAll={}; window._coShare={}; window._coMade={};
   try{
     const [ords, lns]=await Promise.all([db.list('custom_orders',{}), db.list('custom_order_lines',{})]);
-    let handed={}; try{ handed=coHandedBack(await ledgerAll()); }catch(e){}
-    window._coHanded=handed;
-    window._coClaimAll=coClaimPacks(ords, lns, m, handed)||{};
+    const made={};
+    try{ let rows;
+      if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
+      else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
+      (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
+    }catch(e){}
+    window._coMade=made;
+    window._coClaimAll=coClaimPacks(ords, lns, made)||{};
     const open={}; (ords||[]).forEach(o=>{ if(coIsLocked(o.status)) open[o.order_ref]=o; });
     (lns||[]).forEach(l=>{ if(!l||!l.product_sku||!open[l.order_ref]) return;
       (window._coShare[l.product_sku]=window._coShare[l.product_sku]||[]).push(l.order_ref); });
@@ -17087,25 +17089,27 @@ async function _coLoadStock(){
 // Fulfilment panel HTML + overall readiness for the open order.
 function _coFulfilHtml(){
   const stock=window._coStock||{}; const wl=coLines.filter(l=>l.product_sku);
-  /* THIS ORDER'S SHARE, not the shelf. See _coLoadStock. Absent means not
+  /* THIS ORDER'S SHARE OF PRODUCTION. See _coLoadStock. Absent means not
      worked out yet, and the honest answer to that is 0 — a panel that guesses
      high is a panel that tells CS to collect somebody else's packs. */
   const claim=((window._coClaimAll||{})[coRec.order_ref]||{}).bySku||{};
   const mine=l=>+claim[l.product_sku]||0;
   const rows=wl.map(l=>{ const ord=+l.packs||0; const made=mine(l); const pct=ord>0?Math.min(100,Math.round(made/ord*100)):0;
     const st=(ord>0&&made>=ord)?{t:'Ready',c:'#2f7d33'}:(made>0?{t:'In production',c:'var(--earth,#b5762a)'}:{t:'Pending',c:'var(--danger)'});
-    /* When the freezer holds more than this order is owed, say so and name who
-       else is waiting on it — otherwise the figure looks simply wrong to
-       anybody who has just counted the shelf. */
+    /* A shared SKU: say how much was made for it in all and who else it was
+       made for, so a figure smaller than the kitchen remembers does not read as
+       a mistake. The Bulacan shelf is said separately — it is a different fact. */
+    const madeAll=+((window._coMade||{})[l.product_sku])||0;
     const onHand=+stock[l.product_sku]||0;
     const others=((window._coShare||{})[l.product_sku]||[]).filter(r=>r!==coRec.order_ref);
-    const share=(onHand>made&&others.length)
-      ? `<div class="mini" style="color:var(--muted)">${onHand} on hand for this SKU — shared with ${others.map(r=>esc(r)).join(', ')}</div>` : '';
+    const share=((madeAll>made&&others.length)
+        ? `<div class="mini" style="color:var(--muted)">${madeAll} made for this SKU in all — shared with ${others.map(r=>esc(r)).join(', ')}</div>` : '')
+      + (onHand>0 ? `<div class="mini" style="color:var(--muted)">${onHand} on the shelf at ${esc(locName(planProduceLoc()))}</div>` : '');
     return `<tr><td>${esc(l.description||l.product_sku)}<div class="mini"><code>${esc(l.product_sku)}</code></div>${share}</td><td class="num">${ord}</td><td class="num">${made}</td><td><b style="color:${st.c}">${st.t}</b> <span class="mini">${pct}%</span></td></tr>`; }).join('');
   const allReady = wl.length>0 && wl.every(l=>(+l.packs||0)>0 && mine(l)>=(+l.packs||0));
   const html=`<div class="repcard" style="margin:12px 0 0"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
       <h3 style="margin:0">🏭 Fulfilment</h3>${allReady?'<span class="badge b-received">READY FOR DELIVERY</span>':'<span class="badge b-open">in production</span>'}
-      <span style="flex:1"></span><span class="mini">Produced = packs <b>allocated to this order</b> · needed by <b>${esc(coRec.needed_date||'—')}</b></span>
+      <span style="flex:1"></span><span class="mini">Produced = confirmed production <b>allocated to this order</b> · needed by <b>${esc(coRec.needed_date||'—')}</b></span>
       ${allReady?'<button class="btn sm" onclick="coNotifyReady()">📣 Notify CS ready</button>':''}</div>
     <div style="overflow-x:auto"><table><thead><tr><th>Item</th><th class="num">Ordered</th><th class="num">Produced</th><th>Status</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="empty">Lock the order to create its SKUs, then production output shows here.</td></tr>'}</tbody></table></div>
     ${coRec.ready_notified?('<div class="mini" style="margin-top:6px;color:#2f7d33">📣 CS notified ready at '+esc(String(coRec.ready_notified).replace('T',' ').slice(0,16))+'</div>'):''}
@@ -18326,6 +18330,7 @@ async function coHandover(){
     const movs = await ledgerAll();
     const at={};
     (movs||[]).forEach(v=>{ if((v.kind||'')!=='product') return;
+      if(!erpOwnsRow(v)) return;      // packs that reached the shop have already left the ERP
       const sku=v.ref_sku; if(!sku) return;
       (at[sku]=at[sku]||{})[v.location_code||'bulacan']=((at[sku]||{})[v.location_code||'bulacan']||0)+(+v.qty||0); });
     const want={};
@@ -24747,7 +24752,7 @@ async function countLoad(){
   const _wantArch=sc.includes('Retired');
   const _allIngs=await db.list('ingredients',{}), _allProds=await db.list('products',{});
   _cntDualBuild(_allIngs,_allProds);
-  const wantIng=all||sc.includes('Ingredients'), wantSup=all||sc.includes('Supplies'), wantStk=all||sc.includes('Stickers'), wantProd=all||sc.includes('Sellable Products');
+  const wantIng=all||sc.includes('Ingredients'), wantSup=all||sc.includes('Supplies'), wantStk=all||sc.includes('Stickers'), wantProd=(all||sc.includes('Sellable Products')) && erpHoldsProducts(countRec.location_code||'bulacan');   // the shop's products are counted in Shopify
   const loc=(countRec.location_code||'bulacan');
   // Book qty must be THIS location's stock. Summing every location made a Bulacan
   // count sheet open with Pasig's stock in the book column, so every line varied.
@@ -24767,6 +24772,7 @@ async function countLoad(){
      Two maps now, and every line reads the one its own kind belongs to. */
   let stockIng={}, stockProd={};
   try{ (await db.list('stock_balance',{})).forEach(s=>{ if(String(s.location_code||'')!==loc) return;
+    if(!erpOwnsRow(s)) return;
     const t=(String(s.kind||'')==='product')?stockProd:stockIng;
     t[s.ref_sku]=(t[s.ref_sku]||0)+(+s.on_hand||0); });}catch(e){}
   /* Kept for the retired-item test below, which asks "does this hold anything
@@ -24984,7 +24990,8 @@ async function _countApprove(){
       try{ await db.update('products','sku',psku,{[field]:+l.counted_qty}); }catch(e){ failed++; }
     } else {
       // the SAME kind the book figure was read from — see the note above
-      try{ await db.create('inventory_movements',{kind:_kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:uc,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){ failed++; }
+      if(_kind==='product' && !erpHoldsProducts(countRec.location_code)){ /* never: the shop's products are Shopify's */ }
+      else { try{ await db.create('inventory_movements',{kind:_kind,ref_sku:l.ref_sku,location_code:countRec.location_code,qty:gap,unit_cost:uc,movement_type:'count_adjust',note:'Count '+countRec.count_ref}); }catch(e){ failed++; } }
     }
     const kind2=_kind;
     const gval=Math.round(gap*uc*100)/100;
@@ -25195,7 +25202,7 @@ function _valProcCost(it, bySku, byName){
   return raw>0 ? (raw/y) : 0;                      // per kg of PROCESSED output
 }
 async function rptStockGaps(){
-  const bal=await _L('stock_balance'), ing=await _L('ingredients'), prod=await _L('products');
+  const bal=(await _L('stock_balance')).filter(erpOwnsRow), ing=await _L('ingredients'), prod=await _L('products');
   const bySku={}, byName={}; ing.forEach(i=>{ bySku[i.sku]=i; const n=(i.name||'').trim().toLowerCase(); if(n) byName[n]=i; });
   const pm={}; prod.forEach(p=>pm[p.sku]=p);
   const rows=[]; let posted=0, atCost=0, atSell=0, negQty=0, negVal=0;
@@ -25258,7 +25265,11 @@ async function rptStockGaps(){
 async function rptStockStage(){
   const sb=await _L('stock_balance'), b=await _L('production_batches'), iss=await _L('batch_issues'), ing=await _L('ingredients');
   const ic={}; ing.forEach(i=>ic[i.sku]=+i.moving_avg_cost_kg||+i.list_price_kg||0);
-  let raw=0,fin=0; const finBy={}; sb.forEach(s=>{ const val=+s.stock_value||0; if(s.kind==='ingredient')raw+=val; else if(s.kind==='product'){ fin+=val; finBy[s.location_code]=(finBy[s.location_code]||0)+val; } });
+  let raw=0,fin=0; const finBy={}; sb.forEach(s=>{ const val=+s.stock_value||0; if(s.kind==='ingredient')raw+=val; else if(s.kind==='product' && erpOwnsRow(s)){ fin+=val; finBy[s.location_code]=(finBy[s.location_code]||0)+val; } });
+  /* the shop's finished goods, from Shopify at cost per pack */
+  try{ const _sp=await stockPicture(), _cm=await prodCostMap(), _sl=planSellLoc();
+    if(_sp&&_sp.by) Object.keys(_sp.by).forEach(k=>{ const r=_sp.by[k]||{}; if(r.isCust||r.shopQ==null) return;
+      const v=Math.max(0,+r.shopQ||0)*(+_cm[k]||0); fin+=v; finBy[_sl]=(finBy[_sl]||0)+v; }); }catch(e){}
   const openB=new Set(b.filter(x=>x.status!=='confirmed').map(x=>x.batch_ref)); let wip=0;
   iss.forEach(z=>{ if(openB.has(z.batch_ref)) wip+=(+z.actual_raw_g||+z.expected_raw_g||0)/1000*(ic[z.ingredient_sku]||0); });
   const tot=raw+wip+fin;
@@ -25648,7 +25659,8 @@ async function renderMomentum(){
   let mom=[]; try{ mom=await momLoad(); }catch(e){}
   let prods=[]; try{ prods=await db.list('products',{}); }catch(e){}
   const pm={}; prods.forEach(p=>pm[p.sku]=p);
-  let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if((s.kind||'')==='product'){ const k=s.ref_sku; stock[k]=(stock[k]||0)+(+s.on_hand||0); } }); }catch(e){} }
+  /* current stock = the one stock picture (Shopify at the shop, ledger at Bulacan) */
+  let stock={}; try{ const _P=await stockPicture(); if(_P&&_P.by) Object.keys(_P.by).forEach(k=>{ stock[k]=+((_P.by[k]||{}).current)||0; }); }catch(e){}
   const refreshed = mom.reduce((a,r)=>{ const t=r.refreshed_at||''; return t>a?t:a; }, '');
 
   const rows = mom.map(r=>{ const sku=r.sku; const p=pm[sku]||{}; const stk=stock[sku]!=null?stock[sku]:( +p.on_hand||0 );
@@ -25894,7 +25906,9 @@ async function rptPayables(){
 // Ingredients below their reorder point and finished goods below PAR (live stock vs thresholds).
 async function lowStockHtml(){
   const ings=await db.list('ingredients',{}), prods=await db.list('products',{});
-  let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ const k=(s.kind||'')+':'+s.ref_sku; stock[k]=(stock[k]||0)+(+s.on_hand||0); }); }catch(e){} }
+  let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(String(s.kind||'')==='product') return; const k=(s.kind||'')+':'+s.ref_sku; stock[k]=(stock[k]||0)+(+s.on_hand||0); }); }catch(e){} }
+  /* products from the one stock picture, never the shop's ledger */
+  try{ const _P=await stockPicture(); if(_P&&_P.by) Object.keys(_P.by).forEach(k=>{ stock['product:'+k]=+((_P.by[k]||{}).current)||0; }); }catch(e){}
   const ig=ings.map(i=>{ const oh=stock['ingredient:'+i.sku]||0; const thr=+i.reorder_g||+i.par_g||0; const sup=isSupplyItem(i); return {name:i.name,sku:i.sku,oh,thr,short:thr-oh,unit:sup?(i.uom||'units'):'g'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
   const pg=prods.map(p=>{ const oh=stock['product:'+p.sku]||0; const thr=+p.par_packs||0; return {name:p.name,variant:p.variant,sku:p.sku,oh,thr,short:thr-oh,unit:'packs',group_1:prodG1(p),group_2:prodG2(p),sort_order:p.sort_order}; }).filter(r=>r.thr>0&&r.oh<r.thr);
   const lrow=(r,model)=>`<tr style="cursor:pointer" onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open record"><td>${esc(r.name)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(Math.round(r.oh))}</td><td class="num">${num(r.thr)}</td><td class="num"><b style="color:var(--danger)">${num(Math.round(r.short))} ${r.unit}</b></td></tr>`;
@@ -26277,9 +26291,9 @@ async function _openingSections(uploaded, loc){
      and what a unit is worth. Counting against a book figure is how variances
      get spotted at the shelf instead of three days later. */
   const book={};
-  if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(b=>{ if(String(b.location_code||'')!==loc) return;
+  if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(b=>{ if(String(b.location_code||'')!==loc) return; if(!erpOwnsRow(b)) return;
     book[(b.kind==='product'?'product:':'ingredient:')+b.ref_sku]=(book[(b.kind==='product'?'product:':'ingredient:')+b.ref_sku]||0)+(+b.on_hand||0); }); }catch(e){} }
-  else { (DEMO.inventory_movements||[]).forEach(m=>{ if(String(m.location_code||'')!==loc) return;
+  else { (DEMO.inventory_movements||[]).forEach(m=>{ if(String(m.location_code||'')!==loc) return; if(!erpOwnsRow(m)) return;
     const k=(m.kind==='product'?'product:':'ingredient:')+m.ref_sku; book[k]=(book[k]||0)+(+m.qty||0); }); }
   const _bookIng=(i)=>{ const g=+book['ingredient:'+i.sku]||0; return isSupplyItem(i)?g:Math.round(g/10)/100; };  // supplies in units, food kg
   const _bookProd=(sku)=>+book['product:'+sku]||0;
@@ -26493,12 +26507,14 @@ async function openingDoImport(){ if(!_opReport)return;
     // replace the previous opening upload FOR THIS LOCATION only — leaves the other site's opening intact
     if(isLive()){ try{ await sb('inventory_movements?note=like.Opening%20upload*&location_code=eq.'+upLoc,{method:'DELETE',prefer:'return=minimal'}); }catch(e){} }
     else { DEMO.inventory_movements=(DEMO.inventory_movements||[]).filter(m=>!(String(m.note||'').startsWith('Opening upload')&&m.location_code===upLoc)); }
-    let posted=0,fail=0;
+    let posted=0,fail=0,_refSell=0;
     for(const r of valid){ const qty=+r.qty||0; const loc=upLoc; const type=r.type||'';
       try{
         if(type==='sticker'){ const psku=String(r.sku).replace(/^STK-/,''); await db.update('products','sku',psku,{['sticker_'+loc+'_on_hand']:qty}); posted++; continue; }
         const uc=_openCost(r.sku,type); if(!uc) _unpriced++;
-        if(type==='product'){ await db.create('inventory_movements',{kind:'product',ref_sku:r.sku,location_code:loc,qty:qty,unit_cost:uc,movement_type:'opening',note}); posted++; continue; }
+        if(type==='product'){
+          if(!erpHoldsProducts(loc)){ if(!_refSell) toast('Products are not opened at '+locName(loc)+' — Shopify holds that shelf. Product rows were skipped.',true); _refSell++; continue; }
+          await db.create('inventory_movements',{kind:'product',ref_sku:r.sku,location_code:loc,qty:qty,unit_cost:uc,movement_type:'opening',note}); posted++; continue; }
         const g=(type==='supply')?qty:qty*1000;   // supplies in whole units; food ingredients kg→g
         await db.create('inventory_movements',{kind:'ingredient',ref_sku:r.sku,location_code:loc,qty:g,unit_cost:uc,movement_type:'opening',note}); posted++;
       }catch(e){ fail++; }
@@ -27697,9 +27713,9 @@ async function _trOnHand(kind, loc){
     return oh;
   }
   if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(b=>{
-      if(String(b.kind||'')===want && String(b.location_code||'')===loc) oh[b.ref_sku]=(oh[b.ref_sku]||0)+(+b.on_hand||0); }); }catch(e){} }
+      if(String(b.kind||'')===want && String(b.location_code||'')===loc && erpOwnsRow(b)) oh[b.ref_sku]=(oh[b.ref_sku]||0)+(+b.on_hand||0); }); }catch(e){} }
   else (DEMO.inventory_movements||[]).forEach(m=>{
-      if(String(m.kind||'')===want && String(m.location_code||'')===loc) oh[m.ref_sku]=(oh[m.ref_sku]||0)+(+m.qty||0); });
+      if(String(m.kind||'')===want && String(m.location_code||'')===loc && erpOwnsRow(m)) oh[m.ref_sku]=(oh[m.ref_sku]||0)+(+m.qty||0); });
   return oh;
 }
 async function trPick(kind){
@@ -28169,9 +28185,9 @@ const KB = {
        'THE COLUMNS ARE THE WORKING. Read a row left to right and you have the whole sum: Sold 60d → Ave/day → LT demand → Safety → ROP → PAR → New Par → Coverage % → To produce. Nothing is hidden behind a button and nothing is explained in a paragraph.',
        '⬇ CSV carries a few more steps that have no column of their own — Target, Shortfall, Rounding +, Cap applied, Deferred, Days to trigger, Cover after — so a spreadsheet can sort, filter and total them.',
        'Or pull it from the other end: Demand/MRP → 🧮 Pull the week loads the same answer into the plot, alongside the custom orders.'],
-    l:['<b>Current stock</b> = <b>what the shop can sell</b> + <b>what is at the kitchen</b> — named by place, because "not yet sellable at Bulacan" reads as if it had failed to arrive there, when it is sitting in the freezer. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here both numbers come out of the ledger, and they are shown apart because the gap between them is a transfer somebody still has to do.',
-       '<b>There is no Shopify inventory feed.</b> The Shopify sync is one way and pulls ORDERS — the token carries read_orders and read_products, nothing else. <code>wr_shopify_stock</code> is not a feed either: it is this ledger\'s own balance at the selling site, named for what WOULD be pushed if anything ever pushed. So <b>Sellable</b> is our ledger, kept current by the sales the sync posts.',
-       'If you want the shop\'s OWN number, load it by hand: Shopify → Products → Inventory → Export, then <b>📥 Shopify count</b>. It is a snapshot, not a feed — the screen says how old it is, and any product where the count and our ledger disagree is flagged on its row. That gap is the finding: it means somebody adjusted one side and not the other.',
+    l:['<b>Current stock</b> = <b>what the shop can sell</b> + <b>what is at the kitchen</b> — named by place, because "not yet sellable at Bulacan" reads as if it had failed to arrive there, when it is sitting in the freezer. The spreadsheet has to add Shopify inventory to this week\'s production by hand because Shopify cannot see Bulacan; here the shop\'s number comes from Shopify and the kitchen\'s from this ledger — one ledger per location — and they are shown apart because the gap between them is a transfer somebody still has to do.',
+       '<b>Sellable is Shopify\'s own figure, and only Shopify\'s.</b> One ledger per location: the shop\'s products live in Shopify, Bulacan\'s in this ledger. The hourly read-only inventory pull fills it; with no reading the screen says <i>no Shopify reading</i> rather than showing a number of ours. The ERP keeps no product stock at the shop.',
+       'If the hourly pull is down, load the shop\'s figure by hand: Shopify → Products → Inventory → Export, then <b>📥 Shopify count</b>. It is a snapshot, not a feed — the screen says how old it is. There is no second ledger to compare it with, so there is no drift flag.',
        '<b>☁ Send to Demand</b> writes the request into the demand table for a plan date, tagged <code>packs production request</code> — the same place the Google Sheet sync lands, so Demand/MRP picks it up. Re-sending replaces only the rows this screen wrote; a sheet import or a custom order on the same date is left alone.',
        'The formulas are the sheet\'s, unchanged: Ave./day = units sold ÷ window; LT demand = Ave./day × lead time; Safety = LT demand × movement; ROP = LT demand + Safety; PAR = Ave./day × cycle; New Par = PAR rounded up to a case; To produce = New Par + Safety − Current stock.',
        'The five levers sit on the toolbar. <b>Movement</b> can also be set per product — leave the cell blank to use the global figure. Everything is remembered on this browser.',
