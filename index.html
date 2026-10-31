@@ -3917,17 +3917,40 @@ function pqCalc(r){
 async function pqSnapLoad(){
   try{
     if(isLive()){
-      const inv=await sb('shopify_inventory?select=sku,available,on_hand,committed,fetched_at&limit=3000');
+      /* ---- ONE SHOPIFY LOCATION, NOT WHICHEVER ROW CAME LAST ----------------
+         shopify_inventory holds a row per SKU PER SHOPIFY LOCATION (its key is
+         sku + location_name): the Pasig Hub and every partner shelf. This read
+         took no location at all and wrote qty[sku] once per row, so the LAST
+         location returned won. A partner shelf holding 0 read as "Pasig has 0".
+         It was hidden for weeks because Live Stock showed our own Pasig ledger;
+         the planning screens were already reading the wrong figure, and it is
+         much of what the old "vs Shopify" gap was measuring.
+
+         Only rows whose location_name names the sell site are read now (summed,
+         if Shopify has more than one such location). A table with no location
+         names at all is a single-location feed and is read whole. If the feed
+         answered but has no row for the sell site, that is said — it does NOT
+         fall back to a pasted CSV, which would quietly show stale numbers. */
+      let inv=null;
+      try{ inv=await sb('shopify_inventory?select=sku,location_name,available,on_hand,committed,fetched_at&limit=5000'); }
+      catch(e){ inv=await sb('shopify_inventory?select=sku,available,on_hand,committed,fetched_at&limit=5000'); }
       if(inv && inv.length){
+        const named=inv.some(r=>r && r.location_name);
+        const want=shopLocMatch();
+        const locs={}; inv.forEach(r=>{ const n=String((r&&r.location_name)||'(none)'); locs[n]=(locs[n]||0)+1; });
+        const use=named ? inv.filter(r=>r && r.location_name && want(r.location_name)) : inv;
         const qty={}, onh={}, cmt={}; let at='';
-        inv.forEach(r=>{ if(!r.sku) return;
-          if(r.available!=null) qty[r.sku]=Math.max(0,+r.available||0);
-          if(r.on_hand!=null)   onh[r.sku]=Math.max(0,+r.on_hand||0);
+        use.forEach(r=>{ if(!r.sku) return;
+          if(r.available!=null) qty[r.sku]=(qty[r.sku]||0)+Math.max(0,+r.available||0);
+          if(r.on_hand!=null)   onh[r.sku]=(onh[r.sku]||0)+Math.max(0,+r.on_hand||0);
           /* Committed is never coerced to zero when absent — an absence and a
              zero order book are different facts, and the screen says which. */
-          if(r.committed!=null) cmt[r.sku]=Math.max(0,+r.committed||0);
+          if(r.committed!=null) cmt[r.sku]=(cmt[r.sku]||0)+Math.max(0,+r.committed||0);
           const f=String(r.fetched_at||''); if(f>at) at=f; });
-        if(Object.keys(qty).length) return {qty, onhand:onh, committed:cmt, at:at||null, src:'shopify-api'};
+        const read=[...new Set(use.map(r=>String((r&&r.location_name)||'')).filter(Boolean))];
+        return {qty, onhand:onh, committed:cmt, at:at||null, src:'shopify-api',
+                locRead:read, locsSeen:locs, rows:inv.length, rowsUsed:use.length,
+                locErr:(named && !use.length) ? 'no Shopify location matches '+locName(planSellLoc()) : ''};
       }
     }
   }catch(e){}
@@ -5501,11 +5524,14 @@ async function renderLiveStock(){
       if(_onlyShop){
         Object.assign(r,{begin:0,recv:0,prod:0,cons:0,tf:0,sold:0,back:0,adj:0,end:(q||0),value:(q||0)*(+_cpp[r.sku]||0)});
       } else if(q){ r.end+=q; r.value+=q*(+_cpp[r.sku]||0); }
+      /* the per-site column is the shop's own figure too — Shopify's, or blank */
+      r.locEnd=Object.assign({}, r.locEnd||{}); if(q!=null) r.locEnd[planSellLoc()]=q; else delete r.locEnd[planSellLoc()];
       r.shop=true; r.shopQ=q; r.noShop=(q==null); r.virgin=false;
       r.neg=r.end< -0.0001; r.below=(r.par>0 && r.end<r.par);
     });
     if(_onlyShop) rows=rows.filter(r=>r.kind!=='product' || r.shop);   // no custom-pack rows at the shop
-  }
+    window._lsShopSnap=(_pic&&_pic.snap)||null;
+  } else window._lsShopSnap=undefined;
   /* ---- LABEL STOCK IS NOT IN THE LEDGER ------------------------------------
      This screen is built entirely from inventory_movements, and a product's
      label stock is not a movement — it is a column on the product, one per
@@ -5688,7 +5714,18 @@ function drawLiveStock(){
             LOCATION. What can still go wrong is a product Shopify has no reading
             for, and that is worth a tile: the shelf is unknown, not zero. */
        const n=rows.filter(r=>r.kind==='product' && r.shop && r.noShop).length;
-       return n ? kpi('⚠ No Shopify reading', n, 'shelf unknown — check the inventory feed', 'var(--danger)') : ''; })()}
+       const sn=window._lsShopSnap;
+       if(sn===undefined) return '';
+       /* WHERE THE SHOP'S NUMBERS CAME FROM, AND HOW OLD THEY ARE — on the
+          screen, so a dead feed or the wrong location cannot pass for zero. */
+       if(!sn) return kpi('⚠ No Shopify reading', '—', 'the inventory feed has no rows — run the pull', 'var(--danger)');
+       if(sn.locErr) return kpi('⚠ Wrong Shopify location', sn.rows||0, sn.locErr+' · found: '+Object.keys(sn.locsSeen||{}).join(', '), 'var(--danger)');
+       const ageM=sn.at?Math.round((Date.now()-new Date(sn.at).getTime())/60000):null;
+       const ageTxt=ageM==null?'undated':(ageM<90?ageM+' min ago':(ageM<2880?Math.round(ageM/60)+' h ago':Math.round(ageM/1440)+' d ago'));
+       const stale=(ageM==null||ageM>90);
+       const where=(sn.locRead&&sn.locRead.length)?sn.locRead.join(' + '):(sn.src==='shopify-api'?'single-location feed':'pasted count');
+       return kpi((stale?'⚠ ':'')+'Shopify · '+where, Object.keys(sn.qty||{}).length+' SKUs',
+         'read '+ageTxt+(n?' · '+n+' with no reading':''), stale?'var(--danger)':''); })()}
   </div>`;
 
   const qf=(v,div)=> div===1000? (Math.round(v/1000*100)/100).toLocaleString('en-PH',{maximumFractionDigits:2}) : num(Math.round(v));
@@ -5872,7 +5909,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-31 09:30Z';
+const WR_BUILD='2026-10-31 13:20Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -6302,6 +6339,14 @@ function erpHoldsProducts(loc){ return String(loc||'') !== String(planSellLoc())
 /* A stock_balance row or a ledger movement the ERP owns as STOCK. False only
    for a product at the sell site. Use it on every on-hand sum. */
 function erpOwnsRow(r){ return !(r && String(r.kind||'')==='product' && !erpHoldsProducts(r.location_code)); }
+/* Which Shopify location IS the sell site. Matched on the site's code and its
+   display name ("pasig", "Pasig Hub"), so "WR Pasig Hub" matches and a partner
+   shelf (Barkstreet, Carlos Pharmacal, Tuft & Tails, Bazaar…) never does. */
+function shopLocMatch(){
+  const code=String(planSellLoc()||'').trim().toLowerCase();
+  const nm=String((typeof locName==='function'?locName(planSellLoc()):'')||'').trim().toLowerCase();
+  return n=>{ const t=String(n||'').toLowerCase(); return (!!code && t.includes(code)) || (!!nm && t.includes(nm)); };
+}
 function planLocLabel(){ const a=planSupplyLocs(); return a.length===1?a[0]:(a.length+' locations: '+a.join(', ')); }
 async function openPlanLocs(){
   await loadLocs();
