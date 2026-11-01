@@ -2613,9 +2613,17 @@ function demStepNote(){
    removals are remembered for the session and the next pull leaves them alone,
    saying so. Typing a figure back in clears the memory for that line. */
 let _mrpDrop={};
-function mrpSetDem(sku, v){
+/* A CUSTOM ORDER IS NOT ALWAYS A CUST- SKU. An order can carry a catalogue
+   product too — Dana Uson's 3 × BARF Chicken+Beef Cookable — and the custom
+   orders card types it through here. Testing the SKU prefix alone sent that 3
+   through demSnap and it came back as 24, so the card's own promise ("never
+   rounded") was false for exactly those lines, and they were left off the
+   31 Oct plot rather than plotted at 24. The card says which kind of line it is
+   (`fromCo`), and a SKU an open custom order owes counts as custom as well. */
+function mrpSetDem(sku, v, fromCo){
   const raw=Math.max(0, Math.round(+v||0));
-  const isCust=/^CUST-/i.test(String(sku||''));
+  const isCust=!!fromCo || /^CUST-/i.test(String(sku||''))
+    || (+(((window._mrpCoAll||{})[sku]||{}).packs)>0);
   const q=isCust?raw:demSnap(raw);
   if(q>0){ mrpDemand[sku]=q; delete _mrpDrop[sku]; } else { delete mrpDemand[sku]; _mrpDrop[sku]=1; }
   if(!isCust && q!==raw && raw>0) toast(raw+' → '+q+' — minimum '+DEM_MIN+', then steps of '+DEM_INC);
@@ -5909,7 +5917,7 @@ function disconnect(){ SUPA=null; localStorage.removeItem('wr_supa'); relCache={
    two entirely different reasons — it was never deployed, or the browser is
    still serving the cached one — and both look exactly like "the fix did not
    work". Stamp it, show it, and the question is answerable at a glance. */
-const WR_BUILD='2026-10-31 13:20Z';
+const WR_BUILD='2026-11-01 15:30Z';
 /* ONE SWITCH FOR THE PROSE. See the lean-mode note in the stylesheet. It is a
    body class and a line in localStorage — no per-screen state, nothing to keep
    in step, and every screen obeys it the moment it renders. */
@@ -11242,6 +11250,7 @@ async function renderMRP(){
     <button class="btn sec" onclick="saveMRPDraft()" title="Keeps this week's numbers without locking them. One draft per plan date — saving again replaces it, so the week never collects duplicate plots. Nothing is ordered or scheduled from a draft.">📝 Save draft</button>
     <button class="btn sec" onclick="saveMRPPlan()" title="Saving locks this week's demand — the Production Plan only takes targets from a saved (locked) plot">💾 Save plan (locks demand)</button>
     <button class="btn sec" onclick="renderDemandHistory()">📚 History</button>
+    <button class="btn sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals — to view or download as Excel">📋 Demand check</button>
     <button class="btn sec" onclick="openPlanLocs()">⚙ Planning locations</button>
     ${shSyncBtn()}
     ${canRaisePO()?`<button class="wfbtn" onclick="generatePOsFromMRP()" title="Opens the locked plot for this date and orders from its approved figures. This screen does not order on its own — the plot is the document everybody shares.">🧾 Order the locked plot</button>`
@@ -11395,7 +11404,7 @@ async function renderMRP(){
         ? `<td class="num" title="already on a plan — adding it here would buy the ingredients a second time">
              <span style="color:var(--muted)">🔒 ${inD||0}</span>
              <div class="mini"><span class="btn link" style="color:var(--muted)" onclick="mrpCoUnlock('${esc(sku)}')">plan it again…</span></div></td>`
-        : `<td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${mrpDemand[sku]||''}" onchange="mrpSetDem('${sku}',this.value)" title="a customer's own quantity — never rounded"${(planned&&unlocked)?' style="width:84px;text-align:right;border-color:var(--danger)"':''}>${(planned&&unlocked)?'<div class="mini" style="color:var(--danger)">counted twice unless the other plan is dropped</div>':''}</td>`;
+        : `<td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${mrpDemand[sku]||''}" onchange="mrpSetDem('${sku}',this.value,1)" title="a customer's own quantity — never rounded"${(planned&&unlocked)?' style="width:84px;text-align:right;border-color:var(--danger)"':''}>${(planned&&unlocked)?'<div class="mini" style="color:var(--danger)">counted twice unless the other plan is dropped</div>':''}</td>`;
       return `<tr>
         <td>${esc(c.orders.map(o=>o.customer).filter((v,i,a)=>a.indexOf(v)===i).join(', ')||'—')}
           <div class="mini" style="color:var(--muted)">${c.orders.map(o=>{
@@ -16125,7 +16134,7 @@ async function coOpenDemand(){
   const made={}, linked={}, _coBB={};
   try{ let rows;
     // prep batches carry kilos, not packs — they must never count as packs made
-    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind,best_before,order_ref&status=eq.confirmed');
+    if(isLive()) rows=await sbAll('production_batches?select=product_sku,good_packs,status,kind,best_before,order_ref&status=eq.confirmed');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
     (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{
       const n=+b.good_packs||0;
@@ -16558,7 +16567,7 @@ async function coClaimsNow(){
   catch(e){ return {claims:{}, fulfilled:{}, ev:{plannedAll:{},demandAll:{}}, orders:[], lines:[]}; }
   const made={};
   try{ let rows;
-    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
+    if(isLive()) rows=await sbAll('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
     (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
@@ -16599,7 +16608,7 @@ async function coSyncStatuses(){
   const made={};
   try{ let rows;
     // prep batches carry kilos, not packs — they must never count as packs made
-    if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
+    if(isLive()) rows=await sbAll('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
     else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
     (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
   }catch(e){}
@@ -17118,7 +17127,7 @@ async function _coLoadStock(){
     const [ords, lns]=await Promise.all([db.list('custom_orders',{}), db.list('custom_order_lines',{})]);
     const made={};
     try{ let rows;
-      if(isLive()) rows=await sb('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
+      if(isLive()) rows=await sbAll('production_batches?select=product_sku,good_packs,status,kind&status=eq.confirmed');
       else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed');
       (rows||[]).filter(b=>b.kind!=='output').forEach(b=>{ made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
     }catch(e){}
@@ -21426,6 +21435,18 @@ const _ksNoRecipe=(cols,sku)=>`<tr><td colspan="${cols}" style="background:#fdec
   Huwag timbangin ito — walang listahan ng sangkap. <i>Do not weigh this mix: no ingredient list exists for it.</i><br>
   <span style="font-size:9.5px">Buksan ang order sa ERP at i-lock itong muli, o gamitin ang <b>Create the product from this order</b> &mdash;
   nasa order line pa rin ang recipe. <i>Re-lock the custom order, or use "Create the product from this order"; the recipe is still on the order line.</i>${sku?' <code>'+esc(sku)+'</code>':''}</span></td></tr>`;
+/* A recipe that exists but is not whole: lines at 0 g, an ingredient no longer
+   in the master, or grams that do not add up to the pack. Printed in the block
+   and listed on page one, because the kitchen reads this sheet and nothing else. */
+function _ksHasGap(x){ const w=(x&&x.warn)||{}; return !!((w.zero||[]).length||(w.miss||[]).length||w.gap); }
+function _ksGapText(x){ const w=(x&&x.warn)||{}, t=[];
+  if((w.zero||[]).length) t.push((w.zero.length)+' sangkap walang gramo / no grams: '+w.zero.map(esc).join(', '));
+  if((w.miss||[]).length) t.push('wala sa masterlist / not in the ingredient list: '+w.miss.map(esc).join(', '));
+  if(w.gap) t.push('recipe '+Math.round((+x.perPack)||0)+' g vs pack '+Math.round((+x.packG)||0)+' g ('+(w.gap>0?'+':'')+w.gap+' g)');
+  return t.join(' &middot; '); }
+function _ksGapRow(cols,x){ if(!(x&&(x.ings||[]).length) || !_ksHasGap(x)) return '';
+  return `<tr><td colspan="${cols}" style="background:#fff4e5 !important;color:#8a5a12;padding:6px;line-height:1.45;font-size:10px">
+  <b>⚠ KULANG ANG RECIPE · RECIPE INCOMPLETE.</b> ${_ksGapText(x)}<br>Ipaalam sa opisina bago timbangin. <i>Tell the office before weighing.</i></td></tr>`; }
 // Tagalog prep notes, keyed off the feeding format exactly as the dashboard does,
 // plus any either/or ingredient (a "/" in the name) and a bone-handling reminder.
 function _ksPrepNotes(fmt, ings){
@@ -21485,7 +21506,16 @@ async function prodKitchenSheet(){
   let dayPacks=0, dayKg=0;
   const items=lines.map(l=>{
     const p=pm[l.product_sku]||{}; const packs=+l.good_packs||0;
-    const bom=(bm[l.product_sku]||[]).map(b=>ingRow(b.ingredient_sku,b.processed_g)).filter(x=>x.grams>0)
+    /* WHAT THE FILTER BELOW THROWS AWAY HAS TO BE SAID. A recipe line at 0 g
+       is dropped from the table, which is right for weighing and wrong for the
+       reader: Duck Bone Broth carries three lines, all 0 g, so nothing was ever
+       weighed or deducted for it, and a mix with ONE zero line prints a tidy,
+       shorter recipe that looks complete. The gaps are collected here and
+       printed in the block and on page one. */
+    const _bAll=(bm[l.product_sku]||[]);
+    const _zero=_bAll.filter(b=>!(+b.processed_g>0)).map(b=>(im[b.ingredient_sku]||{}).name||b.ingredient_sku);
+    const _miss=_bAll.filter(b=>!im[b.ingredient_sku]).map(b=>b.ingredient_sku);
+    const bom=_bAll.map(b=>ingRow(b.ingredient_sku,b.processed_g)).filter(x=>x.grams>0)
       .sort((a,b)=>b.grams-a.grams);
     const perPack=bom.reduce((s,x)=>s+x.grams,0);
     const packG=+p.pack_g||Math.round(perPack);
@@ -21501,7 +21531,9 @@ async function prodKitchenSheet(){
       seq:(_c&&_c.seq!=null)?_c.seq:9e9,
       fmt:prodG1(p), mixCat:prodG2(p),
       name:prodLabel({...p, sku:l.product_sku, name:(p.name||l.name||l.product_sku)},{noSku:true}),
-      animal:p.animal||'Dog', ings:bom};
+      animal:p.animal||'Dog', ings:bom,
+      warn:{zero:[...new Set(_zero)], miss:[...new Set(_miss)],
+            gap:(bom.length && packG>0 && Math.abs(perPack-packG)>packG*0.05) ? Math.round(perPack-packG) : 0}};
   });
   // Standalone output ingredients get their own block so the prep team sees them on the same sheet.
   const outItems=outs.map(o=>{ const it=im[o.ingredient_sku]||{}; const par=_procParent(it,bySku,byName);
@@ -21546,8 +21578,17 @@ async function prodKitchenSheet(){
         <div style="font-size:11px;line-height:1.6">Hindi ito pwedeng timbangin — walang listahan ng sangkap.
           <i>These cannot be weighed: no ingredient list exists for them.</i> Ipaalam sa opisina bago magsimula.
           <i>Tell the office before starting.</i>
-          <div style="margin-top:5px">${nr.map(x=>'&bull; <b>'+esc2(x.name)+'</b> <code>'+esc2(x.sku)+'</code> &middot; '+x.packs+' pack(s)'+(x.orderRef?' &middot; '+esc2(x.orderRef):'')).join('<br>')}</div>
+          <div style="margin-top:5px">${nr.map(x=>'&bull; <b>'+esc2(x.name)+'</b> <code>'+esc2(x.sku)+'</code> &middot; '+x.packs+' pack(s)'+(x.orderRef?' &middot; '+esc2(x.orderRef):'')+(((x.warn||{}).zero||[]).length?' &middot; '+x.warn.zero.length+' recipe line(s) are 0 g':'')).join('<br>')}</div>
         </div></div>`; })()}
+    ${(()=>{ /* and the recipes that exist but are not whole */
+      const inc=items.filter(x=>(x.ings||[]).length && _ksHasGap(x));
+      const incHtml=!inc.length?'':`<div class="cover-sec" style="border:2px solid #b5762a;background:#fff4e5">
+        <h3 style="color:#8a5a12">&#9888; ${inc.length} mix(es) have an INCOMPLETE recipe</h3>
+        <div style="font-size:11px;line-height:1.6">Kulang o mali ang recipe ng mga ito &mdash; ipaalam sa opisina bago timbangin.
+          <i>Something is missing or off in these recipes; tell the office before weighing.</i>
+          <div style="margin-top:5px">${inc.map(x=>'&bull; <b>'+esc2(x.name)+'</b> <code>'+esc2(x.sku)+'</code> &middot; '+_ksGapText(x)).join('<br>')}</div>
+        </div></div>`;
+      return incHtml; })()}
     <div class="cover-sec"><h3>Today's Production Summary</h3>
       <table class="day-summary"><thead><tr><th>Mix</th><th class="num">Pack Qty</th><th class="num">Pack Size</th></tr></thead>
         <tbody>${summaryRows}</tbody></table>
@@ -21702,7 +21743,7 @@ async function prodKitchenSheet(){
             <table class="ingred"><thead><tr><th>Ingredient</th><th class="num">Per pack</th><th class="num">Total</th></tr></thead>
               <tbody>${x.ings.map(i=>`<tr><td><span class="ingred-name">${_ksDot(i.cat)}${esc2(i.name)}${i.bones?'<span class="bone-flag">🦴 BONE</span>':''}</span></td>
                 <td class="num">${Math.round(i.grams)}g</td><td class="num">${_ksKg(i.grams*x.packs)}</td></tr>`).join('')||_ksNoRecipe(3,x.sku)}</tbody>
-              <tfoot><tr class="totals-row"><td>Total</td><td class="num">${Math.round(x.perPack)}g</td><td class="num"><b>${_ksKg(x.perPack*x.packs)}</b></td></tr></tfoot>
+              <tfoot>${_ksGapRow(3,x)}<tr class="totals-row"><td>Total</td><td class="num">${Math.round(x.perPack)}g</td><td class="num"><b>${_ksKg(x.perPack*x.packs)}</b></td></tr></tfoot>
             </table></div>`).join('')
         + `</div></div>`;
       })()}
@@ -21762,7 +21803,7 @@ async function prodKitchenSheet(){
           <table class="ingred">
             <thead><tr><th>Ingredient</th><th class="num">Per Pack</th><th class="num">Total Needed</th></tr></thead>
             <tbody>${rows||_ksNoRecipe(3,x.sku)}</tbody>
-            <tfoot>
+            <tfoot>${_ksGapRow(3,x)}
               <tr class="totals-row"><td>Total per pack</td><td class="num">${_ksKg(x.packG)}</td><td class="num">—</td></tr>
               <tr class="totals-row"><td>Total — all ${x.packs} packs</td><td class="num">—</td><td class="num">${_ksKg(totalPackGrams)}</td></tr>
             </tfoot>
@@ -26170,6 +26211,167 @@ function mrpPhaseHtml(prods, all){
     <div style="overflow-x:auto"><table><thead><tr>
       <th>Retiring</th><th class="num">Stock left</th><th>Replaced by</th><th class="num">Packs ratio</th>
       <th class="num">Planned</th><th class="num">Becomes</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+/* ---- DEMAND CHECK: EVERY LINE OF THE WEEK, TURNED INTO INGREDIENTS --------
+   Planning asked for one thing: proof that every pack they typed — regular and
+   custom — has been turned into ingredients, with the totals, so they can sign
+   the week off with confidence instead of trusting a screen.
+
+   This is a READ of the week, never a write. It explodes the plot through the
+   same recipes (bom_lines) and the same raw roll-up (rawParRoot, yield) the
+   replenishment plan uses, and it says plainly where a line cannot be turned
+   into food: no recipe, a 0 g line, an ingredient missing from the master, or
+   recipe grams that do not add up to the pack. Raw is shown BEFORE stock and
+   processed bins are netted off — that is the purchase plan's job, and mixing
+   the two here is how a checker stops being able to tick a line.
+
+   For a locked week it reads the locked plot (the document Purchasing orders
+   from); otherwise the editor as it stands. A custom line also shows what open
+   orders still owe, so a plot asking for packs already made stands out. */
+async function mrpDemandCheck(){
+  showBusy('Turning the week into ingredients…');
+  let D;
+  try{ D=await _mrpDemandCheckData(); }catch(e){ hideBusy(); toast('Could not build the check — '+saveErrMsg(e),true); return; }
+  hideBusy();
+  window._mrpCheck=D;
+  if(!D.lines.length){ toast('Nothing to check — this week has no demand lines yet',true); return; }
+  const n0=v=>Math.round(+v||0).toLocaleString('en-PH');
+  const kg=g=>(Math.round((+g||0)/10)/100).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const S=D.sum;
+  const badge=st=>st==='OK'?'<span class="badge b-received">OK</span>':`<span class="badge" style="background:#fdecea;color:#8a2b1c">${esc(st)}</span>`;
+  const lineRows=D.lines.map((l,i)=>`<tr${l.status!=='OK'?' style="background:#fff8f6"':''}><td class="num mini">${i+1}</td>
+      <td>${l.type==='Custom'?'<b>Custom</b>':'Regular'}</td>
+      <td>${esc(l.name)}<div class="mini" style="color:var(--muted)"><code>${esc(l.sku)}</code>${l.who?' · '+esc(l.who):''}</div></td>
+      <td class="num"><b>${n0(l.packs)}</b>${(l.owed!=null&&l.owed!==l.packs)?`<div class="mini" style="color:var(--danger)" title="what open orders still owe right now">owed ${n0(l.owed)}</div>`:''}</td>
+      <td class="num">${n0(l.packG)} g</td><td class="num">${kg(l.foodG)}</td>
+      <td class="num">${n0(l.recipeG)} g</td><td class="num">${kg(l.totalG)}</td><td class="num">${l.nIng}</td>
+      <td>${badge(l.status)}${l.why?`<div class="mini" style="color:#8a2b1c">${esc(l.why)}</div>`:''}</td></tr>`).join('');
+  const ingRows=D.ings.map(x=>`<tr><td>${esc(x.name)}<div class="mini" style="color:var(--muted)"><code>${esc(x.sku)}</code>${x.missing?' · <b style="color:var(--danger)">not in the ingredient list</b>':''}</div></td>
+      <td class="mini">${esc(x.cat||'')}</td><td class="num"><b>${kg(x.g)}</b></td>
+      <td>${x.rootSku&&x.rootSku!==x.sku?esc(x.rootName):'<span class="mini" style="color:var(--muted)">bought as is</span>'}${x.noYield?'<div class="mini" style="color:var(--danger)">no yield set — raw shown 1:1</div>':''}</td>
+      <td class="num">${x.yieldPct?x.yieldPct+'%':'—'}</td><td class="num">${kg(x.rawG)}</td><td class="num">${x.nProd}</td></tr>`).join('');
+  $('modal').innerHTML=`<div class="mwrap">
+    <div class="mhead">📋 Demand check — ${esc(D.label)}<span style="flex:1"></span>
+      <button class="btn sm" onclick="mrpDemandCheckXlsx()">⬇ Excel</button>
+      <button class="btn sm sec" onclick="mrpDemandCheckCsv()">⬇ CSV</button>
+      <button class="btn sm sec" onclick="closeModal()">✕ Close</button></div>
+    <div class="mbody">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <div class="repcard" style="margin:0;flex:1 1 150px"><div class="mini">Demand lines</div><b style="font-size:18px">${S.lines}</b><div class="mini">${S.regLines} regular · ${S.custLines} custom</div></div>
+        <div class="repcard" style="margin:0;flex:1 1 150px"><div class="mini">Packs</div><b style="font-size:18px">${n0(S.packs)}</b><div class="mini">${n0(S.regPacks)} regular · ${n0(S.custPacks)} custom</div></div>
+        <div class="repcard" style="margin:0;flex:1 1 150px"><div class="mini">Food to make (packs × pack size)</div><b style="font-size:18px">${kg(S.foodG)} kg</b></div>
+        <div class="repcard" style="margin:0;flex:1 1 150px"><div class="mini">Ingredients from recipes</div><b style="font-size:18px">${kg(S.recipeG)} kg</b><div class="mini">${D.ings.length} ingredient(s)</div></div>
+        <div class="repcard" style="margin:0;flex:1 1 150px;${S.bad?'border-left:4px solid var(--danger)':'border-left:4px solid var(--ok)'}"><div class="mini">Lines that cannot be fully turned into ingredients</div><b style="font-size:18px;color:${S.bad?'var(--danger)':'var(--ok)'}">${S.bad}</b><div class="mini">${S.bad?n0(S.badPacks)+' pack(s)':'every line is accounted for'}</div></div>
+      </div>
+      <div class="hint" style="margin-bottom:10px">${S.bad
+        ? `<b style="color:var(--danger)">${S.bad} line(s) are not fully covered</b> — their packs would be planned with no (or too little) ingredient behind them. Fix the recipe in Products, then press ↻ Compute.`
+        : `<b style="color:var(--ok)">Every line is accounted for.</b> All ${S.lines} line(s) have a complete recipe.`}
+        Ingredient totals add up to the sum of the lines (${kg(S.recipeG)} kg). Raw is before stock: the replenishment plan nets off what is on hand, in processed bins and on order.
+        ${S.overOwed?`<br><b style="color:var(--danger)">${S.overOwed} custom line(s) ask for more than their open orders still owe</b> (${n0(S.overPacks)} pack(s)) — usually packs already made.`:''}</div>
+      <h3 style="margin:6px 0">1 · Every demand line</h3>
+      <div style="overflow-x:auto"><table><thead><tr><th>#</th><th>Type</th><th>Product</th><th class="num">Packs</th><th class="num">Pack size</th><th class="num">Food kg</th><th class="num">Recipe / pack</th><th class="num">Ingredients kg</th><th class="num">Items</th><th>Recipe</th></tr></thead>
+        <tbody>${lineRows}</tbody>
+        <tfoot><tr class="totals-row"><td colspan="3"><b>Total</b></td><td class="num"><b>${n0(S.packs)}</b></td><td></td><td class="num"><b>${kg(S.foodG)}</b></td><td></td><td class="num"><b>${kg(S.recipeG)}</b></td><td></td><td></td></tr></tfoot></table></div>
+      <h3 style="margin:14px 0 6px">2 · Ingredients needed for the whole week</h3>
+      <div style="overflow-x:auto"><table><thead><tr><th>Ingredient (as in the recipe)</th><th>Category</th><th class="num">Recipe kg</th><th>Made from</th><th class="num">Yield</th><th class="num">Raw kg (before stock)</th><th class="num">Used by</th></tr></thead>
+        <tbody>${ingRows}</tbody>
+        <tfoot><tr class="totals-row"><td colspan="2"><b>Total</b></td><td class="num"><b>${kg(S.recipeG)}</b></td><td></td><td></td><td class="num"><b>${kg(S.rawG)}</b></td><td></td></tr></tfoot></table></div>
+    </div>
+    <div class="mfoot"><button class="btn" onclick="mrpDemandCheckXlsx()">⬇ Download Excel</button><button class="btn sec" onclick="closeModal()">Close</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
+}
+async function _mrpDemandCheckData(){
+  const lockedP=window._mrpLocked||null;
+  const dem=(lockedP&&lockedP.demand)?lockedP.demand:(mrpDemand||{});
+  const label=(lockedP&&lockedP.ref)?(lockedP.ref+' (locked plot)'):('week of '+MRPDATE+' (editor, not saved)');
+  const [prods,boms,ings]=await Promise.all([db.list('products',{}), db.list('bom_lines',{}), listIngredients()]);
+  let coAll=window._mrpCoAll; if(!coAll){ try{ coAll=await coOpenDemand(); }catch(e){ coAll={}; } }
+  const pm={}; (prods||[]).forEach(p=>pm[p.sku]=p);
+  const bySku={}, byName={}; (ings||[]).forEach(it=>{ bySku[it.sku]=it; const nm=(it.name||'').trim().toLowerCase(); if(nm) byName[nm]=it; });
+  const bom={}; (boms||[]).forEach(b=>{ (bom[b.product_sku]=bom[b.product_sku]||[]).push(b); });
+  const ingT={}, detail=[], lines=[];
+  Object.keys(dem).filter(s=>(+dem[s]||0)>0).forEach(sku=>{
+    const packs=+dem[sku]||0, p=pm[sku]||{}, co=(coAll||{})[sku];
+    const isC=/^CUST-/i.test(sku)||!!p.is_custom||!!co;
+    const bl=bom[sku]||[];
+    const packG=+p.pack_g||0;
+    let recipeG=0; const zero=[], miss=[];
+    bl.forEach(b=>{ const g=+b.usable_g||0; const it=bySku[b.ingredient_sku];
+      if(!it) miss.push(b.ingredient_sku);
+      if(!(g>0)){ zero.push((it&&it.name)||b.ingredient_sku); return; }
+      recipeG+=g;
+      const tot=g*packs;
+      let rootSku=b.ingredient_sku, y=1, noY=false;
+      if(it && isProcessedItem(it)){
+        const root=rawParRoot(it,bySku,byName);
+        if(root && root!==it.sku && !isProcessedItem(bySku[root]||{})){ rootSku=root; y=(+it.yield_pct||0)/100; if(!(y>0)){ y=1; noY=true; } }
+      }
+      const e=ingT[b.ingredient_sku]=ingT[b.ingredient_sku]||{sku:b.ingredient_sku, name:(it&&it.name)||b.ingredient_sku,
+        cat:(it&&it.category)||'', g:0, rawG:0, rootSku, rootName:((bySku[rootSku]||{}).name)||rootSku,
+        yieldPct:(rootSku!==b.ingredient_sku&&!noY)?Math.round(y*10000)/100:null, noYield:noY, missing:!it, prods:{}};
+      e.g+=tot; e.rawG+=tot/y; e.prods[sku]=1;
+      detail.push({sku, name:prodLabel({...p,sku},{noSku:true})||sku, packs, ing:b.ingredient_sku, ingName:e.name, gPack:g, totalG:tot});
+    });
+    let status='OK', why='';
+    if(!bl.length){ status='NO RECIPE'; why='no ingredient list — nothing is bought or weighed for it'; }
+    else if(!(recipeG>0)){ status='NO RECIPE'; why='every recipe line is 0 g'; }
+    else if(miss.length){ status='MISSING INGREDIENT'; why='not in the ingredient list: '+miss.join(', '); }
+    else if(zero.length){ status='0 g LINES'; why=zero.length+' line(s) at 0 g: '+zero.join(', '); }
+    else if(packG>0 && Math.abs(recipeG-packG)>packG*0.05){ status='GRAMS ≠ PACK'; why='recipe '+Math.round(recipeG)+' g in a '+Math.round(packG)+' g pack'; }
+    const who=co?[...new Set((co.orders||[]).map(o=>o.customer).filter(Boolean))].join(', ')+((co.orders||[]).length?' · '+[...new Set(co.orders.map(o=>o.ref))].join(', '):''):'';
+    lines.push({sku, name:prodLabel({...p,sku},{noSku:true})||sku, type:isC?'Custom':'Regular', who,
+      owed:isC?Math.round(+((co||{}).packs)||0):null, packs, packG, foodG:packG*packs, recipeG, totalG:recipeG*packs,
+      nIng:bl.filter(b=>+b.usable_g>0).length, status, why});
+  });
+  lines.sort((a,b)=>(a.type===b.type?0:(a.type==='Regular'?-1:1)) || String(a.name).localeCompare(String(b.name)));
+  const ingL=Object.values(ingT).map(e=>({...e, nProd:Object.keys(e.prods).length}))
+    .sort((a,b)=>String(a.cat).localeCompare(String(b.cat)) || b.g-a.g);
+  const sum={lines:lines.length, regLines:0, custLines:0, packs:0, regPacks:0, custPacks:0, foodG:0, recipeG:0, rawG:0, bad:0, badPacks:0, overOwed:0, overPacks:0};
+  lines.forEach(l=>{ sum.packs+=l.packs; sum.foodG+=l.foodG; sum.recipeG+=l.totalG;
+    if(l.type==='Custom'){ sum.custLines++; sum.custPacks+=l.packs; if(l.owed!=null && l.packs>l.owed){ sum.overOwed++; sum.overPacks+=l.packs-l.owed; } }
+    else { sum.regLines++; sum.regPacks+=l.packs; }
+    if(l.status!=='OK'){ sum.bad++; sum.badPacks+=l.packs; } });
+  ingL.forEach(e=>{ sum.rawG+=e.rawG; });
+  return {label, date:MRPDATE, lines, ings:ingL, detail, sum};
+}
+function _mrpCheckAoa(D){
+  const r2=v=>Math.round((+v||0)*100)/100, k3=g=>Math.round((+g||0))/1000;
+  const S=D.sum;
+  const summary=[['Wholesome Rabbit — Demand check'],[D.label],['Generated', new Date().toLocaleString('en-PH'), 'by', CURRENT_USER||''],[],
+    ['','Lines','Packs'],['Regular',S.regLines,S.regPacks],['Custom',S.custLines,S.custPacks],['Total',S.lines,S.packs],[],
+    ['Food to make (packs × pack size), kg', k3(S.foodG)],['Ingredients from recipes, kg', k3(S.recipeG)],['Raw before stock, kg', k3(S.rawG)],
+    ['Lines not fully turned into ingredients', S.bad, 'packs', S.badPacks],
+    ['Custom lines asking more than open orders owe', S.overOwed, 'packs', S.overPacks],[],
+    ['Check: ingredient totals = sum of line totals', k3(D.ings.reduce((a,e)=>a+e.g,0)), '=', k3(S.recipeG)]];
+  const lines=[['#','Type','SKU','Product','Customer / order','Packs','Owed by open orders','Pack g','Food kg','Recipe g / pack','Ingredients kg','Items','Recipe','Why']]
+    .concat(D.lines.map((l,i)=>[i+1,l.type,l.sku,l.name,l.who,l.packs,l.owed==null?'':l.owed,l.packG,k3(l.foodG),r2(l.recipeG),k3(l.totalG),l.nIng,l.status,l.why]))
+    .concat([['','','','TOTAL','',S.packs,'','',k3(S.foodG),'',k3(S.recipeG),'','','']]);
+  const ings=[['Ingredient SKU','Ingredient','Category','Recipe kg','Made from (buy)','Yield %','Raw kg before stock','Used by products','Note']]
+    .concat(D.ings.map(e=>[e.sku,e.name,e.cat,k3(e.g),(e.rootSku!==e.sku?e.rootName:'bought as is'),e.yieldPct==null?'':e.yieldPct,k3(e.rawG),e.nProd,
+      e.missing?'not in the ingredient list':(e.noYield?'no yield set — raw shown 1:1':'')]))
+    .concat([['','TOTAL','',k3(S.recipeG),'','',k3(S.rawG),'','']]);
+  const det=[['SKU','Product','Packs','Ingredient SKU','Ingredient','g per pack','Total g','Total kg']]
+    .concat(D.detail.map(d=>[d.sku,d.name,d.packs,d.ing,d.ingName,r2(d.gPack),r2(d.totalG),k3(d.totalG)]));
+  return {summary, lines, ings, det};
+}
+function mrpDemandCheckXlsx(){
+  const D=window._mrpCheck; if(!D){ toast('Open the demand check first',true); return; }
+  const A=_mrpCheckAoa(D); const fn='WR_Demand_Check_'+_fileSafe(D.date||todayISO());
+  if(typeof XLSX==='undefined'){ mrpDemandCheckCsv(); return; }
+  const wb=XLSX.utils.book_new();
+  const add=(aoa,nm,w)=>{ const ws=XLSX.utils.aoa_to_sheet(aoa); if(w) ws['!cols']=w.map(x=>({wch:x})); XLSX.utils.book_append_sheet(wb,ws,nm); };
+  add(A.summary,'Summary',[46,14,6,12]);
+  add(A.lines,'Demand lines',[4,9,30,38,34,7,10,7,9,10,11,6,18,44]);
+  add(A.ings,'Ingredients',[34,34,20,10,30,8,12,10,26]);
+  add(A.det,'Detail',[30,38,7,34,34,10,12,10]);
+  XLSX.writeFile(wb, fn+'.xlsx');
+}
+function mrpDemandCheckCsv(){
+  const D=window._mrpCheck; if(!D){ toast('Open the demand check first',true); return; }
+  const A=_mrpCheckAoa(D);
+  const csv=aoa=>aoa.map(r=>r.map(v=>{ const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }).join(',')).join('\n');
+  const body=csv(A.summary)+'\n\nDEMAND LINES\n'+csv(A.lines)+'\n\nINGREDIENTS\n'+csv(A.ings)+'\n\nDETAIL\n'+csv(A.det);
+  dlBlob('﻿'+body,'WR_Demand_Check_'+_fileSafe(D.date||todayISO())+'.csv','text/csv;charset=utf-8');
 }
 async function mrpPullCustom(){ const m=window._mrpCoPend||{}; const n=Object.keys(m).length;
   if(!n){ toast('Nothing to pull — every locked custom order is already on a demand plot or a production plan'); return; }
