@@ -2725,7 +2725,11 @@ async function renderForm(){
   const statusbar = m.status? `<div class="statusbar">${m.status.stages.map(s=>`<div class="stg ${r[m.status.f]===s?'on':''}">${s}</div>`).join('')}</div>`:'';
   const faMode=(f)=> fieldMode(state.model, f.n);
   const fieldInput=(f)=>{
-    const v=r[f.n]==null?'':r[f.n]; const dis=(m.readonly||f.ro||faMode(f)==='read')?'disabled':'';
+    const v=r[f.n]==null?'':r[f.n];
+    /* A received/cancelled transfer has already posted stock out of From and into To.
+       Changing either afterwards rewrote the header but not the ledger (DR-10232026 V03). */
+    const _trLock=(state.model==='transfers' && !formIsNew && (f.n==='from_code'||f.n==='to_code') && r.status && r.status!=='sent');
+    const dis=(m.readonly||f.ro||_trLock||faMode(f)==='read')?'disabled':'';
     if(f.t==='formula') return `<input value="${esc(evalF(f.expr,r))}" disabled title="ƒ ${esc(f.expr)}">`;
     if(f.t==='longtext') return `<textarea rows="2" oninput="fSet('${f.n}',this.value)" ${dis}>${esc(v)}</textarea>`;
     if(f.t==='bool') return `<select onchange="fSet('${f.n}',this.value==='true')" ${dis}><option value="false" ${!v?'selected':''}>No</option><option value="true" ${v?'selected':''}>Yes</option></select>`;
@@ -3391,6 +3395,14 @@ async function saveForm(){
       if(live && live!==formRec.updated_at && !_mineStamps.has(state.model+'|'+pkval+'|'+live)){
         if(!confirm('This record was changed since you opened it.\n\nSomeone else may be working on '+pkval+'. Saving now would overwrite their change.\n\nOK = save anyway (your version wins)\nCancel = stop, reload the record and re-apply your edit')) return;
       }
+    }catch(e){} }
+  /* Locations of a posted transfer are locked: stock already moved by them. */
+  if(state.model==='transfers' && !formIsNew){ try{
+      const saved=(await db.list('transfers',{search:pkval})||[]).find(t=>t.transfer_ref===pkval);
+      if(saved && saved.status && saved.status!=='sent' &&
+         (String(saved.from_code||'')!==String(formRec.from_code||'') || String(saved.to_code||'')!==String(formRec.to_code||''))){
+        toast('From/To cannot change on a '+saved.status+' transfer — its stock is already posted. Make a new transfer instead.',true);
+        formRec.from_code=saved.from_code; formRec.to_code=saved.to_code; return; }
     }catch(e){} }
   try{
     // validate numeric fields: no NaN, no negatives (quantities/prices/counts are never < 0)
