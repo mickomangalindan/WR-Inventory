@@ -10953,6 +10953,35 @@ async function planReadyCheck(force){
     act:'Open Internal Transfer', go:'transfers',
     rows: trSent.slice(0,12).map(t=>t.ref+' · '+t.from+' → '+t.to+(t.date?' · '+t.date:''))});
 
+  /* ---- 6b · FINISHED PACKS BELOW ZERO AT THE KITCHEN (check) ------------
+     Bulacan finished stock is ours and nothing else corrects it: the weekly
+     counts there cover raw & premix, not packs. So when more packs are sent
+     to Pasig than production recorded, the ledger goes negative and stays
+     there (6 Nov: 24 SKUs, e.g. CUST-ROSLIN-DUCK-500 −40 — sent, never
+     recorded as made). Planning reads a negative as 0, so the plot is not
+     inflated by it, but the packs really made were never posted: either a
+     batch is missing or a transfer sent more than it should. Shown at any
+     moment on the dashboard tile, not only when planning. */
+  let negRows=[];
+  try{ const mk=planProduceLoc(); const bal={};
+    (await ledgerAll()).forEach(m=>{
+      if(String(m.kind||'')!=='product' || String(m.location_code||'')!==mk) return;
+      bal[m.ref_sku]=(bal[m.ref_sku]||0)+(+m.qty||0); });
+    Object.keys(bal).forEach(sku=>{ const q=Math.round(bal[sku]*1000)/1000;
+      if(q<-0.001) negRows.push({sku, q, cust:/^CUST-/i.test(sku)}); });
+  }catch(e){}
+  negRows.sort((a,b)=>a.q-b.q);
+  const negReg=negRows.filter(r=>!r.cust);
+  add({id:'negbul', tier:'check', ok:!negRows.length, n:negRows.length,
+    label:'No finished pack is below zero at '+locName(planProduceLoc()),
+    fact: negRows.length
+      ? (negRows.length+' product(s) below zero — '+negReg.length+' regular, '+(negRows.length-negReg.length)+' custom; '
+         +_prN(-negRows.reduce((a,r)=>a+r.q,0))+' pack(s) sent that production never recorded')
+      : 'every finished product at '+locName(planProduceLoc())+' is at zero or above',
+    why:'A pack can only leave the kitchen after it was made. Below zero means a transfer sent more than production posted — usually a batch that was made but never confirmed in the ERP, sometimes a transfer typed with the wrong quantity or SKU. Planning treats it as 0, so the plot is not padded, but the real packs are invisible until the batch is posted or the kitchen\'s finished packs are counted.',
+    act:'Open Production', go:'production_batches',
+    rows: negRows.slice(0,15).map(r=>_prN(r.q)+' × '+r.sku+(r.cust?' · custom':''))});
+
   /* ---- 7 · COUNTS LEFT IN DRAFT (check) ---------------------------------- */
   let csDraft=[];
   try{ (await db.list('count_sessions',{})).forEach(s=>{
