@@ -2620,8 +2620,21 @@ let _mrpDrop={};
    rounded") was false for exactly those lines, and they were left off the
    31 Oct plot rather than plotted at 24. The card says which kind of line it is
    (`fromCo`), and a SKU an open custom order owes counts as custom as well. */
+function _mrpCoPartSnap(){ const o={};
+  Object.keys(mrpDemand||{}).forEach(k=>{ const c=mrpCoPartOf(k); if(c>0) o[k]=c; }); return o; }
 function mrpSetDem(sku, v, fromCo){
   const raw=Math.max(0, Math.round(+v||0));
+  /* A REGULAR PACK A CUSTOM ORDER OWES: the card types the order's share, the
+     catalogue row types the shelf's share; the total is what gets made. */
+  if(mrpIsCoRegular(sku)){
+    const co=mrpCoPartOf(sku), shelf=Math.max(0,(+mrpDemand[sku]||0)-co);
+    let nCo=co, nShelf=shelf;
+    if(fromCo) nCo=raw; else { nShelf=raw>0?demSnap(raw):0;
+      if(nShelf!==raw && raw>0) toast(raw+' → '+nShelf+' — minimum '+DEM_MIN+', then steps of '+DEM_INC); }
+    mrpCoPart[sku]=nCo; const t=nCo+nShelf;
+    if(t>0){ mrpDemand[sku]=t; delete _mrpDrop[sku]; } else { delete mrpDemand[sku]; _mrpDrop[sku]=1; }
+    renderMRP(); return;
+  }
   const isCust=!!fromCo || /^CUST-/i.test(String(sku||''))
     || (+(((window._mrpCoAll||{})[sku]||{}).packs)>0);
   const q=isCust?raw:demSnap(raw);
@@ -4224,6 +4237,11 @@ async function pqBuildRows(){
       if(o.refs.indexOf(t.transfer_ref)<0) o.refs.push(t.transfer_ref);
     });
   });
+  /* Packs of a REGULAR SKU made for an open custom order are that customer's,
+     not the shop's pipeline (6 Nov): they show on the custom side only. */
+  const _coHeldReg={};
+  try{ const _cm=await coOpenDemand();
+    Object.keys(_cm||{}).forEach(k=>{ if(!/^CUST-/i.test(k)) _coHeldReg[k]=Math.max(0,+(_cm[k]||{}).made||0); }); }catch(e){}
   /* Three buckets per SKU: the sell site split at the water line, and
      everywhere else as one pipeline figure. */
   const ohBy={};
@@ -4290,7 +4308,8 @@ async function pqBuildRows(){
          are on the shelf as well — so they come out of the pipeline and are
          shown on their own. */
       const tr=transit[p.sku]||{qty:0, fromSell:0, fromOther:0, refs:[]};
-      const other=Math.max(0, oh.other - tr.fromOther);
+      const coHeld=isCust?0:Math.min(Math.max(0, oh.other - tr.fromOther), +_coHeldReg[p.sku]||0);
+      const other=Math.max(0, oh.other - tr.fromOther - coHeld);
       /* LIKE FOR LIKE MEANS "MOVES AT THE SAME MOMENT", NOT "SOUNDS SIMILAR".
          Our ledger raises a sale when the ORDER is placed. Shopify moves the
          unit out of `available` at that same instant; `on_hand` does not drop
@@ -6178,7 +6197,7 @@ async function runCleanse(){
     }
     try{ localStorage.removeItem('wr_notes'); Object.keys(localStorage).forEach(k=>{ if(/^attach:/.test(k) && noteModels.includes(k.split(':')[1])) localStorage.removeItem(k); }); }catch(e){}
   }
-  if(cleanseSel.demand){ localStorage.removeItem('wr_mrp_plans'); mrpDemand={}; mrpManual={}; mrpRemarks={}; mrpAdd={}; window._mrpPlan=null; mrpPlanCache=[]; }
+  if(cleanseSel.demand){ localStorage.removeItem('wr_mrp_plans'); mrpDemand={}; mrpCoPart={}; mrpManual={}; mrpRemarks={}; mrpAdd={}; window._mrpPlan=null; mrpPlanCache=[]; }
   if(cleanseSel.refs){ localStorage.removeItem('wr_refseq'); }
   if(cleanseSel.prod){ prodPlanLines=[]; prodRunRef=''; }
   sysLog('cleanser','wipe','🧹 Cleansed '+done+' table(s): '+groups.map(g=>g.key).join(', ')+' by '+CURRENT_USER);
@@ -7418,6 +7437,20 @@ async function rejectReq(id){
 
 /* MRP / Demand planning */
 let mrpDemand={}, mrpManual={}, mrpRemarks={};
+/* mrpCoPart — the share of a REGULAR pack's figure that is owed to custom
+   orders (6 Nov). mrpDemand stays the total to make (ingredients and POs read
+   it); the custom card shows this share and the catalogue row shows the rest,
+   so the order sits in the Custom section only and the regular row is
+   Shopify's alone. CUST- recipes never use it: they are all custom. */
+let mrpCoPart={};
+function mrpIsCoRegular(sku){ return !/^CUST-/i.test(String(sku||'')) && (+(((window._mrpCoAll||{})[sku]||{}).packs)>0); }
+function mrpCoPartOf(sku){
+  if(!mrpIsCoRegular(sku) && !(sku in mrpCoPart)) return 0;
+  const tot=+mrpDemand[sku]||0;
+  if(sku in mrpCoPart) return Math.min(tot, +mrpCoPart[sku]||0);
+  /* a plot saved before the split carried only the order for these SKUs */
+  return Math.min(tot, +(((window._mrpCoAll||{})[sku]||{}).packs)||0);
+}
 /* Items put on the order by hand — see the ingredients loop in renderMRP.
    {sku: qty in the item's own unit}. Supplies count in units, food in kg. */
 let mrpAdd={};
@@ -7873,6 +7906,15 @@ async function wdtSheetLoad(){
       r.target=+t.target||0; r.still=+t.remaining||0; r.madeAfter=+t.made||0;
       r.gap=today?(+t.extra||0):0; r.plotAsked=+t.target||0; r.par=+t.par||0;
       r.live=(today && t.kind!=='order')?(+t.live||0):null; });
+    /* A REGULAR PACK A CUSTOM ORDER OWES: its order shows under Custom Orders,
+       its Shopify need stays on the regular row — never one figure for both. */
+    Object.keys(T.byCo||{}).forEach(sku=>{ const c=T.byCo[sku]; if(!c) return;
+      const base=rows.find(x=>x.sku===sku && !x.coOfRegular); if(!base) return;
+      if(T.by[sku]===c){ base.target=0; base.still=0; base.madeAfter=0; base.gap=0; base.plotAsked=0; }
+      rows.push({...base, g1:'Custom Orders', g2:c._g2||'Custom', isCustom:true, coOfRegular:true,
+        target:+c.target||0, still:+c.remaining||0, madeAfter:+c.made||0, gap:0, plotAsked:0, live:null, noT:null, omit:null,
+        plots:(base.plots||[]).map(()=>0), restated:0});
+      base.custom=0; base.coWho=''; base.coRefs=''; base.coNeeded=''; });
   }
   await _wdtVelocity(rows);
   /* The same stock picture Regular Packs reads — sellable at the shop, the
@@ -8508,7 +8550,8 @@ async function wdtLoad(){
     const {ctx}=_outIngCtx(ings);
     const need={};
     /* the requirement is what the ONE target still owes — planTargets */
-    const _T=window._wdtT; const _rem=sku=>{ if(_T&&_T.by){ const t=_T.by[sku]; return t?(+t.remaining||0):0; }
+    const _T=window._wdtT; const _rem=sku=>{ if(_T&&_T.by){ const t=_T.by[sku], c=(_T.byCo||{})[sku];
+        return (t&&t!==c?(+t.remaining||0):0)+(c?(+c.remaining||0):0); }
       const r=_wdtRows.find(x=>x.sku===sku); return r?(+r.remaining||0):0; };
     boms.forEach(b=>{ const q=_rem(b.product_sku); if(!q) return;
       need[b.ingredient_sku]=(need[b.ingredient_sku]||0)+(+b.usable_g||0)*q; });
@@ -11391,7 +11434,8 @@ async function renderMRP(){
   window._mrpNextRun=_nextMon;
   const coPend={};
   // "Add all" only ever pulls the ones that are NOT already planned somewhere.
-  Object.keys(coAll).forEach(s=>{ if(coFresh[s] && (+mrpDemand[s]||0)!==coAll[s].packs) coPend[s]=coAll[s].packs; });
+  Object.keys(coAll).forEach(s=>{ const _have=mrpIsCoRegular(s)?mrpCoPartOf(s):(+mrpDemand[s]||0);
+    if(coFresh[s] && _have!==coAll[s].packs) coPend[s]=coAll[s].packs; });
   window._mrpCoPend=coPend;
   const nCoPend=Object.keys(coPend).length;
   const _pName={}; prods.forEach(p=>{ _pName[p.sku]=prodLabel(p,{noSku:true})||p.sku; });
@@ -11431,7 +11475,7 @@ async function renderMRP(){
     const freshSkus=coSkus.filter(k=>!coDone[k]).sort(byNeed);
     const nFreshOrders=new Set(); freshSkus.forEach(k=>coAll[k].orders.forEach(o=>nFreshOrders.add(o.ref)));
     const _corow=(sku,planned)=>{
-      const c=coAll[sku]; const inD=+mrpDemand[sku]||0;
+      const c=coAll[sku]; const inD=mrpIsCoRegular(sku)?mrpCoPartOf(sku):(+mrpDemand[sku]||0);
       const late=c.needed && c.needed<todayISO();
       /* WHICH ORDERS, not just "the product". When one order on this recipe is
          already on a plan and another is not — a duplicate, typically — the row
@@ -11451,7 +11495,7 @@ async function renderMRP(){
         ? `<td class="num" title="already on a plan — adding it here would buy the ingredients a second time">
              <span style="color:var(--muted)">🔒 ${inD||0}</span>
              <div class="mini"><span class="btn link" style="color:var(--muted)" onclick="mrpCoUnlock('${esc(sku)}')">plan it again…</span></div></td>`
-        : `<td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${mrpDemand[sku]||''}" onchange="mrpSetDem('${sku}',this.value,1)" title="a customer's own quantity — never rounded"${(planned&&unlocked)?' style="width:84px;text-align:right;border-color:var(--danger)"':''}>${(planned&&unlocked)?'<div class="mini" style="color:var(--danger)">counted twice unless the other plan is dropped</div>':''}</td>`;
+        : `<td class="num"><input type="number" step="any" inputmode="decimal" style="width:84px;text-align:right" value="${(inD>0?inD:'')}" onchange="mrpSetDem('${sku}',this.value,1)" title="a customer's own quantity — never rounded"${(planned&&unlocked)?' style="width:84px;text-align:right;border-color:var(--danger)"':''}>${(planned&&unlocked)?'<div class="mini" style="color:var(--danger)">counted twice unless the other plan is dropped</div>':''}</td>`;
       return `<tr>
         <td>${esc(c.orders.map(o=>o.customer).filter((v,i,a)=>a.indexOf(v)===i).join(', ')||'—')}
           <div class="mini" style="color:var(--muted)">${c.orders.map(o=>{
@@ -11700,7 +11744,7 @@ async function renderMRP(){
   };
   const _demRow=p=>{
     const _to=(window._mrpPhase||{})[p.sku];
-    return `<tr${_to?' style="background:#fff8e1"':''}><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div>${_to?`<div class="mini" style="color:var(--earth,#b5762a)">🔻 phasing out → <b>${esc(_to.toName)}</b>${Math.abs(phaseRatio(_to.from,_to.to)-1)>1e-9?` · <span title="pack sizes differ — diverting converts by grams">1 : ${Math.round(phaseRatio(_to.from,_to.to)*100)/100}</span>`:''}</div>`:''}</td><td><code>${esc(p.sku)}</code></td>${_demCells(p.sku)}<td class="num"><input type="number" step="1" inputmode="numeric" style="width:90px;text-align:right" value="${mrpDemand[p.sku]||''}" onchange="mrpSetDem('${p.sku}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}">${_to?`<div class="mini"><span class="btn link" onclick="mrpDivert('${esc(p.sku)}')" title="move this figure onto ${esc(_to.toName)}">→ divert</span></div>`:''}</td></tr>`;
+    return `<tr${_to?' style="background:#fff8e1"':''}><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code></div>${_to?`<div class="mini" style="color:var(--earth,#b5762a)">🔻 phasing out → <b>${esc(_to.toName)}</b>${Math.abs(phaseRatio(_to.from,_to.to)-1)>1e-9?` · <span title="pack sizes differ — diverting converts by grams">1 : ${Math.round(phaseRatio(_to.from,_to.to)*100)/100}</span>`:''}</div>`:''}</td><td><code>${esc(p.sku)}</code></td>${_demCells(p.sku)}<td class="num"><input type="number" step="1" inputmode="numeric" style="width:90px;text-align:right" value="${(()=>{ const v=(+mrpDemand[p.sku]||0)-mrpCoPartOf(p.sku); return v>0?v:''; })()}" onchange="mrpSetDem('${p.sku}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}">${mrpCoPartOf(p.sku)>0?`<div class="mini" style="color:var(--muted)">+ ${mrpCoPartOf(p.sku)} for custom orders (card above)</div>`:''}${_to?`<div class="mini"><span class="btn link" onclick="mrpDivert('${esc(p.sku)}')" title="move this figure onto ${esc(_to.toName)}">→ divert</span></div>`:''}</td></tr>`;
   };
   // custom-order SKUs are planned in the card above, not here
   /* SUPPLY-LED PRODUCTS ARE NOT PLANNED HERE. Lamb and rabbit arrive when a
@@ -11717,7 +11761,7 @@ async function renderMRP(){
      diverts it — see mrpPhaseHtml. */
   const _phaseOut=prods.filter(isPhasingOut);
   window._mrpPhaseSet={}; _phaseOut.forEach(p=>{ window._mrpPhaseSet[p.sku]=1; });
-  const catalogue=prods.filter(p=>!coAll[p.sku] && !isSupplyLed(p) && !isPhasingOut(p));
+  const catalogue=prods.filter(p=>!(coAll[p.sku] && (/^CUST-/i.test(p.sku)||p.is_custom)) && !isSupplyLed(p) && !isPhasingOut(p));
   if(_supLed.length){
     /* Out of the way, one click away. They are not planned week to week — they
        are typed when the meat lands — so they sit closed under their own line
@@ -12307,7 +12351,7 @@ async function saveMRPDraft(){
   if(!demCount){ toast('Nothing to save yet — enter some demand first',true); return; }
   if(window._mrpLocked){ toast('This week is already locked — a draft cannot sit under a locked plot',true); return; }
   const prev=mrpDraftFor(MRPDATE);
-  const data={locked:false, demand:{...mrpDemand}, manual:{...mrpManual}, add:{...mrpAdd}, remarks:{...mrpRemarks},
+  const data={locked:false, demand:{...mrpDemand}, coPart:_mrpCoPartSnap(), manual:{...mrpManual}, add:{...mrpAdd}, remarks:{...mrpRemarks},
     by:CURRENT_USER, saved_at:new Date().toISOString(),
     lines:(window._mrpPlan||[]).map(l=>({sku:l.sku,name:l.name,final:l.final,supplier:l.supplier,price:l.price}))};
   try{
@@ -12414,7 +12458,7 @@ async function confirmSaveMRPPlan(hasExisting){
      eight days stale carries that fact for good, and the variance review that
      asks why the week missed can read it instead of guessing. */
   const _pf=await planReadyStamp();
-  const data={ref:g.ref,locked:true,demand:{...mrpDemand},manual:{...mrpManual},add:{...mrpAdd},remarks:{...mrpRemarks},by:CURRENT_USER,saved_at:new Date().toISOString(),
+  const data={ref:g.ref,locked:true,demand:{...mrpDemand},coPart:_mrpCoPartSnap(),manual:{...mrpManual},add:{...mrpAdd},remarks:{...mrpRemarks},by:CURRENT_USER,saved_at:new Date().toISOString(),
     preflight:_pf,
     /* the judgement, kept with the document it was made on — see mrpPullPackReq */
     omitted:_om.omitted, trimmed:_om.trimmed, extra:_om.extra, offeredN:_om.offeredN,
@@ -12533,7 +12577,7 @@ async function mrpPullPackReq(){
   try{ _pAll=(await db.list('products',{}))||[];
     _slSet=new Set(_pAll.filter(p=>isSupplyLed(p)||isPhasingOut(p)).map(p=>p.sku)); }catch(e){}
   const _catAll=(built.rows||[]).map(r=>({r,c:pqCalc(r)}))
-    .filter(x=>x.c.produce>0 && co[x.r.sku]==null && !_slSet.has(x.r.sku));
+    .filter(x=>x.c.produce>0 && !(co[x.r.sku]!=null && /^CUST-/i.test(String(x.r.sku))) && !_slSet.has(x.r.sku));
   const _held=_catAll.filter(x=>_mrpDrop[x.r.sku]);        // taken out by hand earlier — left out
   const cat=_catAll.filter(x=>!_mrpDrop[x.r.sku]);
   const catPacks=cat.reduce((a,x)=>a+x.c.produce,0);
@@ -12595,12 +12639,16 @@ async function mrpPullPackReq(){
      Offering them fixes both: zero one and the save says what is being left
      out, the plot carries the answer, and planTargets reads it back. */
   const _coNm={}; try{ (_pAll||[]).forEach(p=>{ if(p&&p.sku) _coNm[p.sku]=prodLabel(p,{noSku:true})||p.sku; }); }catch(e){}
-  coSkus.forEach(sk=>{ window._mrpPulled.map[sk]=Math.max(0,Math.round(+co[sk]||0));
+  coSkus.forEach(sk=>{ window._mrpPulled.map[sk]=(+window._mrpPulled.map[sk]||0)+Math.max(0,Math.round(+co[sk]||0));
                        window._mrpPulled.names[sk]=_coNm[sk]||sk; });
 
   let nCo=0, nCat=0;
-  coSkus.forEach(sk=>{ mrpDemand[sk]=Math.max(0,Math.round(+co[sk]||0)); nCo++; });   // never rounded
-  cat.forEach(x=>{ mrpDemand[x.r.sku]=demSnap(x.c.produce); nCat++; });
+  /* A regular pack a custom order owes gets BOTH: the order's packs (never
+     rounded, shown on the custom card) plus the shelf's own shortfall (shown
+     on its catalogue row). The total is what is made and bought for. */
+  coSkus.forEach(sk=>{ const q=Math.max(0,Math.round(+co[sk]||0)); mrpDemand[sk]=q;
+    if(!/^CUST-/i.test(String(sk))) mrpCoPart[sk]=q; nCo++; });   // never rounded
+  cat.forEach(x=>{ mrpDemand[x.r.sku]=(co[x.r.sku]!=null?(+mrpDemand[x.r.sku]||0):0)+demSnap(x.c.produce); nCat++; });
   sysLog('mrp',MRPDATE,'🧮 Week pulled into the plot — '+nCo+' custom-order SKU(s) / '+Math.round(coPacks)
     +' pack(s) committed, '+nCat+' catalogue SKU(s) / '+Math.round(catPacks)+' pack(s) by '+CURRENT_USER
     +(_held.length?(' · '+_held.length+' line(s) removed earlier were not re-added'):''));
@@ -12619,7 +12667,7 @@ async function mrpGoDate(d){
     if(!confirm('The demand editor still holds '+held+' line(s) / '+packs+' pack(s) for '+MRPDATE+'.\n\n'
       +'Moving to '+d+' clears them, so the new week starts empty and 🧮 Pull the week fills it from the shelf.\n\n'
       +'Cancel if you meant to save '+MRPDATE+' first.')) return;
-    mrpDemand={}; mrpManual={}; mrpAdd={}; mrpRemarks={}; _mrpDrop={};
+    mrpDemand={}; mrpCoPart={}; mrpManual={}; mrpAdd={}; mrpRemarks={}; _mrpDrop={};
   }
   MRPDATE=d; window._mrpPulled=null; await renderMRP();
   toast('Now on '+d+' — press 🧮 Pull the week to load it'); }
@@ -12772,7 +12820,7 @@ function loadMRPDraft(){
   const dd=d.data||{};
   if(Object.keys(mrpDemand||{}).some(k=>+mrpDemand[k]>0)
      && !confirm('Replace what is on screen with the saved draft for '+MRPDATE+'?\n\nAnything you have typed and not saved will be lost.')) return;
-  mrpDemand={...(dd.demand||{})}; mrpManual={...(dd.manual||{})}; mrpAdd={...(dd.add||{})}; mrpRemarks={...(dd.remarks||{})};
+  mrpDemand={...(dd.demand||{})}; mrpCoPart={...(dd.coPart||{})}; mrpManual={...(dd.manual||{})}; mrpAdd={...(dd.add||{})}; mrpRemarks={...(dd.remarks||{})};
   toast('Draft loaded — saving a draft again will replace it'); renderMRP();
 }
 async function discardMRPDraft(){
@@ -12788,7 +12836,7 @@ async function discardMRPDraft(){
   sysLog('mrp', MRPDATE, '🗑 Draft discarded by '+CURRENT_USER);
   toast('Draft discarded'); renderMRP();
 }
-function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpManual={...(d.manual||{})}; mrpAdd={...(d.add||{})}; mrpRemarks={...(d.remarks||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
+function loadMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.data||p; MRPDATE=p.plan_date||p.date||MRPDATE; mrpDemand={...(d.demand||{})}; mrpCoPart={...(d.coPart||{})}; mrpManual={...(d.manual||{})}; mrpAdd={...(d.add||{})}; mrpRemarks={...(d.remarks||{})}; renderMRP(); toast('Loaded into the editor as a starting point — saving creates a new dated plot'); }
 /* ---- THE REPLENISHMENT LIST IS A WALK ROUND THE FREEZER, TOO ---------------
    The demand half of a plot has been grouped and named for a while. The
    replenishment half — the half somebody actually carries to the suppliers —
@@ -15640,6 +15688,14 @@ function _coSplitMade(rows, made, linked, tot){
    made for her on 12 Oct, still read "Added in Demand": a sooner order on the
    same recipe took her packs out of the pool. Two screens, two answers.
    `linked` is optional: without it this behaves exactly as before. */
+/* A REGULAR PACK ON A CUSTOM ORDER ONLY GETS WHAT WAS MADE FOR IT (6 Nov).
+   Shelf production of a catalogue SKU is Shopify's stock, not a pool any
+   custom order may help itself to — otherwise Dana's 3 Cookable packs read
+   "made" off a batch the shop was waiting for, and the same packs showed on
+   both the regular and the custom side. Only a CUST- recipe shares the pool;
+   a regular SKU counts the batches stamped with its order (the production
+   picker stamps them). */
+function coPoolable(sku){ return /^CUST-/i.test(String(sku||'')); }
 function coClaimPacks(orders, lines, made, linked){
   const pool={...(made||{})}, out={}, own={...(linked||{})};
   const byOrder={}; (lines||[]).forEach(l=>{ if(l&&l.product_sku) (byOrder[l.order_ref]=byOrder[l.order_ref]||[]).push(l); });
@@ -15651,7 +15707,7 @@ function coClaimPacks(orders, lines, made, linked){
         ord+=q; const need=coClaimQty(l);
         const okey=o.order_ref+'|'+l.product_sku;
         const mine=Math.min(need, +own[okey]||0); own[okey]=(+own[okey]||0)-mine;
-        const fromPool=Math.min(need-mine, pool[l.product_sku]||0);
+        const fromPool=coPoolable(l.product_sku)?Math.min(need-mine, pool[l.product_sku]||0):0;
         pool[l.product_sku]=(pool[l.product_sku]||0)-fromPool; const take=mine+fromPool; got+=take;
         bySku[l.product_sku]=(bySku[l.product_sku]||0)+take; });
       out[o.order_ref]={ord,got,bySku};
@@ -16254,11 +16310,14 @@ async function coOpenDemand(){
        still unmet after the recorded link goes looking in the shared pool. */
     const _own=Math.min(coClaimQty(l), +linked[o.order_ref+'|'+l.product_sku]||0);
     const _rest=coClaimQty(l)-_own;
-    const take=_own + Math.min(_rest, pool[l.product_sku]||0);
-    pool[l.product_sku]=(pool[l.product_sku]||0)-Math.min(_rest, pool[l.product_sku]||0);
+    const _fromPool=coPoolable(l.product_sku)?Math.min(_rest, pool[l.product_sku]||0):0;
+    const take=_own + _fromPool;
+    pool[l.product_sku]=(pool[l.product_sku]||0)-_fromPool;
     if(!keep[o.order_ref]){
       const _short=coClaimQty(l)-take;
-      if(_short>0.001){
+      /* A settled order on a REGULAR pack was served from the shelf; it never
+         drew on the pool, so it is not "never made". */
+      if(_short>0.001 && coPoolable(l.product_sku)){
         const u=unmade[o.order_ref]=unmade[o.order_ref]||
           {ref:o.order_ref, customer:o.customer_name||'', needed:String(o.needed_date||'').slice(0,10), lines:[]};
         u.lines.push({sku:l.product_sku, short:_short, ordered:q, wo:+l.written_off_packs||0}); }
@@ -19538,7 +19597,10 @@ async function prodLoadTargets(){
   Object.keys(T.noTargets||{}).forEach(k=>{ noT[k]=T.noTargets[k]; });
   T.rows.forEach(r=>{
     if(r.live>0) live[r.sku]=r.live;
-    if(r.target>0){ dm[r.sku]=r.target; src[r.sku]=(r.kind==='order'?'order':'plot'); made[r.sku]=r.made||0;
+    /* A regular pack can carry two rows (its Shopify row and a custom-order
+       row) — the picker makes them in one run, so the figures add. */
+    if(r.target>0){ const _two=(dm[r.sku]>0); dm[r.sku]=(+dm[r.sku]||0)+r.target;
+      src[r.sku]=_two?'plot':(r.kind==='order'?'order':'plot'); made[r.sku]=(+made[r.sku]||0)+(r.made||0);
       if(r.kind==='order') coCount++; }
     if(r.extra>0 && r.kind!=='order'){ gap[r.sku]=r.extra; gapPacks+=r.extra; gapN++; }
   });
@@ -19877,7 +19939,7 @@ async function planTargets(opt){
     const saved=String((d&&d.saved_at)||rec.saved_at||rec.created_at||'')||(date?date+'T00:00:00':'');
     const om={}; ((d&&d.omitted)||[]).forEach(o=>{ if(o&&o.sku) om[o.sku]=o; });
     return {date, ref:(d&&d.ref)||rec.ref||'', savedAt:saved,
-            from:(saved?isoLocal(new Date(saved)):date), demand:{...((d&&d.demand)||{})}, omit:om}; };
+            from:(saved?isoLocal(new Date(saved)):date), demand:{...((d&&d.demand)||{})}, omit:om, coPart:((d&&d.coPart)?{...d.coPart}:null)}; };
   let P=null;
   if(opt.plot) P=mk(opt.plot);
   else{
@@ -19923,7 +19985,7 @@ async function planTargets(opt){
   const heldCo={};                       // owed, but not yet buyable — see coReadyToMake
   const parked={};                       // left out of the newest plot on purpose
   const ref=P?(P.ref||P.date):'';
-  const rows=[], by={}, seen={}, noTargets={};
+  const rows=[], by={}, byCo={}, seen={}, noTargets={};   // byCo: the custom-order row of a REGULAR pack
   const push=r=>{ rows.push(r); by[r.sku]=r; seen[r.sku]=1; };
   prods.forEach(p=>{
     const sku=p.sku, k=stockPicFor(sku)||{};
@@ -19934,8 +19996,11 @@ async function planTargets(opt){
       perDay:+k.perDay||0, coverDays:(+k.perDay>0)?((+k.current||0)/(+k.perDay)):null,
       par:+k.newPar||0, live:+k.produce||0, target:null, made:0, remaining:null,
       extra:0, kind:'', remark:[], custom:isC};
-    if(isC){
-      const d=co[sku]; if(!d||!(+d.packs>0)) return;          // produced, completed or cancelled — not here at all
+    /* The custom-order row. A CUST- recipe is only this; a REGULAR pack an
+       open order also owes gets this row in the Custom section as well as its
+       Shopify row in the catalogue, never one number covering both (6 Nov). */
+    const _coRow=(r,d)=>{
+      if(!d||!(+d.packs>0)) return false;          // produced, completed or cancelled — not here at all
       /* ---- PARKED ON PURPOSE ---------------------------------------------
          The newest plot was offered this recipe and customer service left it
          out. That is a decision, not an oversight, and it holds for THAT WEEK
@@ -19952,7 +20017,7 @@ async function planTargets(opt){
         h.plotRef=(P&&(P.ref||P.date))||'';
         (d.orders||[]).forEach(o=>h.orders.push({...o, parked:true}));
         parked[sku]=true;
-        return;
+        return true;
       }
       /* ONLY WHAT THE KITCHEN MAY ACTUALLY START. An order still waiting to be
          planned into a week has had no ingredients bought for it; putting it on
@@ -19963,7 +20028,7 @@ async function planTargets(opt){
         (heldCo[sku]=heldCo[sku]||{sku, packs:0, orders:[]});
         heldCo[sku].packs+=(+d.held||+d.packs||0);
         (d.orders||[]).filter(o=>!o.ready).forEach(o=>heldCo[sku].orders.push(o));
-        return;
+        return true;
       }
       r.bulacan=+k.awaiting||0; r.pasig=0; r.total=+k.awaiting||0; r.par=0; r.live=0; r.coverDays=null; r.perDay=0;
       r.kind='order'; r.remaining=+d.ready||0; r.target=Math.max(r.remaining, +d.ordered||0); r.made=r.target-r.remaining;
@@ -19973,7 +20038,18 @@ async function planTargets(opt){
       r.remark.push((who||'custom order')+(refs?' · '+refs:''));
       if(d.needed) r.remark.push('make by '+d.needed+(d.needed<today?' — OVERDUE':''));
       r._g1='🧑‍🍳 Custom Orders'; r._g2=who||'Custom';
-      push(r); return;
+      if(r.coOfRegular){ rows.push(r); byCo[sku]=r; seen[sku]=1; } else push(r);
+      return true;
+    };
+    if(isC){ _coRow(r, co[sku]); return; }
+    const _dco=(co[sku] && +co[sku].packs>0) ? co[sku] : null;
+    let _coInPlot=0;
+    if(_dco){
+      /* The plot's custom share of this SKU: recorded since 6 Nov; older plots
+         were pulled custom-only for these SKUs, so their figure IS the order. */
+      const _pq0=P?(+P.demand[sku]||0):0;
+      _coInPlot = (P && P.coPart) ? Math.min(_pq0, +P.coPart[sku]||0) : Math.min(_pq0, +_dco.ordered||+_dco.packs||0);
+      _coRow({...r, remark:[], custom:true, coOfRegular:true}, _dco);
     }
     const nt=noT[sku];
     const want=r.live;
@@ -19993,7 +20069,7 @@ async function planTargets(opt){
        counted (noTargets) so every screen can still say how many there are and
        why, and they are one checkbox away in 🔎 Search & add. */
     if(nt){ noTargets[sku]={...nt, would:want, name:r.name, toName:nt.to?(nm[nt.to]||nt.to):''}; return; }
-    const pq=P?(+P.demand[sku]||0):0;
+    const pq=Math.max(0,(P?(+P.demand[sku]||0):0)-_coInPlot);
     if(pq>0){
       r.kind='plot'; r.target=pq; r.made=+made[sku]||0; r.remaining=Math.max(0,pq-r.made);
       r.extra=Math.max(0, want-r.remaining);
@@ -20017,7 +20093,7 @@ async function planTargets(opt){
       made:Math.max(0,(+d.ordered||0)-(+d.packs||0)), extra:0, kind:'order', custom:true,
       remark:[(who||'custom order')+' · no product record', d.needed?('make by '+d.needed+(d.needed<today?' — OVERDUE':'')):''].filter(Boolean)});
   });
-  return {rows, by, plot:P, ref, from:P?from:'', plotFrom:P?P.from:'', to, ageDays, made, madeRun, co, heldCo, parked, noT, noTargets, nm};
+  return {rows, by, byCo, plot:P, ref, from:P?from:'', plotFrom:P?P.from:'', to, ageDays, made, madeRun, co, heldCo, parked, noT, noTargets, nm};
 }
 /* The Made window's From. Session only, never stored: each new day it goes
    back to the automatic default. */
@@ -26499,6 +26575,8 @@ async function mrpPullCustom(){ const m=window._mrpCoPend||{}; const n=Object.ke
       +'Plan these '+n+' in the next run: '+(window._mrpNextRun||'the following week')+'.');
     return;
   }
+  /* a regular pack keeps its shelf share; only the custom share is set */
+  Object.keys(m).forEach(sku=>{ if(mrpIsCoRegular(sku)){ const shelf=Math.max(0,(+mrpDemand[sku]||0)-mrpCoPartOf(sku)); mrpCoPart[sku]=+m[sku]||0; mrpDemand[sku]=shelf+(+m[sku]||0); delete m[sku]; } });
   applyDemandMap(m); await coSyncStatuses();
   toast('Pulled '+n+' custom-order SKU(s) into the demand for '+MRPDATE); }
 
