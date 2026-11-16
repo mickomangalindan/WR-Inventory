@@ -605,6 +605,7 @@ body.lean .leanoff{display:none!important}
   .side .mi{color:#3b4744}
   .side .mi.active{background:#e7f2ef;color:#1f5248;box-shadow:inset 3px 0 0 #3a8276}
   .btn{border-radius:8px}
+  .modal input[type=checkbox],.modal input[type=radio]{width:16px;height:16px;padding:0;margin:2px 0 0;flex:0 0 auto;accent-color:#3a8276}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
@@ -12280,9 +12281,11 @@ async function mrpStepHeader(simple){
 async function mrpEditPlan(){
   const L=window._mrpLockedReal; if(!L){ toast('This week is not locked',true); return; }
   let pos=[]; try{ pos=((await db.list('purchase_orders',{}))||[]).filter(x=>String(x.order_date||'').slice(0,10)===MRPDATE && x.status!=='cancelled'); }catch(e){}
-  if(pos.length){
-    alert('Purchase orders were already made from '+(L.ref||'this plan')+' ('+pos.length+' PO).\n\nIt can no longer be changed — anything new goes into next week\'s plan ('+(window._mrpNextRun||'next week')+').');
-    return; }
+  /* After POs: still allowed. Ordering from the new version nets off what is
+     already on order and what has arrived (planPOOpen), so only the extra is bought. */
+  if(pos.length && !confirm(pos.length+' purchase order(s) were already made from '+(L.ref||'this plan')+'.\n\n'
+      +'You can still change it: save a new version, then press “Order what\'s new” in step 4. '
+      +'Only the extra is ordered — what is already on order or already arrived is taken off.\n\nEdit the plan?')) return;
   const i=(mrpPlanCache||[]).findIndex(q=>String(q.plan_date||q.date||'').slice(0,10)===MRPDATE && ((q.data||q)||{}).locked!==false && String(((q.data||q)||{}).ref||q.ref||'')===String(L.ref||''));
   if(i<0){ toast('Could not find the locked plan',true); return; }
   window._mrpEditRef=String(L.ref||''); window._mrpEditDate=MRPDATE;
@@ -12455,7 +12458,7 @@ async function mrpSimpleView(o){
     sec4body=`<div class="mini" style="color:var(--muted);margin-bottom:6px">${pos.length} PO(s) · ${peso(tot)} · Fritz sends them from Purchase Orders</div>
       <table class="mrp-t"><tbody>${pos.map(x=>{ const ls=pl.filter(l=>l.po_ref===x.po_ref); const v=ls.reduce((b,l)=>b+(+l.ordered_kg||0)*(+l.price_kg||0),0);
         return `<tr><td><b>${esc(x.supplier_name||'—')}</b><div class="mini" style="color:var(--muted)">${esc(x.po_ref)} · ${ls.length} item(s)</div></td><td><span class="mrp-chip">${esc(x.status||'')}</span></td><td class="num">${peso(v)}</td></tr>`; }).join('')}</tbody></table>
-      <div style="margin-top:8px"><a href="#/purchase_orders" onclick="openModel('purchase_orders');return false">Open in Purchase Orders →</a></div>`;
+      <div style="margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">${L&&canRaisePO()?`<button class="btn sm sec" onclick="generatePOsFromMRP()" title="After an edit: orders only what is not already on order or arrived">🧾 Order what's new</button>`:''}<a href="#/purchase_orders" onclick="openModel('purchase_orders');return false">Open in Purchase Orders →</a></div>`;
   } else {
     const bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no supplier set)'; (bySup[s]=bySup[s]||[]).push(l); });
     const sups=Object.keys(bySup).map(s=>({s, n:bySup[s].length, v:bySup[s].reduce((a,l)=>a+(l.final/1000)*(+l.price||0),0)})).sort((a,b)=>b.v-a.v);
@@ -12872,7 +12875,7 @@ async function saveMRPPlan(){
      Saving will <b>override</b> it — the previous plot for this date is replaced and cannot be recovered.
      <label style="display:flex;gap:6px;margin-top:8px;color:#222"><input type="checkbox" id="ovConfirm"> I understand this overrides the existing demand plot for ${esc(MRPDATE)}.</label></div>` : '';
   $('modal').innerHTML=`<h3>💾 Save demand plot — ${esc(MRPDATE)}</h3>
-    <p class="mini">Once saved, a demand plot is <b>locked</b> — you can view, print, and download it, but it can no longer be edited.</p>
+    <p class="mini">Once saved, a demand plot is <b>locked</b> — you can view, print and download it. To change it later, use <b>Edit plan</b>: it saves a new version that replaces this one.</p>
     <ul style="margin:10px 0 0;padding-left:18px;font-size:13px;line-height:1.7">
       <li>Plan date: <b>${esc(MRPDATE)}</b> · ${esc(weekOf(MRPDATE))}</li>
       <li>Products with demand: <b>${demCount}</b></li>
