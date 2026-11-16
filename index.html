@@ -4823,7 +4823,10 @@ async function shSyncNow(){
   else if(SHSYNC.url)      toast('Could not pull from Shopify — showing the last saved reading ('+shAgeText()+'). '+why, true);
   else                     toast('Re-read the saved Shopify figures · '+shAgeText()
                                  +'. No manual-pull endpoint is set up, so this cannot ask Shopify for a newer count.');
-  try{ if(typeof _lastModel!=='undefined' && _lastModel==='mrp') await renderMRP(); else await renderPackReq(); }catch(e){}
+  /* stay on the page you pressed it from: Demand / MRP re-draws itself, Regular
+     Packs re-draws itself. (It used to check a variable that was never set, so
+     pressing it on Demand / MRP swapped the screen for Regular Packs.) */
+  try{ if(/^#\/mrp/.test(String(location.hash||''))) await renderMRP(); else await renderPackReq(); }catch(e){}
 }
 
 async function renderPackReq(){
