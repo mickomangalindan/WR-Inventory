@@ -405,6 +405,23 @@ body.lean .hint{display:none!important}
 .mrp-kpis span{display:block;font-size:12px;color:#5f6b68}.mrp-kpis b{font-size:20px;color:#1d2624}
 .mrp-lasts{display:inline-block;min-width:46px;padding:2px 8px;border-radius:999px;font-size:12.5px;font-weight:600}
 .mrp-lr{background:#fdecea;color:#9b2c22}.mrp-ly{background:#fff3dd;color:#7a4a06}.mrp-lg{background:#e7f2ef;color:#1f5248}.mrp-lz{color:#8c887e}
+.mrp-tabs{display:flex;gap:4px;border-bottom:1px solid #e6ebea;margin:4px 0 10px;overflow-x:auto}
+.mrp-tab{background:none;border:0;border-bottom:2px solid transparent;padding:9px 12px;font:inherit;font-size:13.5px;color:#5f6b68;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px}
+.mrp-tab.on{color:#1f5248;border-bottom-color:#3a8276;font-weight:600}
+.mrp-tabn{background:#f0f3f2;color:#3b4744;border-radius:999px;padding:1px 7px;font-size:11.5px;font-weight:600}
+.mrp-tab.on .mrp-tabn{background:#e7f2ef;color:#1f5248}
+.mrp-tablow{background:#fdecea;color:#9b2c22;border-radius:999px;padding:1px 6px;font-size:11px;font-weight:700}
+.mrp-filter{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.mrp-seg{display:inline-flex;border:1px solid #d6dedc;border-radius:8px;overflow:hidden}
+.mrp-seg button{background:#fff;border:0;padding:6px 12px;font:inherit;font-size:12.5px;color:#5f6b68;cursor:pointer}
+.mrp-seg button.on{background:#3a8276;color:#fff}
+.mrp-search{padding:6px 10px;border:1px solid #d6dedc;border-radius:8px;min-width:220px;font:inherit;font-size:13px}
+.mrp-t tr.mrp-grp{cursor:pointer}
+.mrp-t tr.mrp-grp td{padding:9px 10px}
+.mrp-car{display:inline-block;width:12px;color:#3a8276}
+.mrp-gsum{font-weight:400;color:#5f6b68;margin-left:8px;font-size:12px}
+.mrp-t tr.mrp-line td{font-size:12px;color:#5f6b68;font-weight:600;padding:8px 10px 4px 26px;border-bottom:0}
+.mrp-vname{padding-left:26px!important}
 .mrp-note{margin-top:8px;padding:8px 10px;background:#fff8e1;border-radius:8px;font-size:12.5px}
 @media(max-width:700px){.mrp-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .mrp-more>summary{cursor:pointer;font-weight:600;color:#3b4744;padding:10px 0}
@@ -11807,6 +11824,8 @@ async function _renderMRP(){
       Nothing is owed for them, but they are still in this plot, so ingredients would be bought for them.
       <div class="mini" style="margin-top:4px">${dead.slice(0,10).map(k=>'• '+esc(nm[k]||k)+' <code>'+esc(k)+'</code> · '+_prN(+mrpDemand[k]||0)+' pack(s)').join('<br>')}${dead.length>10?'<br>…':''}</div>
       <span class="btn link" style="margin-top:4px;display:inline-block" onclick="mrpDropSettled()">🧹 Take them out of this plot</span></div>`; })();
+  dh+=(()=>{ const T=window._mrpTab||'all'; const ts=mrpTabList(prods.filter(p=>!/^CUST-/i.test(p.sku)&&!isSupplyLed(p)&&!isPhasingOut(p)));
+    return `<div class="mrp-tabs" style="margin-top:10px">${[['all','All']].concat(ts.map(t=>[t,t])).map(([k,l])=>`<button class="mrp-tab${T===k?' on':''}" onclick="mrpSetTab('${esc(k)}')">${esc(l)}</button>`).join('')}</div>`; })();
   dh+=`<h3 style="margin:8px 0 8px">1 · Weekly demand (packs) — keyed by SKU</h3>
     <div style="overflow-x:auto" class="stickyhead"><table style="min-width:1180px"><thead><tr>
       <th>Product</th><th>SKU</th>
@@ -11882,7 +11901,7 @@ async function _renderMRP(){
       +'<b>Type a figure only when the meat has landed or is confirmed</b>: whatever is saved on the plot becomes that week\'s production target. Left blank they have no target anywhere. Their raw material goes on a PO only if you add it by hand.</div>'
       +'<table style="width:100%"><tbody>'+_supLed.map(_demRow).join('')+'</tbody></table></details></td></tr>');
   }
-  hierGroups(pgRows(catalogue),{g1:'_g1',g2:'_g2'}).forEach(G=>{
+  hierGroups(pgRows(catalogue.filter(p=>!window._mrpTab||window._mrpTab==='all'||prodG1(p)===window._mrpTab)),{g1:'_g1',g2:'_g2'}).forEach(G=>{
     dh+=`<tr style="background:#e7f0e9"><td colspan="${DEMCOLS}"><b>${esc(G.g1)}</b> <span class="mini">· ${G.all.length}</span></td></tr>`;
     G.subs.forEach(S=>{ dh+=`<tr style="background:#f6f8f4"><td colspan="${DEMCOLS}" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`+S.items.map(_demRow).join(''); });
   });
@@ -12218,6 +12237,28 @@ async function mrpStepHeader(simple){
 }
 function mrpIsFull(){ try{ return localStorage.getItem('wr_mrp_full')==='1'; }catch(e){ return false; } }
 function mrpSetFull(on){ try{ localStorage.setItem('wr_mrp_full', on?'1':'0'); }catch(e){} renderMRP(); }
+/* Shop-menu order for the tabs; anything else follows, alphabetically. */
+const MRP_TAB_ORDER=['Gently Cooked','Cookable','Raw Feeding','Toppers & Supplements'];
+function mrpTabList(prods){ const seen={}; (prods||[]).forEach(p=>{ seen[prodG1(p)]=1; });
+  return Object.keys(seen).sort((a,b)=>{ const ia=MRP_TAB_ORDER.indexOf(a), ib=MRP_TAB_ORDER.indexOf(b);
+    return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b); }); }
+function mrpSetTab(t){ window._mrpTab=t; renderMRP(); }
+function mrpShowAllSet(v){ window._mrpShowAll=!!v; renderMRP(); }
+/* the "line" inside a section, the way the shop splits it: Trial vs 20 pcs, Mini vs Regular */
+function mrpLineOf(p){ const n=String((p&&p.name)||''), g=prodG2(p);
+  if(/meatball/i.test(g)){ const size=/^\s*3-?piece/i.test(n)?'Trial (3 pcs)':(/20-?piece/i.test(n)?'20 pcs':'Other');
+    const kind=/wholesome mix/i.test(n)?'Wholesome Mix':(/barf/i.test(n)?'BARF Mix':'Single Protein'); return kind+' · '+size; }
+  if(/broth/i.test(g)) return /^\s*mini/i.test(n)?'Mini':'Regular';
+  return ''; }
+function mrpToggleSec(tr,k){ const b=tr.closest('tbody').nextElementSibling; if(!b) return;
+  const open=b.style.display==='none'; b.style.display=open?'':'none';
+  const c=tr.querySelector('.mrp-car'); if(c) c.textContent=open?'▾':'▸';
+  (window._mrpOpen=window._mrpOpen||{})[k]=open; }
+function mrpFilterRows(q){ q=String(q||'').trim().toLowerCase(); const t=document.getElementById('mrpPackT'); if(!t) return;
+  t.querySelectorAll('tbody.mrp-secrows').forEach(b=>{ let any=false;
+    b.querySelectorAll('tr.mrp-prow').forEach(r=>{ const hit=!q||(r.dataset.q||'').includes(q); r.style.display=hit?'':'none'; if(hit) any=true; });
+    if(q){ b.style.display=any?'':'none'; const h=b.previousElementSibling; if(h) h.style.display=any?'':'none'; }
+    else { const h=b.previousElementSibling; if(h) h.style.display=''; } }); }
 function mrpShowAllToggle(){ window._mrpShowAll=!window._mrpShowAll; renderMRP(); }
 /* The simple Demand / MRP page (Zeus, 16 Nov 2026). Four sections, one job
    each. Reads only what _renderMRP already worked out; changes nothing itself. */
@@ -12265,23 +12306,43 @@ async function mrpSimpleView(o){
   const pRow=p=>{ const X=calc[p.sku]||{}; const r=X.r||{}, c=X.c||{}; const d=cov(p), m=make(p), sg=sugg(p);
     const _to=(window._mrpPhase||{})[p.sku];
     const box=L?`<b>${m||'—'}</b>`:`<input type="number" step="1" inputmode="numeric" class="mrp-in" value="${m>0?m:''}" onchange="mrpSetDem('${esc(p.sku)}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}">`;
-    return `<tr><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code>${_to?' · <span style="color:var(--earth,#b5762a)">phasing out</span>':''}</div></td>
+    const lbl=String(p.variant||'').trim()||prodLabel({...p},{noSku:true});
+    return `<tr class="mrp-prow" data-q="${esc((prodLabel({...p},{noSku:true})+' '+lbl+' '+p.sku).toLowerCase())}"><td class="mrp-vname" title="${esc(prodLabel({...p},{noSku:true}))} · ${esc(p.sku)}">${esc(lbl)}${_to?' <span class="mini" style="color:var(--earth,#b5762a)">· phasing out</span>':''}</td>
       <td class="num"><b>${n0(c.cur)}</b><div class="mini" style="color:var(--muted)">Pasig ${n0(r.shop)} · Bulacan ${n0(r.other)}</div></td>
       <td class="num"><span class="mrp-lasts ${tone(d)}">${d==null?'—':(Math.round(d*10)/10)+' d'}</span></td>
       <td class="num">${box}${mrpCoPartOf(p.sku)>0?`<div class="mini" style="color:var(--muted)">+ ${mrpCoPartOf(p.sku)} custom</div>`:''}${sg>0&&sg!==m?`<div class="mini" style="color:var(--muted)">suggested ${n0(sg)}</div>`:''}${c.deferred&&!m?'<div class="mini" style="color:#3a8276">can wait</div>':''}</td></tr>`; };
+  /* TABS FOLLOW THE SHOP MENU: group (tab) → section (folded) → line → variant. */
+  const TAB=window._mrpTab||'all';
+  const tabs=mrpTabList(cat);
+  const inTab=p=>TAB==='all'||prodG1(p)===TAB;
+  const shown=show.filter(inTab);
+  const tabBar=`<div class="mrp-tabs">${[['all','All',cat]].concat(tabs.map(t=>[t,t,cat.filter(p=>prodG1(p)===t)])).map(([k,label,arr])=>{
+      const pk=arr.reduce((a,p)=>a+make(p),0), low=arr.filter(p=>cov(p)!=null&&cov(p)<5).length;
+      return `<button class="mrp-tab${TAB===k?' on':''}" onclick="mrpSetTab('${esc(k)}')">${esc(label)}<span class="mrp-tabn">${pk?n0(pk):'—'}</span>${low?`<span class="mrp-tablow" title="running low">${low}</span>`:''}</button>`; }).join('')}</div>
+    <div class="mrp-filter"><span class="mrp-seg"><button class="${window._mrpShowAll?'':'on'}" onclick="mrpShowAllSet(false)">To make &amp; running low</button><button class="${window._mrpShowAll?'on':''}" onclick="mrpShowAllSet(true)">All products</button></span>
+      <input type="search" class="mrp-search" placeholder="Search a product…" oninput="mrpFilterRows(this.value)"></div>`;
   let body='';
-  hierGroups(pgRows(show),{g1:'_g1',g2:'_g2'}).forEach(G=>{
-    body+=`<tr class="mrp-grp"><td colspan="4">${esc(G.g1)}</td></tr>`;
-    G.subs.forEach(S=>{ body+=S.items.map(pRow).join(''); }); });
+  const secs={}; const order=[];
+  shown.forEach(p=>{ const k=(TAB==='all'?prodG1(p)+' · ':'')+prodG2(p); if(!secs[k]){ secs[k]=[]; order.push(k); } secs[k].push(p); });
+  const tabRank=t=>{ const i=tabs.indexOf(t); return i<0?99:i; };
+  order.sort((a,b)=>{ const pa=secs[a][0], pb=secs[b][0]; return tabRank(prodG1(pa))-tabRank(prodG1(pb)) || cmpItems(pa,pb); });
+  order.forEach(k=>{ const arr=secs[k].slice().sort(cmpItems);
+    const pk=arr.reduce((a,p)=>a+make(p),0), low=arr.filter(p=>cov(p)!=null&&cov(p)<5).length;
+    const open=window._mrpOpen&&window._mrpOpen[k]!==undefined?window._mrpOpen[k]:(pk>0||low>0);
+    const lines={}; const lo=[]; arr.forEach(p=>{ const ln=mrpLineOf(p); if(!lines[ln]){ lines[ln]=[]; lo.push(ln); } lines[ln].push(p); });
+    body+=`<tbody class="mrp-secb"><tr class="mrp-grp" onclick="mrpToggleSec(this,'${esc(k).replace(/'/g,"\\'")}')"><td colspan="4"><span class="mrp-car">${open?'▾':'▸'}</span> ${esc(k)}
+        <span class="mrp-gsum">${arr.length} product(s)${pk?' · <b>'+n0(pk)+' packs</b>':''}${low?' · <span style="color:#9b2c22">'+low+' running low</span>':''}</span></td></tr></tbody>
+      <tbody class="mrp-secrows"${open?'':' style="display:none"'}>${lo.map(ln=>(ln&&lo.length>1?`<tr class="mrp-line"><td colspan="4">${esc(ln)}</td></tr>`:'')+lines[ln].map(pRow).join('')).join('')}</tbody>`; });
   const sec2=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>2 · Regular packs</h3>
       <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs</div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`<button class="btn sm sec ${demStepOn()?'':''}" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`<button class="btn sm sec" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>
       <button class="btn sm" onclick="mrpPullPackReq()">🧮 Pull the week</button>`}</div></div>
     <div class="mrp-kpis"><div><span>Products to make</span><b>${kMake}</b></div><div><span>Packs to make</span><b>${n0(kPk)}</b></div>
       <div><span>Running low (under 5 days)</span><b>${kLow}</b></div><div><span>Can wait</span><b>${kWait}</b></div></div>
-    ${show.length?`<div style="overflow-x:auto"><table class="mrp-t"><thead><tr><th>Product</th><th class="num">In stock</th><th class="num">Lasts</th><th class="num">Make</th></tr></thead><tbody>${body}</tbody></table></div>`
-      :`<div class="mini" style="color:var(--muted);padding:6px 0">Nothing to make or running low. Press <b>Pull the week</b> to start.</div>`}
-    ${cat.length>focus.length||window._mrpShowAll?`<div style="margin-top:8px"><span class="btn link" onclick="mrpShowAllToggle()">${window._mrpShowAll?'Show only what matters':'Show all '+cat.length+' products'}</span></div>`:''}</section>`;
+    ${tabBar}
+    ${shown.length?`<div style="overflow-x:auto"><table class="mrp-t" id="mrpPackT"><thead><tr><th>Product</th><th class="num">In stock</th><th class="num">Lasts</th><th class="num">Make</th></tr></thead>${body}</table></div>`
+      :`<div class="mini" style="color:var(--muted);padding:10px 0">${window._mrpShowAll?'No products in this tab.':'Nothing to make or running low here. Press <b>Pull the week</b>, or switch to <b>All products</b>.'}</div>`}
+  </section>`;
   /* ---- 3 · save and lock ---- */
   const dr=L?null:mrpDraftFor(MRPDATE);
   const drTxt=dr?(()=>{ const dd=dr.data||{}; return `<div class="mrp-note">📝 Draft saved ${esc(String(dd.saved_at||dr.saved_at||'').slice(0,16).replace('T',' '))} by <b>${esc(dd.by||dr.created_by||'someone')}</b>
