@@ -414,11 +414,12 @@ body.lean .hint{display:none!important}
 .mrp-kpis span{display:block;font-size:12px;color:#5f6b68}.mrp-kpis b{font-size:20px;color:#1d2624}
 .mrp-lasts{display:inline-block;min-width:46px;padding:2px 8px;border-radius:999px;font-size:12.5px;font-weight:600}
 .mrp-lr{background:#fdecea;color:#9b2c22}.mrp-ly{background:#fff3dd;color:#7a4a06}.mrp-lg{background:#e7f2ef;color:#1f5248}.mrp-lz{color:#8c887e}
-.mrp-tabs{display:flex;gap:4px;border-bottom:1px solid #e6ebea;margin:4px 0 10px;overflow-x:auto}
-.mrp-tab{background:none;border:0;border-bottom:2px solid transparent;padding:9px 12px;font:inherit;font-size:13.5px;color:#5f6b68;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px}
-.mrp-tab.on{color:#1f5248;border-bottom-color:#3a8276;font-weight:600}
+.mrp-tabs{display:flex;gap:8px;margin:6px 0 12px;overflow-x:auto;padding:2px 0}
+.mrp-tab{background:#f0f3f2;border:0;border-radius:999px;padding:9px 16px;font:inherit;font-size:14px;font-weight:600;color:#3b4744;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:7px}
+.mrp-tab:hover{background:#e7f2ef}
+.mrp-tab.on{background:#3a8276;color:#fff}
 .mrp-tabn{background:#f0f3f2;color:#3b4744;border-radius:999px;padding:1px 7px;font-size:11.5px;font-weight:600}
-.mrp-tab.on .mrp-tabn{background:#e7f2ef;color:#1f5248}
+.mrp-tab.on .mrp-tabn{background:rgba(255,255,255,.25);color:#fff}
 .mrp-tablow{background:#fdecea;color:#9b2c22;border-radius:999px;padding:1px 6px;font-size:11px;font-weight:700}
 .mrp-filter{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
 .mrp-seg{display:inline-flex;border:1px solid #d6dedc;border-radius:8px;overflow:hidden}
@@ -426,12 +427,18 @@ body.lean .hint{display:none!important}
 .mrp-seg button.on{background:#3a8276;color:#fff}
 .mrp-search{padding:6px 10px;border:1px solid #d6dedc;border-radius:8px;min-width:220px;font:inherit;font-size:13px}
 .mrp-t tr.mrp-grp{cursor:pointer}
-.mrp-t tr.mrp-grp td{padding:9px 10px}
+.mrp-t tr.mrp-grp td{padding:11px 10px;background:#e7f2ef!important;color:#1d2624!important;font-weight:700!important;font-size:13.5px!important}
 .mrp-car{display:inline-block;width:12px;color:#3a8276}
 .mrp-gsum{font-weight:400;color:#5f6b68;margin-left:8px;font-size:12px}
 .mrp-t tr.mrp-line td{padding:10px 10px 4px 22px;border-bottom:0}
-.mrp-t tr.mrp-line span{display:inline-block;background:#3a8276;color:#fff;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px}
+.mrp-t tr.mrp-line span{display:inline-block;background:#fff;color:#2f7366;border:1px solid #9cc7be;font-size:11.5px;font-weight:600;padding:2px 9px;border-radius:999px}
 .mrp-vname{padding-left:26px!important}
+.mrp-views{display:flex;gap:2px;margin-left:10px;flex-wrap:wrap}
+.mrp-vtab{background:none;border:0;border-bottom:2px solid transparent;padding:8px 12px;font:inherit;font-size:13px;color:#5f6b68;cursor:pointer}
+.mrp-vtab:hover{color:#1f5248}
+.mrp-vtab.on{color:#1f5248;border-bottom-color:#3a8276;font-weight:600}
+.mrp-sync{margin:-4px 0 10px;font-size:12px}
+.mrp-simple.mrp-wide{max-width:none}
 .mrp-note{margin-top:8px;padding:8px 10px;background:#fff8e1;border-radius:8px;font-size:12.5px}
 @media(max-width:700px){.mrp-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .mrp-more>summary{cursor:pointer;font-weight:600;color:#3b4744;padding:10px 0}
@@ -12146,7 +12153,7 @@ async function _renderMRP(){
   const _pu=window._mrpProcUse||{}; const _puN=Object.keys(_pu).length;
   let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">2 · Replenishment plan</h3>
     ${_puN?`<div class="hint" style="margin:0 0 6px">Processed stock counts: <b>${_puN} processed ingredient(s)</b> covered part of this demand from stock already made (${Object.keys(_pu).slice(0,3).map(k=>esc(ingName(k))+' '+(Math.round(_pu[k]/10)/100)+' kg').join(', ')}${_puN>3?', …':''}), so no raw is ordered for that portion.</div>`:''}
-    ${rpSettingsHtml(plan)}
+    ${mrpView()==='ingredients'?'':rpSettingsHtml(plan)}
     ${(window._rpTooSmall||[]).length?`<div class="hint" style="margin:6px 0 0">
       <b>${window._rpTooSmall.length} line(s) can wait for next week's plot</b> and are not on the plan below — each still has enough left, after this week's production, to outlast the next buying round.
       <div class="mini" style="margin-top:3px">${window._rpTooSmall.slice(0,8).map(x=>esc(x.name)+' — '+x.wanted+' kg wanted, but '+x.days+' days still left after this week'+(x.byLead?(' · needs '+x.needDays+' days because its lead time is '+x.lead+'d'):(' · the floor is '+x.needDays+' days'))).join('<br>')}${window._rpTooSmall.length>8?('<br>…and '+(window._rpTooSmall.length-8)+' more'):''}</div>
@@ -12217,25 +12224,35 @@ async function _renderMRP(){
      the full screen calls (mrpSetDem, mrpPullPackReq, mrpPullCustom,
      saveMRPDraft, saveMRPPlan, generatePOsFromMRP). "Full view" shows the
      whole working screen exactly as before. */
-  if(!mrpIsFull()){
-    let _simple='';
-    try{ _simple=await mrpSimpleView({coAll, coDone, nCoPend, locked:_lockedPlot, nextMon:_nextMon, pName:_pName, catalogue}); }
-    catch(e){ console.warn('mrp simple',String(e&&e.message||e)); _simple=''; }
-    if(_simple){
-      $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
-        <span class="mrp-cp" style="display:contents">
-        <button class="btn sec" onclick="renderDemandHistory()">📚 History</button>
-        <button class="btn sec" onclick="mrpDemandCheck()" title="Every demand line turned into ingredients — view or download as Excel">📋 Demand check</button>
-        ${shSyncBtn()}
-        <div class="sp"></div><button class="btn sec" onclick="mrpSetFull(true)" title="The whole working screen: every column, every check, the ingredient table you can adjust">Full view</button></span>`;
-      $('content').innerHTML=_simple;
-      return;
-    }
+  /* ONE SCREEN, DETAILS ON TABS (Zeus, 16 Nov 2026). Plan is the working
+     screen. The other tabs show the SAME sections the old full screen built,
+     split by who reads them. Nothing is computed differently. */
+  const _view=mrpView();
+  const _isAdm=(typeof curRole==='function' && curRole()==='Admin');
+  const _tabsDef=[['plan','Plan'],['packs','Pack numbers'],['ingredients','Ingredients'],['checks','Checks'],['history','History']].concat(_isAdm?[['settings','⚙ Settings']]:[]);
+  $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+    <span class="mrp-cp mrp-views">${_tabsDef.map(([k,l])=>`<button class="mrp-vtab${_view===k?' on':''}" onclick="mrpSetView('${k}')">${l}</button>`).join('')}</span>`;
+  let _body='';
+  if(_view==='plan'){
+    try{ _body=await mrpSimpleView({coAll, coDone, nCoPend, locked:_lockedPlot, nextMon:_nextMon, pName:_pName, catalogue}); }
+    catch(e){ console.warn('mrp simple',String(e&&e.message||e)); _body=''; }
+  } else if(_view==='packs'){
+    _body=`<div class="mrp-simple mrp-wide"><div class="mini" style="color:var(--muted);margin:0 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. You can still type here; it is the same plan as the Plan tab.</div>${dh}</div>`;
+  } else if(_view==='ingredients'){
+    _body=`<div class="mrp-simple mrp-wide"><div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px">
+        <button class="btn sm sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals — view or download as Excel">⬇ Download ingredient list</button></div>${rh}</div>`;
+  } else if(_view==='checks'){
+    let _lead=''; try{ _lead=await mrpLeadTimeCard(); }catch(e){}
+    _body=`<div class="mrp-simple mrp-wide">${_pre}${mrpMinOrderCard(_bySup,supMin,_supKg)}${_lead}</div>`;
+  } else if(_view==='history'){
+    _body=`<div class="mrp-simple mrp-wide"><div style="margin:0 0 8px"><button class="btn sm sec" onclick="renderDemandHistory()">📚 Open full history</button></div>${savedPlansHtml()||'<section class="mrp-sec"><div class="mini" style="color:var(--muted)">No saved plans yet. A plan shows here once you press Save plan.</div></section>'}</div>`;
+  } else if(_view==='settings'){
+    _body=`<div class="mrp-simple mrp-wide"><section class="mrp-sec"><div class="mrp-sechead"><div><h3>Planning locations</h3>
+        <div class="mini" style="color:var(--muted)">Which stock locations count when planning.</div></div><button class="btn sm sec" onclick="openPlanLocs()">Open</button></div></section>
+      <section class="mrp-sec"><h3>Buying rules</h3><div class="mini" style="color:var(--muted);margin-bottom:8px">How often we buy, safety days, supplier lead times. Changes apply to everyone.</div>${rpSettingsHtml(window._mrpPlan||[])}</section></div>`;
   }
-  $('cp').insertAdjacentHTML('beforeend',`<button class="btn sec" onclick="mrpSetFull(false)" title="back to the four simple steps">← Simple view</button>`);
-  $('content').innerHTML=`<div id="mrpClean" class="${_notes?'':'mrp-clean'}">`+_head+dh+rh
-    +`<details class="mrp-more" style="margin-top:18px"><summary>More details — data checks, minimum orders, lead times, plot history</summary>`
-    +_pre+_more+`</details></div>`;
+  if(!_body){ _body=`<div id="mrpClean" class="${_notes?'':'mrp-clean'}">`+_head+dh+rh+`<details class="mrp-more" style="margin-top:18px"><summary>More details</summary>`+_pre+_more+`</details></div>`; }
+  $('content').innerHTML=_body;
 }
 /* The four steps of a planning week, read from what is already on screen:
    custom orders → regular packs → saved and locked → POs raised. Plus at most
@@ -12292,8 +12309,13 @@ async function mrpEditPlan(){
   loadMRPPlan(i);
 }
 function mrpEditCancel(){ window._mrpEditRef=null; window._mrpEditDate=null; mrpDemand={}; mrpCoPart={}; mrpManual={}; mrpAdd={}; mrpRemarks={}; renderMRP(); }
-function mrpIsFull(){ try{ return localStorage.getItem('wr_mrp_full')==='1'; }catch(e){ return false; } }
-function mrpSetFull(on){ try{ localStorage.setItem('wr_mrp_full', on?'1':'0'); }catch(e){} renderMRP(); }
+const MRP_VIEWS=['plan','packs','ingredients','checks','history','settings'];
+function mrpView(){ let v=''; try{ v=localStorage.getItem('wr_mrp_view')||''; if(!v && localStorage.getItem('wr_mrp_full')==='1') v='packs'; }catch(e){}
+  if(v==='settings' && !(typeof curRole==='function' && curRole()==='Admin')) v='plan';
+  return MRP_VIEWS.includes(v)?v:'plan'; }
+function mrpSetView(v){ try{ localStorage.setItem('wr_mrp_view', v); localStorage.removeItem('wr_mrp_full'); }catch(e){} renderMRP(); }
+function mrpIsFull(){ return mrpView()!=='plan'; }
+function mrpSetFull(on){ mrpSetView(on?'packs':'plan'); }
 /* Shop-menu order for the tabs; anything else follows, alphabetically. */
 const MRP_TAB_ORDER=['Gently Cooked','Cookable','Raw Feeding','Toppers & Supplements'];
 /* Section order and names inside each tab, as the shop menu shows them. */
@@ -12426,6 +12448,7 @@ async function mrpSimpleView(o){
       <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`<button class="btn sm sec" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>
       <button class="btn sm" onclick="mrpPullPackReq()">🧮 Pull the week</button>`}</div></div>
+    ${L?'':`<div class="mrp-sync">${shSyncBtn()}</div>`}
     <div class="mrp-kpis"><div><span>Products to make</span><b>${kMake}</b></div><div><span>Packs to make</span><b>${n0(kPk)}</b></div>
       <div><span>Running low (under 5 days)</span><b>${kLow}</b></div><div><span>Can wait</span><b>${kWait}</b></div></div>
     ${tabBar}
@@ -12469,12 +12492,12 @@ async function mrpSimpleView(o){
       <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         ${L&&canRaisePO()?`<button class="btn sm" onclick="generatePOsFromMRP()">🧾 Make the purchase orders</button>`:''}
         ${L&&!canRaisePO()?'<span class="mini" style="color:var(--muted)">Purchasing makes the orders from the locked plan.</span>':''}
-        <span class="btn link" onclick="mrpSetFull(true)">See or change each ingredient →</span></div>`;
+        <span class="btn link" onclick="mrpSetView('ingredients')">See or change each ingredient →</span></div>`;
   }
   const sec4=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>4 · Order ingredients</h3></div></div>${sec4body}</section>`;
   let head=''; try{ head=await mrpStepHeader(true); }catch(e){}
   return `<div class="mrp-simple">${head}${sec1}${sec2}${sec3}${sec4}
-    <div class="mini" style="color:var(--muted);text-align:center;margin:14px 0 4px">Need every column, the checks, phasing-out or supply-led lines? <span class="btn link" onclick="mrpSetFull(true)">Open full view</span></div></div>`;
+    <div class="mini" style="color:var(--muted);text-align:center;margin:14px 0 4px">Phasing-out and supply-led lines, and every column, are on <span class="btn link" onclick="mrpSetView('packs')">Pack numbers</span>.</div></div>`;
 }
 function mrpToggleNotes(){
   const el=document.getElementById('mrpClean'); if(!el) return;
