@@ -1848,6 +1848,7 @@ function openModel(model){
 async function gotoRecord(model, pkval){ if(!MODELS[model]||pkval==null) return; state={model,view:'form',search:'',groupBy:'',recId:null,sel:[]}; renderSide(); try{ await openForm(encodeURIComponent(String(pkval))); }catch(e){ toast('Could not open record',true); } }
 function gotoReport(id){ if(typeof repTab!=='undefined'){ repTab='standard'; repActive=id; } openModel('reporting'); }
 function route(){
+  try{ _mrpScrollRoute=''; }catch(e){}   // a fresh visit starts at the top (see renderMRP)
   renderSide();
   refreshMentionBell();
   if(state.model==='home'){ return renderDashboard(); }
@@ -3717,7 +3718,8 @@ function _psDays(){
    large share of the total ask, and on a slow mover a 24-pack floor can buy
    months of cover. So the screen prints the cover the rounding buys beside the
    number — the cost of the convenience is shown, not assumed. */
-const PQ_DEF={lead:8, move:1, cycle:21, win:60, cs:12, minPacks:24, minOn:1, defer:1, capDays:90, parCase:1};
+const PQ_DEF={lead:8, move:1, cycle:21, win:60, cs:12, minPacks:24, minOn:1, defer:1, capDays:90, parCase:1,
+  organBatch:12, smallCoverD:7};
 let PQ=Object.assign({},PQ_DEF);
 try{ PQ=Object.assign({},PQ_DEF,JSON.parse(localStorage.getItem('wr_packreq')||'{}')); }catch(e){}
 let PQ_MOVE={};   // per-SKU movement override — the one variable that is genuinely per product
@@ -3738,16 +3740,35 @@ let PQ_Q='', PQ_ONLY=true, PQ_GROUP='hier';
    It is gone from both screens. Demand / MRP now carries the same columns
    Regular Packs does, and the CSV carries the steps that have no column of
    their own (Target, Shortfall, Rounding, Cap, Deferred, Cover after). */
+/* ---- ONE SET OF PACK SETTINGS FOR EVERYONE (16 Nov 2026) -----------------
+   These levers lived in each browser's localStorage, so Dani and Rhods could
+   plan the same week and get different pack counts because one of them once
+   typed a 21. They are now in app_settings ('pack_req'), read once per
+   session like the raw par (loadRawPar); localStorage is only the first-paint
+   cache. Same shape, same fallbacks. */
+async function loadPackReq(){ if(window._pqLoaded||!isLive()) return; window._pqLoaded=true;
+  try{ const r=await sb('app_settings?select=value&key=eq.pack_req');
+    const v=r&&r[0]&&r[0].value;
+    if(v&&typeof v==='object'&&!Array.isArray(v)){
+      PQ=Object.assign({},PQ_DEF,v.pq||{}); PQ_MOVE=Object.assign({},v.move||{});
+      try{ localStorage.setItem('wr_packreq',JSON.stringify(PQ)); localStorage.setItem('wr_packreq_move',JSON.stringify(PQ_MOVE)); }catch(e){}
+    } }catch(e){}
+}
+function savePackReq(){
+  try{ localStorage.setItem('wr_packreq',JSON.stringify(PQ)); localStorage.setItem('wr_packreq_move',JSON.stringify(PQ_MOVE)); }catch(e){}
+  if(isLive()) sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
+    body:JSON.stringify({key:'pack_req',value:{pq:PQ,move:PQ_MOVE}})}).catch(()=>{});
+}
 function pqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0);
-  try{ localStorage.setItem('wr_packreq',JSON.stringify(PQ)); }catch(e){} pqDraw(); }
+  savePackReq(); pqDraw(); }
 function pqReset(){ PQ=Object.assign({},PQ_DEF); PQ_MOVE={};
   try{ localStorage.removeItem('wr_packreq'); localStorage.removeItem('wr_packreq_move'); }catch(e){}
-  renderPackReq(); }
+  savePackReq(); renderPackReq(); }
 function pqMove(sku,v){ const n=parseFloat(v);
   if(!(n>=0) || n===PQ.move) delete PQ_MOVE[sku]; else PQ_MOVE[sku]=n;
-  try{ localStorage.setItem('wr_packreq_move',JSON.stringify(PQ_MOVE)); }catch(e){} pqDraw(); }
+  savePackReq(); pqDraw(); }
 function pqToggle(k){ PQ[k]=PQ[k]?0:1;
-  try{ localStorage.setItem('wr_packreq',JSON.stringify(PQ)); }catch(e){} stockPicInvalidate(); pqDraw(); }
+  savePackReq(); stockPicInvalidate(); pqDraw(); }
 /* The instant a transfer's movements are filed under: local midnight of the
    transfer date. Blank or unparseable falls back to now(), because a movement
    with no date at all is worse than one dated late. */
@@ -3830,10 +3851,33 @@ function pqCalc(r){
     deferred=true; produce=0;
     deferDays = perDay>0 ? (cur-rop)/perDay : null;
   }
-  let capped=false;
-  if(produce>0){
+  let capped=false, smallWait=false;
+  /* ---- A SMALL NEED IS NOT A BATCH (Zeus, 16 Nov 2026) ----------------------
+     "Nabawasan lang ng isa, mag-require na ng 24 — nag-overstock talaga." One
+     organ pack sold and the floor asked for two dozen. The batch is now per
+     product — organs (group "Organs") run in 12s, everything else in minPacks —
+     and a need under HALF a batch is not rounded up at all:
+       stock still lasts ≥ smallCoverD days  → 0 this week; next week's plan
+                                               picks it up if it is still short
+       stock lasts less                       → exactly the need, to the pack
+     Half a batch or more rounds to the NEAREST case, never below the batch, and
+     only rounds up when the nearest would leave under smallCoverD days. */
+  const _isOrgan = /^organs?$/i.test(String(r.group_2||'').trim());
+  const batch = minOn ? (_isOrgan ? Math.max(0,+PQ.organBatch||12) : minPk) : 0;
+  const smallD = Math.max(0,+PQ.smallCoverD||7);
+  if(produce>0 && minOn && batch>0 && produce < batch/2){
+    const coverNow = perDay>0 ? cur/perDay : 999;
+    if(coverNow >= smallD){ produce=0; smallWait=true; deferred=true; deferDays=coverNow; }
+    else produce = Math.ceil(produce);
+  } else if(produce>0 && minOn && batch>0){
+    const step = cs>0 ? cs : 1;
+    let q = Math.max(batch, Math.round(produce/step)*step);
+    if(perDay>0 && (cur+q)/perDay < smallD) q = Math.max(batch, _pqCeil(produce, step));
+    produce = q;
+  } else if(produce>0){
     produce = cs>0 ? _pqCeil(produce, cs) : Math.ceil(produce);
-    if(minPk>0 && produce<minPk) produce = cs>0 ? _pqCeil(minPk, cs) : minPk;
+  }
+  if(produce>0){
     /* ---- AND A CEILING ON ONE RUN --------------------------------------
        Deferral fixes how OFTEN we ask; it does not fix the handful where 24 is
        absurd however rarely it is made. `capDays` is the most days of cover a
@@ -3892,7 +3936,7 @@ function pqCalc(r){
   const target = newPar + safety;
   return {perDay, lead, move, ltd, safety, rop, par, newPar, cur, produce,
           cover, toMove, toMake, target, minOn, rawNeed, padded, coverAfter,
-          rop, deferred, deferDays, capped,
+          rop, deferred, deferDays, capped, smallWait, batch,
           covPct:(target>0?cur/target:null),
           shelfPct:(target>0?shelf/target:null),
           alert:(cur<rop), pct:(newPar>0?cur/newPar:null)};
@@ -4181,6 +4225,7 @@ function _pqDrift(rows){
    now compares the snapshot with the ledger AS IT STOOD AT THE COUNT — like for
    like. A gap there is a real adjustment somebody made on one side only. */
 async function pqBuildRows(){
+  await loadPackReq();
   let prods=[], mom=[], movs=[], trs=[], tls=[];
   try{ prods=await db.list('products',{}); }catch(e){}
   try{ mom=await momLoad(); }catch(e){}
@@ -11327,7 +11372,26 @@ async function planReadyStamp(){
   }catch(e){ return null; }
 }
 
+/* ---- THE PAGE JUMPED TO THE TOP WHILE YOU SCROLLED (Zeus, 16 Nov 2026) ----
+   renderMRP is called from 37 places — every background load, every button —
+   and each call rebuilt the whole screen, so the page went back to the top
+   under the reader's thumb. The redraw now keeps the scroll position of every
+   scrolling box it can find, and puts it back once the new screen is in. A
+   change of route (a fresh visit) still starts at the top. */
+let _mrpScrollRoute='';
 async function renderMRP(){
+  const route=String(location.hash||'');
+  const sameRoute=(_mrpScrollRoute===route);
+  _mrpScrollRoute=route;
+  const boxes=[document.scrollingElement, document.querySelector('.main'), $('content')].filter(Boolean);
+  const keep=sameRoute ? boxes.map(b=>b.scrollTop) : null;
+  try{ return await _renderMRP(); }
+  finally{
+    if(keep){ const put=()=>boxes.forEach((b,i)=>{ if(keep[i]>0) b.scrollTop=keep[i]; });
+      put(); try{ requestAnimationFrame(put); }catch(e){} }
+  }
+}
+async function _renderMRP(){
   /* THE SETTINGS ARE SHARED, SO THEY HAVE TO BE READ. saveRawPar writes them to
      app_settings and the strip says "saved for everyone, not just this browser"
      — but nothing ever read them back, so a second person got RP_DEF and the
