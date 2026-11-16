@@ -420,7 +420,8 @@ body.lean .hint{display:none!important}
 .mrp-t tr.mrp-grp td{padding:9px 10px}
 .mrp-car{display:inline-block;width:12px;color:#3a8276}
 .mrp-gsum{font-weight:400;color:#5f6b68;margin-left:8px;font-size:12px}
-.mrp-t tr.mrp-line td{font-size:12px;color:#5f6b68;font-weight:600;padding:8px 10px 4px 26px;border-bottom:0}
+.mrp-t tr.mrp-line td{padding:10px 10px 4px 22px;border-bottom:0}
+.mrp-t tr.mrp-line span{display:inline-block;background:#3a8276;color:#fff;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px}
 .mrp-vname{padding-left:26px!important}
 .mrp-note{margin-top:8px;padding:8px 10px;background:#fff8e1;border-radius:8px;font-size:12.5px}
 @media(max-width:700px){.mrp-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -11435,6 +11436,7 @@ async function renderMRP(){
   _mrpScrollRoute=route;
   const boxes=[document.scrollingElement, document.querySelector('.main'), $('content')].filter(Boolean);
   const keep=sameRoute ? boxes.map(b=>b.scrollTop) : null;
+  try{ mrpAutosave(); }catch(e){}
   try{ return await _renderMRP(); }
   finally{
     if(keep){ const put=()=>boxes.forEach((b,i)=>{ if(keep[i]>0) b.scrollTop=keep[i]; });
@@ -12239,6 +12241,23 @@ function mrpIsFull(){ try{ return localStorage.getItem('wr_mrp_full')==='1'; }ca
 function mrpSetFull(on){ try{ localStorage.setItem('wr_mrp_full', on?'1':'0'); }catch(e){} renderMRP(); }
 /* Shop-menu order for the tabs; anything else follows, alphabetically. */
 const MRP_TAB_ORDER=['Gently Cooked','Cookable','Raw Feeding','Toppers & Supplements'];
+/* Section order and names inside each tab, as the shop menu shows them. */
+const MRP_SEC_ORDER={'Gently Cooked':['Meatballs','Single Protein','BARF Mix','Wholesome Mix'],
+  'Cookable':['PMR Mix','Single Protein','BARF Mix'],
+  'Raw Feeding':['Single Protein','BARF Mix','PMR Mix'],
+  'Toppers & Supplements':['Bone Broth','Milk','Organs','Fish','Dog Chew']};
+const MRP_SEC_NAME={'Single Protein':'Single Proteins','BARF Mix':'Dog BARF Mix','PMR Mix':'Cat PMR Mix','Wholesome Mix':'Wholesome Daily Mix',
+  'Milk':"Goat's Milk",'Fish':'Raw Fish','Dog Chew':'Dog Chews'};
+function mrpSecRank(g1,g2){ const a=MRP_SEC_ORDER[g1]||[]; const i=a.indexOf(g2); return i<0?99:i; }
+/* LOCAL SAFETY NET. Every change on this screen is kept in this browser, so a
+   brown-out or a closed tab does not lose the week's typing. It never writes to
+   the database and never replaces a saved draft or plot; it only offers to put
+   the numbers back when the screen comes up empty. */
+function mrpAutosave(){ const n=Object.keys(mrpDemand||{}).filter(k=>+mrpDemand[k]>0).length; if(!n||!MRPDATE) return;
+  try{ localStorage.setItem('wr_mrp_auto_'+MRPDATE, JSON.stringify({at:new Date().toISOString(), demand:mrpDemand, coPart:mrpCoPart||{}})); }catch(e){} }
+function mrpAutoGet(){ try{ return JSON.parse(localStorage.getItem('wr_mrp_auto_'+MRPDATE)||'null'); }catch(e){ return null; } }
+function mrpAutoRestore(){ const a=mrpAutoGet(); if(!a) return; mrpDemand=Object.assign({},a.demand||{}); mrpCoPart=Object.assign({},a.coPart||{}); toast('Numbers put back from '+String(a.at||'').slice(11,16)); renderMRP(); }
+function mrpAutoDiscard(){ try{ localStorage.removeItem('wr_mrp_auto_'+MRPDATE); }catch(e){} renderMRP(); }
 function mrpTabList(prods){ const seen={}; (prods||[]).forEach(p=>{ seen[prodG1(p)]=1; });
   return Object.keys(seen).sort((a,b)=>{ const ia=MRP_TAB_ORDER.indexOf(a), ib=MRP_TAB_ORDER.indexOf(b);
     return (ia<0?99:ia)-(ib<0?99:ib) || a.localeCompare(b); }); }
@@ -12248,7 +12267,8 @@ function mrpShowAllSet(v){ window._mrpShowAll=!!v; renderMRP(); }
 function mrpLineOf(p){ const n=String((p&&p.name)||''), g=prodG2(p);
   if(/meatball/i.test(g)){ const size=/^\s*3-?piece/i.test(n)?'Trial (3 pcs)':(/20-?piece/i.test(n)?'20 pcs':'Other');
     const kind=/wholesome mix/i.test(n)?'Wholesome Mix':(/barf/i.test(n)?'BARF Mix':'Single Protein'); return kind+' · '+size; }
-  if(/broth/i.test(g)) return /^\s*mini/i.test(n)?'Mini':'Regular';
+  if(/broth/i.test(g)) return /^\s*mini/i.test(n)?'Mini (100 ml)':'Regular (700 ml)';
+  if(/barf/i.test(g)){ const v=String((p&&p.variant)||'').trim(); const b=(v.match(/^[A-Za-z]+/)||[''])[0]; return b?b+'-Based':''; }
   return ''; }
 function mrpToggleSec(tr,k){ const b=tr.closest('tbody').nextElementSibling; if(!b) return;
   const open=b.style.display==='none'; b.style.display=open?'':'none';
@@ -12298,6 +12318,7 @@ async function mrpSimpleView(o){
   const cov=p=>{ const c=(calc[p.sku]||{}).c; return (c&&c.cover!=null&&c.cover<900)?+c.cover:null; };
   const sugg=p=>{ const c=(calc[p.sku]||{}).c; return c&&c.produce>0?+c.produce:0; };
   const focus=cat.filter(p=>make(p)>0||sugg(p)>0||(cov(p)!=null&&cov(p)<10));
+  if(window._mrpShowAll===undefined) window._mrpShowAll=true;   // every product can take a number; sections fold
   const show=window._mrpShowAll?cat:focus;
   const kMake=cat.filter(p=>make(p)>0).length, kPk=cat.reduce((a,p)=>a+make(p),0);
   const kLow=cat.filter(p=>cov(p)!=null&&cov(p)<5).length;
@@ -12323,16 +12344,19 @@ async function mrpSimpleView(o){
       <input type="search" class="mrp-search" placeholder="Search a product…" oninput="mrpFilterRows(this.value)"></div>`;
   let body='';
   const secs={}; const order=[];
-  shown.forEach(p=>{ const k=(TAB==='all'?prodG1(p)+' · ':'')+prodG2(p); if(!secs[k]){ secs[k]=[]; order.push(k); } secs[k].push(p); });
+  const secName=p=>MRP_SEC_NAME[prodG2(p)]||prodG2(p);
+  shown.forEach(p=>{ const k=(TAB==='all'?prodG1(p)+' · ':'')+secName(p); if(!secs[k]){ secs[k]=[]; order.push(k); } secs[k].push(p); });
   const tabRank=t=>{ const i=tabs.indexOf(t); return i<0?99:i; };
-  order.sort((a,b)=>{ const pa=secs[a][0], pb=secs[b][0]; return tabRank(prodG1(pa))-tabRank(prodG1(pb)) || cmpItems(pa,pb); });
+  order.sort((a,b)=>{ const pa=secs[a][0], pb=secs[b][0]; return tabRank(prodG1(pa))-tabRank(prodG1(pb)) || mrpSecRank(prodG1(pa),prodG2(pa))-mrpSecRank(prodG1(pb),prodG2(pb)) || cmpItems(pa,pb); });
   order.forEach(k=>{ const arr=secs[k].slice().sort(cmpItems);
     const pk=arr.reduce((a,p)=>a+make(p),0), low=arr.filter(p=>cov(p)!=null&&cov(p)<5).length;
     const open=window._mrpOpen&&window._mrpOpen[k]!==undefined?window._mrpOpen[k]:(pk>0||low>0);
-    const lines={}; const lo=[]; arr.forEach(p=>{ const ln=mrpLineOf(p); if(!lines[ln]){ lines[ln]=[]; lo.push(ln); } lines[ln].push(p); });
+    const lines={}; let lo=[]; arr.forEach(p=>{ const ln=mrpLineOf(p); if(!lines[ln]){ lines[ln]=[]; lo.push(ln); } lines[ln].push(p); });
+    const lnRank=l=>(/^Single Protein/.test(l)?0:/^Wholesome/.test(l)?10:/^BARF/.test(l)?20:30)+(/Trial/.test(l)?0:/20 pcs/.test(l)?1:2);
+    lo=lo.sort((a,b)=>lnRank(a)-lnRank(b));
     body+=`<tbody class="mrp-secb"><tr class="mrp-grp" onclick="mrpToggleSec(this,'${esc(k).replace(/'/g,"\\'")}')"><td colspan="4"><span class="mrp-car">${open?'▾':'▸'}</span> ${esc(k)}
         <span class="mrp-gsum">${arr.length} product(s)${pk?' · <b>'+n0(pk)+' packs</b>':''}${low?' · <span style="color:#9b2c22">'+low+' running low</span>':''}</span></td></tr></tbody>
-      <tbody class="mrp-secrows"${open?'':' style="display:none"'}>${lo.map(ln=>(ln&&lo.length>1?`<tr class="mrp-line"><td colspan="4">${esc(ln)}</td></tr>`:'')+lines[ln].map(pRow).join('')).join('')}</tbody>`; });
+      <tbody class="mrp-secrows"${open?'':' style="display:none"'}>${lo.map(ln=>(ln?`<tr class="mrp-line"><td colspan="4"><span>${esc(ln)}</span></td></tr>`:'')+lines[ln].map(pRow).join('')).join('')}</tbody>`; });
   const sec2=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>2 · Regular packs</h3>
       <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`<button class="btn sm sec" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>
@@ -12347,9 +12371,14 @@ async function mrpSimpleView(o){
   const dr=L?null:mrpDraftFor(MRPDATE);
   const drTxt=dr?(()=>{ const dd=dr.data||{}; return `<div class="mrp-note">📝 Draft saved ${esc(String(dd.saved_at||dr.saved_at||'').slice(0,16).replace('T',' '))} by <b>${esc(dd.by||dr.created_by||'someone')}</b>
       <span class="btn link" onclick="loadMRPDraft()">Load it</span> · <span class="btn link" onclick="discardMRPDraft()">Discard</span></div>`; })():'';
+  const _au=L?null:mrpAutoGet(); const _cur=Object.keys(mrpDemand||{}).filter(k=>+mrpDemand[k]>0).length;
+  const auTxt=!_au?'':(_cur===0&&Object.keys(_au.demand||{}).length
+    ? `<div class="mrp-note" style="background:#e7f2ef">↺ There are unsaved numbers on this computer from <b>${esc(String(_au.at||'').slice(0,16).replace('T',' '))}</b> (${Object.keys(_au.demand||{}).length} product(s)).
+        <span class="btn link" onclick="mrpAutoRestore()">Put them back</span> · <span class="btn link" onclick="mrpAutoDiscard()">Ignore</span></div>`
+    : `<div class="mini" style="color:var(--muted);margin-top:6px">✓ Kept on this computer as you type · ${esc(String(_au.at||'').slice(11,16))} — still press Save draft or Save plan to share it</div>`);
   const sec3=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>3 · Save and lock</h3>
       <div class="mini" style="color:var(--muted)">${L?('Locked · <b>'+esc(L.ref||'')+'</b>'+(L.saved_at?' · '+esc(String(L.saved_at).slice(0,16).replace('T',' ')):'')+' — the kitchen sees this week\'s targets'):'When the numbers are right, save the plan. It locks, and the kitchen sees the targets.'}</div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'<span class="mrp-chip ok">Locked</span>':`<button class="btn sm sec" onclick="saveMRPDraft()">📝 Save draft</button><button class="btn sm" onclick="saveMRPPlan()">💾 Save plan (locks)</button>`}</div></div>${drTxt}</section>`;
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'<span class="mrp-chip ok">Locked</span>':`<button class="btn sm sec" onclick="saveMRPDraft()">📝 Save draft</button><button class="btn sm" onclick="saveMRPPlan()">💾 Save plan (locks)</button>`}</div></div>${drTxt}${auTxt}</section>`;
   /* ---- 4 · order ingredients ---- */
   let pos=[], pl=[];
   try{ pos=((await db.list('purchase_orders',{}))||[]).filter(x=>String(x.order_date||'').slice(0,10)===MRPDATE && x.status!=='cancelled'); }catch(e){}
