@@ -11571,9 +11571,18 @@ async function _renderMRP(){
      acted on is how a kitchen ends up short on the very thing it thought it
      had covered. The plot for a locked week is read-only here; new orders wait
      for the next run, and the screen offers to go there. */
-  const _lockedPlot=(mrpPlanCache||[]).map(p=>({p, d:String(p.plan_date||p.date||'').slice(0,10)}))
+  let _lockedPlot=(mrpPlanCache||[]).map(p=>({p, d:String(p.plan_date||p.date||'').slice(0,10)}))
     .filter(x=>x.d===MRPDATE && ((x.p.data||x.p)||{}).locked)
     .map(x=>((x.p.data||x.p)||{}))[0]||null;
+  /* EDIT PLAN (Zeus, 16 Nov 2026). A locked plot is never reopened: "Edit plan"
+     copies it into the editor, and Save plan locks a NEW version that replaces
+     it (the existing override step). Allowed only while no PO has been raised
+     from it. Once the new version is saved its ref differs, so editing ends. */
+  window._mrpLockedReal=_lockedPlot;
+  if(window._mrpEditRef){
+    if(_lockedPlot && String(_lockedPlot.ref||'')===window._mrpEditRef && window._mrpEditDate===MRPDATE) _lockedPlot=null;
+    else { window._mrpEditRef=null; window._mrpEditDate=null; }
+  }
   window._mrpLocked=_lockedPlot;
   const _nextMon=(()=>{ try{ const dt=new Date(MRPDATE+'T00:00:00'); dt.setDate(dt.getDate()+7); return isoLocal(dt); }catch(e){ return ''; } })();
   window._mrpNextRun=_nextMon;
@@ -12268,6 +12277,18 @@ async function mrpStepHeader(simple){
     ${(pos.length&&!simple)?`<div class="mini" style="margin-top:8px"><a href="#/purchase_orders" onclick="openModel('purchase_orders');return false">Open the ${pos.length} purchase order(s) in Purchase Orders →</a> · Fritz sends them from there</div>`:''}
   </div>`;
 }
+async function mrpEditPlan(){
+  const L=window._mrpLockedReal; if(!L){ toast('This week is not locked',true); return; }
+  let pos=[]; try{ pos=((await db.list('purchase_orders',{}))||[]).filter(x=>String(x.order_date||'').slice(0,10)===MRPDATE && x.status!=='cancelled'); }catch(e){}
+  if(pos.length){
+    alert('Purchase orders were already made from '+(L.ref||'this plan')+' ('+pos.length+' PO).\n\nIt can no longer be changed — anything new goes into next week\'s plan ('+(window._mrpNextRun||'next week')+').');
+    return; }
+  const i=(mrpPlanCache||[]).findIndex(q=>String(q.plan_date||q.date||'').slice(0,10)===MRPDATE && ((q.data||q)||{}).locked!==false && String(((q.data||q)||{}).ref||q.ref||'')===String(L.ref||''));
+  if(i<0){ toast('Could not find the locked plan',true); return; }
+  window._mrpEditRef=String(L.ref||''); window._mrpEditDate=MRPDATE;
+  loadMRPPlan(i);
+}
+function mrpEditCancel(){ window._mrpEditRef=null; window._mrpEditDate=null; mrpDemand={}; mrpCoPart={}; mrpManual={}; mrpAdd={}; mrpRemarks={}; renderMRP(); }
 function mrpIsFull(){ try{ return localStorage.getItem('wr_mrp_full')==='1'; }catch(e){ return false; } }
 function mrpSetFull(on){ try{ localStorage.setItem('wr_mrp_full', on?'1':'0'); }catch(e){} renderMRP(); }
 /* Shop-menu order for the tabs; anything else follows, alphabetically. */
@@ -12326,7 +12347,8 @@ async function mrpSimpleView(o){
   const calc=window._mrpCalc||{};
   /* ---- 1 · custom orders ---- */
   const coSk=Object.keys(co).filter(s=>(+(co[s]||{}).packs||0)>0);
-  const fresh=coSk.filter(s=>!(o.coDone||{})[s]).sort((a,b)=>String(co[a].needed||'9999').localeCompare(String(co[b].needed||'9999')));
+  const _editing=!!window._mrpEditRef;
+  const fresh=coSk.filter(s=>_editing||!(o.coDone||{})[s]).sort((a,b)=>String(co[a].needed||'9999').localeCompare(String(co[b].needed||'9999')));
   const doneN=coSk.length-fresh.length;
   const coCust=new Set(); fresh.forEach(s=>(co[s].orders||[]).forEach(x=>coCust.add(x.customer||x.ref)));
   const coPk=fresh.reduce((a,s)=>a+(+co[s].packs||0),0);
@@ -12418,7 +12440,10 @@ async function mrpSimpleView(o){
     : `<div class="mini" style="color:var(--muted);margin-top:6px">✓ Kept on this computer as you type · ${esc(String(_au.at||'').slice(11,16))} — still press Save draft or Save plan to share it</div>`);
   const sec3=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>3 · Save and lock</h3>
       <div class="mini" style="color:var(--muted)">${L?('Locked · <b>'+esc(L.ref||'')+'</b>'+(L.saved_at?' · '+esc(String(L.saved_at).slice(0,16).replace('T',' ')):'')+' — the kitchen sees this week\'s targets'):'When the numbers are right, save the plan. It locks, and the kitchen sees the targets.'}</div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'<span class="mrp-chip ok">Locked</span>':`<button class="btn sm sec" onclick="saveMRPDraft()">📝 Save draft</button><button class="btn sm" onclick="saveMRPPlan()">💾 Save plan (locks)</button>`}</div></div>${drTxt}${auTxt}</section>`;
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${L?`<span class="mrp-chip ok">Locked</span><button class="btn sm sec" onclick="mrpEditPlan()">✏️ Edit plan</button>`
+        :(_editing?`<button class="btn sm sec" onclick="mrpEditCancel()">Cancel editing</button><button class="btn sm" onclick="saveMRPPlan()">💾 Save as new version (locks)</button>`
+        :`<button class="btn sm sec" onclick="saveMRPDraft()">📝 Save draft</button><button class="btn sm" onclick="saveMRPPlan()">💾 Save plan (locks)</button>`)}</div></div>
+      ${_editing?`<div class="mrp-note">✏️ Editing <b>${esc(window._mrpEditRef)}</b>. Change custom orders or packs, then save — it locks a new version that replaces this one. Nothing changes until you save.</div>`:''}${drTxt}${auTxt}</section>`;
   /* ---- 4 · order ingredients ---- */
   let pos=[], pl=[];
   try{ pos=((await db.list('purchase_orders',{}))||[]).filter(x=>String(x.order_date||'').slice(0,10)===MRPDATE && x.status!=='cancelled'); }catch(e){}
