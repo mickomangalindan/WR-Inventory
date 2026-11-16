@@ -10359,7 +10359,7 @@ function wdtPrint(which){
    ingredient with a 7-day lead and a 7-day review must be ordered while it
    still holds 14 days, or it runs dry waiting for the van — so the real
    threshold is whichever is larger, and the screen names which one applied. */
-const RP_DEF={ on:1, review:7, leadMin:7, leadCap:30, cushion:0.5, win:60, procOn:1, shelfOn:1, minG:0, leadN:5, spike:0, minCoverD:8 };
+const RP_DEF={ on:1, review:7, leadMin:7, leadCap:30, cushion:0.5, win:60, procOn:1, shelfOn:1, minG:0, leadN:5, spike:0, minCoverD:7 };
 let RP=Object.assign({},RP_DEF);
 try{ RP=Object.assign({},RP_DEF,JSON.parse(localStorage.getItem('wr_rawpar')||'{}')); }catch(e){}
 /* SETTINGS LIVE IN THE DATABASE, NOT IN A BROWSER.  The pack-request settings
@@ -11990,6 +11990,19 @@ async function _renderMRP(){
       lowStock = (endInv < 0) || (endInv <= RAW_REORDER_G && (rawNeed>0 || avail>0));
       target = lowStock ? (rawNeed + RAW_REORDER_G + leadBuf) : 0;
     }
+    /* ---- NO STOCK CUSHION: BUY THIS WEEK AND NEXT, NOTHING MORE (Zeus, 16 Nov) --
+       Crocodile is expensive and only reaches Bulacan on the Saturday truck, so
+       anything ordered now is cooked the Monday after. It carries no par: buy
+       only when stock cannot cover this week's need PLUS next week's usual use,
+       and then only the shortfall, rounded to its minimum (20 kg). Marked on the
+       ingredient by the note "no stock cushion" (7 Nov), the same flag the
+       reorder view reads. */
+    const _noCush=/no stock cushion/i.test(String(it.notes||''));
+    if(_noCush){
+      const nextWk=(+C.perDay||0)*7;
+      leadBuf=nextWk; trigger=0; target=rawNeed+nextWk;
+      lowStock=(avail < rawNeed+nextWk);
+    }
     if(!lowStock && manualKg<=0 && added<=0) return;          // above the trigger, nothing added → nothing to order
     const buf=trigger;
     const base = lowStock ? Math.max(0, target - avail) : 0;   // order = target − on hand − on order − WIP
@@ -12009,10 +12022,15 @@ async function _renderMRP(){
        added to the plot by name, is never suppressed — that is a buyer making
        a deliberate call and the plan has no business overruling it. */
     const coverAfter = (C.perDay>0) ? ((avail-rawNeed)/C.perDay) : null;
-    const needDays   = Math.max(0,+RP.minCoverD||0, (+RP.review||0) + (+lead||0));
+    /* 16 Nov 2026 (Zeus): the threshold is the item's own lead — how long until
+       an order placed today can be cooked — not review + lead. Fast suppliers
+       (Mayee, EDL, Jojo, SVC) carry 7 days and wait while 7+ days are left;
+       Saturday-pickup suppliers (Frozen Farm, Golden Acre, Coral) carry 14,
+       because an order placed now is cooked the Monday after next Saturday. */
+    const needDays   = Math.max(0,+RP.minCoverD||0, (+lead||0));
     let tooSmall=false;
     if(final>0 && coverAfter!=null && needDays>0 && coverAfter>=needDays
-       && manualKg<=0 && added<=0 && !sup){
+       && manualKg<=0 && added<=0 && !sup && !_noCush){
       tooSmall=true; final=0; }
     // A supply is counted in whole units, not grams, and is never rounded to a pack size.
     if(sup) final=added;
@@ -12022,7 +12040,7 @@ async function _renderMRP(){
     if(tooSmall) _rpTooSmall.push({sku:it.sku, name:it.name,
       wanted:Math.round(subtotal)/1000, days:Math.round(coverAfter*10)/10,
       needDays:Math.round(needDays*10)/10, lead,
-      byLead:(((+RP.review||0)+(+lead||0)) > (+RP.minCoverD||0))});
+      byLead:((+lead||0) > (+RP.minCoverD||0))});
     plan.push({sku:it.sku,name:it.name,rawNeed,par:buf,leadBuf,lead,oh,inc,wip,target,trigger,tooSmall,coverAfter,needDays,
       perWeek:C.perWeek,perDay:C.perDay,capped:C.capped,shelf:C.shelf,manualPar:C.manual,leadKnown:C.leadKnown,leadSrc:C.leadSrc,leadN:C.leadN,
       cover:(C.perDay>0?(avail/C.perDay):null),coverAfter:(C.perDay>0?(Math.max(avail,target)/C.perDay):null),
@@ -12039,7 +12057,7 @@ async function _renderMRP(){
     ${(window._rpTooSmall||[]).length?`<div class="hint" style="margin:6px 0 0">
       <b>${window._rpTooSmall.length} line(s) can wait for next week's plot</b> and are not on the plan below — each still has enough left, after this week's production, to outlast the next buying round.
       <div class="mini" style="margin-top:3px">${window._rpTooSmall.slice(0,8).map(x=>esc(x.name)+' — '+x.wanted+' kg wanted, but '+x.days+' days still left after this week'+(x.byLead?(' · needs '+x.needDays+' days because its lead time is '+x.lead+'d'):(' · the floor is '+x.needDays+' days'))).join('<br>')}${window._rpTooSmall.length>8?('<br>…and '+(window._rpTooSmall.length-8)+' more'):''}</div>
-      <div class="mini" style="margin-top:3px;color:var(--muted)">Type a quantity against any of them to buy it anyway — a figure you type is never held back. The threshold is <b>Buy under (days)</b> above, or review + the item's own lead time, whichever is longer.</div></div>`:''}
+      <div class="mini" style="margin-top:3px;color:var(--muted)">Type a quantity against any of them to buy it anyway — a figure you type is never held back. The threshold is <b>Buy under (days)</b> above, or the item's own lead time (7 days for most suppliers, 14 for Saturday-pickup ones), whichever is longer.</div></div>`:''}
     ${(+RP.spike)?`<div class="hint" style="border-left:4px solid var(--earth,#b5762a);margin:6px 0 0">The lead-time buffer is being sized on <b>this week's demand</b>, not on the steady rate. A week running above the normal rate will buy a proportionally bigger buffer and still be holding it weeks later — on 3 Oct that put <b>79 days</b> of cover on buffalo. Switch it to <b>steady rate</b> unless you have a reason.</div>`:''}
     <div class="hint" style="margin:0 0 8px">${RP_ON
       ? `Every ingredient has its <b>own</b> ceiling now, worked out from how fast it is actually used — not one 5 kg line for all of them.
