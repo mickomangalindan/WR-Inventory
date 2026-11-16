@@ -4798,7 +4798,7 @@ function shSyncAgeRefresh(){
   e.style.color=stale?'var(--danger)':'var(--muted)';
   e.textContent=shAgeText()+(SHSYNC.url?'':' · screen only');
 }
-async function shSyncNow(){
+async function shSyncNow(quiet){
   const b=$('sh_syncbtn'); if(b){ b.disabled=true; b.textContent='⏳ Syncing…'; }
   let pulled=false, why='';
   if(SHSYNC.url){
@@ -4819,6 +4819,8 @@ async function shSyncNow(){
   try{ await stockPicture(true); }catch(e){}
   if(b){ b.disabled=false; b.textContent='🔄 Sync Shopify'; }
   shSyncAgeRefresh();
+  /* quiet = called by Pull the week: no page redraw here, the pull draws next */
+  if(quiet) return {pulled, why};
   if(SHSYNC.url && pulled) toast('Pulled from Shopify'+(why?(' · '+why):'')+' · '+shAgeText());
   else if(SHSYNC.url)      toast('Could not pull from Shopify — showing the last saved reading ('+shAgeText()+'). '+why, true);
   else                     toast('Re-read the saved Shopify figures · '+shAgeText()
@@ -12451,7 +12453,7 @@ async function mrpSimpleView(o){
       <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`<button class="btn sm sec" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>
       <button class="btn sm" onclick="mrpPullPackReq()">🧮 Pull the week</button>`}</div></div>
-    ${L?'':`<div class="mrp-sync">${shSyncBtn()}</div>`}
+    ${L?'':(SHSYNC.url?`<div class="mrp-sync mini" style="color:var(--muted)">Pull the week gets the latest Shopify stock first · last reading <span id="sh_syncage">${esc(shAgeText())}</span></div>`:`<div class="mrp-sync">${shSyncBtn()}</div>`)}
     <div class="mrp-kpis"><div><span>Products to make</span><b>${kMake}</b></div><div><span>Packs to make</span><b>${n0(kPk)}</b></div>
       <div><span>Running low (under 5 days)</span><b>${kLow}</b></div><div><span>Can wait</span><b>${kWait}</b></div></div>
     ${tabBar}
@@ -13125,6 +13127,14 @@ async function mrpPullPackReq(){
       +'Ingredients have been bought against that plot and the run is scheduled from it, so it cannot take more work now.\n\n'
       +'Plan into the next run: '+(window._mrpNextRun||'the following week')+'.');
     return;
+  }
+  /* FRESH NUMBERS FIRST (Zeus, 17 Nov 2026). With the pull link set up, ask
+     Shopify for stock right now; if that fails the pull still runs on the last
+     hourly copy and says how old it is. */
+  if(SHSYNC.url){
+    showBusy('Getting the latest stock from Shopify…');
+    try{ const r=await shSyncNow(true);
+      if(r && !r.pulled) toast('Could not reach Shopify just now — using the last saved stock ('+shAgeText()+').', true); }catch(e){}
   }
   showBusy('Reading the orders, then the shelf…');
   let co={}; let coErr=''; let coFull={};
