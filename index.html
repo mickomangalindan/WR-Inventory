@@ -390,6 +390,23 @@ body.lean .hint{display:none!important}
 .mrp-att{margin-top:12px;background:#fff8ec;border:1px solid #f1dcb5;border-radius:12px;padding:10px 14px;font-size:13px;color:#3d2a08}
 .mrp-attrow{display:flex;gap:10px;align-items:baseline;margin-top:6px}
 .mrp-bul{width:6px;height:6px;border-radius:999px;background:#b26a00;flex:none;transform:translateY(-2px)}
+.mrp-simple{max-width:1100px}
+.mrp-sec{background:#fff;border:1px solid #e6ebea;border-radius:12px;padding:16px 18px;margin-top:14px}
+.mrp-sechead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.mrp-sec h3{margin:0 0 2px;font-size:16px}
+.mrp-t{width:100%;border-collapse:collapse}
+.mrp-t th{font-weight:500;font-size:12px;color:#5f6b68;text-transform:none;letter-spacing:0;background:none;border-bottom:1px solid #e6ebea;padding:8px 10px}
+.mrp-t td{padding:9px 10px;border-bottom:1px solid #f0f3f2;vertical-align:middle}
+.mrp-t tr.mrp-grp td{background:#f6faf9;color:#1f5248;font-weight:600;font-size:12.5px;padding:6px 10px}
+.mrp-in{width:84px;text-align:right;padding:6px 8px;border:1px solid #cfd8d6;border-radius:8px}
+.mrp-in:focus{outline:none;border-color:#3a8276;box-shadow:0 0 0 3px #e7f2ef}
+.mrp-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px}
+.mrp-kpis>div{background:#f6faf9;border-radius:10px;padding:10px 12px}
+.mrp-kpis span{display:block;font-size:12px;color:#5f6b68}.mrp-kpis b{font-size:20px;color:#1d2624}
+.mrp-lasts{display:inline-block;min-width:46px;padding:2px 8px;border-radius:999px;font-size:12.5px;font-weight:600}
+.mrp-lr{background:#fdecea;color:#9b2c22}.mrp-ly{background:#fff3dd;color:#7a4a06}.mrp-lg{background:#e7f2ef;color:#1f5248}.mrp-lz{color:#8c887e}
+.mrp-note{margin-top:8px;padding:8px 10px;background:#fff8e1;border-radius:8px;font-size:12.5px}
+@media(max-width:700px){.mrp-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .mrp-more>summary{cursor:pointer;font-weight:600;color:#3b4744;padding:10px 0}
 body.lean .leanoff{display:none!important}
 /* ---- A COG FOR SETTINGS --------------------------------------------------
@@ -12135,6 +12152,26 @@ async function _renderMRP(){
   let _pre=''; try{ _pre=await planReadyCard(true); }catch(e){ console.warn('preflight',String(e&&e.message||e)); }
   let _head=''; try{ _head=await mrpStepHeader(); }catch(e){ console.warn('mrp head',String(e&&e.message||e)); }
   const _notes=(()=>{ try{ return localStorage.getItem('wr_mrp_notes')==='1'; }catch(e){ return false; } })();
+  /* SIMPLE VIEW IS THE DEFAULT. It is drawn from the same numbers this
+     function just worked out and every box and button calls the same function
+     the full screen calls (mrpSetDem, mrpPullPackReq, mrpPullCustom,
+     saveMRPDraft, saveMRPPlan, generatePOsFromMRP). "Full view" shows the
+     whole working screen exactly as before. */
+  if(!mrpIsFull()){
+    let _simple='';
+    try{ _simple=await mrpSimpleView({coAll, coDone, nCoPend, locked:_lockedPlot, nextMon:_nextMon, pName:_pName, catalogue}); }
+    catch(e){ console.warn('mrp simple',String(e&&e.message||e)); _simple=''; }
+    if(_simple){
+      $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
+        <button class="btn sec" onclick="renderDemandHistory()">📚 History</button>
+        <button class="btn sec" onclick="mrpDemandCheck()" title="Every demand line turned into ingredients — view or download as Excel">📋 Demand check</button>
+        ${shSyncBtn()}
+        <div class="sp"></div><button class="btn sec" onclick="mrpSetFull(true)" title="The whole working screen: every column, every check, the ingredient table you can adjust">Full view</button>`;
+      $('content').innerHTML=_simple;
+      return;
+    }
+  }
+  $('cp').insertAdjacentHTML('beforeend',`<button class="btn sec" onclick="mrpSetFull(false)" title="back to the four simple steps">← Simple view</button>`);
   $('content').innerHTML=`<div id="mrpClean" class="${_notes?'':'mrp-clean'}">`+_head+dh+rh
     +`<details class="mrp-more" style="margin-top:18px"><summary>More details — data checks, minimum orders, lead times, plot history</summary>`
     +_pre+_more+`</details></div>`;
@@ -12142,7 +12179,7 @@ async function _renderMRP(){
 /* The four steps of a planning week, read from what is already on screen:
    custom orders → regular packs → saved and locked → POs raised. Plus at most
    three things that need a person, each with a button. */
-async function mrpStepHeader(){
+async function mrpStepHeader(simple){
   const L=window._mrpLocked||null;
   const co=window._mrpCoAll||{};
   const coSk=Object.keys(co).filter(s=>(+(co[s]||{}).packs||0)>0);
@@ -12168,7 +12205,7 @@ async function mrpStepHeader(){
   return `<div class="mrp-head">
     <div class="mrp-headrow"><div><div class="mini" style="color:var(--muted)">Demand plan</div>
       <div class="mrp-title">Week of ${esc((()=>{ try{ return new Date(MRPDATE+'T00:00:00').toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}); }catch(e){ return MRPDATE; } })())}</div></div>${lockTxt}
-      <button class="btn sec sm" style="margin-left:auto" onclick="mrpToggleNotes()">${document.getElementById('mrpClean')&&!document.getElementById('mrpClean').classList.contains('mrp-clean')?'Hide notes':'Show notes'}</button></div>
+      ${simple?'':`<button class="btn sec sm" style="margin-left:auto" onclick="mrpToggleNotes()">${document.getElementById('mrpClean')&&!document.getElementById('mrpClean').classList.contains('mrp-clean')?'Hide notes':'Show notes'}</button>`}</div>
     <ol class="mrp-steps">
       ${step(1,'Custom orders', coCust.size+' customer(s) · '+coPk+' pack(s)', done.co)}
       ${step(2,'Regular packs', reg.length?(reg.length+' product(s) · '+Math.max(0,Math.round(regPk))+' pack(s)'):'press Pull the week', done.reg)}
@@ -12176,8 +12213,110 @@ async function mrpStepHeader(){
       ${step(4,'Order ingredients', pos.length?(pos.length+' PO(s) made'):(plan.length?plan.length+' line(s) to order':'nothing to order yet'), done.po)}
     </ol>
     ${att.length?`<div class="mrp-att"><b>Needs attention · ${att.length}</b>${att.slice(0,3).map(a=>`<div class="mrp-attrow"><span class="mrp-bul"></span><span>${a[0]}<span class="mini" style="color:var(--muted)"> — ${a[1]}</span></span></div>`).join('')}</div>`:''}
-    ${pos.length?`<div class="mini" style="margin-top:8px"><a href="#/purchase_orders" onclick="openModel('purchase_orders');return false">Open the ${pos.length} purchase order(s) in Purchase Orders →</a> · Fritz sends them from there</div>`:''}
+    ${(pos.length&&!simple)?`<div class="mini" style="margin-top:8px"><a href="#/purchase_orders" onclick="openModel('purchase_orders');return false">Open the ${pos.length} purchase order(s) in Purchase Orders →</a> · Fritz sends them from there</div>`:''}
   </div>`;
+}
+function mrpIsFull(){ try{ return localStorage.getItem('wr_mrp_full')==='1'; }catch(e){ return false; } }
+function mrpSetFull(on){ try{ localStorage.setItem('wr_mrp_full', on?'1':'0'); }catch(e){} renderMRP(); }
+function mrpShowAllToggle(){ window._mrpShowAll=!window._mrpShowAll; renderMRP(); }
+/* The simple Demand / MRP page (Zeus, 16 Nov 2026). Four sections, one job
+   each. Reads only what _renderMRP already worked out; changes nothing itself. */
+async function mrpSimpleView(o){
+  const co=o.coAll||{}, L=o.locked, nm=o.pName||{};
+  const n0=v=>Math.round(+v||0).toLocaleString('en-PH');
+  const peso=v=>'₱'+Math.round(+v||0).toLocaleString('en-PH');
+  const dShort=d=>{ try{ return d?new Date(String(d).slice(0,10)+'T00:00:00').toLocaleDateString('en-PH',{month:'short',day:'numeric'}):'—'; }catch(e){ return d||'—'; } };
+  const calc=window._mrpCalc||{};
+  /* ---- 1 · custom orders ---- */
+  const coSk=Object.keys(co).filter(s=>(+(co[s]||{}).packs||0)>0);
+  const fresh=coSk.filter(s=>!(o.coDone||{})[s]).sort((a,b)=>String(co[a].needed||'9999').localeCompare(String(co[b].needed||'9999')));
+  const doneN=coSk.length-fresh.length;
+  const coCust=new Set(); fresh.forEach(s=>(co[s].orders||[]).forEach(x=>coCust.add(x.customer||x.ref)));
+  const coPk=fresh.reduce((a,s)=>a+(+co[s].packs||0),0);
+  const coRows=fresh.map(s=>{ const c=co[s]; const inD=mrpIsCoRegular(s)?mrpCoPartOf(s):(+mrpDemand[s]||0);
+    const late=c.needed && c.needed<todayISO();
+    const who=(c.orders||[]).map(x=>x.customer).filter((v,i,a)=>v&&a.indexOf(v)===i).join(', ')||'—';
+    const refs=(c.orders||[]).map(x=>x.ref).join(', ');
+    const flag=(window._mrpCoDoneSku||{})[s]?'<div class="mini" style="color:var(--danger)">⚠ looks delivered — check first</div>':'';
+    const box=L?`<span class="mini" style="color:var(--muted)">${inD||0}</span>`
+      :`<input type="number" step="any" inputmode="decimal" class="mrp-in" value="${inD>0?inD:''}" placeholder="${c.packs}" onchange="mrpSetDem('${esc(s)}',this.value,1)" title="a customer's own quantity — never rounded">`;
+    return `<tr><td><b>${esc(who)}</b><div class="mini" style="color:var(--muted)">${esc(refs)}</div>${flag}</td>
+      <td>${esc(nm[s]||s)}<div class="mini" style="color:var(--muted)"><code>${esc(s)}</code></div></td>
+      <td class="mini" style="white-space:nowrap;${late?'color:var(--danger);font-weight:600':''}">${esc(dShort(c.needed))}${late?' · late':''}</td>
+      <td class="num">${n0(c.packs)}</td><td class="num">${box}</td></tr>`; }).join('');
+  const coBtn=o.nCoPend?(L
+      ?`<button class="btn sm sec" onclick="mrpGoDate('${esc(o.nextMon)}')">Plan the ${o.nCoPend} new one(s) next week →</button>`
+      :`<button class="btn sm" onclick="mrpPullCustom()">＋ Add the ${o.nCoPend} not yet in this plan</button>`):'';
+  const sec1=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>1 · Custom orders</h3>
+      <div class="mini" style="color:var(--muted)">${fresh.length?(coCust.size+' customer(s) · '+n0(coPk)+' pack(s) to plan'):'Nothing new to plan'}${doneN?(' · '+doneN+' already planned'):''}</div></div>${coBtn}</div>
+    ${fresh.length?`<div style="overflow-x:auto"><table class="mrp-t"><thead><tr><th>Customer</th><th>Product</th><th>Needed</th><th class="num">Ordered</th><th class="num">In this plan</th></tr></thead><tbody>${coRows}</tbody></table></div>`
+      :`<div class="mini" style="color:var(--muted);padding:4px 0">✅ No custom order needs ingredients this week.</div>`}</section>`;
+  /* ---- 2 · regular packs ---- */
+  const cat=(o.catalogue||[]).filter(p=>!/^CUST-/i.test(p.sku));
+  const make=p=>Math.max(0,(+mrpDemand[p.sku]||0)-mrpCoPartOf(p.sku));
+  const cov=p=>{ const c=(calc[p.sku]||{}).c; return (c&&c.cover!=null&&c.cover<900)?+c.cover:null; };
+  const sugg=p=>{ const c=(calc[p.sku]||{}).c; return c&&c.produce>0?+c.produce:0; };
+  const focus=cat.filter(p=>make(p)>0||sugg(p)>0||(cov(p)!=null&&cov(p)<10));
+  const show=window._mrpShowAll?cat:focus;
+  const kMake=cat.filter(p=>make(p)>0).length, kPk=cat.reduce((a,p)=>a+make(p),0);
+  const kLow=cat.filter(p=>cov(p)!=null&&cov(p)<5).length;
+  const kWait=cat.filter(p=>((calc[p.sku]||{}).c||{}).deferred).length;
+  const tone=d=>d==null?'mrp-lz':d<5?'mrp-lr':d<10?'mrp-ly':'mrp-lg';
+  const pRow=p=>{ const X=calc[p.sku]||{}; const r=X.r||{}, c=X.c||{}; const d=cov(p), m=make(p), sg=sugg(p);
+    const _to=(window._mrpPhase||{})[p.sku];
+    const box=L?`<b>${m||'—'}</b>`:`<input type="number" step="1" inputmode="numeric" class="mrp-in" value="${m>0?m:''}" onchange="mrpSetDem('${esc(p.sku)}',this.value)" title="rounds up to ${DEM_MIN} minimum, then steps of ${DEM_INC}">`;
+    return `<tr><td>${esc(prodLabel({...p},{noSku:true}))}<div class="mini" style="color:var(--muted)"><code>${esc(p.sku)}</code>${_to?' · <span style="color:var(--earth,#b5762a)">phasing out</span>':''}</div></td>
+      <td class="num"><b>${n0(c.cur)}</b><div class="mini" style="color:var(--muted)">Pasig ${n0(r.shop)} · Bulacan ${n0(r.other)}</div></td>
+      <td class="num"><span class="mrp-lasts ${tone(d)}">${d==null?'—':(Math.round(d*10)/10)+' d'}</span></td>
+      <td class="num">${box}${mrpCoPartOf(p.sku)>0?`<div class="mini" style="color:var(--muted)">+ ${mrpCoPartOf(p.sku)} custom</div>`:''}${sg>0&&sg!==m?`<div class="mini" style="color:var(--muted)">suggested ${n0(sg)}</div>`:''}${c.deferred&&!m?'<div class="mini" style="color:#3a8276">can wait</div>':''}</td></tr>`; };
+  let body='';
+  hierGroups(pgRows(show),{g1:'_g1',g2:'_g2'}).forEach(G=>{
+    body+=`<tr class="mrp-grp"><td colspan="4">${esc(G.g1)}</td></tr>`;
+    G.subs.forEach(S=>{ body+=S.items.map(pRow).join(''); }); });
+  const sec2=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>2 · Regular packs</h3>
+      <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs</div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`<button class="btn sm sec ${demStepOn()?'':''}" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>
+      <button class="btn sm" onclick="mrpPullPackReq()">🧮 Pull the week</button>`}</div></div>
+    <div class="mrp-kpis"><div><span>Products to make</span><b>${kMake}</b></div><div><span>Packs to make</span><b>${n0(kPk)}</b></div>
+      <div><span>Running low (under 5 days)</span><b>${kLow}</b></div><div><span>Can wait</span><b>${kWait}</b></div></div>
+    ${show.length?`<div style="overflow-x:auto"><table class="mrp-t"><thead><tr><th>Product</th><th class="num">In stock</th><th class="num">Lasts</th><th class="num">Make</th></tr></thead><tbody>${body}</tbody></table></div>`
+      :`<div class="mini" style="color:var(--muted);padding:6px 0">Nothing to make or running low. Press <b>Pull the week</b> to start.</div>`}
+    ${cat.length>focus.length||window._mrpShowAll?`<div style="margin-top:8px"><span class="btn link" onclick="mrpShowAllToggle()">${window._mrpShowAll?'Show only what matters':'Show all '+cat.length+' products'}</span></div>`:''}</section>`;
+  /* ---- 3 · save and lock ---- */
+  const dr=L?null:mrpDraftFor(MRPDATE);
+  const drTxt=dr?(()=>{ const dd=dr.data||{}; return `<div class="mrp-note">📝 Draft saved ${esc(String(dd.saved_at||dr.saved_at||'').slice(0,16).replace('T',' '))} by <b>${esc(dd.by||dr.created_by||'someone')}</b>
+      <span class="btn link" onclick="loadMRPDraft()">Load it</span> · <span class="btn link" onclick="discardMRPDraft()">Discard</span></div>`; })():'';
+  const sec3=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>3 · Save and lock</h3>
+      <div class="mini" style="color:var(--muted)">${L?('Locked · <b>'+esc(L.ref||'')+'</b>'+(L.saved_at?' · '+esc(String(L.saved_at).slice(0,16).replace('T',' ')):'')+' — the kitchen sees this week\'s targets'):'When the numbers are right, save the plan. It locks, and the kitchen sees the targets.'}</div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'<span class="mrp-chip ok">Locked</span>':`<button class="btn sm sec" onclick="saveMRPDraft()">📝 Save draft</button><button class="btn sm" onclick="saveMRPPlan()">💾 Save plan (locks)</button>`}</div></div>${drTxt}</section>`;
+  /* ---- 4 · order ingredients ---- */
+  let pos=[], pl=[];
+  try{ pos=((await db.list('purchase_orders',{}))||[]).filter(x=>String(x.order_date||'').slice(0,10)===MRPDATE && x.status!=='cancelled'); }catch(e){}
+  if(pos.length){ try{ const refs={}; pos.forEach(x=>refs[x.po_ref]=1); pl=((await db.list('po_lines',{}))||[]).filter(l=>refs[l.po_ref]); }catch(e){} }
+  const plan=(window._mrpPlan||[]).filter(l=>(+l.final||0)>0);
+  let sec4body='';
+  if(pos.length){
+    const tot=pos.reduce((a,x)=>a+pl.filter(l=>l.po_ref===x.po_ref).reduce((b,l)=>b+(+l.ordered_kg||0)*(+l.price_kg||0),0),0);
+    sec4body=`<div class="mini" style="color:var(--muted);margin-bottom:6px">${pos.length} PO(s) · ${peso(tot)} · Fritz sends them from Purchase Orders</div>
+      <table class="mrp-t"><tbody>${pos.map(x=>{ const ls=pl.filter(l=>l.po_ref===x.po_ref); const v=ls.reduce((b,l)=>b+(+l.ordered_kg||0)*(+l.price_kg||0),0);
+        return `<tr><td><b>${esc(x.supplier_name||'—')}</b><div class="mini" style="color:var(--muted)">${esc(x.po_ref)} · ${ls.length} item(s)</div></td><td><span class="mrp-chip">${esc(x.status||'')}</span></td><td class="num">${peso(v)}</td></tr>`; }).join('')}</tbody></table>
+      <div style="margin-top:8px"><a href="#/purchase_orders" onclick="openModel('purchase_orders');return false">Open in Purchase Orders →</a></div>`;
+  } else {
+    const bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no supplier set)'; (bySup[s]=bySup[s]||[]).push(l); });
+    const sups=Object.keys(bySup).map(s=>({s, n:bySup[s].length, v:bySup[s].reduce((a,l)=>a+(l.final/1000)*(+l.price||0),0)})).sort((a,b)=>b.v-a.v);
+    const tot=sups.reduce((a,x)=>a+x.v,0);
+    sec4body=`<div class="mini" style="color:var(--muted);margin-bottom:6px">${plan.length?(plan.length+' ingredient(s) from '+sups.length+' supplier(s) · about '+peso(tot)):'Nothing to buy yet.'}
+        ${L?'':' · lock the plan first, then the orders are made from it'}</div>
+      ${sups.length?`<table class="mrp-t"><tbody>${sups.map(x=>`<tr><td><b>${esc(x.s)}</b><div class="mini" style="color:var(--muted)">${x.n} item(s)</div></td><td class="num">${peso(x.v)}</td></tr>`).join('')}</tbody></table>`:''}
+      <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        ${L&&canRaisePO()?`<button class="btn sm" onclick="generatePOsFromMRP()">🧾 Make the purchase orders</button>`:''}
+        ${L&&!canRaisePO()?'<span class="mini" style="color:var(--muted)">Purchasing makes the orders from the locked plan.</span>':''}
+        <span class="btn link" onclick="mrpSetFull(true)">See or change each ingredient →</span></div>`;
+  }
+  const sec4=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>4 · Order ingredients</h3></div></div>${sec4body}</section>`;
+  let head=''; try{ head=await mrpStepHeader(true); }catch(e){}
+  return `<div class="mrp-simple">${head}${sec1}${sec2}${sec3}${sec4}
+    <div class="mini" style="color:var(--muted);text-align:center;margin:14px 0 4px">Need every column, the checks, phasing-out or supply-led lines? <span class="btn link" onclick="mrpSetFull(true)">Open full view</span></div></div>`;
 }
 function mrpToggleNotes(){
   const el=document.getElementById('mrpClean'); if(!el) return;
