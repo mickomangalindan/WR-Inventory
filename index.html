@@ -11433,9 +11433,16 @@ async function renderMRP(){
   const _nextMon=(()=>{ try{ const dt=new Date(MRPDATE+'T00:00:00'); dt.setDate(dt.getDate()+7); return isoLocal(dt); }catch(e){ return ''; } })();
   window._mrpNextRun=_nextMon;
   const coPend={};
+  /* "Add all" skips a SKU when every order owing it looks delivered — the same
+     test ↻ Compute asks about (mrpCoLooksDone). Adding one by hand still works. */
+  let _coDoneSku={};
+  try{ const _fl=await mrpCoLooksDone(coAll);
+    Object.keys(coAll).forEach(s=>{ const os=((coAll[s]||{}).orders)||[];
+      if(os.length && os.every(o=>_fl.some(f=>f.ref===o.ref && f.sku===s))) _coDoneSku[s]=true; }); }catch(e){}
+  window._mrpCoDoneSku=_coDoneSku;
   // "Add all" only ever pulls the ones that are NOT already planned somewhere.
   Object.keys(coAll).forEach(s=>{ const _have=mrpIsCoRegular(s)?mrpCoPartOf(s):(+mrpDemand[s]||0);
-    if(coFresh[s] && _have!==coAll[s].packs) coPend[s]=coAll[s].packs; });
+    if(coFresh[s] && !_coDoneSku[s] && _have!==coAll[s].packs) coPend[s]=coAll[s].packs; });
   window._mrpCoPend=coPend;
   const nCoPend=Object.keys(coPend).length;
   const _pName={}; prods.forEach(p=>{ _pName[p.sku]=prodLabel(p,{noSku:true})||p.sku; });
@@ -12141,7 +12148,7 @@ let mrpPlanCache=[];
 async function mrpPlans(opts){
   const withDrafts=!!(opts&&opts.drafts);
   let rows;
-  if(isLive()){ try{ rows=await sb('mrp_plans?select=*&order=saved_at.desc&limit=30'); }catch(e){ return []; } }
+  if(isLive()){ try{ rows=await sb('mrp_plans?select=*&order=saved_at.desc&limit=30'); }catch(e){ if(opts&&opts.strict) throw e; return []; } }
   else rows=JSON.parse(localStorage.getItem('wr_mrp_plans')||'[]');
   rows=rows||[];
   /* NEWEST SAVED FIRST, IN BOTH MODES. The live read orders by saved_at desc;
@@ -12544,6 +12551,90 @@ async function confirmSaveMRPPlan(hasExisting){
                  the par calculation is not allowed to overwrite a commitment.
 
    Nothing is written to the database until the plot is saved. */
+/* ---- AN ORDER THAT LOOKS DELIVERED DOES NOT GO BACK ON THE BUYING LIST ----
+   16 Nov 2026: Compute put six orders on DP-11162026 that had already been
+   handed over — Roslin Galang (delivery 12 Nov), Teps Perez ×2, Joysie
+   Rufino, Dana Uson, Lea Francisco. None had been marked Completed. Roslin's
+   40 packs left Bulacan with no production logged; the others were repeat
+   orders filled from earlier packs. The pull reads "not completed" as "still
+   owed", so every Compute bought their meat again — 23 kg of duck on that
+   plot alone.
+
+   Two facts catch it: the DELIVERY date has passed, or FRESH packs of the SKU
+   (best-before not yet passed) already cover what the order owes. Either one
+   holds the order out of the pull until somebody answers — add it, close it
+   out, or leave it out this week. Nothing is closed without a click. */
+async function mrpCoLooksDone(full){
+  const today=todayISO(); const out=[];
+  let orders=[]; try{ orders=await db.list('custom_orders',{}); }catch(e){}
+  const byRef={}; (orders||[]).forEach(o=>{ byRef[o.order_ref]=o; });
+  const stock={};
+  try{ (await db.list('stock_balance',{})).forEach(s=>{
+    if((s.kind||'')==='product' && erpOwnsRow(s)) stock[s.ref_sku]=(stock[s.ref_sku]||0)+(+s.on_hand||0); }); }catch(e){}
+  const bb=window._coBestBefore||{};
+  Object.keys(full||{}).forEach(sku=>{
+    const os=((full[sku]||{}).orders)||[];
+    const fresh=!!(bb[sku] && bb[sku]>=today);
+    const onHand=Math.max(0, +stock[sku]||0);
+    os.forEach(x=>{
+      const q=+x.packs||0; if(!(q>0)) return;
+      const o=byRef[x.ref]||{};
+      const del=String(o.delivery_date||'').slice(0,10);
+      const why=[];
+      if(del && del<today) why.push('delivery date '+del+' has passed');
+      if(fresh && onHand>=q) why.push(onHand+' fresh pack(s) already in stock');
+      if(why.length) out.push({ref:x.ref, customer:x.customer||o.customer_name||'', sku, packs:q, why});
+    });
+  });
+  return out;
+}
+/* One question per ORDER, not per SKU: an order is added, closed or left out
+   whole. Resolves to {ref: 'out'|'add'|'close'} or null if cancelled. */
+function mrpCoAskDone(list){
+  return new Promise(res=>{
+    const refs=[];
+    list.forEach(x=>{ let r=refs.find(y=>y.ref===x.ref);
+      if(!r){ r={ref:x.ref, customer:x.customer, items:[], why:new Set()}; refs.push(r); }
+      r.items.push(x); x.why.forEach(w=>r.why.add(w)); });
+    const ans={}; refs.forEach(r=>{ ans[r.ref]='out'; });
+    window._mrpDoneAns=ans;
+    window._mrpDoneRes=(ok)=>{ closeModal(); window._mrpDoneRes=null; res(ok?Object.assign({},ans):null); };
+    const nm=(window._coNmCache||{});
+    modalWide(true);
+    $('modal').innerHTML=`<h3 style="margin:0 0 4px">These look delivered — add or close?</h3>
+      <div class="mini" style="color:var(--muted);margin-bottom:8px">Not added to the plot yet. Each one either has a delivery date in the past, or fresh packs already on the shelf.
+        <b>Close out</b> marks it Completed so it never comes back. <b>Leave out</b> skips it this week only. <b>Add anyway</b> plans it as usual.</div>
+      <table style="width:100%"><thead><tr><th>Customer</th><th>Order</th><th>Packs</th><th>Why it looks done</th><th style="width:150px">Do</th></tr></thead><tbody>
+      ${refs.map(r=>`<tr>
+        <td><b>${esc(r.customer||'—')}</b></td>
+        <td class="mini">${esc(r.ref)}</td>
+        <td class="mini">${r.items.map(i=>esc(nm[i.sku]||i.sku)+' × '+i.packs).join('<br>')}</td>
+        <td class="mini" style="color:var(--danger)">${esc([...r.why].join(' · '))}</td>
+        <td><select data-ref="${esc(r.ref)}" onchange="window._mrpDoneAns[this.dataset.ref]=this.value">
+          <option value="out" selected>Leave out</option><option value="close">Close out (delivered)</option><option value="add">Add anyway</option></select></td>
+      </tr>`).join('')}
+      </tbody></table>
+      <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn sec" onclick="window._mrpDoneRes&&window._mrpDoneRes(false)">Cancel</button>
+        <button class="btn" id="mrp_done_go" onclick="window._mrpDoneRes&&window._mrpDoneRes(true)">Continue</button></div>`;
+    $('overlay').classList.add('on');
+  });
+}
+/* Close out an order that is not open on screen — the same record coCloseOut
+   leaves: what is still owed is written off on the lines, the order goes to
+   Completed, and the log says why. */
+async function coCloseOutRef(ref, reason){
+  const map=await coOpenDemand(); const left={}; let owed=0;
+  Object.keys(map).forEach(sku=>{ (map[sku].orders||[]).forEach(o=>{ if(o.ref===ref){ left[sku]=(left[sku]||0)+(+o.packs||0); owed+=(+o.packs||0); } }); });
+  const lines=((await db.list('custom_order_lines',{}))||[]).filter(l=>l.order_ref===ref);
+  for(const l of lines){ if(!l.id||!l.product_sku) continue;
+    const w=Math.min(+l.packs||0, left[l.product_sku]||0); left[l.product_sku]=(left[l.product_sku]||0)-w;
+    if(w>0){ try{ await db.update('custom_order_lines','id',l.id,{written_off_packs:(+l.written_off_packs||0)+w}); }catch(e){} } }
+  await db.update('custom_orders','order_ref',ref,{status:'completed'});
+  sysLog('custom_orders',ref,'📕 Closed out from Demand / MRP by '+CURRENT_USER+' — looked delivered ('+reason+')'
+    +(owed>0?(' · '+owed+' pack(s) not logged as produced, written off'):''));
+}
+
 async function mrpPullPackReq(){
   /* A LOCKED WEEK DOES NOT TAKE NEW WORK — the same refusal ＋ Add uses.
      Ingredients have been bought against a saved plot and the run is scheduled
@@ -12555,12 +12646,38 @@ async function mrpPullPackReq(){
     return;
   }
   showBusy('Reading the orders, then the shelf…');
-  let co={}; let coErr='';
-  try{ co=await coOpenDemandMap(); }catch(e){ coErr=String((e&&e.message)||e); }
+  let co={}; let coErr=''; let coFull={};
+  try{ coFull=await coOpenDemand(); Object.keys(coFull).forEach(s=>{ co[s]=coFull[s].packs; }); }
+  catch(e){ coErr=String((e&&e.message)||e); }
   let built;
   try{ built=await pqBuildRows(); }
   catch(e){ hideBusy(); toast('Could not read stock or sales — '+saveErrMsg(e),true); return; }
   hideBusy();
+
+  /* Orders that look delivered are asked about BEFORE anything is loaded —
+     see mrpCoLooksDone. */
+  const _coHeldOut=[], _coClosed=[];
+  try{
+    const flag=await mrpCoLooksDone(coFull);
+    if(flag.length){
+      try{ const nm={}; ((await db.list('products',{}))||[]).forEach(p=>{ if(p&&p.sku) nm[p.sku]=prodLabel(p,{noSku:true})||p.sku; }); window._coNmCache=nm; }catch(e){}
+      const ans=await mrpCoAskDone(flag);
+      if(!ans){ toast('Nothing loaded'); return; }
+      for(const ref of Object.keys(ans)){
+        if(ans[ref]==='add') continue;
+        const f=flag.find(x=>x.ref===ref)||{};
+        const cust=f.customer||ref;
+        // the whole order comes out of this pull, every SKU it owes
+        Object.keys(coFull).forEach(s=>{ ((coFull[s]||{}).orders||[]).forEach(o=>{
+          if(o.ref===ref) co[s]=Math.max(0,(+co[s]||0)-(+o.packs||0)); }); });
+        if(ans[ref]==='close'){
+          try{ await coCloseOutRef(ref, (f.why||[]).join(' · ')); _coClosed.push(cust); }
+          catch(e){ toast('Could not close '+ref+' — '+saveErrMsg(e)+'. It is left out of this pull.',true); _coHeldOut.push(cust); }
+        } else _coHeldOut.push(cust);
+      }
+      Object.keys(co).forEach(s=>{ if(!((+co[s]||0)>0)) delete co[s]; });
+    }
+  }catch(e){}
 
   const coSkus=Object.keys(co).filter(s=>(+co[s]||0)>0);
   const coPacks=coSkus.reduce((a,s)=>a+(+co[s]||0),0);
@@ -12577,7 +12694,7 @@ async function mrpPullPackReq(){
   try{ _pAll=(await db.list('products',{}))||[];
     _slSet=new Set(_pAll.filter(p=>isSupplyLed(p)||isPhasingOut(p)).map(p=>p.sku)); }catch(e){}
   const _catAll=(built.rows||[]).map(r=>({r,c:pqCalc(r)}))
-    .filter(x=>x.c.produce>0 && !(co[x.r.sku]!=null && /^CUST-/i.test(String(x.r.sku))) && !_slSet.has(x.r.sku));
+    .filter(x=>x.c.produce>0 && !((co[x.r.sku]!=null||coFull[x.r.sku]!=null) && /^CUST-/i.test(String(x.r.sku))) && !_slSet.has(x.r.sku));
   const _held=_catAll.filter(x=>_mrpDrop[x.r.sku]);        // taken out by hand earlier — left out
   const cat=_catAll.filter(x=>!_mrpDrop[x.r.sku]);
   const catPacks=cat.reduce((a,x)=>a+x.c.produce,0);
@@ -12601,6 +12718,8 @@ async function mrpPullPackReq(){
         +(_held.length>10?('\n… and '+(_held.length-10)+' more'):'')
         +'\nType a figure back in if you want any of them.'):'')
     +(coErr?('\n\n⚠ The custom orders could not be read ('+coErr+') — the catalogue half will load without them.'):'')
+    +(_coClosed.length?('\n\nCLOSED OUT — looked delivered: '+_coClosed.join(', ')):'')
+    +(_coHeldOut.length?('\n\nLEFT OUT THIS WEEK — looked delivered: '+_coHeldOut.join(', ')):'')
     +'\n\nNothing is saved until you save the plot.')) return;
 
   /* WHAT THE PULL OFFERED IS EVIDENCE, and until now it was thrown away the
@@ -16472,6 +16591,15 @@ async function coDemandDiag(){
 async function coPlanEvidence(){
   const _today=todayISO();
   const plannedAll={}, demandAll={};
+  /* A READ THAT FAILED IS NOT EVIDENCE THAT NOTHING IS PLANNED. Every read
+     below used to swallow its error and carry on with an empty list, and the
+     status sync took "no plot found" at face value. On 16 Nov the four orders
+     on DP-11162026 (Clemence Lim, Juhi Vaswani, Alayne Chan, Homia & Tawke)
+     were saved as Added in Demand at 3:13 PM and read For Demand Planning
+     twenty minutes later with the plot untouched — so the Production Plan
+     held them back as "ingredients not bought". Which read failed was never
+     recorded; that the sync acts on a failed read is what is fixed. */
+  let _readErr='';
   const push=(m,sku,rec)=>{ (m[sku]=m[sku]||[]).push(rec); };
   try{ let rows;
     if(isLive()) rows=await sb('production_batches?select=product_sku,status,planned_packs,good_packs,production_date,run_ref,batch_ref,kind,created_at,order_ref&status=eq.draft');
@@ -16488,7 +16616,7 @@ async function coPlanEvidence(){
         at:String(b.created_at||b.updated_at||'').slice(0,10),
         qty:Math.max(+b.planned_packs||0, +b.good_packs||0)});
     });
-  }catch(e){}
+  }catch(e){ _readErr=_readErr||('production plan: '+String((e&&e.message)||e)); }
   try{ let rows;
     if(isLive()) rows=await sb('demand?select=sku,qty,plan_date,source,updated_at');
     else rows=(DEMO.demand||[]);
@@ -16501,7 +16629,7 @@ async function coPlanEvidence(){
       push(demandAll, r.sku, {date:String(r.plan_date||'').slice(0,10), qty:+r.qty||0,
         src:'row', from:String(r.source||'').trim(), at:String(r.updated_at||'').slice(0,10)});
     });
-  }catch(e){}
+  }catch(e){ _readErr=_readErr||('demand rows: '+String((e&&e.message)||e)); }
   /* THE SAVED DEMAND PLOT. This is where the first version went wrong: a plot
      does not write rows into the `demand` table — it stores the whole SKU→packs
      map inside its own document (mrp_plans.data.demand), which is also what the
@@ -16509,7 +16637,7 @@ async function coPlanEvidence(){
      table meant an order that was plotted and LOCKED still reported "not planned
      yet", because the evidence was sitting in a place nobody looked. */
   try{
-    const plots=await mrpPlans();
+    const plots=await mrpPlans({strict:true});
     (plots||[]).forEach(pl=>{
       const d=(pl&&pl.data)||{}; const dem=d.demand||{};
       const date=String(pl.plan_date||pl.date||'').slice(0,10);
@@ -16519,13 +16647,13 @@ async function coPlanEvidence(){
         push(demandAll, sku, {date, qty:+dem[sku]||0, ref, locked:!!d.locked, at});
       });
     });
-  }catch(e){}
+  }catch(e){ _readErr=_readErr||('demand plots: '+String((e&&e.message)||e)); }
   /* `planned` / `inDemand` here are the UNFILTERED best candidate per SKU, kept
      for screens that genuinely ask a product-level question. No custom-order
      screen reads them any more: an order's own allotment comes from
      coClaimPlans, because a SKU can belong to more than one order. */
   const ev=coEvAt({plannedAll, demandAll}, '');
-  ev.plannedAll=plannedAll; ev.demandAll=demandAll;
+  ev.plannedAll=plannedAll; ev.demandAll=demandAll; ev.readErr=_readErr;
   return ev;
 }
 /* ---- EVIDENCE HAS TO BE YOUNGER THAN THE ORDER IT IS EVIDENCE FOR -----------
@@ -16809,6 +16937,8 @@ async function coSyncStatuses(){
        is waiting on PLANNING, not on the floor — so it says so, and the next
        action is obvious. */
     else { next='for_production'; why[o.order_ref]='locked — waiting to be planned into a demand week'; }
+    /* Never step an order BACK on a read that failed — see coPlanEvidence. */
+    if(ev.readErr && next==='for_production' && cur!=='for_production') continue;
     if(next!==cur){
       moved[o.order_ref]=next;
       try{ await db.update('custom_orders','order_ref',o.order_ref,{status:next}); o.status=next; }catch(e){}
