@@ -11609,6 +11609,9 @@ async function _renderMRP(){
   window._mrpCoDoneSku=_coDoneSku;
   // "Add all" only ever pulls the ones that are NOT already planned somewhere.
   Object.keys(coAll).forEach(s=>{ const _have=mrpIsCoRegular(s)?mrpCoPartOf(s):(+mrpDemand[s]||0);
+    /* once an order has been put into this week's plan, the number in it is the
+       planner's decision — a different figure is not "held back" */
+    if((window._mrpCoAuto||{})[MRPDATE+'|'+s]) return;
     if(coFresh[s] && !_coDoneSku[s] && _have!==coAll[s].packs) coPend[s]=coAll[s].packs; });
   /* CUSTOM ORDERS COME IN BY THEMSELVES (Zeus, 17 Nov 2026: "we already confirmed
      the quantity … double work"). Each open order not yet on any plan is put
