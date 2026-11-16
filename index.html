@@ -11496,7 +11496,9 @@ async function renderMRP(){
                        <div class="mini" style="color:var(--earth,#b5762a)">${nOn} of ${per.length} order(s) on this recipe already planned — this asks for the rest</div>`
                   : (inD>=c.packs ? '<span class="badge b-received">in this run</span>'
                   : (inD>0 ? '<span class="badge b-invoiced">part in this run</span>'
-                           : '<span class="badge b-open">not planned yet</span>')));
+                           : '<span class="badge b-open">not planned yet</span>')))
+        /* typed in by hand, so it never meets the pull's question — say it here */
+        +(_coDoneSku[sku]?'<div class="mini" style="color:var(--danger)" title="delivery date passed, or fresh packs already in stock — close the order out in Custom Orders if it was delivered">⚠ looks delivered — check before adding</div>':'');
       const unlocked=(window._mrpCoUnlock||{})[sku];
       const qtyCell = (planned && !unlocked)
         ? `<td class="num" title="already on a plan — adding it here would buy the ingredients a second time">
@@ -12669,7 +12671,14 @@ async function mrpPullPackReq(){
         const cust=f.customer||ref;
         // the whole order comes out of this pull, every SKU it owes
         Object.keys(coFull).forEach(s=>{ ((coFull[s]||{}).orders||[]).forEach(o=>{
-          if(o.ref===ref) co[s]=Math.max(0,(+co[s]||0)-(+o.packs||0)); }); });
+          if(o.ref===ref){ co[s]=Math.max(0,(+co[s]||0)-(+o.packs||0));
+            /* CS types custom quantities on the card BEFORE pulling. The pull
+               re-writes every SKU it keeps, but one it drops would otherwise
+               keep the hand-typed figure — so it comes off here too. */
+            if(/^CUST-/i.test(String(s))){ const v=Math.max(0,(+mrpDemand[s]||0)-(+o.packs||0)); if(v>0) mrpDemand[s]=v; else delete mrpDemand[s]; }
+            else if(mrpCoPart[s]!=null){ const had=Math.min(+mrpCoPart[s]||0, +o.packs||0);
+              const v=(+mrpCoPart[s]||0)-had; if(v>0) mrpCoPart[s]=v; else delete mrpCoPart[s];
+              const d=Math.max(0,(+mrpDemand[s]||0)-had); if(d>0) mrpDemand[s]=d; else delete mrpDemand[s]; } } }); });
         if(ans[ref]==='close'){
           try{ await coCloseOutRef(ref, (f.why||[]).join(' · ')); _coClosed.push(cust); }
           catch(e){ toast('Could not close '+ref+' — '+saveErrMsg(e)+'. It is left out of this pull.',true); _coHeldOut.push(cust); }
