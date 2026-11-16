@@ -13284,8 +13284,11 @@ async function mrpPullPackReq(){
      lowered by hand) is kept — the pull is for regular packs */
   const _coA=window._mrpCoAuto||{};
   coSkus.forEach(sk=>{ const cur=/^CUST-/i.test(String(sk))?(+mrpDemand[sk]||0):mrpCoPartOf(sk);
-    const q=(_coA[MRPDATE+'|'+sk] && cur>0)?cur:Math.max(0,Math.round(+co[sk]||0)); mrpDemand[sk]=q;
-    if(!/^CUST-/i.test(String(sk))) mrpCoPart[sk]=q; nCo++; });   // never rounded
+    /* already in this week's plan → the planner's number stands, 0 included */
+    const q=_coA[MRPDATE+'|'+sk]?cur:Math.max(0,Math.round(+co[sk]||0));
+    if(/^CUST-/i.test(String(sk))){ if(q>0) mrpDemand[sk]=q; else delete mrpDemand[sk]; }
+    else { mrpCoPart[sk]=q; mrpDemand[sk]=q; }
+    nCo++; });   // never rounded
   cat.forEach(x=>{ mrpDemand[x.r.sku]=(co[x.r.sku]!=null?(+mrpDemand[x.r.sku]||0):0)+demSnap(x.c.produce); nCat++; });
   sysLog('mrp',MRPDATE,'🧮 Week pulled into the plot — '+nCo+' custom-order SKU(s) / '+Math.round(coPacks)
     +' pack(s) committed, '+nCat+' catalogue SKU(s) / '+Math.round(catPacks)+' pack(s) by '+CURRENT_USER
