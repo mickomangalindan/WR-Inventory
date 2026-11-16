@@ -375,6 +375,22 @@
    One switch hides the lot. Nothing is deleted: every module's ❔ guide holds
    the same explanations, and the switch says where they went. */
 body.lean .hint{display:none!important}
+/* Demand / MRP clean layout (16 Nov 2026) — notes hidden unless "Show notes" */
+.mrp-clean .hint{display:none!important}
+.mrp-head{background:#fff;border:1px solid #e6ebea;border-radius:14px;padding:16px 18px;margin:0 0 16px}
+.mrp-headrow{display:flex;flex-wrap:wrap;align-items:center;gap:12px}
+.mrp-title{font-size:22px;font-weight:600}
+.mrp-chip{font-size:12px;font-weight:600;padding:5px 11px;border-radius:999px;background:#eef1f0;color:#3b4744}
+.mrp-chip.ok{background:#e7f2ef;color:#1f5248}
+.mrp-steps{list-style:none;margin:14px 0 0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+.mrp-step{display:flex;gap:10px;align-items:center;border:1px solid #e6ebea;border-radius:12px;padding:10px 12px;font-size:13px}
+.mrp-step.cur{border-color:#3a8276;box-shadow:0 0 0 2px #e7f2ef}
+.mrp-dot{width:28px;height:28px;flex:none;border-radius:999px;display:flex;align-items:center;justify-content:center;font-weight:600;font-size:12px;background:#eef1f0;color:#3b4744}
+.mrp-dot.on{background:#3a8276;color:#fff}.mrp-dot.ok{background:#e7f2ef;color:#1f5248}
+.mrp-att{margin-top:12px;background:#fff8ec;border:1px solid #f1dcb5;border-radius:12px;padding:10px 14px;font-size:13px;color:#3d2a08}
+.mrp-attrow{display:flex;gap:10px;align-items:baseline;margin-top:6px}
+.mrp-bul{width:6px;height:6px;border-radius:999px;background:#b26a00;flex:none;transform:translateY(-2px)}
+.mrp-more>summary{cursor:pointer;font-weight:600;color:#3b4744;padding:10px 0}
 body.lean .leanoff{display:none!important}
 /* ---- A COG FOR SETTINGS --------------------------------------------------
    Levers and configuration are changed monthly and read daily. Behind a fold,
@@ -12106,11 +12122,69 @@ async function _renderMRP(){
       <span class="mini" style="color:var(--muted);margin-left:8px">anything in the master — raw, processed or a kitchen supply — even when the demand roll-up did not ask for it</span></div>
     <div class="pager">${toBuy.length} item(s) · ${kgf(totKg)} kg total · est. ₱${Math.round(totVal).toLocaleString('en-PH')}</div></div>`;
   // ---- 3 · Minimum order qty analysis -------------------------------------
-  rh+=mrpMinOrderCard(_bySup,supMin,_supKg);
-  try{ rh+=await mrpLeadTimeCard(); }catch(e){ console.warn('lead card',String(e&&e.message||e)); }
-  rh+=savedPlansHtml();
+  /* ---- THE CLEAN LAYOUT (Zeus, 16 Nov 2026: "simple, minimalist, yet powerful")
+     Nothing below changes a number or a button. The four steps the team works
+     through sit on top; the long explanations are hidden unless "Show notes" is
+     on; the reference panels (data checks, minimum-order analysis, lead times,
+     plot history) fold into "More details". Every section is still the same
+     HTML, built by the same code. */
+  let _more='';
+  _more+=mrpMinOrderCard(_bySup,supMin,_supKg);
+  try{ _more+=await mrpLeadTimeCard(); }catch(e){ console.warn('lead card',String(e&&e.message||e)); }
+  _more+=savedPlansHtml();
   let _pre=''; try{ _pre=await planReadyCard(true); }catch(e){ console.warn('preflight',String(e&&e.message||e)); }
-  $('content').innerHTML=_pre+dh+rh;
+  let _head=''; try{ _head=await mrpStepHeader(); }catch(e){ console.warn('mrp head',String(e&&e.message||e)); }
+  const _notes=(()=>{ try{ return localStorage.getItem('wr_mrp_notes')==='1'; }catch(e){ return false; } })();
+  $('content').innerHTML=`<div id="mrpClean" class="${_notes?'':'mrp-clean'}">`+_head+dh+rh
+    +`<details class="mrp-more" style="margin-top:18px"><summary>More details — data checks, minimum orders, lead times, plot history</summary>`
+    +_pre+_more+`</details></div>`;
+}
+/* The four steps of a planning week, read from what is already on screen:
+   custom orders → regular packs → saved and locked → POs raised. Plus at most
+   three things that need a person, each with a button. */
+async function mrpStepHeader(){
+  const L=window._mrpLocked||null;
+  const co=window._mrpCoAll||{};
+  const coSk=Object.keys(co).filter(s=>(+(co[s]||{}).packs||0)>0);
+  const coPk=coSk.reduce((a,s)=>a+(+co[s].packs||0),0);
+  const coCust=new Set(); coSk.forEach(s=>((co[s]||{}).orders||[]).forEach(o=>coCust.add(o.customer||o.ref)));
+  const reg=Object.keys(mrpDemand||{}).filter(s=>!/^CUST-/i.test(s) && (+mrpDemand[s]||0)>0);
+  const regPk=reg.reduce((a,s)=>a+(+mrpDemand[s]||0)-(+((mrpCoPart||{})[s])||0),0);
+  const plan=(window._mrpPlan||[]).filter(l=>(+l.final||0)>0);
+  let pos=[];
+  try{ pos=((await db.list('purchase_orders',{}))||[]).filter(o=>String(o.order_date||'').slice(0,10)===MRPDATE && o.status!=='cancelled'); }catch(e){}
+  const done={co:true, reg:reg.length>0, lock:!!L, po:pos.length>0};
+  const cur=!done.reg?2:!done.lock?3:!done.po?4:0;
+  const step=(n,title,sub,ok)=>{ const on=(n===cur);
+    const dot=ok?'<span class="mrp-dot ok">✓</span>':`<span class="mrp-dot${on?' on':''}">${n}</span>`;
+    return `<li class="mrp-step${on?' cur':''}">${dot}<span><b>${title}</b><br><span class="mini">${sub}</span></span></li>`; };
+  const att=[];
+  const noPrice=plan.filter(l=>!(+l.price>0));
+  if(noPrice.length) att.push(['No price on '+noPrice.length+' ingredient line(s): '+noPrice.slice(0,3).map(l=>esc(l.name)).join(', ')+(noPrice.length>3?', …':''), 'the PO will read ₱0 until the price is set in Ingredients']);
+  const dl=Object.keys(window._mrpCoDoneSku||{}).length;
+  if(dl) att.push([dl+' custom order line(s) look delivered', 'close them in Custom Orders, or answer when you pull the week']);
+  if(L && !pos.length) att.push(['This week is locked but has no purchase order yet', 'press “Order the locked plot” above']);
+  const lockTxt=L?`<span class="mrp-chip ok">Locked · ${esc(L.ref||'')}</span>`:`<span class="mrp-chip">Not locked yet</span>`;
+  return `<div class="mrp-head">
+    <div class="mrp-headrow"><div><div class="mini" style="color:var(--muted)">Demand plan</div>
+      <div class="mrp-title">Week of ${esc((()=>{ try{ return new Date(MRPDATE+'T00:00:00').toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'numeric'}); }catch(e){ return MRPDATE; } })())}</div></div>${lockTxt}
+      <button class="btn sec sm" style="margin-left:auto" onclick="mrpToggleNotes()">${document.getElementById('mrpClean')&&!document.getElementById('mrpClean').classList.contains('mrp-clean')?'Hide notes':'Show notes'}</button></div>
+    <ol class="mrp-steps">
+      ${step(1,'Custom orders', coCust.size+' customer(s) · '+coPk+' pack(s)', done.co)}
+      ${step(2,'Regular packs', reg.length?(reg.length+' product(s) · '+Math.max(0,Math.round(regPk))+' pack(s)'):'press Pull the week', done.reg)}
+      ${step(3,'Save and lock', L?('locked'+(L.saved_at?' '+String(L.saved_at).slice(0,10):'')):'💾 Save plan when the numbers are right', done.lock)}
+      ${step(4,'Order ingredients', pos.length?(pos.length+' PO(s) made'):(plan.length?plan.length+' line(s) to order':'nothing to order yet'), done.po)}
+    </ol>
+    ${att.length?`<div class="mrp-att"><b>Needs attention · ${att.length}</b>${att.slice(0,3).map(a=>`<div class="mrp-attrow"><span class="mrp-bul"></span><span>${a[0]}<span class="mini" style="color:var(--muted)"> — ${a[1]}</span></span></div>`).join('')}</div>`:''}
+    ${pos.length?`<div class="mini" style="margin-top:8px"><a href="#/purchase_orders" onclick="openModel('purchase_orders');return false">Open the ${pos.length} purchase order(s) in Purchase Orders →</a> · Fritz sends them from there</div>`:''}
+  </div>`;
+}
+function mrpToggleNotes(){
+  const el=document.getElementById('mrpClean'); if(!el) return;
+  const showing=el.classList.contains('mrp-clean');   // clean now → show notes
+  el.classList.toggle('mrp-clean', !showing);
+  try{ localStorage.setItem('wr_mrp_notes', showing?'1':'0'); }catch(e){}
+  renderMRP();
 }
 // 3 · Per-supplier minimum order qty analysis for the current plan.
 // Minimum order is a SUPPLIER-level constraint (suppliers.min_order_kg). When a
