@@ -11610,6 +11610,20 @@ async function _renderMRP(){
   // "Add all" only ever pulls the ones that are NOT already planned somewhere.
   Object.keys(coAll).forEach(s=>{ const _have=mrpIsCoRegular(s)?mrpCoPartOf(s):(+mrpDemand[s]||0);
     if(coFresh[s] && !_coDoneSku[s] && _have!==coAll[s].packs) coPend[s]=coAll[s].packs; });
+  /* CUSTOM ORDERS COME IN BY THEMSELVES (Zeus, 17 Nov 2026: "we already confirmed
+     the quantity … double work"). Each open order not yet on any plan is put
+     into this week's editor once, at its ordered quantity. Not for a locked
+     week, not for orders that look delivered (those still need a person), and
+     never again after somebody changes or removes the line. Nothing is written
+     to the database here — statuses move when the plan is saved, as before. */
+  if(!_lockedPlot){
+    const A=(window._mrpCoAuto=window._mrpCoAuto||{});
+    Object.keys(coPend).forEach(sk=>{ const k=MRPDATE+'|'+sk; if(A[k] || (_mrpDrop||{})[sk]) return; A[k]=1;
+      const q=+coPend[sk]||0;
+      if(mrpIsCoRegular(sk)){ const shelf=Math.max(0,(+mrpDemand[sk]||0)-mrpCoPartOf(sk)); mrpCoPart[sk]=q; mrpDemand[sk]=shelf+q; }
+      else mrpDemand[sk]=q;
+      delete coPend[sk]; });
+  }
   window._mrpCoPend=coPend;
   const nCoPend=Object.keys(coPend).length;
   const _pName={}; prods.forEach(p=>{ _pName[p.sku]=prodLabel(p,{noSku:true})||p.sku; });
@@ -12386,7 +12400,7 @@ async function mrpSimpleView(o){
     const late=c.needed && c.needed<todayISO();
     const who=(c.orders||[]).map(x=>x.customer).filter((v,i,a)=>v&&a.indexOf(v)===i).join(', ')||'—';
     const refs=(c.orders||[]).map(x=>x.ref).join(', ');
-    const flag=(window._mrpCoDoneSku||{})[s]?'<div class="mini" style="color:var(--danger)">⚠ looks delivered — check first</div>':'';
+    const flag=(window._mrpCoDoneSku||{})[s]?'<div class="mini" style="color:var(--danger)">⚠ looks delivered — not included; type a number to add it</div>':'';
     const box=L?`<span class="mini" style="color:var(--muted)">${inD||0}</span>`
       :`<input type="number" step="any" inputmode="decimal" class="mrp-in" value="${inD>0?inD:''}" placeholder="${c.packs}" onchange="mrpSetDem('${esc(s)}',this.value,1)" title="a customer's own quantity — never rounded">`;
     return `<tr><td><b>${esc(who)}</b><div class="mini" style="color:var(--muted)">${esc(refs)}</div>${flag}</td>
@@ -12395,9 +12409,9 @@ async function mrpSimpleView(o){
       <td class="num">${n0(c.packs)}</td><td class="num">${box}</td></tr>`; }).join('');
   const coBtn=o.nCoPend?(L
       ?`<button class="btn sm sec" onclick="mrpGoDate('${esc(o.nextMon)}')">Plan the ${o.nCoPend} new one(s) next week →</button>`
-      :`<button class="btn sm" onclick="mrpPullCustom()">＋ Add the ${o.nCoPend} not yet in this plan</button>`):'';
+      :`<button class="btn sm sec" onclick="mrpPullCustom()" title="orders that looked delivered, or that you took out, are not added by themselves">＋ Add the ${o.nCoPend} held back</button>`):'';
   const sec1=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>1 · Custom orders</h3>
-      <div class="mini" style="color:var(--muted)">${fresh.length?(coCust.size+' customer(s) · '+n0(coPk)+' pack(s) to plan'):'Nothing new to plan'}${doneN?(' · '+doneN+' already planned'):''}</div></div>${coBtn}</div>
+      <div class="mini" style="color:var(--muted)">${fresh.length?(coCust.size+' customer(s) · '+n0(coPk)+' pack(s)'+(L?'':' · added automatically from Custom Orders — change a number only to make fewer')):'Nothing new to plan'}${doneN?(' · '+doneN+' already planned'):''}</div></div>${coBtn}</div>
     ${fresh.length?`<div style="overflow-x:auto"><table class="mrp-t"><thead><tr><th>Customer</th><th>Product</th><th>Needed</th><th class="num">Ordered</th><th class="num">In this plan</th></tr></thead><tbody>${coRows}</tbody></table></div>`
       :`<div class="mini" style="color:var(--muted);padding:4px 0">✅ No custom order needs ingredients this week.</div>`}</section>`;
   /* ---- 2 · regular packs ---- */
@@ -13263,7 +13277,11 @@ async function mrpPullPackReq(){
   /* A regular pack a custom order owes gets BOTH: the order's packs (never
      rounded, shown on the custom card) plus the shelf's own shortfall (shown
      on its catalogue row). The total is what is made and bought for. */
-  coSkus.forEach(sk=>{ const q=Math.max(0,Math.round(+co[sk]||0)); mrpDemand[sk]=q;
+  /* a custom quantity already in the plan (put in automatically, then maybe
+     lowered by hand) is kept — the pull is for regular packs */
+  const _coA=window._mrpCoAuto||{};
+  coSkus.forEach(sk=>{ const cur=/^CUST-/i.test(String(sk))?(+mrpDemand[sk]||0):mrpCoPartOf(sk);
+    const q=(_coA[MRPDATE+'|'+sk] && cur>0)?cur:Math.max(0,Math.round(+co[sk]||0)); mrpDemand[sk]=q;
     if(!/^CUST-/i.test(String(sk))) mrpCoPart[sk]=q; nCo++; });   // never rounded
   cat.forEach(x=>{ mrpDemand[x.r.sku]=(co[x.r.sku]!=null?(+mrpDemand[x.r.sku]||0):0)+demSnap(x.c.produce); nCat++; });
   sysLog('mrp',MRPDATE,'🧮 Week pulled into the plot — '+nCo+' custom-order SKU(s) / '+Math.round(coPacks)
