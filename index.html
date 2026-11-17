@@ -12433,9 +12433,10 @@ async function _renderMRP(){
   /* ONE SCREEN, DETAILS ON TABS (Zeus, 16 Nov 2026). Plan is the working
      screen. The other tabs show the SAME sections the old full screen built,
      split by who reads them. Nothing is computed differently. */
-  const _view=mrpView();
   const _isAdm=(typeof curRole==='function' && curRole()==='Admin');
-  const _tabsDef=[['plan','Plan'],['packs','Pack numbers'],['ingredients','Ingredients'],['checks','Checks'],['history','History']].concat(_isAdm?[['settings','⚙ Settings']]:[]);
+  /* Checks and Settings are for whoever looks after the app (Zeus 17 Nov). */
+  let _view=mrpView(); if(!_isAdm && (_view==='checks'||_view==='settings')) _view='plan';
+  const _tabsDef=[['plan','Plan'],['packs','Pack numbers'],['ingredients','Ingredients']].concat(_isAdm?[['checks','Checks']]:[]).concat([['history','History']]).concat(_isAdm?[['settings','⚙ Settings']]:[]);
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <span class="mrp-cp mrp-views">${_tabsDef.map(([k,l])=>`<button class="mrp-vtab${_view===k?' on':''}" onclick="mrpSetView('${k}')">${l}</button>`).join('')}</span>`;
   let _body='';
@@ -12446,10 +12447,14 @@ async function _renderMRP(){
     let _sc=''; try{ _sc=mrpScoreHtml(await mrpPlanMadeScore(6), await mrpKitchenCapacity()); }catch(e){}
     _body=`<div class="mrp-simple mrp-wide">${_sc}${mrpGaugeCompare()}<div class="mini" style="color:var(--muted);margin:12px 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. Read only: plan and type quantities in the <b>Plan</b> tab.</div><div class="mrp-ro">${dh}</div></div>`;
   } else if(_view==='ingredients'){
-    _body=`<div class="mrp-simple mrp-wide mrp-ingv"><div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px">
-        <button class="btn sm sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals — view or download as Excel">⬇ Download ingredient list</button>
-        <button class="btn sm sec" onclick="mrpSetView('plan')">← Back to plan</button></div>
-      <div class="hint" style="margin:0 0 10px">Type extra kg in <b>Manual ±</b> or use <b>＋ Add item to order</b>. The order updates at once and is kept on this computer; it is saved for everyone when you <b>Save</b> the plan — after it is locked, use <b>Edit plan → Save</b>. If POs are already made, press <b>Order what's new</b>.</div>${rh}</div>`;
+    const _all=(()=>{ try{ return localStorage.getItem('wr_ing_all')==='1'; }catch(e){ return false; } })();
+    _body=`<div class="mrp-simple mrp-wide mrp-ingv"><div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px;align-items:center">
+        <button class="btn sm sec" onclick="mrpSetView('plan')">← Back to plan</button>
+        <span style="flex:1"></span>
+        <button class="btn sm sec" onclick="mrpAddOpen()">＋ Add item to order</button>
+        <button class="btn sm sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals">⬇ Ingredient list</button>
+        <button class="btn sm sec" onclick="mrpIngAll(${_all?0:1})">${_all?'Simple view':'Show all columns'}</button></div>
+      ${_all?rh:mrpIngSimpleHtml(ings)}</div>`;
   } else if(_view==='checks'){
     let _lead=''; try{ _lead=await mrpLeadTimeCard(); }catch(e){}
     _body=`<div class="mrp-simple mrp-wide">${_pre}${mrpMinOrderCard(_bySup,supMin,_supKg)}${_lead}</div>`;
@@ -12543,6 +12548,38 @@ function mrpGoPOs(){ try{ sessionStorage.setItem('wr_back_mrp','1'); }catch(e){}
     clearInterval(t); const d=document.createElement('div'); d.id='mrpBackChip'; d.style.cssText='margin:0 0 10px';
     d.innerHTML='<a href="#/mrp" class="btn sm sec" onclick="openModel(\'mrp\');return false">← Back to Demand / MRP</a>';
     c.insertBefore(d,c.firstChild); },300); }
+/* STEP 3 FOR SOMEBODY NEW TO IT (Zeus 17 Nov): one card per supplier, four
+   numbers a row — need, have, order, extra — and a reason only when the order
+   is not the need. Same window._mrpPlan the full table and the POs use; the
+   Extra box writes the same mrpManual the old "Manual ±" box wrote. */
+function mrpIngAll(on){ try{ localStorage.setItem('wr_ing_all', on?'1':'0'); }catch(e){} renderMRP(); }
+function mrpIngExtra(sku,v){ const y=window.scrollY; mrpManual[sku]=+v||0; try{ mrpAutosave(); }catch(e){}
+  Promise.resolve(renderMRP()).then(()=>{ window.scrollTo(0,y); const el=document.querySelector('[data-ingx="'+CSS.escape(sku)+'"]'); if(el) el.focus(); }); }
+function mrpIngSimpleHtml(ings){
+  const P=(window._mrpPlan||[]).filter(l=>(+l.final||0)>0 || (+l.manualKg||0)!==0);
+  const k2=g=>(Math.round((+g||0)/10)/100).toLocaleString('en-PH',{maximumFractionDigits:2});
+  const peso=v=>'₱'+Math.round(+v||0).toLocaleString('en-PH');
+  if(!P.length) return `<section class="mrp-sec"><h3>Ingredients to order</h3><div class="mini" style="color:var(--muted)">Nothing to order yet. Go back and press <b>Pull the week</b> first.</div></section>`;
+  const by={}; P.forEach(l=>{ const s=(l.supplier||'').trim()||'(no supplier set)'; (by[s]=by[s]||[]).push(l); });
+  const sups=Object.keys(by).map(s=>({s, rows:by[s].slice().sort((a,b)=>String(a.name).localeCompare(String(b.name))), v:by[s].reduce((a,l)=>a+((+l.final||0)/1000)*(+l.price||0),0)})).sort((a,b)=>b.v-a.v);
+  const tot=sups.reduce((a,x)=>a+x.v,0);
+  const why=l=>{ const it=(ings||[]).find(x=>x.sku===l.sku)||{}; const sub=Math.max(0,+l.base||0)+(+l.manualKg||0)*1000;
+    if(l.isSupply) return ''; const mn=+it.min_order_kg||0, ps=+it.pack_size_kg||0;
+    if((+l.final||0)>sub+5){ if(ps>0&&/bottle/i.test(it.uom||'')) return Math.round(l.final/1000/ps)+' bottles · min '+Math.round(mn/ps)+' bottles';
+      if(mn>0 && l.final<=mn*1000+5) return 'supplier minimum '+mn+' kg'; if(ps>0) return 'whole cases of '+ps+' kg'; return 'rounded up'; }
+    if(ps>0&&/bottle/i.test(it.uom||'')) return Math.round(l.final/1000/ps)+' bottles';
+    return ''; };
+  return `<section class="mrp-sec"><h3>Ingredients to order</h3>
+    <div class="mini" style="color:var(--muted)">${P.length} item(s) · ${sups.length} supplier(s) · about <b>${peso(tot)}</b>. Check the orders, add extra if you need it, then go back and <b>Save and lock</b>.</div></section>
+    ${sups.map(x=>`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>${esc(x.s)}</h3><div class="mini" style="color:var(--muted)">${x.rows.length} item(s) · ${peso(x.v)}</div></div></div>
+      <table class="mrp-t"><thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num">Have</th><th class="num">Order</th><th class="num" title="Type 10 to add 10 kg, or -5 to order 5 kg less">Extra kg</th><th></th></tr></thead><tbody>
+      ${x.rows.map(l=>{ const have=(+l.oh||0)+(+l.wip||0)+(+l.inc||0); const w=why(l);
+        return `<tr><td>${esc(l.name)}</td><td class="num">${k2(l.rawNeed)}</td><td class="num" style="color:var(--muted)">${k2(have)}</td>
+          <td class="num"><b style="color:#1f5248">${l.isSupply?((+l.final||0)+' '+esc(l.unit||'')):k2(l.final)}</b></td>
+          <td class="num"><input type="number" step="any" data-ingx="${esc(l.sku)}" class="mrp-in" style="width:70px" placeholder="0" value="${(+l.manualKg||0)?(+l.manualKg):''}" onchange="mrpIngExtra('${esc(String(l.sku)).replace(/'/g,'&#39;')}',this.value)"></td>
+          <td class="mini" style="color:var(--muted)">${w?esc(w):''}</td></tr>`; }).join('')}
+      </tbody></table></section>`).join('')}`;
+}
 function mrpSetView(v){ try{ localStorage.setItem('wr_mrp_view', v); localStorage.removeItem('wr_mrp_full'); }catch(e){} renderMRP(); }
 /* TREND: last 30 days against the 60-day rate. ↑ selling faster, ↓ slower. */
 function mrpTrend(r){ const l=(+r.sold||0)/Math.max(1,+PQ.win||60), sh=(+r.sold30||0)/30; if(!(l>0||sh>0)) return '';
@@ -13014,7 +13051,7 @@ function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return'';
         :(r.pos===null?'<span class="mini" style="color:var(--muted)">?</span>'
         :(r.pos>0?`<span style="color:#4e7a3e;font-weight:700">${r.pos}</span>`
                  :(r.items>0?'<b style="color:var(--danger)" title="This plot was locked and never ordered from">none</b>':'<span class="mini" style="color:var(--muted)">—</span>')))}</td>
-      <td>${r.draft?'<span class="mini" style="color:var(--muted)">—</span>':prPlotBadge(r.pf)}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span>${(r.draft||!canRaisePO())?'':` · <span class="btn link" onclick="planPOOpen(${r.i})" title="Raise the purchase orders this plot asked for, from its own approved figures. The plot is not changed or unlocked.">Order</span>`} · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
+      <td>${r.draft?'<span class="mini" style="color:var(--muted)">—</span>':prPlotBadge(r.pf)}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span>${(r.draft||!canRaisePO())?'':` · <span class="btn link" onclick="window._poConfirmOnly=false;planPOOpen(${r.i})" title="Raise the purchase orders this plot asked for, from its own approved figures. The plot is not changed or unlocked.">Order</span>`} · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
     </tbody></table></div></div>`; }
 // Dedicated, VIEW-ONLY history of every saved demand plot (no reuse / no delete).
 async function renderDemandHistory(){
@@ -13028,7 +13065,7 @@ async function renderDemandHistory(){
     const lines=(d&&d.lines)||p.lines||[]; const items=lines.filter(l=>l.final>0); const val=items.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
     const by=(d&&d.by)||p.by||''; return {i,date,ref,items:items.length,val,by,wk:weekOf(date),pf:d}; });
   const body = rows.length
-    ? rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td>${prPlotBadge(r.pf)}</td><td class="mini">${esc(r.by||'')}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span>${((r.pf&&r.pf.locked===false)||!canRaisePO())?'':` · <span class="btn link" onclick="planPOOpen(${r.i})">Order</span>`}</td></tr>`).join('')
+    ? rows.map(r=>`<tr><td>${esc(r.wk)}</td><td><code>${esc(r.ref||'—')}</code></td><td>${esc(r.date)}</td><td class="num">${r.items}</td><td class="num">₱${Math.round(r.val).toLocaleString('en-PH')}</td><td>${prPlotBadge(r.pf)}</td><td class="mini">${esc(r.by||'')}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span>${((r.pf&&r.pf.locked===false)||!canRaisePO())?'':` · <span class="btn link" onclick="window._poConfirmOnly=false;planPOOpen(${r.i})">Order</span>`}</td></tr>`).join('')
     : '<tr><td colspan="8" class="empty">No saved demand plots yet.</td></tr>';
   $('content').innerHTML=`<div class="repcard"><h3 style="margin:0 0 6px">Saved demand plots ${isLive()?'· Supabase':''}</h3>
     <div class="hint" style="margin:0 0 10px">A read-only record of every demand plot you've saved. Open one to view its full replenishment plan — nothing here can be edited or deleted.</div>
@@ -14188,13 +14225,14 @@ function planPODraw(){
           <td class="num mini"${r._added?' title="Not on the plot — added here by the buyer. The plot approved nothing for this line."':''}>${r._added?'—':kg(r.final)}</td>
           <td class="num mini"${(+r._recv>0)?' style="color:#b5762a;font-weight:700"':''}>${(+r._recv>0)?kg(r._recv):'—'}</td>
           <td class="num mini"${(+r._oo>0)?' style="color:#3c6ea5;font-weight:700"':''}${(+r._oo>0)?(' title="'+esc(r._ooRef.map(x=>x.ref+' · '+x.st+(x.sup?(' · '+x.sup):'')).join(' | '))+'"'):''}>${(+r._oo>0)?kg(r._oo):'—'}</td>
-          <td class="num"><input type="number" step="any" inputmode="decimal" min="0" value="${kg(r._sugg)}"
-              onchange="planPOSet(${n},this.value)" style="width:92px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
+          <td class="num">${window._poConfirmOnly?`<b>${kg(r._sugg)}</b>`:`<input type="number" step="any" inputmode="decimal" min="0" value="${kg(r._sugg)}"
+              onchange="planPOSet(${n},this.value)" style="width:92px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px">`}</td>
           <td class="num mini">${Math.round(((+r._sugg||0)/1000)*(+r.price||0)).toLocaleString('en-PH')}</td></tr>`).join('')}
       </tbody></table></div>
       <div class="pager">${nOrder} line(s) · ${kgf(totKg)} kg · est. ₱${Math.round(totVal).toLocaleString('en-PH')}
         · ${Object.keys(bySup).length} draft PO(s), one per supplier</div>
-      <div class="mini" style="color:var(--muted);margin-top:6px"><b>Order now = Approved − Arrived since − Already on order</b>, floored at zero. Set a line to <b>0</b> to leave it out, or type over any figure. Drafts are created open and unsent — nothing reaches a supplier until somebody sends it.</div>
+      ${window._poConfirmOnly?`<div class="hint" style="margin-top:8px">Quantities come from <b>Step 3 · Check ingredients</b>. To change one, close this, go back to the plan (Edit plan if locked), change it there, then make the orders.</div>`:''}
+      <div class="mini" style="color:var(--muted);margin-top:6px${window._poConfirmOnly?';display:none':''}"><b>Order now = Approved − Arrived since − Already on order</b>, floored at zero. Set a line to <b>0</b> to leave it out, or type over any figure. Drafts are created open and unsent — nothing reaches a supplier until somebody sends it.</div>
     </div>
     <div class="mfoot" style="display:flex;gap:8px;margin-top:12px">
       <button class="btn" onclick="planPOGenerate()" ${nOrder?'':'disabled'}>🧾 Create ${Object.keys(bySup).length} draft PO(s)</button>
@@ -14334,7 +14372,7 @@ async function viewMRPPlan(i){ const p=mrpPlanCache[i]; if(!p)return; const d=p.
       <h4 style="margin:14px 0 6px">Replenishment (${lines.length} item(s) · est. ₱${Math.round(totVal).toLocaleString('en-PH')})</h4>
       <table><thead><tr>${_rc.map(c=>`<th${c.align==='right'?' class="num"':''}>${esc(c.label)}</th>`).join('')}</tr></thead><tbody>${lineRows}</tbody></table>
     </div>
-    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="printMRPPlan()">🖨 Print</button><button class="btn sec" onclick="downloadMRPPlan()">⬇ Download CSV</button>${(lines.length&&canRaisePO())?`<button class="btn sec" onclick="planPOOpen(${i})" title="Raise the purchase orders this plot asked for, from the plot's own approved figures. The plot is not changed or unlocked.">🧾 Generate purchase orders</button>`:''}<span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
+    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap"><button class="btn" onclick="printMRPPlan()">🖨 Print</button><button class="btn sec" onclick="downloadMRPPlan()">⬇ Download CSV</button>${(lines.length&&canRaisePO())?`<button class="btn sec" onclick="window._poConfirmOnly=false;planPOOpen(${i})" title="Raise the purchase orders this plot asked for, from the plot's own approved figures. The plot is not changed or unlocked.">🧾 Generate purchase orders</button>`:''}<span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Close</button></div>`;
   $('overlay').classList.add('on');
 }
 function _viewPlanRows(){ const v=window._viewPlan; if(!v)return[]; return (v.d.lines||[]).filter(l=>l.final>0); }
@@ -14515,6 +14553,9 @@ async function generatePOsFromMRP(){
   /* Hand straight over. No confirmation: there is nothing to decide between —
      this IS ordering the week, and the plot is where the week lives. */
   closeModal();
+  /* From the Demand / MRP plan the window only CONFIRMS: quantities are set
+     once, in Step 3. Opened from the plot screen it stays editable for Fritz. */
+  window._poConfirmOnly=true;
   return planPOOpen(_plotIdx);
 }
 
