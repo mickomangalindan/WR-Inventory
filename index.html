@@ -12442,8 +12442,11 @@ async function _renderMRP(){
      split by who reads them. Nothing is computed differently. */
   const _isAdm=(typeof curRole==='function' && curRole()==='Admin');
   /* Checks and Settings are for whoever looks after the app (Zeus 17 Nov). */
-  let _view=mrpView(); if(!_isAdm && (_view==='checks'||_view==='settings')) _view='plan';
-  const _tabsDef=[['plan','Plan'],['packs','Pack numbers'],['ingredients','Ingredients']].concat(_isAdm?[['checks','Checks']]:[]).concat([['history','History']]).concat(_isAdm?[['settings','⚙ Settings']]:[]);
+  let _view=mrpView(); if(!_isAdm && (_view==='checks'||_view==='settings'||_view==='ingredients')) _view='plan';
+  /* Everything a planner does is on the Plan tab (Zeus 17 Nov). The full
+     ingredient table (on hand, WIP, on order, target, trigger) is for checking
+     the maths, so it sits with the Admin tabs. */
+  const _tabsDef=[['plan','Plan'],['packs','Pack numbers'],['history','History']].concat(_isAdm?[['ingredients','Ingredient details'],['checks','Checks'],['settings','⚙ Settings']]:[]);
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <span class="mrp-cp mrp-views">${_tabsDef.map(([k,l])=>`<button class="mrp-vtab${_view===k?' on':''}" onclick="mrpSetView('${k}')">${l}</button>`).join('')}</span>`;
   let _body='';
@@ -12460,9 +12463,8 @@ async function _renderMRP(){
         <span style="flex:1"></span>
         <button class="btn sm sec" onclick="mrpAddOpen()">＋ Add item to order</button>
         <button class="btn sm sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals">⬇ Ingredient list</button>
-        <button class="btn sm sec" onclick="mrpIngAll(${_all?0:1})">${_all?'Simple view':'Show all columns'}</button>
-        ${_lockedPlot?'':`<button class="btn sm" onclick="saveMRPDraft()" title="Shares the plan with the team as a draft — still not locked">💾 Save draft</button>`}</div>
-      ${_all?rh:mrpIngSimpleHtml(ings)}</div>`;
+</div>
+      ${rh}</div>`;
   } else if(_view==='checks'){
     let _lead=''; try{ _lead=await mrpLeadTimeCard(); }catch(e){}
     _body=`<div class="mrp-simple mrp-wide">${_pre}${mrpMinOrderCard(_bySup,supMin,_supKg)}${_lead}</div>`;
@@ -12581,13 +12583,17 @@ function mrpIngTable(x, ings){
     if(l.isSupply||!((+l.final||0)>sub+5)) return ''; const mn=+it.min_order_kg||0, ps=+it.pack_size_kg||0;
     if(btl(it)) return 'minimum '+Math.round(mn/ps)+' bottles';
     if(mn>0 && l.final<=mn*1000+5) return 'supplier minimum '+mn+' kg'; if(ps>0) return 'whole cases of '+ps+' kg'; return 'rounded up'; };
-  return `<table class="mrp-t mrp-ingt"><colgroup><col><col style="width:110px"><col style="width:110px"><col style="width:110px"><col style="width:96px"><col style="width:190px"></colgroup>
-    <thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num" title="raw in the freezer + premix / processed counted back as raw + already on order">Have</th><th class="num">Order</th><th class="num" title="type 10 to add, -5 for less">Extra</th><th></th></tr></thead><tbody>
+  /* MOQ column: the supplier's minimum and case size; bold when it is what made the order bigger than the need */
+  const moq=l=>{ const it=itOf(l); if(l.isSupply) return '—'; const mn=+it.min_order_kg||0, ps=+it.pack_size_kg||0;
+    if(btl(it)) return mn>0?(Math.round(mn/ps)+' btl'):'—';
+    return mn>0?(mn+' kg'+(ps>0?(' · case '+ps):'')):(ps>0?('case '+ps+' kg'):'—'); };
+  return `<table class="mrp-t mrp-ingt"><colgroup><col><col style="width:105px"><col style="width:105px"><col style="width:150px"><col style="width:105px"><col style="width:96px"></colgroup>
+    <thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num" title="raw in the freezer + premix / processed counted back as raw + already on order">Have</th><th class="num" title="supplier minimum order / case size">MOQ</th><th class="num">Order</th><th class="num" title="type 10 to add, -5 for less">Extra</th></tr></thead><tbody>
     ${x.rows.map(l=>{ const it=itOf(l); const have=(+l.oh||0)+(+l.wip||0)+(+l.inc||0);
       return `<tr><td>${esc(l.name)}</td><td class="num">${q(l,l.rawNeed)}</td><td class="num" style="color:var(--muted)">${q(l,have)}</td>
+        <td class="num mini" style="${why(l)?'color:#1f5248;font-weight:700':'color:var(--muted)'}" title="${esc(why(l))}">${moq(l)}</td>
         <td class="num"><b style="color:#1f5248">${q(l,l.final)}</b></td>
-        <td class="num"><input type="number" step="any" data-ingx="${esc(l.sku)}" class="mrp-in" style="width:72px" placeholder="0" value="${(+l.manualKg||0)?(btl(it)?Math.round(+l.manualKg/(+it.pack_size_kg)):+l.manualKg):''}" onchange="mrpIngExtra('${esc(String(l.sku)).replace(/'/g,'&#39;')}',this.value,${btl(it)?(+it.pack_size_kg):0})"></td>
-        <td class="mini" style="color:var(--muted)">${esc(why(l))}</td></tr>`; }).join('')}
+        <td class="num"><input type="number" step="any" data-ingx="${esc(l.sku)}" class="mrp-in" style="width:72px" placeholder="0" value="${(+l.manualKg||0)?(btl(it)?Math.round(+l.manualKg/(+it.pack_size_kg)):+l.manualKg):''}" onchange="mrpIngExtra('${esc(String(l.sku)).replace(/'/g,'&#39;')}',this.value,${btl(it)?(+it.pack_size_kg):0})"></td></tr>`; }).join('')}
     </tbody></table>`;
 }
 function mrpIngSimpleHtml(ings){
@@ -12858,7 +12864,7 @@ async function mrpSimpleView(o){
   const _ingTot=sups.reduce((a,x)=>a+x.v,0);
   const secIng=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>3 · Check ingredients</h3>
       <div class="mini" style="color:var(--muted)">${plan.length?(plan.length+' ingredient(s) to buy from '+sups.length+' supplier(s) · about '+peso(_ingTot)):'Nothing to buy yet — pull the week first.'}</div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm sec" onclick="mrpAddOpen()">＋ Add item</button><button class="btn sm sec" onclick="mrpSetView('ingredients')">All columns →</button></div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm sec" onclick="mrpAddOpen()">＋ Add item</button>${(typeof curRole==='function'&&curRole()==='Admin')?`<button class="btn sm sec" onclick="mrpSetView('ingredients')">Details →</button>`:''}</div></div>
     ${(!pos.length&&sups.length)?(()=>{ const R=mrpIngRows(window._mrpIngsAll||[]); const O=window._mrpIngOpen||{};
       return R.sups.map(x=>`<details class="mrp-ingsup" data-s="${esc(x.s)}"${O[x.s]?' open':''} ontoggle="(window._mrpIngOpen=window._mrpIngOpen||{})[this.dataset.s]=this.open">
         <summary><b>${esc(x.s)}</b> <span class="mini" style="color:var(--muted)">${x.rows.length} item(s)</span><span style="float:right">${peso(x.v)}</span></summary>${mrpIngTable(x,window._mrpIngsAll||[])}</details>`).join(''); })():''}
