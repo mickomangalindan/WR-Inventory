@@ -2680,9 +2680,12 @@ function demStepOn(){ try{ return localStorage.getItem('wr_dem_step')!=='off'; }
 function demStepToggle(){ try{ localStorage.setItem('wr_dem_step', demStepOn()?'off':'on'); }catch(e){}
   toast(demStepOn()?('Rounding ON — minimum '+DEM_MIN+', then steps of '+DEM_INC):'Rounding OFF — type any quantity');
   if(typeof renderMRP==='function') renderMRP(); }
-function demSnap(v){
+function demSnap(v, sku){
   const n=Math.max(0, Math.round(+v||0));
   if(!(n>0)) return 0;                       // zero is a real answer: do not make it 24
+  /* FUEL GAUGE ON: round to THIS product's batch (fast 24/12, slow 12/6, very
+     slow 6/6), not to one 24/12 for everything. The 24/12 switch does not apply. */
+  if(sku && (+PQ.gauge)){ const T=mrpTierOf(sku); if(n<=T.min) return T.min; return T.min+Math.ceil((n-T.min)/T.step)*T.step; }
   if(!demStepOn()) return n;
   if(n<=DEM_MIN) return DEM_MIN;
   return DEM_MIN + Math.ceil((n-DEM_MIN)/DEM_INC)*DEM_INC;
@@ -2709,6 +2712,7 @@ let _mrpDrop={};
    rounded") was false for exactly those lines, and they were left off the
    31 Oct plot rather than plotted at 24. The card says which kind of line it is
    (`fromCo`), and a SKU an open custom order owes counts as custom as well. */
+function mrpTierOf(sku){ const x=(window._mrpCalc||{})[sku]; return pqTier(x&&x.c?(+x.c.perDay||0):0); }
 function _mrpCoPartSnap(){ const o={};
   Object.keys(mrpDemand||{}).forEach(k=>{ const c=mrpCoPartOf(k); if(c>0) o[k]=c; }); return o; }
 function mrpSetDem(sku, v, fromCo){
@@ -2718,15 +2722,16 @@ function mrpSetDem(sku, v, fromCo){
   if(mrpIsCoRegular(sku)){
     const co=mrpCoPartOf(sku), shelf=Math.max(0,(+mrpDemand[sku]||0)-co);
     let nCo=co, nShelf=shelf;
-    if(fromCo) nCo=raw; else { nShelf=raw>0?demSnap(raw):0;
-      if(nShelf!==raw && raw>0) toast(raw+' → '+nShelf+' — minimum '+DEM_MIN+', then steps of '+DEM_INC); }
+    if(fromCo) nCo=raw; else { nShelf=raw>0?demSnap(raw,sku):0;
+      if(nShelf!==raw && raw>0){ const T=(+PQ.gauge)?mrpTierOf(sku):{min:DEM_MIN,step:DEM_INC}; toast(raw+' → '+nShelf+' — batch '+T.min+', then steps of '+T.step); } }
     mrpCoPart[sku]=nCo; const t=nCo+nShelf;
     if(t>0){ mrpDemand[sku]=t; delete _mrpDrop[sku]; } else { delete mrpDemand[sku]; _mrpDrop[sku]=1; }
     renderMRP(); return;
   }
   const isCust=!!fromCo || /^CUST-/i.test(String(sku||''))
     || (+(((window._mrpCoAll||{})[sku]||{}).packs)>0);
-  const q=isCust?raw:demSnap(raw);
+  const q=isCust?raw:demSnap(raw,sku);
+  if(!isCust && q!==raw && raw>0 && (+PQ.gauge)){ const T=mrpTierOf(sku); toast(raw+' → '+q+' — batch '+T.min+', then steps of '+T.step); }
   if(q>0){ mrpDemand[sku]=q; delete _mrpDrop[sku]; } else { delete mrpDemand[sku]; _mrpDrop[sku]=1; }
   if(!isCust && q!==raw && raw>0) toast(raw+' → '+q+' — minimum '+DEM_MIN+', then steps of '+DEM_INC);
   renderMRP();
@@ -12544,7 +12549,7 @@ async function mrpSimpleView(o){
     return `<tr class="mrp-prow" data-q="${esc((prodLabel({...p},{noSku:true})+' '+lbl+' '+p.sku).toLowerCase())}"><td class="mrp-vname" title="${esc(prodLabel({...p},{noSku:true}))} · ${esc(p.sku)}">${esc(lbl)}${_to?' <span class="mini" style="color:var(--earth,#b5762a)">· phasing out</span>':''}</td>
       <td class="num"><b>${n0(c.cur)}</b><div class="mini" style="color:var(--muted)">Pasig ${n0(r.shop)} · Bulacan ${n0(r.other)}</div></td>
       <td class="num"><span class="mrp-lasts ${c.zone?({red:'mrp-lr',yellow:'mrp-ly',green:'mrp-lg'}[c.zone]||'mrp-lz'):tone(d)}" title="${c.zone?('Fuel gauge: '+c.zone+' · '+({fast:'fast seller',slow:'slow seller',vslow:'very slow seller'}[c.tier]||'')):''}">${d==null?'—':(Math.round(d*10)/10)+' d'}</span>${mrpTrend(r)}</td>
-      <td class="num">${box}${(L?(+LC[p.sku]||0):mrpCoPartOf(p.sku))>0?`<div class="mini" style="color:var(--muted)">+ ${L?(+LC[p.sku]||0):mrpCoPartOf(p.sku)} custom</div>`:''}${!L&&sg>0&&sg!==m?`<div class="mini" style="color:var(--muted)">suggested ${n0(sg)}</div>`:''}${c.deferred&&!m?'<div class="mini" style="color:#3a8276">can wait</div>':''}</td></tr>`; };
+      <td class="num">${box}${(L?(+LC[p.sku]||0):mrpCoPartOf(p.sku))>0?`<div class="mini" style="color:var(--muted)">+ ${L?(+LC[p.sku]||0):mrpCoPartOf(p.sku)} custom</div>`:''}${!L&&sg>0&&sg!==m?`<div class="mini" style="color:var(--muted)">suggested ${n0(sg)}</div>`:''}${c.deferred&&!m?'<div class="mini" style="color:#3a8276">can wait</div>':''}${(+PQ.gauge)&&!L?`<div class="mini" style="color:var(--muted)">batch ${c.batch||'—'}${c.tier?' · steps of '+pqTier(+c.perDay||0).step:''}</div>`:''}</td></tr>`; };
   /* TABS FOLLOW THE SHOP MENU: group (tab) → section (folded) → line → variant. */
   const TAB=window._mrpTab||'all';
   const tabs=mrpTabList(cat);
@@ -12574,7 +12579,7 @@ async function mrpSimpleView(o){
       <tbody class="mrp-secrows"${open?'':' style="display:none"'}>${lo.map(ln=>(ln?`<tr class="mrp-line"><td colspan="4"><span>${esc(ln)}</span></td></tr>`:'')+lines[ln].map(pRow).join('')).join('')}</tbody>`; });
   const sec2=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>2 · Regular packs</h3>
       <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs</div></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`<button class="btn sm sec" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`${(+PQ.gauge)?'':`<button class="btn sm sec" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>`}
       <button class="btn sm" onclick="mrpPullPackReq()">🧮 Pull the week</button>`}</div></div>
     ${L?'':(SHSYNC.url?`<div class="mrp-sync mini" style="color:var(--muted)">Pull the week gets the latest Shopify stock first · last reading <span id="sh_syncage">${esc(shAgeText())}</span></div>`:`<div class="mrp-sync">${shSyncBtn()}</div>`)}
     <div class="mrp-kpis"><div><span>Products to make</span><b>${kMake}</b></div><div><span>Packs to make</span><b>${n0(kPk)}</b></div>
@@ -13361,7 +13366,7 @@ async function mrpPullPackReq(){
      lets the plot carry the answer afterwards. */
   window._mrpPulled={ date:MRPDATE, at:new Date().toISOString(), by:CURRENT_USER,
     map:{}, names:{} };
-  cat.forEach(x=>{ window._mrpPulled.map[x.r.sku]=demSnap(x.c.produce);
+  cat.forEach(x=>{ window._mrpPulled.map[x.r.sku]=(+PQ.gauge)?Math.round(+x.c.produce||0):demSnap(x.c.produce);
                    window._mrpPulled.names[x.r.sku]=x.r.name||x.r.sku; });
   /* ---- A CUSTOM ORDER IS A JUDGEMENT TOO --------------------------------
      Everything above this line was built for the CATALOGUE, and custom SKUs
@@ -13396,7 +13401,7 @@ async function mrpPullPackReq(){
     if(/^CUST-/i.test(String(sk))){ if(q>0) mrpDemand[sk]=q; else delete mrpDemand[sk]; }
     else { mrpCoPart[sk]=q; mrpDemand[sk]=q; }
     nCo++; });   // never rounded
-  cat.forEach(x=>{ mrpDemand[x.r.sku]=(co[x.r.sku]!=null?(+mrpDemand[x.r.sku]||0):0)+demSnap(x.c.produce); nCat++; });
+  cat.forEach(x=>{ mrpDemand[x.r.sku]=(co[x.r.sku]!=null?(+mrpDemand[x.r.sku]||0):0)+((+PQ.gauge)?Math.round(+x.c.produce||0):demSnap(x.c.produce)); nCat++; });
   sysLog('mrp',MRPDATE,'🧮 Week pulled into the plot — '+nCo+' custom-order SKU(s) / '+Math.round(coPacks)
     +' pack(s) committed, '+nCat+' catalogue SKU(s) / '+Math.round(catPacks)+' pack(s) by '+CURRENT_USER
     +(_held.length?(' · '+_held.length+' line(s) removed earlier were not re-added'):''));
