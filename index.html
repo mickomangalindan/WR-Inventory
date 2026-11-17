@@ -2723,6 +2723,7 @@ function demSnap(v, sku){
   return DEM_MIN + Math.ceil((n-DEM_MIN)/DEM_INC)*DEM_INC;
 }
 function demStepNote(){
+  if(+PQ.gauge) return 'Batches follow how fast each product sells: fast sellers <b>24</b> then +12, slow <b>12</b> then +6, very slow <b>6</b> then +6. Zero stays zero.';
   return demStepOn()
     ? 'Quantities round up to a minimum of <b>'+DEM_MIN+'</b>, then in steps of <b>'+DEM_INC+'</b> — the line packs in trays, so 25 is not a thing it can make. Zero stays zero.'
     : '<b>Rounding is off</b> — quantities go in exactly as typed, including ones the line cannot pack.';
