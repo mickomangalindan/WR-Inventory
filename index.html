@@ -3983,7 +3983,7 @@ async function mrpPlanMadeScore(n){
     Object.keys(dem).forEach(sku=>{ if(/^CUST-/i.test(sku)) return; const q=+dem[sku]||0; if(!(q>0)) return; n++; plan+=q; const m=Math.min(q,+made[sku]||0); got+=m; if(m>=q) full++; else short.push({sku,q,m}); });
     return {date:dt, ref:byDate[dt].ref, plan, got, pct:plan?Math.round(100*got/plan):null, n, full, short, open:end>todayISO()}; });
 }
-function mrpScoreHtml(sc, cap){ if(!sc||!sc.length) return '';
+function mrpScoreHtml(sc, cap){ if(!sc||!sc.length) return `<section class="mrp-sec"><h3>Planned vs made</h3><div class="mini" style="color:var(--muted)">No locked plan yet. Once a week's plan is saved, this shows how much of it the kitchen made in the 7 days after.</div></section>`;
   const n0=v=>Math.round(+v||0).toLocaleString('en-PH');
   const bar=p=>`<span style="display:inline-block;width:80px;height:8px;background:#f0f3f2;border-radius:4px;vertical-align:middle;margin-right:6px"><span style="display:block;height:8px;width:${Math.min(100,p||0)}%;background:${(p||0)>=80?'#3a8276':(p||0)>=50?'#e0a33a':'#c0564b'};border-radius:4px"></span></span>`;
   return `<section class="mrp-sec"><div class="mrp-sechead"><div><h3>Planned vs made</h3><div class="mini" style="color:var(--muted)">Regular packs in each locked plan, against what the kitchen confirmed in the 7 days after it.${cap&&cap.packs?` Kitchen makes about <b>${n0(cap.packs)}</b> packs a week (${esc(cap.from)}, custom included).`:''}</div></div></div>
