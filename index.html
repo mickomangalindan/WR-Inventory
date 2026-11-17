@@ -10858,7 +10858,7 @@ function rawParCalc(it, perWeekG, leadObs){
 /* The settings strip above the replenishment plan.  Every number that shapes a
    ceiling is on this one line, with the arithmetic printed under it, because a
    buying rule nobody can read is a buying rule nobody will trust. */
-function rpSettingsHtml(plan){
+function rpSettingsHtml(plan,lean){
   const P=plan||[];
   const held=P.reduce((s,l)=>s+(+l.oh||0)+(+l.wip||0),0);
   const wip =P.reduce((s,l)=>s+(+l.wip||0),0);
@@ -10879,13 +10879,13 @@ function rpSettingsHtml(plan){
     <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
       <button class="btn sm ${on?'':'sec'}" onclick="rpToggle('on')"
         title="off = the old flat 5 kg reorder point for every ingredient">${on?'✓ Per-ingredient par':'✕ Per-ingredient par (using flat 5 kg)'}</button>
-      ${on?`${n('Review (d)','review','how often you actually sit down and buy. 7 = weekly.')}
-            ${n('Cushion ×','cushion','safety on top of lead-time use. 0.5 = half again.')}
+      ${on?`${lean?'':`${n('Review (d)','review','how often you actually sit down and buy. 7 = weekly.')}`}
+            ${lean?'':`${n('Cushion ×','cushion','safety on top of lead-time use. 0.5 = half again.')}`}
             ${n('Lead floor (d)','leadMin','used when an ingredient has no lead time typed')}
             ${n('Lead cap (d)','leadCap','protects against a lead time typed in error')}
             ${n('Window (d)','win','sales window the usage rate is read from',52)}
             ${n('Lead needs n receipts','leadN','a measured lead time is only believed once this many genuine deliveries have been recorded against it. Below that the floor is used. Mayee Gajudo read 11 days off three receipts (0, 2, 11) — one late delivery, not a lead time.',46)}
-            ${n('Buy under (days)','minCoverD','order only when what is left AFTER this week\'s production runs out within this many days. The plot runs weekly, so anything with more cover than that is caught by next week\'s plot. An item whose review + lead time is longer uses that instead, so a slow supplier is never left to run dry. 0 = raise every line however much cover it has.',40)}
+            ${lean?'':`${n('Buy under (days)','minCoverD','order only when what is left AFTER this week\'s production runs out within this many days. The plot runs weekly, so anything with more cover than that is caught by next week\'s plot. An item whose review + lead time is longer uses that instead, so a slow supplier is never left to run dry. 0 = raise every line however much cover it has.',40)}`}
             <button class="btn sm ${(+RP.spike)?'':'sec'}" onclick="rpToggle('spike')" title="OFF (recommended): the lead-time buffer is sized on the steady weekly rate. ON: it is sized on THIS WEEK's demand, so a week running well above the steady rate buys a proportionally bigger buffer and keeps it afterwards — that is what put 79 days of cover on buffalo.">${(+RP.spike)?'✓ Buffer on the spike':'✕ Buffer on the steady rate'}</button>
             <button class="btn sm ${(+RP.procOn)?'':'sec'}" onclick="rpToggle('procOn')" title="count processed / part-prepped stock back as raw so it is not bought twice">${(+RP.procOn)?'✓':'✕'} Count WIP</button>
             <button class="btn sm ${(+RP.shelfOn)?'':'sec'}" onclick="rpToggle('shelfOn')" title="never hold more days than the ingredient keeps">${(+RP.shelfOn)?'✓':'✕'} Shelf-life cap</button>
@@ -10894,7 +10894,7 @@ function rpSettingsHtml(plan){
       <span class="sp" style="flex:1"></span>
       <span class="mini" style="color:var(--muted)">settings are saved for everyone, not just this browser</span>
     </div>
-    ${on?`<div class="mini" style="margin-top:7px;color:var(--muted);line-height:1.6">
+    ${(on&&!lean)?`<div class="mini" style="margin-top:7px;color:var(--muted);line-height:1.6">
       <b>${withCeiling}</b> ingredient(s) on a computed ceiling${typed?` · <b>${typed}</b> on a figure you typed`:''}${capped?` · <b>${capped}</b> capped by shelf life`:''}${noRate?` · <b>${noRate}</b> with no sales history, bought only against the week's own demand`:''}${noLead?` · <b>${noLead}</b> with no lead time typed, assuming ${RP.leadMin} days`:''}.
       Ceilings total <b>${kgf(tgt)} kg</b>; you already hold <b>${kgf(held)} kg</b>${wip>0?` (of which <b>${kgf(wip)} kg</b> is processed stock counted back as raw)`:''};
       this order adds <b>${kgf(buy)} kg</b>.
@@ -10904,7 +10904,7 @@ function rpSettingsHtml(plan){
         const meas=P.filter(l=>l.leadSrc&&l.leadSrc!=='assumed'&&l.leadSrc!=='typed').length, asm=P.filter(l=>l.leadSrc==='assumed').length, typ=P.filter(l=>l.leadSrc==='typed').length;
         return `<br>Lead time: <b>${meas}</b> measured from delivery history${typ?`, <b>${typ}</b> typed on the ingredient`:''}${asm?`, <b>${asm}</b> still assumed at ${RP.leadMin} days`:''}
           ${L.all.length?` · ${L.all.length} received PO(s) read${L.proxy?` (<b>${L.proxy}</b> of them dated by updated_at, a proxy — it firms up as POs are received from today)`:''}`:''}.`;})()}
-    </div>`:`<div class="mini" style="margin-top:7px;color:var(--earth,#b5762a)">The flat rule is on: every ingredient reorders at 5 kg, whether that is four days of pork loin or most of a year of crocodile.</div>`}
+    </div>`:on?'':`<div class="mini" style="margin-top:7px;color:var(--earth,#b5762a)">The flat rule is on: every ingredient reorders at 5 kg, whether that is four days of pork loin or most of a year of crocodile.</div>`}
   </div>`;
 }
 
@@ -12494,6 +12494,15 @@ const MRP_VIEWS=['plan','packs','ingredients','checks','history','settings'];
 function mrpView(){ let v=''; try{ v=localStorage.getItem('wr_mrp_view')||''; if(!v && localStorage.getItem('wr_mrp_full')==='1') v='packs'; }catch(e){}
   if(v==='settings' && !(typeof curRole==='function' && curRole()==='Admin')) v='plan';
   return MRP_VIEWS.includes(v)?v:'plan'; }
+/* Purchase Orders opened from the Ingredients tab keeps a way home: a chip at
+   the top of the PO list goes back to the same week's Demand / MRP. */
+function mrpGoPOs(){ try{ sessionStorage.setItem('wr_back_mrp','1'); }catch(e){} openModel('purchase_orders'); let n=0;
+  const t=setInterval(()=>{ n++; const c=$('content'); if(!c||n>20){ clearInterval(t); return; }
+    if(state.model!=='purchase_orders'){ clearInterval(t); return; }
+    if(/Loading…/.test(c.textContent||'')||c.querySelector('#mrpBackChip')) return;
+    clearInterval(t); const d=document.createElement('div'); d.id='mrpBackChip'; d.style.cssText='margin:0 0 10px';
+    d.innerHTML='<a href="#/mrp" class="btn sm sec" onclick="openModel(\'mrp\');return false">← Back to Demand / MRP</a>';
+    c.insertBefore(d,c.firstChild); },300); }
 function mrpSetView(v){ try{ localStorage.setItem('wr_mrp_view', v); localStorage.removeItem('wr_mrp_full'); }catch(e){} renderMRP(); }
 /* TREND: last 30 days against the 60-day rate. ↑ selling faster, ↓ slower. */
 function mrpTrend(r){ const l=(+r.sold||0)/Math.max(1,+PQ.win||60), sh=(+r.sold30||0)/30; if(!(l>0||sh>0)) return '';
@@ -12556,7 +12565,7 @@ function mrpBuySettingsHtml(){
         ${[['week','This week'],['ahead','A week ahead'],['two','14 days ahead']].map(([k,l])=>`<option value="${k}"${SUPT[sp].t===k?' selected':''}>${l}</option>`).join('')}</select></td>
       <td class="num"><input type="number" class="mrp-in" style="width:60px" value="${esc(String(SUPT[sp].lead))}" onchange="supTimingSet(${esc(JSON.stringify(sp))},'lead',this.value)"> <span class="mini" style="color:var(--muted)">days</span></td></tr>`).join('')}</tbody></table>
       <div class="mini" style="color:var(--muted);margin-top:4px">Suppliers not listed keep the general rule above.</div>`:''}
-    <details class="mrp-adv"><summary>Advanced</summary>${rpSettingsHtml(window._mrpPlan||[])}</details></section>`; }
+    <details class="mrp-adv"><summary>Advanced</summary>${rpSettingsHtml(window._mrpPlan||[],1)}</details></section>`; }
 function mrpIsFull(){ return mrpView()!=='plan'; }
 function mrpSetFull(on){ mrpSetView(on?'packs':'plan'); }
 /* Shop-menu order for the tabs; anything else follows, alphabetically. */
@@ -12727,7 +12736,7 @@ async function mrpSimpleView(o){
     sec4body=`<div class="mini" style="color:var(--muted);margin-bottom:6px">${pos.length} PO(s) · ${peso(tot)} · Fritz sends them from Purchase Orders</div>
       <table class="mrp-t"><tbody>${pos.map(x=>{ const ls=pl.filter(l=>l.po_ref===x.po_ref); const v=ls.reduce((b,l)=>b+(+l.ordered_kg||0)*(+l.price_kg||0),0);
         return `<tr><td><b>${esc(x.supplier_name||'—')}</b><div class="mini" style="color:var(--muted)">${esc(x.po_ref)} · ${ls.length} item(s)</div></td><td><span class="mrp-chip">${esc(x.status||'')}</span></td><td class="num">${peso(v)}</td></tr>`; }).join('')}</tbody></table>
-      <div style="margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">${L&&canRaisePO()?`<button class="btn sm sec" onclick="generatePOsFromMRP()" title="After an edit: orders only what is not already on order or arrived">🧾 Order what's new</button>`:''}<a href="#/purchase_orders" onclick="openModel('purchase_orders');return false">Open in Purchase Orders →</a></div>`;
+      <div style="margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">${L&&canRaisePO()?`<button class="btn sm sec" onclick="generatePOsFromMRP()" title="After an edit: orders only what is not already on order or arrived">🧾 Order what's new</button>`:''}<a href="#/purchase_orders" onclick="mrpGoPOs();return false">Open in Purchase Orders →</a><a href="#" onclick="mrpSetView('plan');window.scrollTo(0,0);return false">← Back to plan</a></div>`;
   } else {
     const bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no supplier set)'; (bySup[s]=bySup[s]||[]).push(l); });
     const sups=Object.keys(bySup).map(s=>({s, n:bySup[s].length, v:bySup[s].reduce((a,l)=>a+(l.final/1000)*(+l.price||0),0)})).sort((a,b)=>b.v-a.v);
@@ -16860,7 +16869,7 @@ function drawCoSched(){
     <div style="display:flex;gap:22px;flex-wrap:wrap">
       <div style="min-width:290px;flex:1">
         ${n('Promise the customer','promiseDays','calendar days from the lock',120)}
-        ${day('Ingredients are bought on','buyDow','the day the plot is pulled and POs are raised')}
+        ${day('Plan &amp; order day','buyDow','the day the weekly plan is made and POs are raised')}
         ${n('Production starts','buyToStart','days after the meat is ordered',60)}
         ${day('The van to '+esc(locName(planSellLoc()))+' runs on','vanDow','when finished packs travel')}
         ${n('Default lead time','coLead','days between a promise and its make-by, on a new quote',60)}
