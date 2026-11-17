@@ -3936,7 +3936,7 @@ const _pqCeil=(v,step)=>{ const s=+step||0; if(!(s>0)) return Math.ceil(v); retu
               product's own learned buffer (grows after a red week, shrinks
               after three green ones)
      RED    stock won't last the wait                → make now
-     YELLOW lasts the wait, not the week after        → make if worth a batch
+     YELLOW lasts the wait, not the week after        → make now too (next van is too late)
      GREEN  more than that                            → make nothing
    Speed: the higher of the 60-day and the last-30-day rate, so growth shows
    at once and one quiet month does not cut the shelf. Batch by speed tier
@@ -3963,7 +3963,10 @@ function pqCalcGauge(r){
   const ceilTo=(x,st)=>st>0?Math.ceil(x/st)*st:Math.ceil(x);
   if(perDay>0 && need>0){
     if(zone==='green'){ deferred=true; deferDays=(cur-yellowLine)/perDay; }
-    else if(zone==='yellow' && need < T.min/2){ smallWait=true; deferred=true; deferDays=(cur-redLine)/perDay; }
+    /* YELLOW IS NOT "MAYBE" (replay of 16 Nov, 18 Nov): yellow means the stock lasts
+       until this week's van but NOT until next week's — and next week's plan only
+       arrives the Saturday after. Skipping a small yellow need ran 4 products out
+       for 1–4 days in the replay. So yellow is made now, at least one batch. */
     else { produce=Math.max(T.min, ceilTo(need,T.step)); }
   }
   if(produce>0){ const capD=Math.max(0,+PQ.gcapD||0);
@@ -12356,7 +12359,7 @@ async function _renderMRP(){
       cover:(C.perDay>0?(avail/C.perDay):null),coverAfter:(C.perDay>0?(Math.max(avail,target)/C.perDay):null),
       eta:(onOrderEta[it.sku]||''),base,endInv,lowStock,manualKg,moq,final,
       added, unit:(sup?(it.uom||'units'):'kg'), isSupply:sup, isProcessed:!!it.is_intermediate,
-      remark:(mrpRemarks[it.sku]||''),supplier:defSup,price:+it.list_price_kg||0,orderBy:dateMinus(MRPDATE,lead)});
+      remark:(mrpRemarks[it.sku]||''),supplier:defSup,price:+it.list_price_kg||0,orderBy:MRPDATE,arrive:addDaysISO(MRPDATE,(_tLead!=null?_tLead:lead))});   /* order on the plan day; it arrives about lead days later (was plan day − lead = always in the past, 18 Nov) */
   });
   plan.sort((a,b)=>b.final-a.final);
   window._mrpPlan=plan; window._mrpSupLedIng=_supLedIng; window._rpTooSmall=_rpTooSmall;
@@ -12383,7 +12386,7 @@ async function _renderMRP(){
     </details>
     ${(window._mrpNoYield&&window._mrpNoYield.length)?`<div style="background:#fff8e1;border:1px solid #e0b400;border-radius:6px;padding:9px 11px;margin:0 0 10px;font-size:12.5px">⚠ These processed ingredients roll up to something we buy but carry <b>no yield %</b>, so the plan has had to assume 100% — one kilo of raw per kilo of cut, which for a carcass cut is a small fraction of the truth and <b>under-orders silently</b>: <b>${window._mrpNoYield.map(esc).join(', ')}</b>. Set <i>Yield %</i> on them (Ingredients → 🥩 Item &amp; yield), stated <b>against the thing we buy</b> — the live animal, not the dressed carcass.</div>`:''}
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
-    <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Use / wk</th><th class="num">Need</th><th class="num">On hand</th><th class="num">WIP</th><th class="num">On order</th><th class="num">Have</th><th class="num" title="the ceiling — the most this ingredient is ever filled to">Target</th><th class="num" title="stock has to fall through this before anything is ordered">Trigger</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
+    <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Use / wk</th><th class="num">Need</th><th class="num">On hand</th><th class="num">WIP</th><th class="num">On order</th><th class="num">Have</th><th class="num" title="the ceiling — the most this ingredient is ever filled to">Target</th><th class="num" title="stock has to fall through this before anything is ordered">Trigger</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th title="ordered on the plan day; about when it arrives">Arrives ~</th><th>Supplier</th></tr></thead><tbody>`;
   const _rowHtml=(l)=>`<tr><td>${esc(l.name)}
     ${l.isSupply?'<span class="tagf" style="background:#e8e6df;color:#57544c">supply</span>':(l.isProcessed?'<span class="tagf tagf-proc">processed</span>':'')}
     <div class="mini">${l.isSupply?('per '+esc(l.unit)):('yield '+(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)+'%')}</div>${l.remark?`<div class="mini" style="color:var(--berry)">📝 ${esc(l.remark)}</div>`:''}</td>
@@ -12400,7 +12403,7 @@ async function _renderMRP(){
     <td class="num"><b style="color:var(--berry)">${l.final>0?(l.isSupply?(l.final+' '+esc(l.unit)):kgf(l.final)):'—'}</b>${(()=>{ const it=ings.find(x=>x.sku===l.sku)||{}; const sub=Math.max(0,+l.base||0)+(+l.manualKg||0)*1000; if(l.isSupply||!(l.final>sub+5)) return '';
       const mn=+it.min_order_kg||0, ps=+it.pack_size_kg||0;
       return `<div class="mini" style="color:var(--muted)" title="what the plan needs plus anything typed, then rounded up">${kgf(sub)} → up to ${mn>0&&l.final<=mn*1000+5?('min '+mn+' kg'):(ps>0?('whole cases of '+ps+' kg'):'min')}</div>`; })()}${(()=>{ const it=ings.find(x=>x.sku===l.sku)||{}; const ps=+it.pack_size_kg||0; return (l.final>0&&ps>0&&/bottle|head/i.test(it.uom||''))?`<div class="mini">= ${Math.round(l.final/1000/ps)} ${/head/i.test(it.uom||'')?'head':('bottle(s) of '+(ps>=1?ps+' L':Math.round(ps*1000)+' ml'))}</div>`:''; })()}${l.added>0?`<div class="mini" style="color:var(--muted)">incl. ${l.added} added by hand <span class="x" style="cursor:pointer;color:var(--danger)" onclick="mrpAddSet('${esc(l.sku)}',0)">✕</span></div>`:''}</td>
-    <td>${l.lead?l.orderBy:'—'}</td><td>${esc(l.supplier)||'<span class="mini">set default</span>'}</td></tr>`;
+    <td>${l.arrive||'—'}</td><td>${esc(l.supplier)||'<span class="mini">set default</span>'}</td></tr>`;
   // group the plan per supplier (matches how POs are generated), with a per-supplier subtotal + total kg
   const _bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no default supplier — set one)'; (_bySup[s]=_bySup[s]||[]).push(l); });
   const _supKg=(arr)=>arr.reduce((s,l)=>s+(+l.final||0),0);                 // total order grams for a supplier
@@ -12642,7 +12645,7 @@ function mrpGaugeCompare(){ const C=window._mrpCalc||{}; const rows=Object.value
       <tr><td>Old way (21-day par + lead)</td><td class="num">${a.n}</td><td class="num">${n0(a.pk)}</td><td class="num">${avg(a)}</td></tr>
       <tr><td><b>Fuel gauge</b> (${+PQ.waitD||14}-day wait + ${+PQ.afterD||7}+${+PQ.safeD||3} days)</td><td class="num"><b>${b.n}</b></td><td class="num"><b>${n0(b.pk)}</b></td><td class="num"><b>${avg(b)}</b></td></tr>
     </tbody></table>
-    <div class="mini" style="margin-top:8px">Gauge today: <span class="mrp-lasts mrp-lr">${b.red} red</span> make now · <span class="mrp-lasts mrp-ly">${b.yel} yellow</span> make if worth a batch · <span class="mrp-lasts mrp-lg">${b.grn} green</span> skip</div></section>`; }
+    <div class="mini" style="margin-top:8px">Gauge today: <span class="mrp-lasts mrp-lr">${b.red} red</span> make now · <span class="mrp-lasts mrp-ly">${b.yel} yellow</span> make now (won't last 2 weeks) · <span class="mrp-lasts mrp-lg">${b.grn} green</span> skip</div></section>`; }
 function mrpPqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0); savePackReq(); renderMRP(); }
 function mrpPqToggle(k){ PQ[k]=(+PQ[k])?0:1; savePackReq(); renderMRP(); }
 /* The week's two fixed days, here where planners look (Zeus 17 Nov: "Settings
