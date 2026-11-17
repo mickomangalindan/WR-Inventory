@@ -3817,7 +3817,8 @@ const PQ_DEF={lead:8, move:1, cycle:21, win:60, cs:12, minPacks:24, minOn:1, def
      gauge 1 = use pqCalcGauge; 0 = the classic sum below. All numbers are settings. */
   gauge:0, waitD:14, afterD:7, safeD:3, grow:1, gcapD:42,
   fastWk:8, slowWk:3, fastMin:24, fastStep:12, slowMin:12, slowStep:6, vslowMin:6, vslowStep:6,
-  learn:1, bufMax:2, bufMin:0.5};
+  learn:1, bufMax:2, bufMin:0.5,
+  capOn:1, capPk:0};   /* kitchen limit: capPk 0 = learn it from the last 4 weeks made */
 let PQ=Object.assign({},PQ_DEF);
 try{ PQ=Object.assign({},PQ_DEF,JSON.parse(localStorage.getItem('wr_packreq')||'{}')); }catch(e){}
 let PQ_MOVE={};   // per-SKU movement override — the one variable that is genuinely per product
@@ -3946,6 +3947,50 @@ function pqCalcGauge(r){
     covPct:(target>0?cur/target:null), shelfPct:(target>0?shelf/target:null), alert:(zone==='red'), pct:(target>0?cur/target:null)};
 }
 function pqCalc(r){ return (+PQ.gauge) ? pqCalcGauge(r) : pqCalcClassic(r); }
+/* ---- WHAT THE KITCHEN ACTUALLY MAKES (Zeus, 17 Nov 2026) --------------------
+   Plans asked for 1,100–1,900 regular packs a week while the kitchen made
+   600–900, so it made a little of everything, and ingredients were bought for
+   the whole plan. Packs confirmed per week, custom included, averaged over the
+   last 4 full weeks. */
+async function mrpMadeByWeek(weeks){
+  const since=new Date(Date.now()-((weeks||6)+1)*7*86400000).toISOString().slice(0,10);
+  let rows=[]; try{
+    if(isLive()) rows=await sbAll('production_batches?select=product_sku,good_packs,production_date,kind&status=eq.confirmed&production_date=gte.'+since);
+    else rows=(DEMO.production_batches||[]).filter(b=>b.status==='confirmed' && String(b.production_date||'')>=since);
+  }catch(e){ rows=[]; }
+  return (rows||[]).filter(b=>b.kind!=='output');
+}
+function _wkStart(d){ const x=new Date(String(d).slice(0,10)+'T00:00:00'); const k=(x.getDay()+6)%7; x.setDate(x.getDate()-k); return x.toISOString().slice(0,10); }
+async function mrpKitchenCapacity(){
+  if(+PQ.capPk>0) return {packs:+PQ.capPk, from:'setting'};
+  const rows=await mrpMadeByWeek(5); const thisWk=_wkStart(todayISO()); const by={};
+  rows.forEach(b=>{ const w=_wkStart(b.production_date); if(w===thisWk) return; by[w]=(by[w]||0)+(+b.good_packs||0); });
+  const wk=Object.keys(by).sort().slice(-4); if(!wk.length) return {packs:0, from:'none'};
+  return {packs:Math.round(wk.reduce((a,w)=>a+by[w],0)/wk.length), from:'last '+wk.length+' week(s)', weeks:wk.map(w=>({w,p:by[w]}))};
+}
+/* PLANNED vs MADE: each locked plot against regular packs confirmed in the 7
+   days from its date. Counts only up to what was planned per product, so an
+   extra batch of one product cannot hide a missing one. */
+async function mrpPlanMadeScore(n){
+  let plots=[]; try{ plots=(await mrpPlans())||[]; }catch(e){}
+  const byDate={}; plots.forEach(q=>{ const d=q.data||q; if(d.locked===false) return; const dt=String(q.plan_date||q.date||'').slice(0,10); if(!dt) return;
+    if(!byDate[dt] || String(q.saved_at||d.saved_at||'')>String(byDate[dt].saved_at||'')) byDate[dt]={dem:d.demand||{}, ref:d.ref||q.ref||'', saved_at:q.saved_at||d.saved_at}; });
+  const dates=Object.keys(byDate).sort().filter(d=>d<=todayISO()).slice(-(n||6)); if(!dates.length) return [];
+  const rows=await mrpMadeByWeek(Math.ceil((Date.now()-new Date(dates[0]).getTime())/(7*86400000))+1);
+  return dates.map(dt=>{ const dem=byDate[dt].dem; const end=new Date(new Date(dt+'T00:00:00').getTime()+7*86400000).toISOString().slice(0,10);
+    const made={}; rows.forEach(b=>{ const pd=String(b.production_date||'').slice(0,10); if(pd>=dt && pd<end) made[b.product_sku]=(made[b.product_sku]||0)+(+b.good_packs||0); });
+    let plan=0, got=0, full=0, n=0; const short=[];
+    Object.keys(dem).forEach(sku=>{ if(/^CUST-/i.test(sku)) return; const q=+dem[sku]||0; if(!(q>0)) return; n++; plan+=q; const m=Math.min(q,+made[sku]||0); got+=m; if(m>=q) full++; else short.push({sku,q,m}); });
+    return {date:dt, ref:byDate[dt].ref, plan, got, pct:plan?Math.round(100*got/plan):null, n, full, short, open:end>todayISO()}; });
+}
+function mrpScoreHtml(sc, cap){ if(!sc||!sc.length) return '';
+  const n0=v=>Math.round(+v||0).toLocaleString('en-PH');
+  const bar=p=>`<span style="display:inline-block;width:80px;height:8px;background:#f0f3f2;border-radius:4px;vertical-align:middle;margin-right:6px"><span style="display:block;height:8px;width:${Math.min(100,p||0)}%;background:${(p||0)>=80?'#3a8276':(p||0)>=50?'#e0a33a':'#c0564b'};border-radius:4px"></span></span>`;
+  return `<section class="mrp-sec"><div class="mrp-sechead"><div><h3>Planned vs made</h3><div class="mini" style="color:var(--muted)">Regular packs in each locked plan, against what the kitchen confirmed in the 7 days after it.${cap&&cap.packs?` Kitchen makes about <b>${n0(cap.packs)}</b> packs a week (${esc(cap.from)}, custom included).`:''}</div></div></div>
+    <table class="mrp-t"><thead><tr><th>Plan for</th><th class="num">Planned</th><th class="num">Made toward it</th><th>Score</th><th class="num">Products done in full</th></tr></thead><tbody>
+    ${sc.slice().reverse().map(r=>`<tr><td>${esc(r.date)}${r.open?' <span class="mini" style="color:var(--muted)">· week still running</span>':''}</td><td class="num">${n0(r.plan)}</td><td class="num">${n0(r.got)}</td><td>${bar(r.pct)}<b>${r.pct==null?'—':r.pct+'%'}</b></td><td class="num">${r.full} of ${r.n}</td></tr>`).join('')}
+    </tbody></table></section>`; }
+
 function pqCalcClassic(r){
   const win=Math.max(1,+PQ.win||60);
   const perDay = (+r.sold||0)/win;
@@ -12337,7 +12382,8 @@ async function _renderMRP(){
     try{ _body=await mrpSimpleView({coAll, coDone, nCoPend, locked:_lockedPlot, nextMon:_nextMon, pName:_pName, catalogue}); }
     catch(e){ console.warn('mrp simple',String(e&&e.message||e)); _body=''; }
   } else if(_view==='packs'){
-    _body=`<div class="mrp-simple mrp-wide">${mrpGaugeCompare()}<div class="mini" style="color:var(--muted);margin:12px 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. You can still type here; it is the same plan as the Plan tab.</div>${dh}</div>`;
+    let _sc=''; try{ _sc=mrpScoreHtml(await mrpPlanMadeScore(6), await mrpKitchenCapacity()); }catch(e){}
+    _body=`<div class="mrp-simple mrp-wide">${_sc}${mrpGaugeCompare()}<div class="mini" style="color:var(--muted);margin:12px 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. You can still type here; it is the same plan as the Plan tab.</div>${dh}</div>`;
   } else if(_view==='ingredients'){
     _body=`<div class="mrp-simple mrp-wide"><div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px">
         <button class="btn sm sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals — view or download as Excel">⬇ Download ingredient list</button></div>${rh}</div>`;
@@ -12446,7 +12492,9 @@ function mrpPackSettingsHtml(){ const f=(k,l,u)=>`<label style="display:flex;jus
         ${f('fastMin','Fast: minimum batch','packs')}${f('fastStep','Fast: then steps of','packs')}${f('slowMin','Slow: minimum batch','packs')}${f('slowStep','Slow: then steps of','packs')}${f('vslowMin','Very slow: minimum batch','packs')}${f('vslowStep','Very slow: then steps of','packs')}</div></div>
     <div class="mini" style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap">
       <span class="btn link" onclick="mrpPqToggle('grow')">${(+PQ.grow)?'✓':'✕'} Use the last 30 days when selling faster</span>
-      <span class="btn link" onclick="mrpPqToggle('learn')">${(+PQ.learn)?'✓':'✕'} Buffer learns (bigger after a red week, smaller after 3 green)</span></div></section>`; }
+      <span class="btn link" onclick="mrpPqToggle('learn')">${(+PQ.learn)?'✓':'✕'} Buffer learns (bigger after a red week, smaller after 3 green)</span>
+      <span class="btn link" onclick="mrpPqToggle('capOn')">${(+PQ.capOn)?'✓':'✕'} Kitchen limit (plan only what the kitchen makes, red first)</span></div>
+    <div style="max-width:420px">${f('capPk','Kitchen makes a week (0 = learn from the last 4 weeks)','packs')}</div></section>`; }
 function mrpIsFull(){ return mrpView()!=='plan'; }
 function mrpSetFull(on){ mrpSetView(on?'packs':'plan'); }
 /* Shop-menu order for the tabs; anything else follows, alphabetically. */
@@ -12581,6 +12629,9 @@ async function mrpSimpleView(o){
       <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`${(+PQ.gauge)?'':`<button class="btn sm sec" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>`}
       <button class="btn sm" onclick="mrpPullPackReq()">🧮 Pull the week</button>`}</div></div>
+    ${(!L && (window._mrpCapHeld||[]).length)?`<details class="mrp-note" style="background:#f6faf9"><summary><b>Kitchen limit:</b> ${window._mrpCapHeld.length} product(s) / ${n0(window._mrpCapHeld.reduce((a,x)=>a+x.packs,0))} pack(s) wait for next week — the week was filled red first, then yellow</summary>
+      <div class="mini" style="margin-top:6px">${window._mrpCapHeld.map(x=>`${esc(nm[x.sku]||x.name||x.sku)} — ${n0(x.packs)}${x.part?' more':''} <span class="mrp-lasts ${x.zone==='red'?'mrp-lr':'mrp-ly'}">${esc(x.zone||'')}</span>`).join(' · ')}</div>
+      <div class="mini" style="color:var(--muted);margin-top:4px">Type a number on any of them to add it anyway.</div></details>`:''}
     ${L?'':(SHSYNC.url?`<div class="mrp-sync mini" style="color:var(--muted)">Pull the week gets the latest Shopify stock first · last reading <span id="sh_syncage">${esc(shAgeText())}</span></div>`:`<div class="mrp-sync">${shSyncBtn()}</div>`)}
     <div class="mrp-kpis"><div><span>Products to make</span><b>${kMake}</b></div><div><span>Packs to make</span><b>${n0(kPk)}</b></div>
       <div><span>Running low (under 5 days)</span><b>${kLow}</b></div><div><span>Can wait</span><b>${kWait}</b></div></div>
@@ -13323,7 +13374,25 @@ async function mrpPullPackReq(){
   const _catAll=(built.rows||[]).map(r=>({r,c:pqCalc(r)}))
     .filter(x=>x.c.produce>0 && !((co[x.r.sku]!=null||coFull[x.r.sku]!=null) && /^CUST-/i.test(String(x.r.sku))) && !_slSet.has(x.r.sku));
   const _held=_catAll.filter(x=>_mrpDrop[x.r.sku]);        // taken out by hand earlier — left out
-  const cat=_catAll.filter(x=>!_mrpDrop[x.r.sku]);
+  let cat=_catAll.filter(x=>!_mrpDrop[x.r.sku]);
+  /* KITCHEN LIMIT (fuel gauge on): the week asks only for what the kitchen
+     makes, red first (soonest out), then yellow. Ingredients follow the plan,
+     so nothing is bought for packs that will not be made. What does not fit
+     is named and waits — next week's gauge sees it again. */
+  window._mrpCapHeld=[]; let _cap=null;
+  if((+PQ.gauge) && (+PQ.capOn)){
+    try{ _cap=await mrpKitchenCapacity(); }catch(e){ _cap=null; }
+    if(_cap && _cap.packs>0){
+      let room=_cap.packs-Math.round(coPacks||0);
+      const zr=z=>z==='red'?0:(z==='yellow'?1:2);
+      const ord=cat.slice().sort((a,b)=>zr(a.c.zone)-zr(b.c.zone) || ((+a.c.cover||0)-(+b.c.cover||0)));
+      const keep=new Set();
+      ord.forEach(x=>{ const q=+x.c.produce||0; if(q<=room){ keep.add(x); room-=q; }
+        else { const mn=+x.c.batch||0; if(x.c.zone==='red' && mn>0 && mn<=room){ x.c.produce=Math.min(q,Math.floor(room/mn)*mn); keep.add(x); room-=x.c.produce; window._mrpCapHeld.push({sku:x.r.sku, name:x.r.name, packs:q-x.c.produce, zone:x.c.zone, part:true}); }
+          else window._mrpCapHeld.push({sku:x.r.sku, name:x.r.name, packs:q, zone:x.c.zone}); } });
+      cat=cat.filter(x=>keep.has(x));
+    }
+  }
   const catPacks=cat.reduce((a,x)=>a+x.c.produce,0);
 
   if(!coSkus.length && !cat.length){
@@ -13337,6 +13406,7 @@ async function mrpPullPackReq(){
     +'CATALOGUE — '+cat.length+' product(s) / '+Math.round(catPacks)+' pack(s), rounded to '+DEM_MIN+' minimum then steps of '+DEM_INC+'\n\n'
     +cat.slice(0,8).map(x=>'• '+x.r.name+' — '+Math.round(x.c.produce)).join('\n')
     +(cat.length>8?('\n… and '+(cat.length-8)+' more'):'')
+    +((window._mrpCapHeld||[]).length?('\n\nKITCHEN LIMIT — about '+(_cap&&_cap.packs)+' packs a week: '+window._mrpCapHeld.length+' product(s) / '+window._mrpCapHeld.reduce((a,x)=>a+x.packs,0)+' pack(s) wait for next week'):'')
     +'\n\nWorked out at: lead '+PQ.lead+'d · movement '+PQ.move+'× · cycle '+PQ.cycle+'d · window '+PQ.win+'d · case '+PQ.cs
     +'\nSellable read from '+built.src+'.'
     +(noSales?('\n\n'+noSales+' product(s) have no sales in the window and so ask for nothing.'):'')
@@ -15991,8 +16061,10 @@ async function renderDashboard(){
      tile is reporting on, and finding that out after reading the dashboard is
      finding it out too late. */
   let _prTile=''; try{ _prTile=await planReadyTile(); }catch(e){}
+  let _pmCard=''; try{ _pmCard=mrpScoreHtml(await mrpPlanMadeScore(6), await mrpKitchenCapacity()); }catch(e){}
   $('content').innerHTML=`<div class="wrdash">
     ${_prTile?`<div class="grid" style="margin-bottom:14px">${_prTile}</div>`:''}
+    ${_pmCard?`<div style="margin-bottom:14px">${_pmCard}</div>`:''}
     <div class="grid k6" style="margin-bottom:14px">${kpis}</div>
     ${_drCard}
     <div class="grid c3" style="margin-bottom:14px">${gMargin}${gStock}${gMom}</div>
