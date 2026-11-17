@@ -615,6 +615,7 @@ body.lean .leanoff{display:none!important}
   .side .mi.active{background:#e7f2ef;color:#1f5248;box-shadow:inset 3px 0 0 #3a8276}
   .btn{border-radius:8px}
   .modal input[type=checkbox],.modal input[type=radio]{width:16px;height:16px;padding:0;margin:2px 0 0;flex:0 0 auto;accent-color:#3a8276}
+  .mrp-ro input:disabled,.mrp-ro select:disabled{background:transparent;border-color:transparent;color:inherit;opacity:1;-webkit-text-fill-color:currentColor}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
@@ -12375,7 +12376,7 @@ async function _renderMRP(){
     <td class="num">${kgf(Math.max(0,l.base))}</td>
     <td class="num"><input type="number" step="any" style="width:74px;text-align:right" value="${l.manualKg||''}" onchange="mrpManual['${l.sku}']=+this.value||0;renderMRP()"></td>
     <td class="num">${l.moq?kgf(l.moq):'—'}</td>
-    <td class="num"><b style="color:var(--berry)">${l.final>0?(l.isSupply?(l.final+' '+esc(l.unit)):kgf(l.final)):'—'}</b>${l.added>0?`<div class="mini" style="color:var(--muted)">incl. ${l.added} added by hand <span class="x" style="cursor:pointer;color:var(--danger)" onclick="mrpAddSet('${esc(l.sku)}',0)">✕</span></div>`:''}</td>
+    <td class="num"><b style="color:var(--berry)">${l.final>0?(l.isSupply?(l.final+' '+esc(l.unit)):kgf(l.final)):'—'}</b>${(()=>{ const it=ings.find(x=>x.sku===l.sku)||{}; const ps=+it.pack_size_kg||0; return (l.final>0&&ps>0&&/bottle/i.test(it.uom||''))?`<div class="mini">= ${Math.round(l.final/1000/ps)} bottle(s) of ${ps>=1?ps+' L':Math.round(ps*1000)+' ml'}</div>`:''; })()}${l.added>0?`<div class="mini" style="color:var(--muted)">incl. ${l.added} added by hand <span class="x" style="cursor:pointer;color:var(--danger)" onclick="mrpAddSet('${esc(l.sku)}',0)">✕</span></div>`:''}</td>
     <td>${l.lead?l.orderBy:'—'}</td><td>${esc(l.supplier)||'<span class="mini">set default</span>'}</td></tr>`;
   // group the plan per supplier (matches how POs are generated), with a per-supplier subtotal + total kg
   const _bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no default supplier — set one)'; (_bySup[s]=_bySup[s]||[]).push(l); });
@@ -12429,10 +12430,12 @@ async function _renderMRP(){
     catch(e){ console.warn('mrp simple',String(e&&e.message||e)); _body=''; }
   } else if(_view==='packs'){
     let _sc=''; try{ _sc=mrpScoreHtml(await mrpPlanMadeScore(6), await mrpKitchenCapacity()); }catch(e){}
-    _body=`<div class="mrp-simple mrp-wide">${_sc}${mrpGaugeCompare()}<div class="mini" style="color:var(--muted);margin:12px 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. You can still type here; it is the same plan as the Plan tab.</div>${dh}</div>`;
+    _body=`<div class="mrp-simple mrp-wide">${_sc}${mrpGaugeCompare()}<div class="mini" style="color:var(--muted);margin:12px 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. Read only: plan and type quantities in the <b>Plan</b> tab.</div><div class="mrp-ro">${dh}</div></div>`;
   } else if(_view==='ingredients'){
     _body=`<div class="mrp-simple mrp-wide"><div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px">
-        <button class="btn sm sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals — view or download as Excel">⬇ Download ingredient list</button></div>${rh}</div>`;
+        <button class="btn sm sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals — view or download as Excel">⬇ Download ingredient list</button>
+        <button class="btn sm sec" onclick="mrpSetView('plan')">← Back to plan</button></div>
+      <div class="hint" style="margin:0 0 10px">Type extra kg in <b>Manual ±</b> or use <b>＋ Add item to order</b>. The order updates at once and is kept on this computer; it is saved for everyone when you <b>Save</b> the plan — after it is locked, use <b>Edit plan → Save</b>. If POs are already made, press <b>Order what's new</b>.</div>${rh}</div>`;
   } else if(_view==='checks'){
     let _lead=''; try{ _lead=await mrpLeadTimeCard(); }catch(e){}
     _body=`<div class="mrp-simple mrp-wide">${_pre}${mrpMinOrderCard(_bySup,supMin,_supKg)}${_lead}</div>`;
@@ -12446,6 +12449,16 @@ async function _renderMRP(){
   }
   if(!_body){ _body=`<div id="mrpClean" class="${_notes?'':'mrp-clean'}">`+_head+dh+rh+`<details class="mrp-more" style="margin-top:18px"><summary>More details</summary>`+_pre+_more+`</details></div>`; }
   $('content').innerHTML=_body;
+  if(_view==='packs') mrpReadOnly($('content').querySelector('.mrp-ro'));
+}
+/* PACK NUMBERS IS FOR READING (Zeus 17 Nov: "where do I plan? Plan tab only").
+   Nothing underneath changes — the same table, the same numbers, the same plan
+   the Plan tab edits. This only takes the typing and the plan buttons off this
+   one screen and hides the custom-order list the Plan tab already shows. */
+function mrpReadOnly(root){ if(!root) return;
+  root.querySelectorAll('input,select,textarea').forEach(el=>{ el.readOnly=true; el.disabled=true; el.tabIndex=-1; });
+  root.querySelectorAll('button').forEach(b=>{ if(/Pull the week|Clear demand|Round to|Add|Remove|✕|＋/.test(b.textContent||'')) b.style.display='none'; });
+  root.querySelectorAll('h3').forEach(h=>{ if(/Custom orders —/.test(h.textContent||'')){ const box=h.closest('.repcard')||h.parentElement; if(box) box.style.display='none'; } });
 }
 /* The four steps of a planning week, read from what is already on screen:
    custom orders → regular packs → saved and locked → POs raised. Plus at most
@@ -12463,7 +12476,7 @@ async function mrpStepHeader(simple){
   let pos=[];
   try{ pos=((await db.list('purchase_orders',{}))||[]).filter(o=>String(o.order_date||'').slice(0,10)===MRPDATE && o.status!=='cancelled'); }catch(e){}
   const done={co:true, reg:reg.length>0, lock:!!L, po:pos.length>0};
-  const cur=!done.reg?2:!done.lock?3:!done.po?4:0;
+  const cur=!done.reg?2:!done.lock?3:!done.po?5:0;
   const step=(n,title,sub,ok)=>{ const on=(n===cur);
     const dot=ok?'<span class="mrp-dot ok">✓</span>':`<span class="mrp-dot${on?' on':''}">${n}</span>`;
     return `<li class="mrp-step${on?' cur':''}">${dot}<span><b>${title}</b><br><span class="mini">${sub}</span></span></li>`; };
@@ -12472,7 +12485,7 @@ async function mrpStepHeader(simple){
   if(noPrice.length) att.push(['No price on '+noPrice.length+' ingredient line(s): '+noPrice.slice(0,3).map(l=>esc(l.name)).join(', ')+(noPrice.length>3?', …':''), 'the PO will read ₱0 until the price is set in Ingredients']);
   const dl=Object.keys(window._mrpCoDoneSku||{}).length;
   if(dl) att.push([dl+' custom order line(s) look delivered', 'close them in Custom Orders, or answer when you pull the week']);
-  if(L && !pos.length) att.push(['This week is locked but has no purchase order yet', 'press “Order the locked plot” above']);
+  if(L && !pos.length) att.push(['This week is locked but has no purchase order yet', 'press “Make the purchase orders” in step 5']);
   const lockTxt=L?`<span class="mrp-chip ok">Locked · ${esc(L.ref||'')}</span>`:`<span class="mrp-chip">Not locked yet</span>`;
   return `<div class="mrp-head">
     <div class="mrp-headrow"><div><div class="mini" style="color:var(--muted)">Demand plan</div>
@@ -12481,8 +12494,9 @@ async function mrpStepHeader(simple){
     <ol class="mrp-steps">
       ${step(1,'Custom orders', coCust.size+' customer(s) · '+coPk+' pack(s)', done.co)}
       ${step(2,'Regular packs', reg.length?(reg.length+' product(s) · '+Math.max(0,Math.round(regPk))+' pack(s)'):'press Pull the week', done.reg)}
-      ${step(3,'Save and lock', L?('locked'+(L.saved_at?' '+String(L.saved_at).slice(0,10):'')):'💾 Save plan when the numbers are right', done.lock)}
-      ${step(4,'Order ingredients', pos.length?(pos.length+' PO(s) made'):(plan.length?plan.length+' line(s) to order':'nothing to order yet'), done.po)}
+      ${step(3,'Check ingredients', plan.length?plan.length+' line(s) · add extras':'nothing to buy yet', done.lock||done.po)}
+      ${step(4,'Save and lock', L?('locked'+(L.saved_at?' '+String(L.saved_at).slice(0,10):'')):'💾 Save plan when the numbers are right', done.lock)}
+      ${step(5,'Purchase orders', pos.length?(pos.length+' PO(s) made'):(L?'press Make the purchase orders':'after the lock'), done.po)}
     </ol>
     ${att.length?`<div class="mrp-att"><b>Needs attention · ${att.length}</b>${att.slice(0,3).map(a=>`<div class="mrp-attrow"><span class="mrp-bul"></span><span>${a[0]}<span class="mini" style="color:var(--muted)"> — ${a[1]}</span></span></div>`).join('')}</div>`:''}
     ${(pos.length&&!simple)?`<div class="mini" style="margin-top:8px"><a href="#/purchase_orders" onclick="openModel('purchase_orders');return false">Open the ${pos.length} purchase order(s) in Purchase Orders →</a> · Fritz sends them from there</div>`:''}
@@ -12607,9 +12621,9 @@ function mrpSecRank(g1,g2){ const a=MRP_SEC_ORDER[g1]||[]; const i=a.indexOf(g2)
    the database and never replaces a saved draft or plot; it only offers to put
    the numbers back when the screen comes up empty. */
 function mrpAutosave(){ const n=Object.keys(mrpDemand||{}).filter(k=>+mrpDemand[k]>0).length; if(!n||!MRPDATE) return;
-  try{ localStorage.setItem('wr_mrp_auto_'+MRPDATE, JSON.stringify({at:new Date().toISOString(), demand:mrpDemand, coPart:mrpCoPart||{}})); }catch(e){} }
+  try{ localStorage.setItem('wr_mrp_auto_'+MRPDATE, JSON.stringify({at:new Date().toISOString(), demand:mrpDemand, coPart:mrpCoPart||{}, manual:mrpManual||{}, add:mrpAdd||{}})); }catch(e){} }
 function mrpAutoGet(){ try{ return JSON.parse(localStorage.getItem('wr_mrp_auto_'+MRPDATE)||'null'); }catch(e){ return null; } }
-function mrpAutoRestore(){ const a=mrpAutoGet(); if(!a) return; mrpDemand=Object.assign({},a.demand||{}); mrpCoPart=Object.assign({},a.coPart||{}); toast('Numbers put back from '+String(a.at||'').slice(11,16)); renderMRP(); }
+function mrpAutoRestore(){ const a=mrpAutoGet(); if(!a) return; mrpDemand=Object.assign({},a.demand||{}); mrpCoPart=Object.assign({},a.coPart||{}); if(a.manual) mrpManual=Object.assign({},a.manual); if(a.add) mrpAdd=Object.assign({},a.add); toast('Numbers put back from '+String(a.at||'').slice(11,16)); renderMRP(); }
 function mrpAutoDiscard(){ try{ localStorage.removeItem('wr_mrp_auto_'+MRPDATE); }catch(e){} renderMRP(); }
 function mrpTabList(prods){ const seen={}; (prods||[]).forEach(p=>{ seen[prodG1(p)]=1; });
   return Object.keys(seen).sort((a,b)=>{ const ia=MRP_TAB_ORDER.indexOf(a), ib=MRP_TAB_ORDER.indexOf(b);
@@ -12743,8 +12757,8 @@ async function mrpSimpleView(o){
     ? `<div class="mrp-note" style="background:#e7f2ef">↺ There are unsaved numbers on this computer from <b>${esc(String(_au.at||'').slice(0,16).replace('T',' '))}</b> (${Object.keys(_au.demand||{}).length} product(s)).
         <span class="btn link" onclick="mrpAutoRestore()">Put them back</span> · <span class="btn link" onclick="mrpAutoDiscard()">Ignore</span></div>`
     : `<div class="mini" style="color:var(--muted);margin-top:6px">✓ Kept on this computer as you type · ${esc(String(_au.at||'').slice(11,16))} — still press Save draft or Save plan to share it</div>`);
-  const sec3=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>3 · Save and lock</h3>
-      <div class="mini" style="color:var(--muted)">${L?('Locked · <b>'+esc(L.ref||'')+'</b>'+(L.saved_at?' · '+esc(String(L.saved_at).slice(0,16).replace('T',' ')):'')+' — the kitchen sees this week\'s targets'):'When the numbers are right, save the plan. It locks, and the kitchen sees the targets.'}</div></div>
+  const sec3=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>4 · Save and lock</h3>
+      <div class="mini" style="color:var(--muted)">${L?('Locked · <b>'+esc(L.ref||'')+'</b>'+(L.saved_at?' · '+esc(String(L.saved_at).slice(0,16).replace('T',' ')):'')+' — the kitchen sees this week\'s targets'):'When packs and ingredients are right, save the plan. It locks, and the kitchen sees the targets.'}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${L?`<span class="mrp-chip ok">Locked</span><button class="btn sm sec" onclick="mrpEditPlan()">✏️ Edit plan</button>`
         :(_editing?`<button class="btn sm sec" onclick="mrpEditCancel()">Cancel editing</button><button class="btn sm" onclick="saveMRPPlan()">💾 Save as new version (locks)</button>`
         :`<button class="btn sm sec" onclick="saveMRPDraft()">📝 Save draft</button><button class="btn sm" onclick="saveMRPPlan()">💾 Save plan (locks)</button>`)}</div></div>
@@ -12762,20 +12776,25 @@ async function mrpSimpleView(o){
         return `<tr><td><b>${esc(x.supplier_name||'—')}</b><div class="mini" style="color:var(--muted)">${esc(x.po_ref)} · ${ls.length} item(s)</div></td><td><span class="mrp-chip">${esc(x.status||'')}</span></td><td class="num">${peso(v)}</td></tr>`; }).join('')}</tbody></table>
       <div style="margin-top:8px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">${L&&canRaisePO()?`<button class="btn sm sec" onclick="generatePOsFromMRP()" title="After an edit: orders only what is not already on order or arrived">🧾 Order what's new</button>`:''}<a href="#/purchase_orders" onclick="mrpGoPOs();return false">Open in Purchase Orders →</a><a href="#" onclick="mrpSetView('plan');window.scrollTo(0,0);return false">← Back to plan</a></div>`;
   } else {
-    const bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no supplier set)'; (bySup[s]=bySup[s]||[]).push(l); });
-    const sups=Object.keys(bySup).map(s=>({s, n:bySup[s].length, v:bySup[s].reduce((a,l)=>a+(l.final/1000)*(+l.price||0),0)})).sort((a,b)=>b.v-a.v);
-    const tot=sups.reduce((a,x)=>a+x.v,0);
-    sec4body=`<div class="mini" style="color:var(--muted);margin-bottom:6px">${plan.length?(plan.length+' ingredient(s) from '+sups.length+' supplier(s) · about '+peso(tot)):'Nothing to buy yet.'}
-        ${L?'':' · lock the plan first, then the orders are made from it'}</div>
-      ${sups.length?`<table class="mrp-t"><tbody>${sups.map(x=>`<tr><td><b>${esc(x.s)}</b><div class="mini" style="color:var(--muted)">${x.n} item(s)</div></td><td class="num">${peso(x.v)}</td></tr>`).join('')}</tbody></table>`:''}
+    sec4body=`<div class="mini" style="color:var(--muted)">${L?'':'Lock the plan first (step 4); the orders are made from it.'}</div>
       <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         ${L&&canRaisePO()?`<button class="btn sm" onclick="generatePOsFromMRP()">🧾 Make the purchase orders</button>`:''}
-        ${L&&!canRaisePO()?'<span class="mini" style="color:var(--muted)">Purchasing makes the orders from the locked plan.</span>':''}
-        <span class="btn link" onclick="mrpSetView('ingredients')">See or change each ingredient →</span></div>`;
+        ${L&&!canRaisePO()?'<span class="mini" style="color:var(--muted)">Purchasing makes the orders from the locked plan.</span>':''}</div>`;
   }
-  const sec4=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>4 · Order ingredients</h3></div></div>${sec4body}</section>`;
+  /* 3 · CHECK INGREDIENTS comes BEFORE the lock (Zeus 17 Nov): pull the week,
+     look at what it needs, add extras on the Ingredients tab, then lock, then
+     order. The supplier totals are the same numbers the POs are made from. */
+  const bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no supplier set)'; (bySup[s]=bySup[s]||[]).push(l); });
+  const sups=Object.keys(bySup).map(s=>({s, n:bySup[s].length, v:bySup[s].reduce((a,l)=>a+(l.final/1000)*(+l.price||0),0)})).sort((a,b)=>b.v-a.v);
+  const _ingTot=sups.reduce((a,x)=>a+x.v,0);
+  const secIng=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>3 · Check ingredients</h3>
+      <div class="mini" style="color:var(--muted)">${plan.length?(plan.length+' ingredient(s) to buy from '+sups.length+' supplier(s) · about '+peso(_ingTot)):'Nothing to buy yet — pull the week first.'}</div></div>
+      <button class="btn sm sec" onclick="mrpSetView('ingredients')">See or add ingredients →</button></div>
+    ${(!pos.length&&sups.length)?`<table class="mrp-t"><tbody>${sups.map(x=>`<tr><td><b>${esc(x.s)}</b><div class="mini" style="color:var(--muted)">${x.n} item(s)</div></td><td class="num">${peso(x.v)}</td></tr>`).join('')}</tbody></table>`:''}
+    <div class="mini" style="color:var(--muted);margin-top:6px">Need extra (e.g. 20 kg chia for shipping)? Add it on the Ingredients tab before you lock.</div></section>`;
+  const sec4=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>5 · Purchase orders</h3></div></div>${sec4body}</section>`;
   let head=''; try{ head=await mrpStepHeader(true); }catch(e){}
-  return `<div class="mrp-simple">${head}${sec1}${sec2}${sec3}${sec4}
+  return `<div class="mrp-simple">${head}${sec1}${sec2}${secIng}${sec3}${sec4}
     <div class="mini" style="color:var(--muted);text-align:center;margin:14px 0 4px">Phasing-out and supply-led lines, and every column, are on <span class="btn link" onclick="mrpSetView('packs')">Pack numbers</span>.</div></div>`;
 }
 function mrpToggleNotes(){
