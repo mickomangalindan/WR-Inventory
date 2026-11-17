@@ -10920,7 +10920,7 @@ function rpSettingsHtml(plan,lean){
             <button class="btn sm ${(+RP.spike)?'':'sec'}" onclick="rpToggle('spike')" title="OFF (recommended): the lead-time buffer is sized on the steady weekly rate. ON: it is sized on THIS WEEK's demand, so a week running well above the steady rate buys a proportionally bigger buffer and keeps it afterwards — that is what put 79 days of cover on buffalo.">${(+RP.spike)?'✓ Buffer on the spike':'✕ Buffer on the steady rate'}</button>
             <button class="btn sm ${(+RP.procOn)?'':'sec'}" onclick="rpToggle('procOn')" title="count processed / part-prepped stock back as raw so it is not bought twice">${(+RP.procOn)?'✓':'✕'} Count WIP</button>
             <button class="btn sm ${(+RP.shelfOn)?'':'sec'}" onclick="rpToggle('shelfOn')" title="never hold more days than the ingredient keeps">${(+RP.shelfOn)?'✓':'✕'} Shelf-life cap</button>
-            <button class="btn sm sec" onclick="rpWriteTargets()" title="fill par_g / reorder_g on the ingredient master with these computed figures, so Live Stock's low-stock alerts use the same numbers">📌 Write targets to Master Data</button>`:''}
+            <!-- 'Write targets to master' retired 18 Nov: it froze today's figures as typed overrides that then beat the plan's own calculation -->`:''}
       <button class="btn sm sec" onclick="rpReset()">↺ Default</button>
       <span class="sp" style="flex:1"></span>
       <span class="mini" style="color:var(--muted)">settings are saved for everyone, not just this browser</span>
