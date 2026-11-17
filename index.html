@@ -616,6 +616,15 @@ body.lean .leanoff{display:none!important}
   .btn{border-radius:8px}
   .modal input[type=checkbox],.modal input[type=radio]{width:16px;height:16px;padding:0;margin:2px 0 0;flex:0 0 auto;accent-color:#3a8276}
   .mrp-ro input:disabled,.mrp-ro select:disabled{background:transparent;border-color:transparent;color:inherit;opacity:1;-webkit-text-fill-color:currentColor}
+/* Ingredients tab in the same look as the Plan tab (17 Nov) */
+.mrp-ingv .repcard{background:#fff;border:1px solid #e6ebea;border-radius:12px;padding:16px 18px;box-shadow:none}
+.mrp-ingv .repcard h3{font-size:16px}
+.mrp-ingv table{width:100%;border-collapse:collapse}
+.mrp-ingv table th{font-weight:500;font-size:12px;color:#5f6b68;text-transform:none;letter-spacing:0;background:none;border-bottom:1px solid #e6ebea;padding:8px 8px}
+.mrp-ingv table td{padding:8px 8px;border-bottom:1px solid #f0f3f2;vertical-align:middle;background:#fff}
+.mrp-ingv table tr.subtot td,.mrp-ingv table tr[style*="background"] td{background:#e7f2ef}
+.mrp-ingv .hint{background:#f6faf9;border-left:3px solid #9cc7be}
+.mrp-ingv input[type=number]{border:1px solid #cfd8d6;border-radius:6px;padding:4px 6px}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
@@ -12343,7 +12352,9 @@ async function _renderMRP(){
   plan.sort((a,b)=>b.final-a.final);
   window._mrpPlan=plan; window._mrpSupLedIng=_supLedIng; window._rpTooSmall=_rpTooSmall;
   const _pu=window._mrpProcUse||{}; const _puN=Object.keys(_pu).length;
-  let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">2 · Replenishment plan</h3>
+  let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">${mrpView()==='ingredients'?'Ingredients to order':'2 · Replenishment plan'}</h3>
+    <div class="mini" style="color:var(--muted);margin:0 0 6px">Order = what the plan needs + use while waiting for delivery − what you have, then rounded up to the supplier's minimum / whole cases. Extra kg typed in <b>Manual ±</b> is added before the rounding.</div>
+    <details class="mrp-adv" style="margin:0 0 8px"><summary>How the order is worked out (details)</summary>
     ${_puN?`<div class="hint" style="margin:0 0 6px">Processed stock counts: <b>${_puN} processed ingredient(s)</b> covered part of this demand from stock already made (${Object.keys(_pu).slice(0,3).map(k=>esc(ingName(k))+' '+(Math.round(_pu[k]/10)/100)+' kg').join(', ')}${_puN>3?', …':''}), so no raw is ordered for that portion.</div>`:''}
     ${mrpView()==='ingredients'?'':rpSettingsHtml(plan)}
     ${(window._rpTooSmall||[]).length?`<div class="hint" style="margin:6px 0 0">
@@ -12360,6 +12371,7 @@ async function _renderMRP(){
          Typing a figure into <b>Par / week</b> or <b>Reorder</b> in Master Data overrides the sum for that one ingredient.`
       : `<b>Flat 5 kg rule (old).</b> Raws reorder when demand outstrips stock + on order, or ending stock is ≤ 5 kg, and top up to need + 5 kg + lead-time use. Every ingredient uses the same 5 kg whether it is a day of cover or a year of it.`}
       Order qty is then ± your manual adjustment and rounded up to the <b>min order</b> and a whole <b>ordering pack</b> (both per ingredient in Master Data). Processed forms (deboned, ground, liver…) roll up into the raw you actually buy. Supplier = each item's default.</div>
+    </details>
     ${(window._mrpNoYield&&window._mrpNoYield.length)?`<div style="background:#fff8e1;border:1px solid #e0b400;border-radius:6px;padding:9px 11px;margin:0 0 10px;font-size:12.5px">⚠ These processed ingredients roll up to something we buy but carry <b>no yield %</b>, so the plan has had to assume 100% — one kilo of raw per kilo of cut, which for a carcass cut is a small fraction of the truth and <b>under-orders silently</b>: <b>${window._mrpNoYield.map(esc).join(', ')}</b>. Set <i>Yield %</i> on them (Ingredients → 🥩 Item &amp; yield), stated <b>against the thing we buy</b> — the live animal, not the dressed carcass.</div>`:''}
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
     <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Use / wk</th><th class="num">Need</th><th class="num">On hand</th><th class="num">WIP</th><th class="num">On order</th><th class="num">Have</th><th class="num" title="the ceiling — the most this ingredient is ever filled to">Target</th><th class="num" title="stock has to fall through this before anything is ordered">Trigger</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th>Order by</th><th>Supplier</th></tr></thead><tbody>`;
@@ -12376,7 +12388,9 @@ async function _renderMRP(){
     <td class="num">${kgf(Math.max(0,l.base))}</td>
     <td class="num"><input type="number" step="any" style="width:74px;text-align:right" value="${l.manualKg||''}" onchange="mrpManual['${l.sku}']=+this.value||0;renderMRP()"></td>
     <td class="num">${l.moq?kgf(l.moq):'—'}</td>
-    <td class="num"><b style="color:var(--berry)">${l.final>0?(l.isSupply?(l.final+' '+esc(l.unit)):kgf(l.final)):'—'}</b>${(()=>{ const it=ings.find(x=>x.sku===l.sku)||{}; const ps=+it.pack_size_kg||0; return (l.final>0&&ps>0&&/bottle/i.test(it.uom||''))?`<div class="mini">= ${Math.round(l.final/1000/ps)} bottle(s) of ${ps>=1?ps+' L':Math.round(ps*1000)+' ml'}</div>`:''; })()}${l.added>0?`<div class="mini" style="color:var(--muted)">incl. ${l.added} added by hand <span class="x" style="cursor:pointer;color:var(--danger)" onclick="mrpAddSet('${esc(l.sku)}',0)">✕</span></div>`:''}</td>
+    <td class="num"><b style="color:var(--berry)">${l.final>0?(l.isSupply?(l.final+' '+esc(l.unit)):kgf(l.final)):'—'}</b>${(()=>{ const it=ings.find(x=>x.sku===l.sku)||{}; const sub=Math.max(0,+l.base||0)+(+l.manualKg||0)*1000; if(l.isSupply||!(l.final>sub+5)) return '';
+      const mn=+it.min_order_kg||0, ps=+it.pack_size_kg||0;
+      return `<div class="mini" style="color:var(--muted)" title="what the plan needs plus anything typed, then rounded up">${kgf(sub)} → up to ${mn>0&&l.final<=mn*1000+5?('min '+mn+' kg'):(ps>0?('whole cases of '+ps+' kg'):'min')}</div>`; })()}${(()=>{ const it=ings.find(x=>x.sku===l.sku)||{}; const ps=+it.pack_size_kg||0; return (l.final>0&&ps>0&&/bottle/i.test(it.uom||''))?`<div class="mini">= ${Math.round(l.final/1000/ps)} bottle(s) of ${ps>=1?ps+' L':Math.round(ps*1000)+' ml'}</div>`:''; })()}${l.added>0?`<div class="mini" style="color:var(--muted)">incl. ${l.added} added by hand <span class="x" style="cursor:pointer;color:var(--danger)" onclick="mrpAddSet('${esc(l.sku)}',0)">✕</span></div>`:''}</td>
     <td>${l.lead?l.orderBy:'—'}</td><td>${esc(l.supplier)||'<span class="mini">set default</span>'}</td></tr>`;
   // group the plan per supplier (matches how POs are generated), with a per-supplier subtotal + total kg
   const _bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no default supplier — set one)'; (_bySup[s]=_bySup[s]||[]).push(l); });
@@ -12432,7 +12446,7 @@ async function _renderMRP(){
     let _sc=''; try{ _sc=mrpScoreHtml(await mrpPlanMadeScore(6), await mrpKitchenCapacity()); }catch(e){}
     _body=`<div class="mrp-simple mrp-wide">${_sc}${mrpGaugeCompare()}<div class="mini" style="color:var(--muted);margin:12px 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. Read only: plan and type quantities in the <b>Plan</b> tab.</div><div class="mrp-ro">${dh}</div></div>`;
   } else if(_view==='ingredients'){
-    _body=`<div class="mrp-simple mrp-wide"><div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px">
+    _body=`<div class="mrp-simple mrp-wide mrp-ingv"><div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px">
         <button class="btn sm sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals — view or download as Excel">⬇ Download ingredient list</button>
         <button class="btn sm sec" onclick="mrpSetView('plan')">← Back to plan</button></div>
       <div class="hint" style="margin:0 0 10px">Type extra kg in <b>Manual ±</b> or use <b>＋ Add item to order</b>. The order updates at once and is kept on this computer; it is saved for everyone when you <b>Save</b> the plan — after it is locked, use <b>Edit plan → Save</b>. If POs are already made, press <b>Order what's new</b>.</div>${rh}</div>`;
@@ -12727,7 +12741,7 @@ async function mrpSimpleView(o){
   const vLabel=p=>String(p.variant||'').trim()||prodLabel({...p},{noSku:true});
   order.forEach(k=>{ const arr=secs[k].slice().sort((a,b)=>vLabel(a).localeCompare(vLabel(b),'en',{sensitivity:'base'}));
     const pk=arr.reduce((a,p)=>a+make(p),0), low=arr.filter(p=>cov(p)!=null&&cov(p)<5).length;
-    const open=window._mrpOpen&&window._mrpOpen[k]!==undefined?window._mrpOpen[k]:(pk>0||low>0);
+    const open=window._mrpOpen&&window._mrpOpen[k]!==undefined?window._mrpOpen[k]:false;   // closed on first load (Zeus 17 Nov); what you open stays open across tabs until a refresh
     const lines={}; let lo=[]; arr.forEach(p=>{ const ln=mrpLineOf(p); if(!lines[ln]){ lines[ln]=[]; lo.push(ln); } lines[ln].push(p); });
     const lnRank=l=>(/^Single Protein/.test(l)?0:/^Wholesome/.test(l)?10:/^BARF/.test(l)?20:30)+(/Trial/.test(l)?0:/20 pcs/.test(l)?1:2);
     lo=lo.sort((a,b)=>lnRank(a)-lnRank(b));
