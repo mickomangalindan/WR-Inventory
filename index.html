@@ -625,6 +625,13 @@ body.lean .leanoff{display:none!important}
 .mrp-ingv table tr.subtot td,.mrp-ingv table tr[style*="background"] td{background:#e7f2ef}
 .mrp-ingv .hint{background:#f6faf9;border-left:3px solid #9cc7be}
 .mrp-ingv input[type=number]{border:1px solid #cfd8d6;border-radius:6px;padding:4px 6px}
+.mrp-ingt{table-layout:fixed}
+.mrp-ingt thead th,.mrp-ingt thead tr{background:none!important}
+.mrp-ingt td:first-child{white-space:normal}
+.mrp-ingsup{border-top:1px solid #f0f3f2;padding:2px 0}
+.mrp-ingsup>summary{cursor:pointer;padding:10px 4px;list-style:none}
+.mrp-ingsup>summary::before{content:'▸ ';color:#2f7366}
+.mrp-ingsup[open]>summary::before{content:'▾ '}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
@@ -11672,7 +11679,7 @@ async function _renderMRP(){
     <div class="sp"></div><span style="color:var(--muted)">demand + lead time + PAR → replenishment → PO</span>`;
   const _allP=await db.list('products',{});
   const allBySku={}; _allP.forEach(p=>allBySku[p.sku]=p);
-  const prods=_allP.filter(p=>!isArchivedProd(p)), boms=await db.list('bom_lines',{}), ings=await listIngredients();
+  const prods=_allP.filter(p=>!isArchivedProd(p)), boms=await db.list('bom_lines',{}), ings=await listIngredients(); window._mrpIngsAll=ings;
   window._mrpNm={}; _allP.forEach(p=>{ window._mrpNm[p.sku]=prodLabel(p,{noSku:true})||p.sku; });
   const sups=await db.list('suppliers',{});
   const supMin={}; sups.forEach(s=>{ const nm=(s.name||'').trim(); if(nm) supMin[nm]=(+s.min_order_kg||0)*1000; });   // supplier min order → grams
@@ -12445,7 +12452,7 @@ async function _renderMRP(){
     catch(e){ console.warn('mrp simple',String(e&&e.message||e)); _body=''; }
   } else if(_view==='packs'){
     let _sc=''; try{ _sc=mrpScoreHtml(await mrpPlanMadeScore(6), await mrpKitchenCapacity()); }catch(e){}
-    _body=`<div class="mrp-simple mrp-wide">${_sc}${mrpGaugeCompare()}<div class="mini" style="color:var(--muted);margin:12px 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. Read only: plan and type quantities in the <b>Plan</b> tab.</div><div class="mrp-ro">${dh}</div></div>`;
+    _body=`<div class="mrp-simple mrp-wide mrp-ingv">${_sc}${mrpGaugeCompare()}<div class="mini" style="color:var(--muted);margin:12px 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. Read only: plan and type quantities in the <b>Plan</b> tab.</div><div class="mrp-ro">${dh}</div></div>`;
   } else if(_view==='ingredients'){
     const _all=(()=>{ try{ return localStorage.getItem('wr_ing_all')==='1'; }catch(e){ return false; } })();
     _body=`<div class="mrp-simple mrp-wide mrp-ingv"><div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px;align-items:center">
@@ -12453,7 +12460,8 @@ async function _renderMRP(){
         <span style="flex:1"></span>
         <button class="btn sm sec" onclick="mrpAddOpen()">＋ Add item to order</button>
         <button class="btn sm sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals">⬇ Ingredient list</button>
-        <button class="btn sm sec" onclick="mrpIngAll(${_all?0:1})">${_all?'Simple view':'Show all columns'}</button></div>
+        <button class="btn sm sec" onclick="mrpIngAll(${_all?0:1})">${_all?'Simple view':'Show all columns'}</button>
+        ${_lockedPlot?'':`<button class="btn sm" onclick="saveMRPDraft()" title="Shares the plan with the team as a draft — still not locked">💾 Save draft</button>`}</div>
       ${_all?rh:mrpIngSimpleHtml(ings)}</div>`;
   } else if(_view==='checks'){
     let _lead=''; try{ _lead=await mrpLeadTimeCard(); }catch(e){}
@@ -12553,32 +12561,42 @@ function mrpGoPOs(){ try{ sessionStorage.setItem('wr_back_mrp','1'); }catch(e){}
    is not the need. Same window._mrpPlan the full table and the POs use; the
    Extra box writes the same mrpManual the old "Manual ±" box wrote. */
 function mrpIngAll(on){ try{ localStorage.setItem('wr_ing_all', on?'1':'0'); }catch(e){} renderMRP(); }
-function mrpIngExtra(sku,v){ const y=window.scrollY; mrpManual[sku]=+v||0; try{ mrpAutosave(); }catch(e){}
+function mrpIngExtra(sku,v,btlKg){ const y=window.scrollY; mrpManual[sku]=(+v||0)*((+btlKg||0)>0?(+btlKg):1); try{ mrpAutosave(); }catch(e){}
   Promise.resolve(renderMRP()).then(()=>{ window.scrollTo(0,y); const el=document.querySelector('[data-ingx="'+CSS.escape(sku)+'"]'); if(el) el.focus(); }); }
-function mrpIngSimpleHtml(ings){
+function mrpIngRows(ings){
   const P=(window._mrpPlan||[]).filter(l=>(+l.final||0)>0 || (+l.manualKg||0)!==0);
-  const k2=g=>(Math.round((+g||0)/10)/100).toLocaleString('en-PH',{maximumFractionDigits:2});
-  const peso=v=>'₱'+Math.round(+v||0).toLocaleString('en-PH');
-  if(!P.length) return `<section class="mrp-sec"><h3>Ingredients to order</h3><div class="mini" style="color:var(--muted)">Nothing to order yet. Go back and press <b>Pull the week</b> first.</div></section>`;
   const by={}; P.forEach(l=>{ const s=(l.supplier||'').trim()||'(no supplier set)'; (by[s]=by[s]||[]).push(l); });
   const sups=Object.keys(by).map(s=>({s, rows:by[s].slice().sort((a,b)=>String(a.name).localeCompare(String(b.name))), v:by[s].reduce((a,l)=>a+((+l.final||0)/1000)*(+l.price||0),0)})).sort((a,b)=>b.v-a.v);
-  const tot=sups.reduce((a,x)=>a+x.v,0);
-  const why=l=>{ const it=(ings||[]).find(x=>x.sku===l.sku)||{}; const sub=Math.max(0,+l.base||0)+(+l.manualKg||0)*1000;
-    if(l.isSupply) return ''; const mn=+it.min_order_kg||0, ps=+it.pack_size_kg||0;
-    if((+l.final||0)>sub+5){ if(ps>0&&/bottle/i.test(it.uom||'')) return Math.round(l.final/1000/ps)+' bottles · min '+Math.round(mn/ps)+' bottles';
-      if(mn>0 && l.final<=mn*1000+5) return 'supplier minimum '+mn+' kg'; if(ps>0) return 'whole cases of '+ps+' kg'; return 'rounded up'; }
-    if(ps>0&&/bottle/i.test(it.uom||'')) return Math.round(l.final/1000/ps)+' bottles';
-    return ''; };
+  return {P, sups, tot:sups.reduce((a,x)=>a+x.v,0)};
+}
+/* One supplier's lines. Every supplier's table uses the same fixed columns, so
+   Need / Have / Order / Extra line up from card to card (Zeus 17 Nov). Bottled
+   items (uom 'bottle' + pack size) are shown in bottles, not kg. */
+function mrpIngTable(x, ings){
+  const k2=g=>(Math.round((+g||0)/10)/100).toLocaleString('en-PH',{maximumFractionDigits:2});
+  const itOf=l=>(ings||[]).find(i=>i.sku===l.sku)||{};
+  const btl=it=>(+it.pack_size_kg||0)>0 && /bottle/i.test(it.uom||'');
+  const q=(l,g)=>{ const it=itOf(l); if(l.isSupply) return (+g||0)+' '+esc(l.unit||''); if(btl(it)) return Math.round((+g||0)/1000/(+it.pack_size_kg))+' btl'; return k2(g)+' kg'; };
+  const why=l=>{ const it=itOf(l); const sub=Math.max(0,+l.base||0)+(+l.manualKg||0)*1000;
+    if(l.isSupply||!((+l.final||0)>sub+5)) return ''; const mn=+it.min_order_kg||0, ps=+it.pack_size_kg||0;
+    if(btl(it)) return 'minimum '+Math.round(mn/ps)+' bottles';
+    if(mn>0 && l.final<=mn*1000+5) return 'supplier minimum '+mn+' kg'; if(ps>0) return 'whole cases of '+ps+' kg'; return 'rounded up'; };
+  return `<table class="mrp-t mrp-ingt"><colgroup><col><col style="width:110px"><col style="width:110px"><col style="width:110px"><col style="width:96px"><col style="width:190px"></colgroup>
+    <thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num" title="raw in the freezer + premix / processed counted back as raw + already on order">Have</th><th class="num">Order</th><th class="num" title="type 10 to add, -5 for less">Extra</th><th></th></tr></thead><tbody>
+    ${x.rows.map(l=>{ const it=itOf(l); const have=(+l.oh||0)+(+l.wip||0)+(+l.inc||0);
+      return `<tr><td>${esc(l.name)}</td><td class="num">${q(l,l.rawNeed)}</td><td class="num" style="color:var(--muted)">${q(l,have)}</td>
+        <td class="num"><b style="color:#1f5248">${q(l,l.final)}</b></td>
+        <td class="num"><input type="number" step="any" data-ingx="${esc(l.sku)}" class="mrp-in" style="width:72px" placeholder="0" value="${(+l.manualKg||0)?(btl(it)?Math.round(+l.manualKg/(+it.pack_size_kg)):+l.manualKg):''}" onchange="mrpIngExtra('${esc(String(l.sku)).replace(/'/g,'&#39;')}',this.value,${btl(it)?(+it.pack_size_kg):0})"></td>
+        <td class="mini" style="color:var(--muted)">${esc(why(l))}</td></tr>`; }).join('')}
+    </tbody></table>`;
+}
+function mrpIngSimpleHtml(ings){
+  const peso=v=>'₱'+Math.round(+v||0).toLocaleString('en-PH');
+  const {P,sups,tot}=mrpIngRows(ings);
+  if(!P.length) return `<section class="mrp-sec"><h3>Ingredients to order</h3><div class="mini" style="color:var(--muted)">Nothing to order yet. Go back and press <b>Pull the week</b> first.</div></section>`;
   return `<section class="mrp-sec"><h3>Ingredients to order</h3>
-    <div class="mini" style="color:var(--muted)">${P.length} item(s) · ${sups.length} supplier(s) · about <b>${peso(tot)}</b>. Check the orders, add extra if you need it, then go back and <b>Save and lock</b>.</div></section>
-    ${sups.map(x=>`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>${esc(x.s)}</h3><div class="mini" style="color:var(--muted)">${x.rows.length} item(s) · ${peso(x.v)}</div></div></div>
-      <table class="mrp-t"><thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num">Have</th><th class="num">Order</th><th class="num" title="Type 10 to add 10 kg, or -5 to order 5 kg less">Extra kg</th><th></th></tr></thead><tbody>
-      ${x.rows.map(l=>{ const have=(+l.oh||0)+(+l.wip||0)+(+l.inc||0); const w=why(l);
-        return `<tr><td>${esc(l.name)}</td><td class="num">${k2(l.rawNeed)}</td><td class="num" style="color:var(--muted)">${k2(have)}</td>
-          <td class="num"><b style="color:#1f5248">${l.isSupply?((+l.final||0)+' '+esc(l.unit||'')):k2(l.final)}</b></td>
-          <td class="num"><input type="number" step="any" data-ingx="${esc(l.sku)}" class="mrp-in" style="width:70px" placeholder="0" value="${(+l.manualKg||0)?(+l.manualKg):''}" onchange="mrpIngExtra('${esc(String(l.sku)).replace(/'/g,'&#39;')}',this.value)"></td>
-          <td class="mini" style="color:var(--muted)">${w?esc(w):''}</td></tr>`; }).join('')}
-      </tbody></table></section>`).join('')}`;
+    <div class="mini" style="color:var(--muted)">${P.length} item(s) · ${sups.length} supplier(s) · about <b>${peso(tot)}</b>. <b>Have</b> = raw in the freezer + premix (counted as raw) + already ordered. <b>Extra</b>: type 10 to add, -5 for less.</div></section>
+    ${sups.map(x=>`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>${esc(x.s)}</h3><div class="mini" style="color:var(--muted)">${x.rows.length} item(s) · ${peso(x.v)}</div></div></div>${mrpIngTable(x,ings)}</section>`).join('')}`;
 }
 function mrpSetView(v){ try{ localStorage.setItem('wr_mrp_view', v); localStorage.removeItem('wr_mrp_full'); }catch(e){} renderMRP(); }
 /* TREND: last 30 days against the 60-day rate. ↑ selling faster, ↓ slower. */
@@ -12840,9 +12858,11 @@ async function mrpSimpleView(o){
   const _ingTot=sups.reduce((a,x)=>a+x.v,0);
   const secIng=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>3 · Check ingredients</h3>
       <div class="mini" style="color:var(--muted)">${plan.length?(plan.length+' ingredient(s) to buy from '+sups.length+' supplier(s) · about '+peso(_ingTot)):'Nothing to buy yet — pull the week first.'}</div></div>
-      <button class="btn sm sec" onclick="mrpSetView('ingredients')">See or add ingredients →</button></div>
-    ${(!pos.length&&sups.length)?`<table class="mrp-t"><tbody>${sups.map(x=>`<tr><td><b>${esc(x.s)}</b><div class="mini" style="color:var(--muted)">${x.n} item(s)</div></td><td class="num">${peso(x.v)}</td></tr>`).join('')}</tbody></table>`:''}
-    <div class="mini" style="color:var(--muted);margin-top:6px">Need extra (e.g. 20 kg chia for shipping)? Add it on the Ingredients tab before you lock.</div></section>`;
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm sec" onclick="mrpAddOpen()">＋ Add item</button><button class="btn sm sec" onclick="mrpSetView('ingredients')">All columns →</button></div></div>
+    ${(!pos.length&&sups.length)?(()=>{ const R=mrpIngRows(window._mrpIngsAll||[]); const O=window._mrpIngOpen||{};
+      return R.sups.map(x=>`<details class="mrp-ingsup" data-s="${esc(x.s)}"${O[x.s]?' open':''} ontoggle="(window._mrpIngOpen=window._mrpIngOpen||{})[this.dataset.s]=this.open">
+        <summary><b>${esc(x.s)}</b> <span class="mini" style="color:var(--muted)">${x.rows.length} item(s)</span><span style="float:right">${peso(x.v)}</span></summary>${mrpIngTable(x,window._mrpIngsAll||[])}</details>`).join(''); })():''}
+    <div class="mini" style="color:var(--muted);margin-top:8px">Open a supplier to add extra (type 10 to add, -5 for less). <b>Have</b> = raw in the freezer + premix (as raw) + already ordered.</div></section>`;
   const sec4=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>5 · Purchase orders</h3></div></div>${sec4body}</section>`;
   let head=''; try{ head=await mrpStepHeader(true); }catch(e){}
   return `<div class="mrp-simple">${head}${sec1}${sec2}${secIng}${sec3}${sec4}
@@ -12900,15 +12920,14 @@ function mrpAddSet(sku,qty){ qty=+qty||0; if(qty>0) mrpAdd[sku]=qty; else delete
 async function mrpAddOpen(){
   let ings=[]; try{ ings=await listIngredients(); }catch(e){}
   if(!ings.length){ toast('No master items loaded',true); return; }
-  window._maSel={...mrpAdd}; window._maQ=''; window._maKind='';
+  window._maSel={...mrpAdd}; window._maQ=''; window._maKind='raw';   // raw only (Zeus 17 Nov): processed forms are the kitchen's, not something we buy
   $('modal').innerHTML=`<div><h3>＋ Add an item to the order</h3>
-    <p class="mini">Anything in the master, whether or not the demand roll-up asked for it. Quantity is in the item's <b>own unit</b> — kilos for food, the stated unit for a supply. What you enter is <b>added on top</b> of whatever the plan already calculated for that item.</p>
+    <p class="mini">Raw ingredients only — what you buy from a supplier. The kg you type are added on top of what the plan already orders.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 8px">
       <input id="ma_q" placeholder="🔎 search name / SKU / category…" oninput="window._maQ=this.value;drawMrpAddBody()" style="flex:1;min-width:200px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
-      <select onchange="window._maKind=this.value;drawMrpAddBody()" style="padding:6px;border:1px solid var(--line);border-radius:6px">
-        <option value="">All types</option><option value="raw">Raw (purchasable)</option><option value="proc">Processed</option><option value="sup">Kitchen supplies</option></select>
+      
     </div>
-    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Item</th><th>Type</th><th class="num">On hand</th><th class="num">Add</th><th>Unit</th></tr></thead><tbody id="maBody"></tbody></table></div>
+    <div class="mscroll" style="overflow-x:auto"><table><thead><tr><th>Item</th><th>Supplier</th><th>Supplier minimum</th><th class="num">On hand</th><th class="num">Add</th><th>Unit</th></tr></thead><tbody id="maBody"></tbody></table></div>
     <div class="mfoot"><button class="btn" onclick="mrpAddApply()">✅ Add to the order</button><button class="btn sec" onclick="closeModal()">Cancel</button>
       <span style="flex:1"></span><span class="mini" id="maCount" style="align-self:center;color:var(--muted)"></span></div></div>`;
   window._maIngs=ings;
@@ -12921,7 +12940,7 @@ function drawMrpAddBody(){
   const kf=window._maKind||'';
   const stock=window._mrpStock||{};
   const list=ings.filter(i=>{
-    if(kf && kindOf(i)!==kf) return false;
+    if(kf && kindOf(i)!==kf) return false; if(i.active===false) return false;
     if(!q.length) return true;
     const t=[i.name,i.sku,i.category,i.raw_input,i.uom].filter(Boolean).join(' ').toLowerCase();
     return q.every(w=>t.includes(w));
@@ -12929,9 +12948,9 @@ function drawMrpAddBody(){
   const rows=_outIngRows(ings,list);
   let body='';
   hierGroups(rows,{g1:'_g1',g2:'_g2'}).forEach(G=>{
-    body+=`<tr class="grp"><td colspan="5" style="padding-left:10px"><b>${esc(G.g1)}</b></td></tr>`;
+    body+=`<tr class="grp"><td colspan="6" style="padding-left:10px"><b>${esc(G.g1)}</b></td></tr>`;
     G.subs.forEach(S=>{
-      if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="5" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
+      if(S.g2) body+=`<tr style="background:#fbfbf8"><td colspan="6" style="padding-left:26px" class="mini"><b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(i=>{
         const k=kindOf(i); const unit=(k==='sup')?(i.uom||'units'):'kg';
         const oh=(k==='sup')?(+stock[i.sku]||0):Math.round((+stock[i.sku]||0)/10)/100;
@@ -12939,13 +12958,13 @@ function drawMrpAddBody(){
         const tag=k==='sup'?'<span class="tagf" style="background:#e8e6df;color:#57544c">supply</span>'
                 :(k==='proc'?'<span class="tagf tagf-proc">processed</span>':'<span class="tagf tagf-raw">raw</span>');
         body+=`<tr><td style="padding-left:26px">${esc(i._nm||i.name)}<div class="mini"><code>${esc(i.sku)}</code></div></td>
-          <td>${tag}</td><td class="num mini">${oh||'—'}</td>
+          <td class="mini">${esc(i.supplier||'—')}</td><td class="mini">${(+i.min_order_kg||0)>0?('order at least '+(+i.min_order_kg)+' kg'+((+i.pack_size_kg||0)>0?(' · cases of '+(+i.pack_size_kg)+' kg'):'')):'no minimum'}</td><td class="num mini">${oh||'—'}</td>
           <td><input type="number" step="any" inputmode="decimal" value="${v}" oninput="window._maSel['${esc(i.sku)}']=this.value===''?'':(+this.value||0);_maCount()" style="width:84px;text-align:right;padding:4px;border:1px solid var(--line);border-radius:5px"></td>
           <td class="mini">${esc(unit)}</td></tr>`;
       });
     });
   });
-  const el=$('maBody'); if(el) el.innerHTML=body||'<tr><td colspan="5" class="empty">Nothing matches.</td></tr>';
+  const el=$('maBody'); if(el) el.innerHTML=body||'<tr><td colspan="6" class="empty">Nothing matches.</td></tr>';
   _maCount();
 }
 function _maCount(){ const sel=window._maSel||{}; const n=Object.keys(sel).filter(k=>+sel[k]>0).length;
