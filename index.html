@@ -3807,7 +3807,12 @@ function _psDays(){
    months of cover. So the screen prints the cover the rounding buys beside the
    number — the cost of the convenience is shown, not assumed. */
 const PQ_DEF={lead:8, move:1, cycle:21, win:60, cs:12, minPacks:24, minOn:1, defer:1, capDays:90, parCase:1,
-  organBatch:12, smallCoverD:7};
+  organBatch:12, smallCoverD:7,
+  /* FUEL-GAUGE PLANNING (Zeus, 17 Nov 2026 — "feel ko overstock kami").
+     gauge 1 = use pqCalcGauge; 0 = the classic sum below. All numbers are settings. */
+  gauge:0, waitD:14, afterD:7, safeD:3, grow:1, gcapD:42,
+  fastWk:8, slowWk:3, fastMin:24, fastStep:12, slowMin:12, slowStep:6, vslowMin:6, vslowStep:6,
+  learn:1, bufMax:2, bufMin:0.5};
 let PQ=Object.assign({},PQ_DEF);
 try{ PQ=Object.assign({},PQ_DEF,JSON.parse(localStorage.getItem('wr_packreq')||'{}')); }catch(e){}
 let PQ_MOVE={};   // per-SKU movement override — the one variable that is genuinely per product
@@ -3835,6 +3840,7 @@ let PQ_Q='', PQ_ONLY=true, PQ_GROUP='hier';
    session like the raw par (loadRawPar); localStorage is only the first-paint
    cache. Same shape, same fallbacks. */
 async function loadPackReq(){ if(window._pqLoaded||!isLive()) return; window._pqLoaded=true;
+  try{ const b=await sb('app_settings?select=value&key=eq.pack_buf'); const bv=b&&b[0]&&b[0].value; if(bv&&typeof bv==='object') PQ_BUF=bv; }catch(e){}
   try{ const r=await sb('app_settings?select=value&key=eq.pack_req');
     const v=r&&r[0]&&r[0].value;
     if(v&&typeof v==='object'&&!Array.isArray(v)){
@@ -3847,6 +3853,18 @@ function savePackReq(){
   if(isLive()) sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
     body:JSON.stringify({key:'pack_req',value:{pq:PQ,move:PQ_MOVE}})}).catch(()=>{});
 }
+/* THE BUFFER LEARNS, once per locked plot: a product planned while RED gets a
+   third more after-arrival stock; three GREEN plots in a row take a quarter off.
+   Bounded by bufMin..bufMax. Stored in app_settings 'pack_buf' for everyone. */
+function pqLearn(){ if(!(+PQ.gauge) || !(+PQ.learn)) return; const C=window._mrpCalc||{}; let n=0;
+  Object.keys(C).forEach(sku=>{ const z=((C[sku]||{}).c||{}).zone; if(!z||z==='none') return;
+    const b=PQ_BUF[sku]||{m:1,g:0};
+    if(z==='red'){ b.m=Math.min(+PQ.bufMax||2,(+b.m||1)*1.33); b.g=0; }
+    else if(z==='green'){ b.g=(+b.g||0)+1; if(b.g>=3){ b.m=Math.max(+PQ.bufMin||0.5,(+b.m||1)*0.75); b.g=0; } }
+    else b.g=0;
+    b.m=Math.round(b.m*100)/100; PQ_BUF[sku]=b; n++; });
+  if(n && isLive()) sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
+    body:JSON.stringify({key:'pack_buf',value:PQ_BUF})}).catch(()=>{}); }
 function pqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0);
   savePackReq(); pqDraw(); }
 function pqReset(){ PQ=Object.assign({},PQ_DEF); PQ_MOVE={};
@@ -3869,7 +3887,61 @@ function _transferStamp(t){
 }
 const _pqCeil=(v,step)=>{ const s=+step||0; if(!(s>0)) return Math.ceil(v); return Math.ceil(v/s)*s; };
 
-function pqCalc(r){
+/* ==== FUEL-GAUGE PLANNING (Zeus, 17 Nov 2026) ===============================
+   The classic sum filled every product back to a 21-day par PLUS lead demand
+   every week (29 days of cover), so it overstocked, and a par that forgot what
+   sells during the two-week wait still left the shelf short. This counts the
+   wait honestly and only makes what is needed:
+     wait   = Monday plan → the Saturday van that brings the new batch (14 d)
+     after  = what we want left when it lands (7 d) + safety (3 d), × the
+              product's own learned buffer (grows after a red week, shrinks
+              after three green ones)
+     RED    stock won't last the wait                → make now
+     YELLOW lasts the wait, not the week after        → make if worth a batch
+     GREEN  more than that                            → make nothing
+   Speed: the higher of the 60-day and the last-30-day rate, so growth shows
+   at once and one quiet month does not cut the shelf. Batch by speed tier
+   (fast/slow/very slow), capped at gcapD days of cover. Every number is in
+   PQ (⚙ Settings). */
+let PQ_BUF={};
+function pqTier(perDay){ const wk=perDay*7;
+  if(wk>=(+PQ.fastWk||8)) return {tier:'fast', min:+PQ.fastMin||24, step:+PQ.fastStep||12};
+  if(wk>=(+PQ.slowWk||3)) return {tier:'slow', min:+PQ.slowMin||12, step:+PQ.slowStep||6};
+  return {tier:'vslow', min:+PQ.vslowMin||6, step:+PQ.vslowStep||6}; }
+function pqCalcGauge(r){
+  const win=Math.max(1,+PQ.win||60);
+  const pdLong=(+r.sold||0)/win, pdShort=(+r.sold30||0)/30;
+  const perDay=(+PQ.grow)?Math.max(pdLong,pdShort):pdLong;
+  const waitD=Math.max(0,+PQ.waitD||0), afterD=Math.max(0,+PQ.afterD||0), safeD=Math.max(0,+PQ.safeD||0);
+  const mult=Math.max(+PQ.bufMin||0.5, Math.min(+PQ.bufMax||2, +((PQ_BUF[r.sku]||{}).m)||1));
+  const cur=(+r.shop||0)+(+r.other||0), shelf=+r.shop||0;
+  const ltd=perDay*waitD, redLine=ltd, yellowLine=perDay*(waitD+afterD*mult);
+  const target=perDay*(waitD+(afterD+safeD)*mult);
+  const T=pqTier(perDay);
+  const zone= perDay<=0 ? 'none' : (cur<redLine?'red':(cur<yellowLine?'yellow':'green'));
+  const need=target-cur, rawNeed=Math.max(0,Math.ceil(need));
+  let produce=0, deferred=false, deferDays=null, smallWait=false, capped=false;
+  const ceilTo=(x,st)=>st>0?Math.ceil(x/st)*st:Math.ceil(x);
+  if(perDay>0 && need>0){
+    if(zone==='green'){ deferred=true; deferDays=(cur-yellowLine)/perDay; }
+    else if(zone==='yellow' && need < T.min/2){ smallWait=true; deferred=true; deferDays=(cur-redLine)/perDay; }
+    else { produce=Math.max(T.min, ceilTo(need,T.step)); }
+  }
+  if(produce>0){ const capD=Math.max(0,+PQ.gcapD||0);
+    if(capD>0){ const room=Math.floor(perDay*capD-cur);
+      if(room<produce){ let q=T.step>0?Math.floor(Math.max(0,room)/T.step)*T.step:Math.max(0,room);
+        if(zone==='red' && q<rawNeed) q=rawNeed;
+        if(q<produce){ produce=Math.max(0,q); capped=true; } } } }
+  const padded=Math.max(0,produce-rawNeed), coverAfter=perDay>0?(cur+produce)/perDay:null;
+  const cover=perDay>0?shelf/perDay:(shelf>0?999:null);
+  const shelfShort=Math.max(0,target-shelf), toMove=Math.min(Math.round(shelfShort),Math.max(0,Math.round(+r.other||0)));
+  return {perDay, lead:waitD, move:mult, ltd, safety:perDay*safeD*mult, rop:redLine, par:target, newPar:Math.ceil(target), cur, produce,
+    cover, toMove, toMake:produce, target, minOn:true, rawNeed, padded, coverAfter, deferred, deferDays, capped, smallWait,
+    batch:T.min, tier:T.tier, zone, mult, yellowLine,
+    covPct:(target>0?cur/target:null), shelfPct:(target>0?shelf/target:null), alert:(zone==='red'), pct:(target>0?cur/target:null)};
+}
+function pqCalc(r){ return (+PQ.gauge) ? pqCalcGauge(r) : pqCalcClassic(r); }
+function pqCalcClassic(r){
   const win=Math.max(1,+PQ.win||60);
   const perDay = (+r.sold||0)/win;
   const lead   = Math.max(0,+PQ.lead||0);
@@ -4407,6 +4479,7 @@ async function pqBuildRows(){
   });
   const soldBy={}; (mom||[]).forEach(r=>{ const w=+PQ.win||60;
     soldBy[r.sku] = (w<=30?(+r.u30||0):(w<=60?(+r.u60||0):(w<=90?(+r.u90||0):(+r.u120||0)))); });
+  const sold30By={}; (mom||[]).forEach(r=>{ sold30By[r.sku]=+r.u30||0; });
   const rows=(prods||[]).filter(p=>!isArchivedProd(p) && !/sticker/i.test(String(p.group_1||'')))
     .map(p=>{
       const oh=ohBy[p.sku]||{sellAt:0, sellAfter:0, other:0, cons:0, all:0, sites:{}, consSites:{}, at:{}};
@@ -4479,7 +4552,7 @@ async function pqBuildRows(){
                      .sort((a,b)=>(+oh.consSites[b]||0)-(+oh.consSites[a]||0))
                      .map(k=>({code:k, qty:Math.max(0,+oh.consSites[k]||0)})),
         inTransit:tr.qty, transitRefs:tr.refs,
-        other, bul:Math.max(0,+oh.other||0), sold:(+soldBy[p.sku]||0)};
+        other, bul:Math.max(0,+oh.other||0), sold:(+soldBy[p.sku]||0), sold30:(+sold30By[p.sku]||0)};
     });
   /* HOW LONG SINCE A SALE LAST POSTED.
      The ledger can be perfectly healthy in every other respect and still be
@@ -12259,7 +12332,7 @@ async function _renderMRP(){
     try{ _body=await mrpSimpleView({coAll, coDone, nCoPend, locked:_lockedPlot, nextMon:_nextMon, pName:_pName, catalogue}); }
     catch(e){ console.warn('mrp simple',String(e&&e.message||e)); _body=''; }
   } else if(_view==='packs'){
-    _body=`<div class="mrp-simple mrp-wide"><div class="mini" style="color:var(--muted);margin:0 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. You can still type here; it is the same plan as the Plan tab.</div>${dh}</div>`;
+    _body=`<div class="mrp-simple mrp-wide">${mrpGaugeCompare()}<div class="mini" style="color:var(--muted);margin:12px 0 8px">Every product with its stock, days of cover, sales and par — the numbers behind <b>Pull the week</b>. You can still type here; it is the same plan as the Plan tab.</div>${dh}</div>`;
   } else if(_view==='ingredients'){
     _body=`<div class="mrp-simple mrp-wide"><div style="display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px">
         <button class="btn sm sec" onclick="mrpDemandCheck()" title="Every demand line, regular and custom, turned into ingredients with totals — view or download as Excel">⬇ Download ingredient list</button></div>${rh}</div>`;
@@ -12271,6 +12344,7 @@ async function _renderMRP(){
   } else if(_view==='settings'){
     _body=`<div class="mrp-simple mrp-wide"><section class="mrp-sec"><div class="mrp-sechead"><div><h3>Planning locations</h3>
         <div class="mini" style="color:var(--muted)">Which stock locations count when planning.</div></div><button class="btn sm sec" onclick="openPlanLocs()">Open</button></div></section>
+      ${mrpPackSettingsHtml()}${mrpGaugeCompare()}
       <section class="mrp-sec"><h3>Buying rules</h3><div class="mini" style="color:var(--muted);margin-bottom:8px">How often we buy, safety days, supplier lead times. Changes apply to everyone.</div>${rpSettingsHtml(window._mrpPlan||[])}</section></div>`;
   }
   if(!_body){ _body=`<div id="mrpClean" class="${_notes?'':'mrp-clean'}">`+_head+dh+rh+`<details class="mrp-more" style="margin-top:18px"><summary>More details</summary>`+_pre+_more+`</details></div>`; }
@@ -12336,6 +12410,38 @@ function mrpView(){ let v=''; try{ v=localStorage.getItem('wr_mrp_view')||''; if
   if(v==='settings' && !(typeof curRole==='function' && curRole()==='Admin')) v='plan';
   return MRP_VIEWS.includes(v)?v:'plan'; }
 function mrpSetView(v){ try{ localStorage.setItem('wr_mrp_view', v); localStorage.removeItem('wr_mrp_full'); }catch(e){} renderMRP(); }
+/* TREND: last 30 days against the 60-day rate. ↑ selling faster, ↓ slower. */
+function mrpTrend(r){ const l=(+r.sold||0)/Math.max(1,+PQ.win||60), sh=(+r.sold30||0)/30; if(!(l>0||sh>0)) return '';
+  const ch=l>0?(sh-l)/l:1; if(ch>=0.2) return `<div class="mini" style="color:#2f7a5b" title="last 30 days sell ${Math.round(ch*100)}% faster than the 60-day rate">↑ ${Math.round(ch*100)}%</div>`;
+  if(ch<=-0.2) return `<div class="mini" style="color:#9b2c22" title="last 30 days sell ${Math.round(-ch*100)}% slower than the 60-day rate">↓ ${Math.round(-ch*100)}%</div>`; return ''; }
+/* CLASSIC vs FUEL GAUGE, side by side, on today's stock and sales. */
+function mrpGaugeCompare(){ const C=window._mrpCalc||{}; const rows=Object.values(C).filter(x=>x&&x.r&&!/^CUST-/i.test(x.r.sku));
+  if(!rows.length) return '';
+  let a={n:0,pk:0,cov:0,cn:0}, b={n:0,pk:0,cov:0,cn:0,red:0,yel:0,grn:0};
+  rows.forEach(({r})=>{ const k=pqCalcClassic(r), g=pqCalcGauge(r);
+    if(k.produce>0){a.n++; a.pk+=k.produce;} if(g.produce>0){b.n++; b.pk+=g.produce;}
+    if(k.coverAfter!=null&&k.coverAfter<900){a.cov+=k.coverAfter;a.cn++;} if(g.coverAfter!=null&&g.coverAfter<900){b.cov+=g.coverAfter;b.cn++;}
+    if(g.zone==='red')b.red++; else if(g.zone==='yellow')b.yel++; else if(g.zone==='green')b.grn++; });
+  const n0=v=>Math.round(+v||0).toLocaleString('en-PH'), avg=o=>o.cn?Math.round(o.cov/o.cn):'—';
+  return `<section class="mrp-sec"><div class="mrp-sechead"><div><h3>Old way vs fuel gauge — this week</h3>
+      <div class="mini" style="color:var(--muted)">Same stock, same sales. Now using: <b>${(+PQ.gauge)?'fuel gauge':'old way'}</b>${(typeof curRole==='function'&&curRole()==='Admin')?' · switch it in ⚙ Settings':''}</div></div></div>
+    <table class="mrp-t"><thead><tr><th></th><th class="num">Products to make</th><th class="num">Packs to make</th><th class="num">Avg days of stock after</th></tr></thead><tbody>
+      <tr><td>Old way (21-day par + lead)</td><td class="num">${a.n}</td><td class="num">${n0(a.pk)}</td><td class="num">${avg(a)}</td></tr>
+      <tr><td><b>Fuel gauge</b> (${+PQ.waitD||14}-day wait + ${+PQ.afterD||7}+${+PQ.safeD||3} days)</td><td class="num"><b>${b.n}</b></td><td class="num"><b>${n0(b.pk)}</b></td><td class="num"><b>${avg(b)}</b></td></tr>
+    </tbody></table>
+    <div class="mini" style="margin-top:8px">Gauge today: <span class="mrp-lasts mrp-lr">${b.red} red</span> make now · <span class="mrp-lasts mrp-ly">${b.yel} yellow</span> make if worth a batch · <span class="mrp-lasts mrp-lg">${b.grn} green</span> skip</div></section>`; }
+function mrpPqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0); savePackReq(); renderMRP(); }
+function mrpPqToggle(k){ PQ[k]=(+PQ[k])?0:1; savePackReq(); renderMRP(); }
+function mrpPackSettingsHtml(){ const f=(k,l,u)=>`<label style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #f0f3f2"><span>${l}</span><span><input type="number" step="any" class="mrp-in" value="${esc(String(PQ[k]))}" onchange="mrpPqSet('${k}',this.value)"> <span class="mini" style="color:var(--muted)">${u||''}</span></span></label>`;
+  return `<section class="mrp-sec"><div class="mrp-sechead"><div><h3>Pack planning</h3><div class="mini" style="color:var(--muted)">How Pull the week decides how many regular packs to make. Changes apply to everyone.</div></div>
+      <button class="btn sm ${(+PQ.gauge)?'':'sec'}" onclick="mrpPqToggle('gauge')">${(+PQ.gauge)?'✓ Fuel gauge ON':'Fuel gauge OFF (old way)'}</button></div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:4px 24px">
+      <div><b class="mini">Timing</b>${f('waitD','Wait: Monday plan → Saturday van','days')}${f('afterD','Wanted left when it lands','days')}${f('safeD','Safety for spikes','days')}${f('gcapD','Never more than','days of stock')}</div>
+      <div><b class="mini">Speed groups (packs sold a week)</b>${f('fastWk','Fast seller from','a week')}${f('slowWk','Slow seller from','a week')}
+        ${f('fastMin','Fast: minimum batch','packs')}${f('fastStep','Fast: then steps of','packs')}${f('slowMin','Slow: minimum batch','packs')}${f('slowStep','Slow: then steps of','packs')}${f('vslowMin','Very slow: minimum batch','packs')}${f('vslowStep','Very slow: then steps of','packs')}</div></div>
+    <div class="mini" style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap">
+      <span class="btn link" onclick="mrpPqToggle('grow')">${(+PQ.grow)?'✓':'✕'} Use the last 30 days when selling faster</span>
+      <span class="btn link" onclick="mrpPqToggle('learn')">${(+PQ.learn)?'✓':'✕'} Buffer learns (bigger after a red week, smaller after 3 green)</span></div></section>`; }
 function mrpIsFull(){ return mrpView()!=='plan'; }
 function mrpSetFull(on){ mrpSetView(on?'packs':'plan'); }
 /* Shop-menu order for the tabs; anything else follows, alphabetically. */
@@ -12437,7 +12543,7 @@ async function mrpSimpleView(o){
     const lbl=String(p.variant||'').trim()||prodLabel({...p},{noSku:true});
     return `<tr class="mrp-prow" data-q="${esc((prodLabel({...p},{noSku:true})+' '+lbl+' '+p.sku).toLowerCase())}"><td class="mrp-vname" title="${esc(prodLabel({...p},{noSku:true}))} · ${esc(p.sku)}">${esc(lbl)}${_to?' <span class="mini" style="color:var(--earth,#b5762a)">· phasing out</span>':''}</td>
       <td class="num"><b>${n0(c.cur)}</b><div class="mini" style="color:var(--muted)">Pasig ${n0(r.shop)} · Bulacan ${n0(r.other)}</div></td>
-      <td class="num"><span class="mrp-lasts ${tone(d)}">${d==null?'—':(Math.round(d*10)/10)+' d'}</span></td>
+      <td class="num"><span class="mrp-lasts ${c.zone?({red:'mrp-lr',yellow:'mrp-ly',green:'mrp-lg'}[c.zone]||'mrp-lz'):tone(d)}" title="${c.zone?('Fuel gauge: '+c.zone+' · '+({fast:'fast seller',slow:'slow seller',vslow:'very slow seller'}[c.tier]||'')):''}">${d==null?'—':(Math.round(d*10)/10)+' d'}</span>${mrpTrend(r)}</td>
       <td class="num">${box}${(L?(+LC[p.sku]||0):mrpCoPartOf(p.sku))>0?`<div class="mini" style="color:var(--muted)">+ ${L?(+LC[p.sku]||0):mrpCoPartOf(p.sku)} custom</div>`:''}${!L&&sg>0&&sg!==m?`<div class="mini" style="color:var(--muted)">suggested ${n0(sg)}</div>`:''}${c.deferred&&!m?'<div class="mini" style="color:#3a8276">can wait</div>':''}</td></tr>`; };
   /* TABS FOLLOW THE SHOP MENU: group (tab) → section (folded) → line → variant. */
   const TAB=window._mrpTab||'all';
@@ -12996,6 +13102,7 @@ async function confirmSaveMRPPlan(hasExisting){
        It matters more now than it used to: the production plan only offers an
        order once it reads as planned. */
     try{ await coSyncStatuses(); }catch(e){}
+    try{ pqLearn(); }catch(e){}             // the fuel gauge learns once per locked plot
     if(_pf && _pf.tier!=='ok'){
       const _st=(_pf.failed||[]).filter(f=>f.tier==='stop');
       if(_st.length) sysLog('mrp',g.ref,'⚠ saved while '+_st.length+' data check(s) were failing — '
