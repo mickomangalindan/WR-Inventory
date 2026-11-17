@@ -1876,9 +1876,16 @@ function renderSide(){
   });
   $('side').innerHTML=h;
 }
+function crumbBack(){ return `<span onclick="navBack()" title="Back" style="cursor:pointer;margin-right:10px;color:var(--muted);font-weight:700;font-size:16px">←</span>`; }
+function navBack(){
+  if(state && state.view==='form'){ window._navBackGo=true; openModel(state.model); return; }
+  const st=window._navStack||[]; let prev=st.pop();
+  while(prev && state && prev===state.model) prev=st.pop();
+  window._navBackGo=true; openModel(prev||'home');
+}
 function setCrumb(extra){
   const m=MODELS[state.model];
-  const back = `<span onclick="history.back()" title="Back" style="cursor:pointer;margin-right:10px;color:var(--muted);font-weight:700;font-size:16px">←</span>`;
+  const back = crumbBack();
   const link = (state.view==='form'&&!formIsNew) ? ` <span onclick="copyRecordLink()" title="Copy link to this record" style="cursor:pointer;color:var(--muted)">🔗</span>` : '';
   $('crumb').innerHTML = back+`<b>${m.label}</b>`+(extra?` / ${esc(extra)}`:'')+link;
 }
@@ -1923,6 +1930,11 @@ function openModel(model){
      away thinking they saved should be told they did not. */
   if(typeof _pbDirty!=='undefined' && _pbDirty && _pbRef){ pbGuard().then(ok=>{ if(ok){ _pbDirty=false; openModel(model); } }); return; }
   toggleNav(false);            // picking a module closes the drawer behind it
+  /* In-app back trail. The ← in the top bar used history.back(), but moving
+     between screens does not always leave a browser-history entry (and inside
+     a preview frame there is none at all), so ← did nothing. Keep our own. */
+  if(!window._navBackGo && state && state.model && state.model!==model){ (window._navStack=window._navStack||[]).push(state.model); if(window._navStack.length>30) window._navStack.shift(); }
+  window._navBackGo=false;
   if(model==='home'){ state={model:'home',view:'home',search:'',groupBy:'',recId:null}; renderSide(); renderDashboard(); return; }
   /* THE PRODUCTION SCHEDULE WAS MERGED INTO THE WEEKLY DEMAND TARGET on
      17 Oct — its product view duplicated that sheet, and its day-by-day ledger
@@ -4957,7 +4969,7 @@ async function shSyncNow(quiet){
 }
 
 async function renderPackReq(){
-  $('crumb').innerHTML='<b>Regular Packs</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Regular Packs</b>';
   $('cp').innerHTML=`<div class="title">Regular Packs <span onclick="openKB('packreq')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn sec sm" onclick="renderPackReq()">↻ Refresh</button>
     <button class="btn sec sm" onclick="pqPrint()">🖨 Print</button>
@@ -8978,7 +8990,7 @@ function ylBody(){
   return h;
 }
 async function renderYields(){
-  $('crumb').innerHTML='<b>Yield &amp; Loss</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Yield &amp; Loss</b>';
   if(!_ylFrom){ const d=new Date(); const t=new Date(d.getTime()-27*864e5);
     _ylTo=todayISO(); _ylFrom=isoLocal(t); }
   $('cp').innerHTML=`<div class="title">Yield &amp; Loss <span onclick="openKB('yields')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
@@ -9698,7 +9710,7 @@ async function shSyncTest(){
 }
 
 async function renderShopify(){
-  $('crumb').innerHTML='<b>Shopify sync</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Shopify sync</b>';
   $('cp').innerHTML=`<div class="title">Shopify sync <span onclick="openKB('shopify')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <label class="mini">Last <select onchange="_shDays=+this.value;renderShopify()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
       ${[7,14,30,90].map(n=>`<option value="${n}" ${_shDays===n?'selected':''}>${n} days</option>`).join('')}</select></label>
@@ -9937,7 +9949,7 @@ function shCsv(){
 }
 
 async function renderPurchasing(){
-  $('crumb').innerHTML='<b>Purchase Orders</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Purchase Orders</b>';
   $('cp').innerHTML=`<div class="title">Purchase Orders <span onclick="openKB('purchasing')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="state.model='purchase_orders';state.view='form';openForm('')">＋ New order</button>
     <button class="btn sec sm" onclick="puMode()">${_puWeeks?'☰ Flat list':'🗓 By week'}</button>
@@ -10028,7 +10040,7 @@ async function renderPurchasing(){
 }
 
 async function renderPayables(){
-  $('crumb').innerHTML='<b>Weekly Payables</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Weekly Payables</b>';
   $('cp').innerHTML=`<div class="title">Weekly Payables <span onclick="openKB('payables')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <label class="mini">Show <select onchange="_wpN=+this.value;renderPayables()" style="padding:4px 6px;border:1px solid var(--line);border-radius:5px">
       ${[4,8,13,26,52].map(n=>`<option value="${n}" ${_wpN===n?'selected':''}>${n} weeks</option>`).join('')}</select></label>
@@ -10150,7 +10162,7 @@ function wdtPickPlot(ref){
 async function renderWDT(){
   const _tabs=`<button class="btn ${_wdtTab==='products'?'':'sec'} sm" onclick="wdtSetTab('products')">📦 Products</button><button class="btn ${_wdtTab==='movement'?'':'sec'} sm" onclick="wdtSetTab('movement')" title="ingredients, supplies and stickers — what moved, day by day. This was the Production Schedule.">📅 Movement</button>`;
   if(_wdtTab==='movement'){
-    $('crumb').innerHTML='<b>Weekly Demand Target</b> › Movement';
+    $('crumb').innerHTML=crumbBack()+'<b>Weekly Demand Target</b> › Movement';
     $('cp').innerHTML=`<div class="title">Weekly Demand Target <span onclick="openKB('wdt')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
       ${_tabs}<span class="sp"></span>${psControlsHtml()}
       <div class="sp"></div><span style="color:var(--muted)">day by day, in and out, against what the run needs</span>`;
@@ -12428,7 +12440,7 @@ async function _renderMRP(){
     _body=`<div class="mrp-simple mrp-wide"><div style="margin:0 0 8px"><button class="btn sm sec" onclick="renderDemandHistory()">📚 Open full history</button></div>${savedPlansHtml()||'<section class="mrp-sec"><div class="mini" style="color:var(--muted)">No saved plans yet. A plan shows here once you press Save plan.</div></section>'}</div>`;
   } else if(_view==='settings'){
     let _learn=null; try{ _learn=await mrpKitchenCapacity(true); }catch(e){}
-    _body=`<div class="mrp-simple">${mrpPackSettingsHtml(_learn)}${mrpBuySettingsHtml()}
+    _body=`<div class="mrp-simple">${mrpWeekSettingsHtml()}${mrpPackSettingsHtml(_learn)}${mrpBuySettingsHtml()}
       <section class="mrp-sec"><div class="mrp-sechead"><div><h3>Locations</h3>
         <div class="mini" style="color:var(--muted)">Which places' stock counts as ours: Pasig (Shopify) and Bulacan. Set once, rarely changed.</div></div><button class="btn sm sec" onclick="openPlanLocs()">Open</button></div></section></div>`;
   }
@@ -12526,6 +12538,18 @@ function mrpGaugeCompare(){ const C=window._mrpCalc||{}; const rows=Object.value
     <div class="mini" style="margin-top:8px">Gauge today: <span class="mrp-lasts mrp-lr">${b.red} red</span> make now · <span class="mrp-lasts mrp-ly">${b.yel} yellow</span> make if worth a batch · <span class="mrp-lasts mrp-lg">${b.grn} green</span> skip</div></section>`; }
 function mrpPqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0); savePackReq(); renderMRP(); }
 function mrpPqToggle(k){ PQ[k]=(+PQ[k])?0:1; savePackReq(); renderMRP(); }
+/* The week's two fixed days, here where planners look (Zeus 17 Nov: "Settings
+   is still settings, not plan and order day"). Same PLAN_CFG the custom-order
+   schedule uses, saved for everybody. */
+function mrpWeekSettingsHtml(){
+  const sel=(k,cur)=>`<select onchange="mrpWeekSet('${k}',this.value)" style="padding:5px 8px;border:1px solid #cfd8d6;border-radius:6px">
+      ${DOW_NAME.map((d,i)=>`<option value="${i}"${i===cur?' selected':''}>${d}</option>`).join('')}</select>`;
+  return `<section class="mrp-sec"><h3>Week</h3>
+    <div class="mrp-setrow"><div><b>Plan &amp; order day</b><div class="mini" style="color:var(--muted)">The day the weekly plan is made and POs go out.</div></div>${sel('buyDow',planBuyDow())}</div>
+    <div class="mrp-setrow"><div><b>Van to Pasig</b><div class="mini" style="color:var(--muted)">The day finished packs travel.</div></div>${sel('vanDow',planVanDow())}</div></section>`; }
+async function mrpWeekSet(k,v){ PLAN_CFG[k]=Math.max(0,Math.min(6,+v||0)); const ok=await savePlanCfg();
+  try{ sysLog('mrp','(week)','⚙ '+(k==='buyDow'?'Plan & order day':'Van day')+' → '+DOW_NAME[+v]+' by '+CURRENT_USER); }catch(e){}
+  if(ok!==false) toast('Saved for everybody'); renderMRP(); }
 function mrpPackSettingsHtml(learn){
   const row=(k,l,why,u)=>`<div class="mrp-setrow"><div><b>${l}</b><div class="mini" style="color:var(--muted)">${why}</div></div>
       <div style="white-space:nowrap"><input type="number" step="any" class="mrp-in" value="${esc(String(PQ[k]))}" onchange="mrpPqSet('${k}',this.value)"> <span class="mini" style="color:var(--muted)">${u||''}</span></div></div>`;
@@ -15926,7 +15950,7 @@ function packsCostAvg(fgVal, stockRows){
   return n>0?(fgVal/n):0;
 }
 async function renderDashboard(){
-  $('crumb').innerHTML='<b>Dashboard</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Dashboard</b>';
   $('cp').innerHTML=`<div class="title">Operations Dashboard</div><div class="sp"></div>
     <div class="search" onclick="openCmd()" style="cursor:pointer">🔎<input placeholder="Search everything…  (⌘K)" readonly style="cursor:pointer"></div>`;
   $('content').innerHTML='<div class="empty">Loading…</div>';
@@ -18742,7 +18766,7 @@ function drawCOForm(){
       if(_coView==='form' && coRec.order_ref===window._coCoverFor) drawCOForm(); }).catch(()=>{});
   }
   if(!locked){ window._coCoverFor=null; window._coCover=null; }
-  $('crumb').innerHTML=`<b>Custom Orders</b> / ${esc(coRec.order_ref||'New quote')}`;
+  $('crumb').innerHTML=crumbBack()+`<b>Custom Orders</b> / ${esc(coRec.order_ref||'New quote')}`;
   $('cp').innerHTML=`<div class="title">Custom Orders</div>
     ${!locked?`<button class="btn sec" onclick="coSave()">💾 Save quote</button><button class="wfbtn" onclick="coLock()">🔒 Lock order</button>`:''}
     ${locked&&coRec.order_ref?`<button id="co_saveDates" class="btn sec" onclick="coSaveDates()" title="a locked order's LINES are fixed, but its schedule is not — rescheduling is normal and must not need an unlock">💾 Save dates</button>`:''}
@@ -19531,7 +19555,7 @@ let _guideKey='wf';
 function setGuide(k){ _guideKey=k; renderGuides(); }
 function renderGuides(){
   const g=GUIDES.find(x=>x.key===_guideKey)||GUIDES[0];
-  $('crumb').innerHTML='<b>Guides</b> / '+esc(g.label.replace(/^[^\w]+/,''));
+  $('crumb').innerHTML=crumbBack()+'<b>Guides</b> / '+esc(g.label.replace(/^[^\w]+/,''));
   $('cp').innerHTML=`<div class="title">Guides</div>
     ${GUIDES.map(x=>`<button class="btn ${x.key===_guideKey?'':'sec'}" onclick="setGuide('${x.key}')">${x.label}</button>`).join(' ')}
     <div class="sp"></div><a class="btn sec" href="${esc(g.src)}" target="_blank" rel="noopener noreferrer">↗ Open in new tab</a>`;
@@ -19540,7 +19564,7 @@ function renderGuides(){
     <div class="mini" style="margin-top:6px;color:var(--muted)">Step-by-step manuals with screenshots. If a guide doesn't appear, make sure the <code>guides/</code> folder (with <code>${esc(g.src.split('/').pop())}</code>) is deployed alongside the app.</div>`;
 }
 function renderFFCalc(){
-  $('crumb').innerHTML='<b>Fresh Food Calculator</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Fresh Food Calculator</b>';
   $('cp').innerHTML=`<div class="title">Fresh Food Calculator <span onclick="openKB('ffcalc')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <a class="btn" href="${esc(FFCALC_URL)}" target="_blank" rel="noopener noreferrer">🧮 Open the calculator ↗</a>
     <button class="btn sec" onclick="openModel('custom_orders')">🧑‍🍳 Custom Orders</button>
@@ -19578,7 +19602,7 @@ function renderFFCalc(){
 // find a repeat customer without opening the calculator. Read-only; jump into the calculator to edit.
 const _FT_LBL={raw:'BARF Raw',cookable:'BARF Cookable',sousVide:'Gently Cooked'};
 async function renderFFProfiles(){
-  $('crumb').innerHTML='<b>Calculator Profiles</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Calculator Profiles</b>';
   $('cp').innerHTML=`<div class="title">Calculator Profiles <span onclick="openKB('ffprofiles')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn sec" onclick="renderFFProfiles()">↻ Refresh</button>
     <button class="btn sec" onclick="ffImportPick()">📥 Import backup (JSON)</button>
@@ -25191,7 +25215,7 @@ async function locUsage(){
   return locCodes().map(c=>({code:c, name:locName(c), refs:null}));
 }
 async function renderLocations(){
-  $('crumb').innerHTML='<b>Master Data</b> / Locations';
+  $('crumb').innerHTML=crumbBack()+'<b>Master Data</b> / Locations';
   $('cp').innerHTML=`<div class="title">Locations</div>
     <button class="btn" onclick="locAdd()">＋ New location</button>
     <button class="btn sec sm" onclick="renderLocations()">↻ Refresh</button>
@@ -25594,7 +25618,7 @@ function drawCountForm(){
       ${stale?`<br><b style="color:var(--earth,#b5762a)">The reading is over 12 hours old.</b> Refresh it before counting, or expect variances that are really just a day of trading.`:''}
       <br><span class="mini" style="color:var(--muted)">Our own ledger figure is shown beside each line, so you can see where the two disagree.</span></div>`;
   })();
-  $('crumb').innerHTML=`<b>Weekly Inventory</b> / ${esc(countRec.count_ref||'New')}`;
+  $('crumb').innerHTML=crumbBack()+`<b>Weekly Inventory</b> / ${esc(countRec.count_ref||'New')}`;
   $('cp').innerHTML=`<div class="title">Weekly Inventory</div><div class="sp"></div><span style="color:var(--muted)">book qty auto · needs approval</span>`;
   const scopes=['All','Ingredients','Supplies','Stickers','Sellable Products','Retired']; const sc=countRec.scope||['All'];
   const scopeHtml=scopes.map(s=>`<label class="sck" title="${s==='Retired'?'add back archived items that still have stock on the shelf':''}"><input type="checkbox" ${sc.includes(s)?'checked':''} ${approved?'disabled':''} onchange="countScope('${s}',this.checked)"> ${s==='Retired'?'Retired (still on the shelf)':s}</label>`).join('');
@@ -26233,7 +26257,7 @@ function pivotTable(title,data,rows,cfg,m){
       'a high <b>Top-3 concentration</b> KPI (you\'re heavily dependent on a few items / suppliers / categories — a risk if one falls through) and the long tail at the bottom (small contributors you could simplify or drop).')}
   </div>`; }
 async function renderReporting(){
-  $('crumb').innerHTML='<b>Reports</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Reports</b>';
   $('cp').innerHTML=`<div class="title">Reports <span onclick="openKB('reporting')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <div class="vswitch"><button class="${repTab==='standard'?'on':''}" onclick="repTab='standard';repActive=null;renderReporting()">⭐ Standard</button><button class="${repTab==='custom'?'on':''}" onclick="repTab='custom';renderReporting()">🛠 Custom</button></div>
     <div class="sp"></div><span style="color:var(--muted)">${repTab==='standard'?'recommended reports':'build your own'}</span>`;
@@ -27183,7 +27207,7 @@ function saveAutos(){ localStorage.setItem('wr_autos',JSON.stringify(AUTOS));
 async function loadAutos(){ if(!isLive()) return;
   try{ const r=await sb('app_settings?select=value&key=eq.autos'); if(r&&r[0]&&r[0].value){ AUTOS=_autosTidy({...AUTOS,...r[0].value}); localStorage.setItem('wr_autos',JSON.stringify(AUTOS)); if(state.model==='automations'&&state.view==='special') renderAutomations(); } }catch(e){} }
 function renderAutomations(){
-  $('crumb').innerHTML='<b>Automations</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Automations</b>';
   $('cp').innerHTML=`<div class="title">Automation Configuration</div><div class="sp"></div><span style="color:var(--muted)">one-stop hub for integrations</span>`;
   let h='<div class="repcard"><p class="hint" style="margin:0 0 12px">Every integration runs from the Apps Script (n8n is retired). Toggle on and paste the Apps Script web-app /exec URL, sheet or folder. This is the single place to manage every automation.</p><table><thead><tr><th>Automation</th><th style="width:70px;text-align:center">On</th><th>URL / config</th></tr></thead><tbody>';
   Object.keys(AUTOS).forEach(k=>{ const a=AUTOS[k]; h+=`<tr><td><b>${esc(a.label)}</b><div class="mini">${esc(a.hint)}</div></td><td style="text-align:center"><input type="checkbox" ${a.on?'checked':''} onchange="AUTOS['${k}'].on=this.checked;saveAutos();toast('Saved')"></td><td><input value="${esc(a.url)}" placeholder="https://..." style="width:100%;border:1px solid var(--line);border-radius:5px;padding:6px" onchange="AUTOS['${k}'].url=this.value;saveAutos()"></td></tr>`; });
@@ -27994,7 +28018,7 @@ function stkLeadFor(sup){ const k=String(sup||'').trim();
    No column here has a peso sign in it, at any role.                        */
 let _rcvSearch='', _rcvShowDone=false;
 async function renderReceiving(){
-  $('crumb').innerHTML='<b>Receiving</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>Receiving</b>';
   $('cp').innerHTML=`<div class="title">Receiving <span onclick="openKB('receiving')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <input value="${esc(_rcvSearch)}" placeholder="Search supplier, reference or item…" oninput="_rcvSearch=this.value;drawReceiving()"
       style="min-width:230px;padding:6px 9px;border:1px solid var(--line);border-radius:6px">
@@ -29277,7 +29301,7 @@ async function transferLoadApply(){
 
 /* ============ System Check (in-app unit tests) ============ */
 async function renderSelfTest(){
-  $('crumb').innerHTML='<b>System Check</b>';
+  $('crumb').innerHTML=crumbBack()+'<b>System Check</b>';
   $('cp').innerHTML=`<div class="title">System Check</div><button class="btn" onclick="renderSelfTest()">▶ Run tests</button><div class="sp"></div><span style="color:var(--muted)">verify everything is working</span>`;
   $('content').innerHTML='<div class="repcard"><div class="empty">Running tests…</div></div>';
   const tests=[]; const T=(name,fn)=>tests.push({name,fn});
