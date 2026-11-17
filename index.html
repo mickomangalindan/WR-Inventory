@@ -10577,7 +10577,7 @@ function wdtPrint(which){
    ingredient with a 7-day lead and a 7-day review must be ordered while it
    still holds 14 days, or it runs dry waiting for the van — so the real
    threshold is whichever is larger, and the screen names which one applied. */
-const RP_DEF={ on:1, review:7, leadMin:7, leadCap:30, cushion:0.5, win:60, procOn:1, shelfOn:1, minG:0, leadN:5, spike:0, minCoverD:7 };
+const RP_DEF={ on:1, review:7, leadMin:7, leadCap:30, cushion:0.5, win:60, procOn:1, shelfOn:1, minG:0, leadN:5, spike:0, minCoverD:7, timingOn:1 };
 let RP=Object.assign({},RP_DEF);
 try{ RP=Object.assign({},RP_DEF,JSON.parse(localStorage.getItem('wr_rawpar')||'{}')); }catch(e){}
 /* SETTINGS LIVE IN THE DATABASE, NOT IN A BROWSER.  The pack-request settings
@@ -10585,6 +10585,25 @@ try{ RP=Object.assign({},RP_DEF,JSON.parse(localStorage.getItem('wr_rawpar')||'{
    same screen and getting different numbers because one of them once typed a
    21 into their own laptop.  These are in app_settings from the start; the
    localStorage copy is only a cache so the first paint is not blank. */
+/* ---- ORDER TIMING PER SUPPLIER (Zeus, 17 Nov 2026) --------------------------
+   week  — arrives by Tue/Wed, in time for THIS week's cooking: buy this week's
+           need plus the use while waiting (lead × cushion). No extra week.
+   ahead — arrives late in the week: buy for next week too (the review week).
+   two   — Saturday route, cooked the Monday after next Saturday: 14 days.
+   `lead` is how many days until it can be cooked. Saved for everyone in
+   app_settings 'supplier_timing'; anything not listed keeps the old rule. */
+const SUPT_DEF={
+  'Mayee Gajudo':{t:'week',lead:4}, 'Jojo Santillan':{t:'week',lead:2}, 'SVC':{t:'week',lead:3},
+  'KGM Manila':{t:'week',lead:3}, 'Iana Ignacio':{t:'week',lead:3}, 'Sheila David':{t:'week',lead:3}, 'Bukid sa Manila':{t:'week',lead:4},
+  'EDL Farms and Feeds Manufacturing, Inc.':{t:'ahead',lead:7}, 'Local Goat Raisers':{t:'ahead',lead:7}, 'NutriFruits':{t:'ahead',lead:7}, 'JSJ Goat Farm':{t:'ahead',lead:7},
+  'Frozen Farm':{t:'two',lead:14}, 'Coral Agri Farm':{t:'two',lead:14}, 'Golden Acre':{t:'two',lead:14}, 'Helen Marie Laurente':{t:'two',lead:14}, 'JIA2 Corp':{t:'two',lead:14} };
+let SUPT=JSON.parse(JSON.stringify(SUPT_DEF));
+try{ const _st=JSON.parse(localStorage.getItem('wr_supt')||'null'); if(_st&&typeof _st==='object') SUPT=_st; }catch(e){}
+async function loadSupTiming(){ if(window._suptLoaded||!isLive()) return; window._suptLoaded=true;
+  try{ const r=await sb('app_settings?select=value&key=eq.supplier_timing'); const v=r&&r[0]&&r[0].value; if(v&&typeof v==='object'&&!Array.isArray(v)) SUPT=v; }catch(e){} }
+function saveSupTiming(){ try{ localStorage.setItem('wr_supt',JSON.stringify(SUPT)); }catch(e){}
+  if(isLive()) sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'supplier_timing',value:SUPT})}).catch(()=>{}); }
+function supTimingSet(sup,k,v){ const o=SUPT[sup]=SUPT[sup]||{t:'ahead',lead:7}; if(k==='t') o.t=v; else o.lead=Math.max(0,parseFloat(v)||0); saveSupTiming(); renderMRP(); }
 async function loadRawPar(){ if(window._rawParLoaded||!isLive()) return; window._rawParLoaded=true;
   try{ const r=await sb('app_settings?select=value&key=eq.raw_par');
     if(r&&r[0]&&r[0].value&&typeof r[0].value==='object'&&!Array.isArray(r[0].value)){
@@ -11617,7 +11636,7 @@ async function _renderMRP(){
      promise on screen was false. That is the exact localStorage failure the raw
      par was supposed to stop repeating. Same shape as loadCostModel: once per
      session, live only, app_settings wins over the local mirror. */
-  await loadRawPar();
+  await loadRawPar(); try{ await loadSupTiming(); }catch(e){}
   $('cp').innerHTML=`<div class="title">Demand / MRP <span onclick="openKB('mrp')" title="Module guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderMRP()">↻ Compute</button>
     <button class="btn sec" onclick="saveMRPDraft()" title="Keeps this week's numbers without locking them. One draft per plan date — saving again replaces it, so the week never collects duplicate plots. Nothing is ordered or scheduled from a draft.">📝 Save draft</button>
@@ -12237,6 +12256,19 @@ async function _renderMRP(){
       lowStock = (endInv < 0) || (endInv <= RAW_REORDER_G && (rawNeed>0 || avail>0));
       target = lowStock ? (rawNeed + RAW_REORDER_G + leadBuf) : 0;
     }
+    /* ---- ORDER TIMING: THIS WEEK / A WEEK AHEAD / 14 DAYS (17 Nov) ---------- */
+    const _spName=((it.supplier||'').trim()) || ((it.supplier1||'').trim());
+    const _ST=(RP_ON && (+RP.timingOn) && _spName) ? SUPT[_spName] : null;
+    let _tLead=null;
+    if(_ST && !(it.is_live_animal)){
+      _tLead=Math.max(0,+_ST.lead||0); const pd=+C.perDay||0, cush=+C.cush||0;
+      const ropT=pd*_tLead*(1+cush);
+      if(_ST.t==='week'){ leadBuf=ropT; trigger=ropT; target=rawNeed+ropT;
+        lowStock=(endInv<0) || (rawNeed>0 && endInv<ropT) || (ropT>0 && avail<=ropT); }
+      else { const tgtT=Math.max(pd*((+C.review||7)+_tLead)*(1+cush), rawNeed+ropT);
+        leadBuf=ropT; trigger=ropT; target=tgtT;
+        lowStock=(endInv<0) || (rawNeed>0 && endInv<ropT) || (ropT>0 && avail<=ropT); }
+    }
     /* ---- NO STOCK CUSHION: BUY THIS WEEK AND NEXT, NOTHING MORE (Zeus, 16 Nov) --
        Crocodile is expensive and only reaches Bulacan on the Saturday truck, so
        anything ordered now is cooked the Monday after. It carries no par: buy
@@ -12274,7 +12306,7 @@ async function _renderMRP(){
        (Mayee, EDL, Jojo, SVC) carry 7 days and wait while 7+ days are left;
        Saturday-pickup suppliers (Frozen Farm, Golden Acre, Coral) carry 14,
        because an order placed now is cooked the Monday after next Saturday. */
-    const needDays   = Math.max(0,+RP.minCoverD||0, (+lead||0));
+    const needDays   = (_tLead!=null) ? (_ST.t==='week' ? _tLead : Math.max(+RP.minCoverD||0,_tLead)) : Math.max(0,+RP.minCoverD||0, (+lead||0));
     let tooSmall=false;
     if(final>0 && coverAfter!=null && needDays>0 && coverAfter>=needDays
        && manualKg<=0 && added<=0 && !sup && !_noCush){
@@ -12517,6 +12549,13 @@ function mrpBuySettingsHtml(){
     ${row('minCoverD','Buy when less than this is left','After this week\'s cooking. Saturday-pickup suppliers are checked 14 days ahead.','days')}
     ${row('cushion','Cushion','Extra on top of what you use while waiting for delivery. 0.5 = half again, 1 = double.','×')}
     ${row('review','How often you buy','7 = once a week.','days')}
+    <div class="mrp-setrow" style="border-bottom:0"><div><b>Order timing per supplier</b><div class="mini" style="color:var(--muted)">This week = arrives by Tue/Wed in time to cook · A week ahead = arrives late in the week · 14 days = Saturday route. Days = until it can be cooked.</div></div>
+      <button class="btn sm ${(+RP.timingOn)?'':'sec'}" onclick="mrpRpSet('timingOn',(+RP.timingOn)?0:1)">${(+RP.timingOn)?'On':'Off'}</button></div>
+    ${(+RP.timingOn)?`<table class="mrp-t"><tbody>${Object.keys(SUPT).sort((a,b)=>({week:0,ahead:1,two:2}[SUPT[a].t]-{week:0,ahead:1,two:2}[SUPT[b].t])||a.localeCompare(b)).map(sp=>`<tr><td>${esc(sp)}</td>
+      <td><select onchange="supTimingSet(${esc(JSON.stringify(sp))},'t',this.value)" style="padding:4px 6px;border:1px solid #cfd8d6;border-radius:6px">
+        ${[['week','This week'],['ahead','A week ahead'],['two','14 days ahead']].map(([k,l])=>`<option value="${k}"${SUPT[sp].t===k?' selected':''}>${l}</option>`).join('')}</select></td>
+      <td class="num"><input type="number" class="mrp-in" style="width:60px" value="${esc(String(SUPT[sp].lead))}" onchange="supTimingSet(${esc(JSON.stringify(sp))},'lead',this.value)"> <span class="mini" style="color:var(--muted)">days</span></td></tr>`).join('')}</tbody></table>
+      <div class="mini" style="color:var(--muted);margin-top:4px">Suppliers not listed keep the general rule above.</div>`:''}
     <details class="mrp-adv"><summary>Advanced</summary>${rpSettingsHtml(window._mrpPlan||[])}</details></section>`; }
 function mrpIsFull(){ return mrpView()!=='plan'; }
 function mrpSetFull(on){ mrpSetView(on?'packs':'plan'); }
