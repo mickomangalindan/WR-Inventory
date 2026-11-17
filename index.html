@@ -621,13 +621,13 @@ body.lean .leanoff{display:none!important}
 .mrp-ingv .repcard{background:#fff;border:1px solid #e6ebea;border-radius:12px;padding:16px 18px;box-shadow:none}
 .mrp-ingv .repcard h3{font-size:16px}
 .mrp-ingv table{width:100%;border-collapse:collapse}
-.mrp-ingv table th{font-weight:500;font-size:12px;color:#5f6b68;text-transform:none;letter-spacing:0;background:none;border-bottom:1px solid #e6ebea;padding:8px 8px}
+.mrp-ingv table th{font-weight:500;font-size:12px;color:#5f6b68;text-transform:none;letter-spacing:0;background:#fff;border-bottom:1px solid #e6ebea;padding:8px 8px}
 .mrp-ingv table td{padding:8px 8px;border-bottom:1px solid #f0f3f2;vertical-align:middle;background:#fff}
 .mrp-ingv table tr.subtot td,.mrp-ingv table tr[style*="background"] td{background:#e7f2ef}
 .mrp-ingv .hint{background:#f6faf9;border-left:3px solid #9cc7be}
 .mrp-ingv input[type=number]{border:1px solid #cfd8d6;border-radius:6px;padding:4px 6px}
 .mrp-ingt{table-layout:fixed}
-.mrp-ingt thead th,.mrp-ingt thead tr{background:none!important}
+.mrp-ingt thead th,.mrp-ingt thead tr{background:#fff!important}
 .mrp-ingt td:first-child{white-space:normal}
 .mrp-ingsup{border-top:1px solid #f0f3f2;padding:2px 0}
 .mrp-ingsup>summary{cursor:pointer;padding:10px 4px;list-style:none}
@@ -12407,7 +12407,7 @@ async function _renderMRP(){
     const arr=_bySup[sup]; const sItems=arr.filter(l=>l.final>0); const sVal=sItems.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); const sKg=_supKg(arr);
     const minG=supMin[sup]||0; const shortG=minG>0?(minG-sKg):0;
     const minTag = minG>0 ? (shortG>0 ? ` · <span style="color:var(--danger)">min ${kgf(minG)} — short ${kgf(shortG)}</span>` : ` · <span style="color:#4e7a3e">✓ meets min ${kgf(minG)}</span>`) : '';
-    rh+=`<tr><td colspan="15" style="background:#f6f8f4;font-weight:700;color:#4e7a3e;padding:6px 8px">🏭 ${esc(sup)} <span style="opacity:.6;font-weight:400">— ${sItems.length} item(s) · <b>${kgf(sKg)} kg</b> · est. ₱${Math.round(sVal).toLocaleString('en-PH')}${minTag}</span></td></tr>`;
+    rh+=`<tr class="mrp-suprow"><td colspan="15" style="background:#fff;font-weight:700;color:#1f2a28;padding:14px 8px 6px;font-size:15px;border-bottom:1px solid #e6ebea">${esc(sup)} <span style="color:var(--muted);font-weight:400;font-size:13px">— ${sItems.length} item(s) · <b>${kgf(sKg)} kg</b> · est. ₱${Math.round(sVal).toLocaleString('en-PH')}${minTag}</span></td></tr>`;
     arr.sort((a,b)=>b.final-a.final).forEach(l=>{ rh+=_rowHtml(l); });
   });
   if(_supLedIng.length) rh+=`<tr><td colspan="15" style="background:#fff8e1;border-left:3px solid #e0b400;padding:7px 9px;font-size:12.5px">
@@ -12489,7 +12489,18 @@ async function _renderMRP(){
 function mrpReadOnly(root){ if(!root) return;
   root.querySelectorAll('input,select,textarea').forEach(el=>{ el.readOnly=true; el.disabled=true; el.tabIndex=-1; });
   root.querySelectorAll('button').forEach(b=>{ if(/Pull the week|Clear demand|Round to|Add|Remove|✕|＋/.test(b.textContent||'')) b.style.display='none'; });
-  root.querySelectorAll('h3').forEach(h=>{ if(/Custom orders —/.test(h.textContent||'')){ const box=h.closest('.repcard')||h.parentElement; if(box) box.style.display='none'; } });
+  root.querySelectorAll('h3').forEach(h=>{ if(/Custom orders —/.test(h.textContent||'')){ const box=h.closest('.repcard')||h.parentElement; if(box) box.style.display='none'; }
+    if(/Weekly demand \(packs\)/.test(h.textContent||'')) h.textContent='Weekly demand (packs)'; });
+  /* one SKU (it is already under the name) and one PAR (the one used — rounded
+     to a whole batch; the unrounded figure was the old sheet's helper column) */
+  root.querySelectorAll('table').forEach(t=>{ const hr=t.querySelector('thead tr'); if(!hr) return;
+    const ths=[...hr.children]; const lab=th=>(th.textContent||'').replace(/\s+/g,' ').trim();
+    const iSku=ths.findIndex(th=>lab(th)==='SKU'), iPar=ths.findIndex(th=>/^PAR$/i.test(lab(th))), iNew=ths.findIndex(th=>/^New Par$/i.test(lab(th)));
+    const hide=[iSku, iNew>=0?iPar:-1].filter(i=>i>=0);
+    if(iNew>=0) ths[iNew].textContent='PAR';
+    if(!hide.length) return;
+    t.querySelectorAll('tr').forEach(tr=>{ if(tr.children.length!==ths.length) return; hide.forEach(i=>{ if(tr.children[i]) tr.children[i].style.display='none'; }); });
+  });
 }
 /* The four steps of a planning week, read from what is already on screen:
    custom orders → regular packs → saved and locked → POs raised. Plus at most
@@ -13037,7 +13048,9 @@ function prPlotBadge(d){
   const stop=f.filter(x=>x.tier==='stop');
   const col=stop.length?'var(--danger)':'#b5762a';
   const tip=f.map(x=>x.id+': '+x.fact).join(' \n');
-  return `<span class="mini" style="color:${col};font-weight:700" title="${esc(tip)}">${stop.length?'⚠ '+stop.length+' wrong':'· '+f.length+' open'}</span>`;
+  /* click to see WHICH checks failed when the plan was saved (Zeus 18 Nov) */
+  return `<details class="mini" style="color:${col}"><summary style="cursor:pointer;font-weight:700">${stop.length?'⚠ '+stop.length+' check(s) failed':'· '+f.length+' note(s)'}</summary>
+    <div style="font-weight:400;color:#333;max-width:320px;margin-top:4px;line-height:1.5">${f.map(x=>'• '+esc(x.fact||x.id)).join('<br>')}<div style="color:var(--muted);margin-top:4px">These were true when the plan was saved — e.g. Shopify sales not up to date. Fix the feed, then Edit plan → Save to re-check.</div></div></details>`;
 }
 /* ---- WHICH PLOTS WERE NEVER ORDERED ---------------------------------------
    A week was planned, locked, and then nobody raised the purchase orders — and
@@ -13081,7 +13094,7 @@ function savedPlansHtml(){ const a=mrpPlanCache; if(!a.length)return'';
       <td class="num">${r.draft?'<span class="mini" style="color:var(--muted)">—</span>'
         :(r.pos===null?'<span class="mini" style="color:var(--muted)">?</span>'
         :(r.pos>0?`<span style="color:#4e7a3e;font-weight:700">${r.pos}</span>`
-                 :(r.items>0?'<b style="color:var(--danger)" title="This plot was locked and never ordered from">none</b>':'<span class="mini" style="color:var(--muted)">—</span>')))}</td>
+                 :(r.items>0?'<span style="color:#b5762a" title="No purchase orders made from this plan yet">not yet</span>':'<span class="mini" style="color:var(--muted)">—</span>')))}</td>
       <td>${r.draft?'<span class="mini" style="color:var(--muted)">—</span>':prPlotBadge(r.pf)}</td><td style="white-space:nowrap"><span class="btn link" onclick="viewMRPPlan(${r.i})">View</span>${(r.draft||!canRaisePO())?'':` · <span class="btn link" onclick="window._poConfirmOnly=false;planPOOpen(${r.i})" title="Raise the purchase orders this plot asked for, from its own approved figures. The plot is not changed or unlocked.">Order</span>`} · <span class="btn link" onclick="loadMRPPlan(${r.i})">Reuse</span> · <span class="btn link" style="color:var(--danger)" onclick="delMRPPlan(${r.i})">Delete</span></td></tr>`).join('')}
     </tbody></table></div></div>`; }
 // Dedicated, VIEW-ONLY history of every saved demand plot (no reuse / no delete).
@@ -13273,44 +13286,29 @@ async function saveMRPPlan(){
   const totVal=toBuy.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0);
   // A draft on this date is replaced by locking, not overridden — see saveMRPDraft.
   const existing=(mrpPlanCache||[]).filter(p=>(p.plan_date||p.date)===MRPDATE && ((p.data||p)||{}).locked!==false);
-  const warn = existing.length ? `<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:10px;margin:12px 0;color:var(--danger);font-size:13px">
-     ⚠ A demand plot already exists for <b>${esc(MRPDATE)}</b> (${existing.map(e=>esc((e.data&&e.data.ref)||e.ref||'?')).join(', ')}).<br>
-     Saving will <b>override</b> it — the previous plot for this date is replaced and cannot be recovered.
-     <label style="display:flex;gap:6px;margin-top:8px;color:#222"><input type="checkbox" id="ovConfirm"> I understand this overrides the existing demand plot for ${esc(MRPDATE)}.</label></div>` : '';
-  $('modal').innerHTML=`<h3>💾 Save demand plot — ${esc(MRPDATE)}</h3>
-    <p class="mini">Once saved, a demand plot is <b>locked</b> — you can view, print and download it. To change it later, use <b>Edit plan</b>: it saves a new version that replaces this one.</p>
-    <ul style="margin:10px 0 0;padding-left:18px;font-size:13px;line-height:1.7">
-      <li>Plan date: <b>${esc(MRPDATE)}</b> · ${esc(weekOf(MRPDATE))}</li>
-      <li>Products with demand: <b>${demCount}</b></li>
-      <li>Ingredients to order: <b>${toBuy.length}</b></li>
-      <li>Estimated order value: <b>₱${Math.round(totVal).toLocaleString('en-PH')}</b></li>
-    </ul>${(()=>{ const O=mrpOmissions();
-      if(!O.extra.length) return '';
-      const packs=O.extra.reduce((a,x)=>a+x.qty,0);
-      return `<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:10px;margin:12px 0;font-size:12.5px">
-        <b>⚠ ${O.extra.length} line(s) — ${packs} pack(s) — were NOT offered by this pull.</b>
-        <div class="mini" style="margin:5px 0 0;color:var(--muted)">They were already in the editor before the pull: typed by hand, loaded from an older plot, or left over from another week. The shelf does not ask for them. Keep them only if you mean to make them; ingredients WILL be ordered for them.</div>
-        <div style="margin-top:6px;max-height:120px;overflow:auto" class="mini">${
-          O.extra.slice(0,40).map(x=>`• ${esc(x.name)} <span style="color:var(--muted)">— ${x.qty}</span>`).join('<br>')
-          +(O.extra.length>40?('<br>… and '+(O.extra.length-40)+' more'):'')}</div>
-        <div style="margin-top:8px"><button class="btn sec sm" onclick="mrpDropExtra()">🧹 Remove these ${O.extra.length} line(s)</button></div></div>`;
-      })()}${(()=>{ const O=mrpOmissions();
-      if(!O.omitted.length && !O.trimmed.length) return '';
-      const packs=O.omitted.reduce((a,x)=>a+x.offered,0);
-      return `<div style="background:#fff8e1;border:1px solid #e0b400;border-radius:6px;padding:10px;margin:12px 0;font-size:12.5px">
-        <b>⚖ Leaving out ${O.omitted.length} of the ${O.offeredN} line(s) the pull offered</b>${packs?(' — '+packs+' pack(s)'):''}${O.trimmed.length?(', and taking less of '+O.trimmed.length):''}.
-        <div class="mini" style="margin:5px 0 0;color:var(--muted)">That is usually right — supply-led lines are not ordered, a retiring range is not restocked, a bundle with no recipe cannot be made. It is recorded <b>with the plot</b> so next week knows it was a decision, not an oversight, and so the Weekly Demand Target can say so instead of flagging them.</div>
-        <div style="margin-top:6px;max-height:120px;overflow:auto" class="mini">${
-          O.omitted.slice(0,40).map(x=>`• ${esc(x.name)} <span style="color:var(--muted)">— ${x.offered}</span>`).join('<br>')
-          +(O.omitted.length>40?('<br>… and '+(O.omitted.length-40)+' more'):'')
-          +(O.trimmed.length?('<br>'+O.trimmed.slice(0,10).map(x=>`• ${esc(x.name)} <span style="color:var(--muted)">— ${x.offered} → ${x.saved}</span>`).join('<br>')):'')}</div></div>`;
-      })()}${warn}
-    <div style="display:flex;gap:8px;margin-top:16px"><button class="btn" onclick="confirmSaveMRPPlan(${existing.length})">✅ Confirm &amp; save</button><span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
+  /* MINIMAL SAVE DIALOG (Zeus 18 Nov): one summary line, short notes only when
+     they matter, nothing red unless something is really at risk. */
+  const _editing=!!window._mrpEditRef;
+  const _exRef=existing.map(e=>esc((e.data&&e.data.ref)||e.ref||'?')).join(', ');
+  const warn = existing.length ? (_editing
+      ? `<div class="mini" style="margin:12px 0 0;color:var(--muted)">This replaces <b>${_exRef}</b> (the plan you are editing).<input type="checkbox" id="ovConfirm" checked hidden></div>`
+      : `<label class="mini" style="display:flex;gap:6px;align-items:center;margin:12px 0 0;padding:8px 10px;border:1px solid #e6c9c2;border-radius:8px;background:#fdf6f4"><input type="checkbox" id="ovConfirm"> A plan for this week already exists (${_exRef}) — replace it.</label>`) : '';
+  const _O=mrpOmissions();
+  const _ex=_O.extra.length?`<div style="margin:12px 0 0;padding:8px 10px;border:1px solid #ead9b0;border-radius:8px;background:#fdf9ef" class="mini">
+      Added by hand, not asked for by the shelf: ${_O.extra.slice(0,6).map(x=>`<b>${esc(x.name)}</b> ${x.qty}`).join(', ')}${_O.extra.length>6?' …':''}. Ingredients are ordered for these.
+      <span class="btn link" onclick="mrpDropExtra()" style="margin-left:6px">Remove</span></div>`:'';
+  const _om=(_O.omitted.length||_O.trimmed.length)?`<details class="mini" style="margin:10px 0 0;color:var(--muted)"><summary>${_O.omitted.length} suggested line(s) left out${_O.trimmed.length?(', '+_O.trimmed.length+' made smaller'):''}</summary>
+      <div style="margin-top:6px;max-height:120px;overflow:auto">${_O.omitted.slice(0,40).map(x=>`• ${esc(x.name)} — ${x.offered}`).join('<br>')}${_O.trimmed.length?('<br>'+_O.trimmed.slice(0,10).map(x=>`• ${esc(x.name)} — ${x.offered} → ${x.saved}`).join('<br>')):''}</div></details>`:'';
+  $('modal').innerHTML=`<h3>💾 Save and lock — week of ${esc(MRPDATE)}</h3>
+    <div style="font-size:14px;margin:6px 0 0"><b>${demCount}</b> product(s) · <b>${toBuy.length}</b> ingredient(s) · about <b>₱${Math.round(totVal).toLocaleString('en-PH')}</b></div>
+    <div class="mini" style="color:var(--muted);margin-top:4px">The kitchen sees these targets. To change it later, use <b>Edit plan</b>.</div>
+    ${_ex}${_om}${warn}
+    <div style="display:flex;gap:8px;margin-top:16px"><button class="btn" onclick="confirmSaveMRPPlan(${existing.length})">💾 Save and lock</button><span style="flex:1"></span><button class="btn sec" onclick="closeModal()">Cancel</button></div>`;
   $('overlay').classList.add('on');
 }
 // STEP 2 — actually save (mint the DP ref here so cancelling never burns a sequence number).
 async function confirmSaveMRPPlan(hasExisting){
-  if(hasExisting){ const c=document.getElementById('ovConfirm'); if(!c||!c.checked){ toast('Tick the override confirmation to proceed',true); return; } }
+  if(hasExisting){ const c=document.getElementById('ovConfirm'); if(!c||!c.checked){ toast('Tick “replace it” to save',true); return; } }
   closeModal();
   const g=await genRef('DP',{category:'RAW',date:MRPDATE}); window._mrpDPit=g.it;
   // Saving a plot LOCKS this week's demand — the Production Plan will only take a
@@ -14291,22 +14289,38 @@ async function planPOGenerate(){
      When the plot's own lines are all covered and the only thing being ordered
      is a line the buyer added, nobody is being asked twice — saying so would
      teach them to dismiss the warning on the day it matters. */
-  const fromPlot=take.filter(r=>!r._added);
-  if(S.already.length && fromPlot.length
-     && !confirm('There are already '+S.already.length+' purchase order(s) from this plot.\n\n'
-        +fromPlot.length+' of the line(s) you are about to order came from the plot itself.\n\n'
-        +'Create ANOTHER set? The supplier will be asked twice unless you cancel the old ones.')) return;
-  if(S.already.length && !fromPlot.length
-     && !confirm('This plot already has '+S.already.length+' purchase order(s), and every one of its own lines is covered.\n\n'
-        +'You are ordering only the '+take.length+' line(s) added here, which the plot never asked for. Nothing is ordered twice.\n\nGo ahead?')) return;
   const bySup={}; take.forEach(l=>{ const k=l.supplier||'(unassigned)'; (bySup[k]=bySup[k]||[]).push(l); });
   const sups=Object.keys(bySup);
-  if(!confirm('Create '+sups.length+' draft purchase order(s) from '+(S.ref||'this plot')+'?\n\n'
-     +sups.map(x=>'• '+x+' — '+bySup[x].length+' line(s)').join('\n')
-     +'\n\nThey are created as DRAFTS. Nothing is sent to a supplier.')) return;
-
-  showBusy('Creating draft POs…');
+  /* NOT SENT YET → ADD TO IT (Zeus 18 Nov). A supplier who already has an OPEN
+     (draft, not yet sent) PO from this week gets the new kilos added to that
+     PO, so Fritz sends one order, not two. Once a PO has gone out (RFQ sent,
+     confirmed, …) a new PO is made, as before. */
+  const dd0=_mmddyyyy(S.date);
+  let openBySup={};
+  try{ (await db.list('purchase_orders',{})).forEach(o=>{
+    if(String(o.status||'').toLowerCase()!=='open') return;
+    if(!String(o.po_ref||'').startsWith('PO-'+dd0)) return;
+    const k=o.supplier_name||'(unassigned)'; if(!openBySup[k] || String(o.po_ref)>String(openBySup[k].po_ref)) openBySup[k]=o; }); }catch(e){}
+  const into=sups.filter(x=>openBySup[x]), fresh=sups.filter(x=>!openBySup[x]);
+  if(!confirm((into.length?('Add to '+into.length+' draft PO(s) not sent yet:\n'+into.map(x=>'• '+x+' → '+openBySup[x].po_ref+' (+'+bySup[x].length+' line(s))').join('\n')+'\n\n'):'')
+     +(fresh.length?('Create '+fresh.length+' new draft PO(s):\n'+fresh.map(x=>'• '+x+' — '+bySup[x].length+' line(s)').join('\n')+'\n\n'):'')
+     +'Nothing is sent to a supplier.')) return;
   const made=[];
+  if(into.length){ showBusy('Adding to draft POs…');
+    try{ for(const sup of into){ const ref=openBySup[sup].po_ref;
+      try{
+        const cur=(await db.list('po_lines',{})).filter(l=>l.po_ref===ref).map(l=>({po_ref:ref, ingredient_sku:l.ingredient_sku, ordered_kg:+l.ordered_kg||0, price_kg:l.price_kg, received_kg:+l.received_kg||0}));
+        bySup[sup].forEach(l=>{ const q=l.isSupply?(+l._sugg||0):Math.round(l._sugg/10)/100;
+          const hit=cur.find(c=>c.ingredient_sku===l.sku); if(hit) hit.ordered_kg=Math.round((hit.ordered_kg+q)*1000)/1000;
+          else cur.push({po_ref:ref, ingredient_sku:l.sku, ordered_kg:q, price_kg:l.price, received_kg:0}); });
+        await db.replaceChildren({model:'po_lines',fk:'po_ref'}, ref, cur);
+        sysLog('purchase_orders',ref,'➕ Added from '+(S.ref||'the plot')+' by '+CURRENT_USER+' (not sent yet): '+bySup[sup].map(l=>l.name+' +'+(l.isSupply?(l._sugg+' unit(s)'):((Math.round(l._sugg/10)/100)+' kg'))).join('; '));
+        made.push(ref+' · '+sup+' (+'+bySup[sup].length+')');
+      }catch(e){ toast('Could not add to '+ref+': '+e.message,true); } } }
+    finally{ hideBusy(); } }
+  sups.splice(0,sups.length,...fresh);
+  if(!sups.length){ closeModal(); toast('Added to '+made.length+' draft PO(s) — still not sent'); openModel('purchase_orders'); return; }
+  showBusy('Creating draft POs…');
   try{
     const dd=_mmddyyyy(S.date); const xx=_planXX(S.ref)||'01';
     const taken=new Set(); try{ (await db.list('purchase_orders',{})).forEach(o=>{ if(o&&o.po_ref) taken.add(String(o.po_ref)); }); }catch(e){}
@@ -14344,7 +14358,7 @@ async function planPOGenerate(){
   } finally{ hideBusy(); }
   if(!made.length){ alert('NO purchase order was created.\n\nThe database refused every one. If you can open Purchasing but not post to it, that is a permissions problem — see Users & Access → Check this against the database.'); return; }
   closeModal();
-  toast('Created '+made.length+' draft PO(s) from '+(S.ref||'the plot')+' — review and send them in Purchasing');
+  toast('Done: '+made.length+' draft PO(s) made or topped up from '+(S.ref||'the plot')+' — review and send them in Purchasing');
   openModel('purchase_orders');
 }
 
