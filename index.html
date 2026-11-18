@@ -13030,7 +13030,10 @@ async function mrpHoldOpen(){
   $('modal').innerHTML=`<div><h3>＋ Make on-hold product</h3>
     <p class="mini">For rabbit, lamb, mackerel, Cookable and Cat Mix — only when the meat has arrived or you decide to make some. The packs you type are made as typed. A customer's order comes in from Custom Orders by itself.</p>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0">
-      <select id="mh_sku" style="flex:1;min-width:240px;padding:6px">${ps.map(p=>`<option value="${esc(p.sku)}">${esc(window._mrpHoldNm[p.sku])}</option>`).join('')}</select>
+      <select id="mh_sku" style="flex:1;min-width:240px;padding:6px">${(()=>{ const G={}; const ord=[];
+        ps.forEach(p=>{ const k=(prodG1(p)||'Other')+(prodG2(p)?' · '+prodG2(p):''); if(!G[k]){ G[k]=[]; ord.push(k); } G[k].push(p); });
+        ord.sort((a,b)=>a.localeCompare(b));
+        return ord.map(k=>`<optgroup label="${esc(k)}">${G[k].map(p=>`<option value="${esc(p.sku)}">${esc(window._mrpHoldNm[p.sku])}</option>`).join('')}</optgroup>`).join(''); })()}</select>
       <input id="mh_n" type="number" min="1" step="1" placeholder="packs" style="width:90px;text-align:right;padding:6px">
     </div>
     <div class="mfoot"><button class="btn" onclick="mrpHoldSet($('mh_sku').value,$('mh_n').value);closeModal()">Add to the plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
