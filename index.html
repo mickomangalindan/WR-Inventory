@@ -3953,7 +3953,8 @@ function pqCalcGauge(r){
   const perDay=(+PQ.grow)?Math.max(pdLong,pdShort):pdLong;
   const waitD=Math.max(0,+PQ.waitD||0), afterD=Math.max(0,+PQ.afterD||0), safeD=Math.max(0,+PQ.safeD||0);
   const mult=Math.max(+PQ.bufMin||0.5, Math.min(+PQ.bufMax||2, +((PQ_BUF[r.sku]||{}).m)||1));
-  const cur=(+r.shop||0)+(+r.other||0), shelf=+r.shop||0;
+  const coming=Math.max(0,+((window._mrpComing||{})[r.sku])||0);   // still being cooked from the last plan (see mrpComingLoad)
+  const cur=(+r.shop||0)+(+r.other||0)+coming, shelf=+r.shop||0;
   const ltd=perDay*waitD, redLine=ltd, yellowLine=perDay*(waitD+afterD*mult);
   const target=perDay*(waitD+(afterD+safeD)*mult);
   const T=pqTier(perDay);
@@ -3977,7 +3978,7 @@ function pqCalcGauge(r){
   const padded=Math.max(0,produce-rawNeed), coverAfter=perDay>0?(cur+produce)/perDay:null;
   const cover=perDay>0?shelf/perDay:(shelf>0?999:null);
   const shelfShort=Math.max(0,target-shelf), toMove=Math.min(Math.round(shelfShort),Math.max(0,Math.round(+r.other||0)));
-  return {perDay, lead:waitD, move:mult, ltd, safety:perDay*safeD*mult, rop:redLine, par:target, newPar:Math.ceil(target), cur, produce,
+  return {perDay, lead:waitD, move:mult, ltd, safety:perDay*safeD*mult, rop:redLine, par:target, newPar:Math.ceil(target), cur, coming, produce,
     cover, toMove, toMake:produce, target, minOn:true, rawNeed, padded, coverAfter, deferred, deferDays, capped, smallWait,
     batch:T.min, tier:T.tier, zone, mult, yellowLine,
     covPct:(target>0?cur/target:null), shelfPct:(target>0?shelf/target:null), alert:(zone==='red'), pct:(target>0?cur/target:null)};
@@ -12027,6 +12028,7 @@ async function _renderMRP(){
      Built once per render rather than per row: pqBuildRows reads stock and
      sales and is not something to call 120 times down a table. */
   window._mrpCalc={};
+  try{ await mrpComingLoad(); }catch(e){}
   try{
     const _b=await pqBuildRows();
     (_b.rows||[]).forEach(r=>{ try{ window._mrpCalc[r.sku]={r, c:pqCalc(r)}; }catch(e){} });
@@ -12831,7 +12833,7 @@ async function mrpSimpleView(o){
         <span class="mrp-gsum">${arr.length} product(s)${pk?' · <b>'+n0(pk)+' packs</b>':''}${low?' · <span style="color:#9b2c22">'+low+' running low</span>':''}</span></td></tr></tbody>
       <tbody class="mrp-secrows"${open?'':' style="display:none"'}>${lo.map(ln=>(ln?`<tr class="mrp-line"><td colspan="4"><span>${esc(ln)}</span></td></tr>`:'')+lines[ln].map(pRow).join('')).join('')}</tbody>`; });
   const sec2=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>2 · Regular packs</h3>
-      <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs</div></div>
+      <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs${(()=>{ const c=window._mrpComing||{}; const n=Object.values(c).reduce((a,v)=>a+(+v||0),0); return n>0?(' + <b>'+Math.round(n)+' packs still being cooked</b> from '+esc(window._mrpComingRef||'the last plan')):''; })()}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`${(+PQ.gauge)?'':`<button class="btn sm sec" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>`}
       <button class="btn sm" onclick="mrpPullPackReq()">🧮 Pull the week</button>`}</div></div>
     ${(!L && (window._mrpCapHeld||[]).length)?`<details class="mrp-note" style="background:#f6faf9"><summary><b>Kitchen limit:</b> ${window._mrpCapHeld.length} product(s) / ${n0(window._mrpCapHeld.reduce((a,x)=>a+x.packs,0))} pack(s) wait for next week — the week was filled red first, then yellow</summary>
@@ -13496,6 +13498,29 @@ async function coCloseOutRef(ref, reason){
     +(owed>0?(' · '+owed+' pack(s) not logged as produced, written off'):''));
 }
 
+/* PLANNED BUT NOT MADE YET (for planning on a Thursday, Zeus 18 Nov).
+   On a Thursday the last plan's batch is still being cooked (Thu–Fri) and only
+   reaches Pasig on Saturday's van. Those packs are on their way, so the gauge
+   counts them — otherwise it plans them a second time. Only a plan whose van is
+   still AFTER this plan date counts: on a Saturday the last plan's van is today,
+   its batch is already in stock, and anything it did not make is not coming. */
+async function mrpComingLoad(){
+  window._mrpComing={}; window._mrpComingRef='';
+  try{
+    if(!(+PQ.gauge)) return;
+    const plans=(await mrpPlans().catch(()=>[]))||[];
+    const prev=plans.map(x=>({x,d:String(x.plan_date||x.date||'').slice(0,10)}))
+      .filter(o=>o.d && o.d<MRPDATE && ((o.x.data||o.x)||{}).locked).sort((a,b)=>b.d.localeCompare(a.d))[0];
+    if(!prev) return;
+    const vd=(typeof planVanDow==='function')?planVanDow():6;
+    const van=(()=>{ const t=new Date(prev.d+'T00:00:00'); do{ t.setDate(t.getDate()+1); }while(t.getDay()!==vd); return isoLocal(t); })();
+    if(!(van>MRPDATE)) return;
+    const T=await planTargets({plot:prev.x, prods:await db.list('products',{})});
+    (T.rows||[]).forEach(r=>{ if(!r||!r.sku||/^CUST-/i.test(String(r.sku))||r.kind==='order') return;
+      const left=Math.max(0,(+r.target||0)-(+r.made||0)); if(left>0) window._mrpComing[r.sku]=(window._mrpComing[r.sku]||0)+left; });
+    window._mrpComingRef=((prev.x.data||prev.x)||{}).ref||prev.d;
+  }catch(e){ window._mrpComing={}; }
+}
 async function mrpPullPackReq(){
   /* A LOCKED WEEK DOES NOT TAKE NEW WORK — the same refusal ＋ Add uses.
      Ingredients have been bought against a saved plot and the run is scheduled
@@ -13519,6 +13544,7 @@ async function mrpPullPackReq(){
   try{ coFull=await coOpenDemand(); Object.keys(coFull).forEach(s=>{ co[s]=coFull[s].packs; }); }
   catch(e){ coErr=String((e&&e.message)||e); }
   let built;
+  try{ await mrpComingLoad(); }catch(e){}
   try{ built=await pqBuildRows(); }
   catch(e){ hideBusy(); toast('Could not read stock or sales — '+saveErrMsg(e),true); return; }
   hideBusy();
