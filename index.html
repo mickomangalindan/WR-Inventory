@@ -12178,7 +12178,7 @@ async function _renderMRP(){
      draws the processed bin first (that is the processed-first rule the kitchen
      already follows). Before this, the roll-up converted the whole recipe need to
      raw and ordered it, so every processed item held in stock was bought twice. */
-  const need={}, _unmapped={}, _noYield={}, procUse={}, procAvail={};
+  const need={}, _unmapped={}, _noYield={}, procUse={}, procAvail={}, pmxUsed={};
   ings.forEach(i=>{ if(isProcessedItem(i)) procAvail[i.sku]=Math.max(0, +stock[i.sku]||0); });
   boms.forEach(b=>{ const dem=+mrpDemand[b.product_sku]||0; if(!dem) return;
     const g=(+b.usable_g||0)*dem; if(!g) return;
@@ -12204,10 +12204,15 @@ async function _renderMRP(){
          so it says something. */
       if(rootSku!==b.ingredient_sku && !(+it.yield_pct>0)) _noYield[it.name||b.ingredient_sku]=1;
     }
+    /* SHOW THE PREMIX, DON'T HIDE IT (Zeus 18 Nov): what this week takes from the
+       prepped bins, per raw we buy — so the screen can show the full week's need
+       and the premix that covers part of it, not just what is left to buy. */
+    if(isProcessedItem(it) && rootSku!==b.ingredient_sku){ const used=g-recipeG; if(used>0){
+      const u=pmxUsed[rootSku]=pmxUsed[rootSku]||{g:0,raw:0}; u.g+=used; u.raw+=(y>0?used/y:used); } }
     if(recipeG<=0) return;                                     // fully covered by processed stock
     need[rootSku]=(need[rootSku]||0)+(y>0? recipeG/y : recipeG);
   });
-  window._mrpProcUse=procUse;
+  window._mrpProcUse=procUse; window._mrpPmxUsed=pmxUsed;
   window._mrpUnmapped=Object.keys(_unmapped);
   window._mrpNoYield=Object.keys(_noYield);
   /* ---- WHAT IS ALREADY IN THE BUILDING ----------------------------------
@@ -12286,7 +12291,9 @@ async function _renderMRP(){
          that reverts, and left 79 days of cover behind. The week itself still
          cannot go short, because rawNeed is added to the buffer in full. */
       leadBuf=(+RP.spike) ? Math.max(C.rop, rawNeed*(lead/7)) : C.rop;
-      target =Math.max(C.target, rawNeed + leadBuf);
+      /* KEEP AFTER COOKING (Zeus 18 Nov): the target is what should be left once
+         this week's cooking is out — so the week's need is bought in full on top. */
+      target =Math.max(C.target, leadBuf);
       trigger=C.rop;
       /* ORDER ONLY THROUGH THE TRIGGER, THEN FILL TO THE TOP.  Without the
          first clause this places a small order every single week, which is how
@@ -12307,9 +12314,9 @@ async function _renderMRP(){
     if(_ST && !(it.is_live_animal)){
       _tLead=Math.max(0,+_ST.lead||0); const pd=+C.perDay||0, cush=+C.cush||0;
       const ropT=pd*_tLead*(1+cush);
-      if(_ST.t==='week'){ leadBuf=ropT; trigger=ropT; target=rawNeed+ropT;
+      if(_ST.t==='week'){ leadBuf=ropT; trigger=ropT; target=ropT;
         lowStock=(endInv<0) || (rawNeed>0 && endInv<ropT) || (ropT>0 && avail<=ropT); }
-      else { const tgtT=Math.max(pd*((+C.review||7)+_tLead)*(1+cush), rawNeed+ropT);
+      else { const tgtT=Math.max(pd*((+C.review||7)+_tLead)*(1+cush), ropT);
         leadBuf=ropT; trigger=ropT; target=tgtT;
         lowStock=(endInv<0) || (rawNeed>0 && endInv<ropT) || (ropT>0 && avail<=ropT); }
     }
@@ -12325,12 +12332,14 @@ async function _renderMRP(){
       /* Zeus 18 Nov: "crocodile when the plan needs it" — only this plan's own
          need, no next-week use, no buffer. A 0.9 kg gap no longer becomes a
          20 kg (₱16,000) order. */
-      leadBuf=0; trigger=0; target=rawNeed;
+      leadBuf=0; trigger=0; target=0;   // nothing kept after cooking
       lowStock=(rawNeed>0 && avail < rawNeed);
     }
     if(!lowStock && manualKg<=0 && added<=0) return;          // above the trigger, nothing added → nothing to order
     const buf=trigger;
-    const base = lowStock ? Math.max(0, target - avail) : 0;   // order = target − on hand − on order − WIP
+    /* ORDER FROM THE FULL WEEK (Zeus 18 Nov): need − premix − raw − on order = left
+       after cooking; order = keep after cooking − left. */
+    const base = lowStock ? Math.max(0, target - endInv) : 0;
     const subtotal=base + manualKg*1000;
     const moq=(+it.min_order_kg||0)*1000;
     // round up to satisfy the min order AND land on a whole ordering-pack multiple (#4)
@@ -12352,7 +12361,10 @@ async function _renderMRP(){
        (Mayee, EDL, Jojo, SVC) carry 7 days and wait while 7+ days are left;
        Saturday-pickup suppliers (Frozen Farm, Golden Acre, Coral) carry 14,
        because an order placed now is cooked the Monday after next Saturday. */
-    const needDays   = (_tLead!=null) ? (_ST.t==='week' ? _tLead : Math.max(+RP.minCoverD||0,_tLead)) : Math.max(0,+RP.minCoverD||0, (+lead||0));
+    /* CAN IT WAIT? (Zeus 18 Nov) Only if what is left after cooking lasts until NEXT
+       week's order arrives: one week to the next plan + that order's wait. Ostrich,
+       9-day wait, lasting 12.9 days, was skipped and would have run out 3 days early. */
+    const needDays   = Math.max(+RP.minCoverD||0, (+RP.review||7) + ((_tLead!=null) ? _tLead : (+lead||0)));
     let tooSmall=false;
     if(final>0 && coverAfter!=null && needDays>0 && coverAfter>=needDays
        && manualKg<=0 && added<=0 && !sup && !_noCush){
@@ -12371,7 +12383,7 @@ async function _renderMRP(){
       cover:(C.perDay>0?(avail/C.perDay):null),coverAfter:(C.perDay>0?(Math.max(avail,target)/C.perDay):null),
       eta:(onOrderEta[it.sku]||''),base,endInv,lowStock,manualKg,moq,final,
       added, unit:(sup?(it.uom||'units'):'kg'), isSupply:sup, isProcessed:!!it.is_intermediate,
-      remark:(mrpRemarks[it.sku]||''),supplier:defSup,price:+it.list_price_kg||0,orderBy:MRPDATE,arrive:addDaysISO(MRPDATE,(_tLead!=null?_tLead:lead))});   /* order on the plan day; it arrives about lead days later (was plan day − lead = always in the past, 18 Nov) */
+      remark:(mrpRemarks[it.sku]||''),wait:(_tLead!=null?_tLead:lead),supplier:defSup,price:+it.list_price_kg||0,orderBy:MRPDATE,arrive:addDaysISO(MRPDATE,(_tLead!=null?_tLead:lead))});   /* order on the plan day; it arrives about lead days later (was plan day − lead = always in the past, 18 Nov) */
   });
   plan.sort((a,b)=>b.final-a.final);
   window._mrpPlan=plan; window._mrpSupLedIng=_supLedIng; window._rpTooSmall=_rpTooSmall;
@@ -12398,21 +12410,24 @@ async function _renderMRP(){
     </details>
     ${(window._mrpNoYield&&window._mrpNoYield.length)?`<div style="background:#fff8e1;border:1px solid #e0b400;border-radius:6px;padding:9px 11px;margin:0 0 10px;font-size:12.5px">⚠ These processed ingredients roll up to something we buy but carry <b>no yield %</b>, so the plan has had to assume 100% — one kilo of raw per kilo of cut, which for a carcass cut is a small fraction of the truth and <b>under-orders silently</b>: <b>${window._mrpNoYield.map(esc).join(', ')}</b>. Set <i>Yield %</i> on them (Ingredients → 🥩 Item &amp; yield), stated <b>against the thing we buy</b> — the live animal, not the dressed carcass.</div>`:''}
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
-    <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Use / wk</th><th class="num">Need</th><th class="num">On hand</th><th class="num">WIP</th><th class="num">On order</th><th class="num">Have</th><th class="num" title="the ceiling — the most this ingredient is ever filled to">Target</th><th class="num" title="stock has to fall through this before anything is ordered">Trigger</th><th class="num">Base</th><th class="num">Manual ±kg</th><th class="num">MOQ</th><th class="num">Order</th><th title="ordered on the plan day; about when it arrives">Arrives ~</th><th>Supplier</th></tr></thead><tbody>`;
+    <div style="overflow-x:auto"><table><thead><tr><th>Ingredient</th><th class="num">Use / wk</th><th class="num" title="raw kg the whole week needs">Need (week)</th><th class="num" title="prepped stock in the freezer">Premix (WIP)</th><th class="num" title="raw in the freezer">On hand (raw)</th><th class="num">On order</th><th class="num" title="need − premix − raw − on order">Left after cooking</th><th class="num" title="reorder point: if Left after cooking is below this, buy">Buy when below</th><th class="num" title="fill up so this much is left after cooking">Keep after cooking</th><th class="num" title="Keep after cooking − Left after cooking">To order</th><th class="num">MOQ</th><th class="num">Order</th><th title="ordered on the plan day; about when it arrives">Arrives ~</th><th>Supplier</th></tr></thead><tbody>`;
   const _rowHtml=(l)=>`<tr><td>${esc(l.name)}
     ${l.isSupply?'<span class="tagf" style="background:#e8e6df;color:#57544c">supply</span>':(l.isProcessed?'<span class="tagf tagf-proc">processed</span>':'')}
     <div class="mini">${l.isSupply?('per '+esc(l.unit)):('yield '+(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)+'%')}</div>${l.remark?`<div class="mini" style="color:var(--berry)">📝 ${esc(l.remark)}</div>`:''}</td>
     <td class="num" style="color:var(--muted)" title="${l.perDay>0?('the steady rate this ceiling is sized on — '+(Math.round(l.perDay/10)/100)+' kg a day'):'no sales history in the window: this ingredient has no ceiling, and is bought only against the week\'s own demand'}">${l.perWeek>0?kgf(l.perWeek):'—'}</td>
-    <td class="num">${kgf(l.rawNeed)}</td><td class="num">${kgf(l.oh)}</td>
+    <td class="num">${(()=>{ const u=(window._mrpPmxUsed||{})[l.sku]; if(!(u&&u.raw>0)) return kgf(l.rawNeed);
+      return `${kgf(l.rawNeed+u.raw)}<div class="mini" style="font-weight:400;color:var(--muted)">premix covers ${kgf(u.raw)} · raw ${kgf(l.rawNeed)}</div>`; })()}</td>
     <td class="num" style="${(+l.wip||0)>0?'color:#6a4ea8;font-weight:600':'color:var(--muted)'}" title="${(+l.wip||0)>0?('processed stock converted back to raw through yield, less drip: '+((window._mrpWipSrc||{})[l.sku]||[]).map(w=>w.name+' '+(Math.round(w.g/10)/100)+' kg → '+(Math.round(w.rawEq/10)/100)+' kg raw').join('; ')):'no processed stock held for this raw'}">${(+l.wip||0)>0?(()=>{ /* WIP SHOWS THE PREPPED WEIGHT (Zeus 18 Nov): what is actually on the shelf, prepped. The raw-equivalent that Have adds up sits underneath. */
       const pg=((window._mrpWipSrc||{})[l.sku]||[]).reduce((a,w)=>a+(+w.g||0),0);
-      return pg>0?`${kgf(pg)}<div class="mini" style="font-weight:400;color:var(--muted)">prepped · = ${kgf(l.wip)} raw</div>`:kgf(l.wip); })():'—'}</td>
+      const u=(window._mrpPmxUsed||{})[l.sku]; const ug=u?u.g:0;
+      return pg>0?`${kgf(pg+ug)}<div class="mini" style="font-weight:400;color:var(--muted)">prepped${ug>0?(' · '+kgf(ug)+' for this week'):''} · ${kgf(pg)} left = ${kgf(l.wip)} raw</div>`:kgf(l.wip); })():(()=>{
+      const u=(window._mrpPmxUsed||{})[l.sku]; return (u&&u.g>0)?`${kgf(u.g)}<div class="mini" style="font-weight:400;color:var(--muted)">prepped · all for this week</div>`:'—'; })()}</td>
+    <td class="num" style="${(+l.oh||0)<0?'color:var(--danger);font-weight:600':''}" title="raw in the freezer, as bought">${kgf(l.oh)}${(+l.oh||0)<0?'<div class="mini" style="font-weight:400">count it</div>':''}</td>
     <td class="num" style="${(+l.inc||0)>0?'color:#1e6b2e;font-weight:600':'color:var(--muted)'}" title="${l.eta?('earliest expected '+esc(l.eta)):'confirmed POs not yet received'}">${(+l.inc||0)>0?kgf(l.inc)+(l.eta?`<div class="mini" style="font-weight:400">eta ${esc(l.eta)}</div>`:''):'—'}</td>
-    <td class="num" title="on hand + WIP (as raw) + on order — everything we already own${l.cover!=null?(', '+Math.round(l.cover)+' days of cover'):''}"><b>${kgf((+l.oh||0)+(+l.wip||0)+(+l.inc||0))}</b>${l.cover!=null?`<div class="mini" style="font-weight:400;color:${l.cover<7?'var(--danger)':'var(--muted)'}">${Math.round(l.cover)}d</div>`:''}</td>
-    <td class="num" style="${l.manualPar?'color:#6a4ea8':''}" title="${l.manualPar?'a figure typed into Master Data — the sum is overridden for this ingredient':(l.capped?('capped by shelf life: '+l.shelf+' days'):'daily use × (review + lead) × cushion')}">${l.target>0?kgf(l.target):'—'}${l.capped?'<div class="mini" style="font-weight:400;color:var(--earth,#b5762a)">shelf '+l.shelf+'d</div>':''}${l.manualPar?'<div class="mini" style="font-weight:400">typed</div>':''}</td>
-    <td class="num" style="${(+l.endInv||0)<0?'color:var(--danger);font-weight:600':'color:var(--muted)'}" title="lead time ${l.lead} days — ${l.leadSrc==='typed'?'typed on the ingredient':(l.leadSrc==='assumed'?('nothing measured, assuming the '+RP.leadMin+'-day floor'):('measured at the 75th percentile from '+l.leadSrc+(l.leadN?(', '+l.leadN+' deliveries'):'')))}">${l.trigger>0?kgf(l.trigger):'—'}<div class="mini" style="font-weight:400;color:${l.leadSrc==='assumed'?'var(--earth,#b5762a)':'var(--muted)'}">${l.lead}d ${l.leadSrc==='assumed'?'?':(l.leadSrc==='typed'?'set':'meas')}</div></td>
-    <td class="num">${kgf(Math.max(0,l.base))}</td>
-    <td class="num"><input type="number" step="any" style="width:74px;text-align:right" value="${l.manualKg||''}" onchange="mrpManual['${l.sku}']=+this.value||0;renderMRP()"></td>
+    <td class="num" title="need − premix − raw − on order: what is left once this week is cooked"><b style="${(+l.endInv||0)<0?'color:var(--danger)':''}">${kgf(l.endInv)}</b>${l.perDay>0?`<div class="mini" style="font-weight:400;color:${(l.endInv/l.perDay)<(+l.wait||0)?'var(--danger)':'var(--muted)'}">lasts ${Math.max(0,Math.round(l.endInv/l.perDay))}d</div>`:''}</td>
+    <td class="num" style="color:var(--muted)" title="daily use × wait × cushion — below this after cooking, buy">${l.trigger>0?kgf(l.trigger):'—'}<div class="mini" style="font-weight:400">${+l.wait||0}d wait</div></td>
+    <td class="num" title="what should be left after cooking: daily use × (wait + 7 days) × cushion; fast suppliers: wait only">${l.target>0?kgf(l.target):'—'}${(l.perDay>0&&l.target>0)?`<div class="mini" style="font-weight:400;color:var(--muted)">~${Math.round(l.target/l.perDay)}d of use</div>`:''}</td>
+    <td class="num"><b>${kgf(Math.max(0,l.base))}</b></td>
     <td class="num">${l.moq?kgf(l.moq):'—'}</td>
     <td class="num"><b style="color:var(--berry)">${l.final>0?(l.isSupply?(l.final+' '+esc(l.unit)):kgf(l.final)):'—'}</b>${(()=>{ const it=ings.find(x=>x.sku===l.sku)||{}; const sub=Math.max(0,+l.base||0)+(+l.manualKg||0)*1000; if(l.isSupply||!(l.final>sub+5)) return '';
       const mn=+it.min_order_kg||0, ps=+it.pack_size_kg||0;
