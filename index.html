@@ -12900,12 +12900,16 @@ async function mrpSimpleView(o){
   const sec2=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>2 · Regular packs</h3>
       <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs${(()=>{ const c=window._mrpComing||{}; const n=Object.values(c).reduce((a,v)=>a+(+v||0),0); return n>0?(' + <b>'+Math.round(n)+' packs still being cooked</b> from '+esc(window._mrpComingRef||'the last plan')):''; })()}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`${(+PQ.gauge)?'':`<button class="btn sm sec" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>`}
-      <button class="btn sm" onclick="mrpPullPackReq()">🧮 Pull the week</button>`}</div></div>
+      <button class="btn sm" onclick="mrpPullPackReq()">🧮 Pull the week</button><button class="btn sm sec" onclick="mrpHoldOpen()" title="rabbit, lamb, mackerel, Cookable, Cat Mix — only when the meat has arrived or you decide to make them">＋ Make on-hold product</button>`}</div></div>
     ${(!L && (window._mrpCapHeld||[]).length)?`<details class="mrp-note" style="background:#f6faf9"><summary><b>Bigger than a usual kitchen week:</b> if the kitchen is short, these ${window._mrpCapHeld.length} product(s) / ${n0(window._mrpCapHeld.reduce((a,x)=>a+x.packs,0))} pack(s) at the end of the cook order may slip — they stay in the plan</summary>
       <div class="mini" style="margin-top:6px">${window._mrpCapHeld.map(x=>`${esc(nm[x.sku]||x.name||x.sku)} — ${n0(x.packs)}${x.part?' more':''} ${mrpBandTag(x.band||x.zone)}`).join(' · ')}</div></details>`:''}
     ${L?'':(SHSYNC.url?`<div class="mrp-sync mini" style="color:var(--muted)">Pull the week gets the latest Shopify stock first · last reading <span id="sh_syncage">${esc(shAgeText())}</span></div>`:`<div class="mrp-sync">${shSyncBtn()}</div>`)}
     <div class="mrp-kpis"><div><span>Products to make</span><b>${kMake}</b></div><div><span>Packs to make</span><b>${n0(kPk)}</b></div>
       <div><span>Running low (under 5 days)</span><b>${kLow}</b></div><div><span>Can wait</span><b>${kWait}</b></div></div>
+    ${(()=>{ const SL=window._mrpSupLed||{}; const src=L?(L.demand||{}):(mrpDemand||{}); const cp=L?(L.coPart||{}):null;
+      const rows=Object.keys(src).filter(k=>SL[k]).map(k=>({k,n:Math.max(0,(+src[k]||0)-(cp?(+cp[k]||0):mrpCoPartOf(k)))})).filter(x=>x.n>0);
+      if(!rows.length) return '';
+      return `<div class="mrp-note" style="background:#fff8e1"><b>On-hold products added by hand</b> · ${rows.map(x=>`${esc((window._mrpHoldNm||{})[x.k]||nm[x.k]||x.k)} <b>${n0(x.n)}</b>${L?'':` <span class="x" style="cursor:pointer;color:var(--danger)" title="remove" onclick="mrpHoldSet('${esc(x.k)}',0)">✕</span>`}`).join(' · ')}</div>`; })()}
     ${tabBar}
     ${shown.length?`<div style="overflow-x:auto"><table class="mrp-t" id="mrpPackT"><thead><tr><th>Product</th><th class="num">In stock</th><th class="num">Lasts</th><th class="num">Make</th></tr></thead>${body}</table></div>`
       :`<div class="mini" style="color:var(--muted);padding:10px 0">${window._mrpShowAll?'No products in this tab.':'Nothing to make or running low here. Press <b>Pull the week</b>, or switch to <b>All products</b>.'}</div>`}
@@ -13010,6 +13014,31 @@ function mrpMinOrderCard(bySup, supMin, supKgFn){
    a processed form you would normally make, or to top up a raw whose stock is fine.
    This picker covers every item in the master, grouped the same way as the count. */
 function mrpAddSet(sku,qty){ qty=+qty||0; if(qty>0) mrpAdd[sku]=qty; else delete mrpAdd[sku]; renderMRP(); }
+/* ---- MAKE AN ON-HOLD PRODUCT (Zeus 18 Nov) ---------------------------------
+   Rabbit, lamb, mackerel, Cookable and Cat Mix are never offered by Pull the
+   week. When the meat has arrived, or the team decides to make some for the
+   shelf, they are added here by hand — the exact packs typed, no batch rounding —
+   and from then on they are part of the plan like any other line (ingredients,
+   lock, Production Plan). A customer's order needs nothing here: it comes in
+   from Custom Orders by itself. */
+async function mrpHoldOpen(){
+  if(window._mrpLocked){ alert(MRPDATE+' is locked. Use ✏️ Edit plan first.'); return; }
+  let ps=[]; try{ ps=((await db.list('products',{}))||[]).filter(p=>isSupplyLed(p) && p.active!==false && !/^CUST-/i.test(String(p.sku))); }catch(e){}
+  if(!ps.length){ toast('No on-hold products',true); return; }
+  window._mrpHoldNm={}; ps.forEach(p=>{ window._mrpHoldNm[p.sku]=prodLabel(p,{noSku:true})||p.sku; });
+  ps.sort((a,b)=>window._mrpHoldNm[a.sku].localeCompare(window._mrpHoldNm[b.sku]));
+  $('modal').innerHTML=`<div><h3>＋ Make on-hold product</h3>
+    <p class="mini">For rabbit, lamb, mackerel, Cookable and Cat Mix — only when the meat has arrived or you decide to make some. The packs you type are made as typed. A customer's order comes in from Custom Orders by itself.</p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0">
+      <select id="mh_sku" style="flex:1;min-width:240px;padding:6px">${ps.map(p=>`<option value="${esc(p.sku)}">${esc(window._mrpHoldNm[p.sku])}</option>`).join('')}</select>
+      <input id="mh_n" type="number" min="1" step="1" placeholder="packs" style="width:90px;text-align:right;padding:6px">
+    </div>
+    <div class="mfoot"><button class="btn" onclick="mrpHoldSet($('mh_sku').value,$('mh_n').value);closeModal()">Add to the plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  modalWide(false); $('overlay').classList.add('on');
+}
+function mrpHoldSet(sku,v){ const n=Math.max(0,Math.round(+v||0)); const co=mrpCoPartOf(sku);
+  if(n>0){ mrpDemand[sku]=co+n; delete _mrpDrop[sku]; } else if(co>0) mrpDemand[sku]=co; else delete mrpDemand[sku];
+  renderMRP(); }
 async function mrpAddOpen(){
   let ings=[]; try{ ings=await listIngredients(); }catch(e){}
   if(!ings.length){ toast('No master items loaded',true); return; }
