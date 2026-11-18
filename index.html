@@ -12912,7 +12912,8 @@ async function mrpSimpleView(o){
     ${(()=>{ const SL=window._mrpSupLed||{}; const src=L?(L.demand||{}):(mrpDemand||{}); const cp=L?(L.coPart||{}):null;
       const rows=Object.keys(src).filter(k=>SL[k]).map(k=>({k,n:Math.max(0,(+src[k]||0)-(cp?(+cp[k]||0):mrpCoPartOf(k)))})).filter(x=>x.n>0);
       if(!rows.length) return '';
-      return `<div class="mrp-note" style="background:#fff8e1"><b>On-hold products added by hand</b> · ${rows.map(x=>`${esc((window._mrpHoldNm||{})[x.k]||nm[x.k]||x.k)} <b>${n0(x.n)}</b>${L?'':` <span class="x" style="cursor:pointer;color:var(--danger)" title="remove" onclick="mrpHoldSet('${esc(x.k)}',0)">✕</span>`}`).join(' · ')}</div>`; })()}
+      return `<div class="mrp-note" style="background:#fff8e1;padding:8px 12px"><b>On-hold products added by hand</b> <span class="mini" style="color:var(--muted)">· ${rows.length} product(s) · ${n0(rows.reduce((a,x)=>a+x.n,0))} packs</span>
+        <table style="width:100%;margin-top:6px;border-collapse:collapse">${rows.map(x=>`<tr><td style="padding:4px 0;border-top:1px solid #f0e6c0">${esc((window._mrpHoldNm||{})[x.k]||nm[x.k]||x.k)}</td><td class="num" style="padding:4px 8px;border-top:1px solid #f0e6c0;width:90px"><b>${n0(x.n)}</b> packs</td>${L?'':`<td style="width:28px;border-top:1px solid #f0e6c0;text-align:right"><span class="x" style="cursor:pointer;color:var(--danger)" title="remove" onclick="mrpHoldSet('${esc(x.k)}',0)">✕</span></td>`}</tr>`).join('')}</table></div>`; })()}
     ${tabBar}
     ${shown.length?`<div style="overflow-x:auto"><table class="mrp-t" id="mrpPackT"><thead><tr><th>Product</th><th class="num">In stock</th><th class="num">Lasts</th><th class="num">Make</th></tr></thead>${body}</table></div>`
       :`<div class="mini" style="color:var(--muted);padding:10px 0">${window._mrpShowAll?'No products in this tab.':'Nothing to make or running low here. Press <b>Pull the week</b>, or switch to <b>All products</b>.'}</div>`}
@@ -13033,15 +13034,24 @@ async function mrpHoldOpen(){
   $('modal').innerHTML=`<div><h3>＋ Make on-hold product</h3>
     <p class="mini">For rabbit, lamb, mackerel, Cookable and Cat Mix — only when the meat has arrived or you decide to make some. The packs you type are made as typed. A customer's order comes in from Custom Orders by itself.</p>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0">
-      <select id="mh_sku" style="flex:1;min-width:240px;padding:6px">${(()=>{ const G={}; const ord=[];
-        ps.forEach(p=>{ const k=(prodG1(p)||'Other')+(prodG2(p)?' · '+prodG2(p):''); if(!G[k]){ G[k]=[]; ord.push(k); } G[k].push(p); });
-        ord.sort((a,b)=>a.localeCompare(b));
-        return ord.map(k=>`<optgroup label="${esc(k)}">${G[k].map(p=>`<option value="${esc(p.sku)}">${esc(window._mrpHoldNm[p.sku])}</option>`).join('')}</optgroup>`).join(''); })()}</select>
+      <input type="hidden" id="mh_sku" value="">
+      <input type="search" placeholder="Search a product…" oninput="mrpHoldFilter(this.value)" style="flex:1;min-width:220px;padding:6px 8px;border:1px solid var(--line);border-radius:6px">
       <input id="mh_n" type="number" min="1" step="1" placeholder="packs" style="width:90px;text-align:right;padding:6px">
     </div>
-    <div class="mfoot"><button class="btn" onclick="mrpHoldSet($('mh_sku').value,$('mh_n').value);closeModal()">Add to the plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
-  modalWide(false); $('overlay').classList.add('on');
+    <div id="mh_list" style="max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:8px">${(()=>{ const G={}; const ord=[];
+      ps.forEach(p=>{ const k=(prodG1(p)||'Other')+(prodG2(p)?' · '+prodG2(p):''); if(!G[k]){ G[k]=[]; ord.push(k); } G[k].push(p); });
+      ord.sort((a,b)=>a.localeCompare(b));
+      /* a native dropdown greys its group names out on a Mac (Zeus 18 Nov) — so the list is drawn here, headings in bold */
+      return ord.map(k=>`<div class="mh-grp" style="background:var(--berry-d,#2f7366);color:#fff;font-weight:700;padding:6px 10px;font-size:12.5px;position:sticky;top:0">${esc(k)}</div>`
+        +G[k].map(p=>`<div class="mh-item" data-sku="${esc(p.sku)}" data-q="${esc(window._mrpHoldNm[p.sku].toLowerCase())}" onclick="mrpHoldPick(this)" style="padding:7px 12px;border-bottom:1px solid var(--line2);cursor:pointer">${esc(window._mrpHoldNm[p.sku])}</div>`).join('')).join(''); })()}</div>
+    <div class="mfoot"><button class="btn" onclick="if(!$('mh_sku').value){toast('Pick a product first',true);return;} if(!(+$('mh_n').value>0)){toast('Type the packs',true);return;} mrpHoldSet($('mh_sku').value,$('mh_n').value);closeModal()">Add to the plan</button><button class="btn sec" onclick="closeModal()">Cancel</button></div></div>`;
+  modalWide(true); $('overlay').classList.add('on');
 }
+function mrpHoldPick(el){ document.querySelectorAll('#mh_list .mh-item').forEach(x=>{ x.style.background=''; x.style.fontWeight=''; });
+  el.style.background='var(--hi,#e7f2ef)'; el.style.fontWeight='700'; $('mh_sku').value=el.dataset.sku; const n=$('mh_n'); if(n) n.focus(); }
+function mrpHoldFilter(q){ q=String(q||'').toLowerCase().trim();
+  document.querySelectorAll('#mh_list .mh-item').forEach(x=>{ x.style.display=(!q||x.dataset.q.includes(q))?'':'none'; });
+  document.querySelectorAll('#mh_list .mh-grp').forEach(g=>{ let n=g.nextElementSibling, any=false; while(n&&n.classList.contains('mh-item')){ if(n.style.display!=='none') any=true; n=n.nextElementSibling; } g.style.display=any?'':'none'; }); }
 function mrpHoldSet(sku,v){ const n=Math.max(0,Math.round(+v||0)); const co=mrpCoPartOf(sku);
   if(n>0){ mrpDemand[sku]=co+n; delete _mrpDrop[sku]; } else if(co>0) mrpDemand[sku]=co; else delete mrpDemand[sku];
   renderMRP(); }
@@ -13812,7 +13822,9 @@ async function mrpPullPackReq(){
     /* already in this week's plan → the planner's number stands, 0 included */
     const q=_coA[MRPDATE+'|'+sk]?cur:Math.max(0,Math.round(+co[sk]||0));
     if(/^CUST-/i.test(String(sk))){ if(q>0) mrpDemand[sk]=q; else delete mrpDemand[sk]; }
-    else { mrpCoPart[sk]=q; mrpDemand[sk]=q; }
+    else { /* an on-hold product added by hand keeps its hand-typed packs on top of the customer's (18 Nov) */
+      const _keep=(window._mrpSupLed||{})[sk]?Math.max(0,(+mrpDemand[sk]||0)-mrpCoPartOf(sk)):0;
+      mrpCoPart[sk]=q; mrpDemand[sk]=q+_keep; }
     nCo++; });   // never rounded
   cat.forEach(x=>{ mrpDemand[x.r.sku]=(co[x.r.sku]!=null?(+mrpDemand[x.r.sku]||0):0)+((+PQ.gauge)?Math.round(+x.c.produce||0):demSnap(x.c.produce)); nCat++; });
   sysLog('mrp',MRPDATE,'🧮 Week pulled into the plot — '+nCo+' custom-order SKU(s) / '+Math.round(coPacks)
