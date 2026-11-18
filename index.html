@@ -3851,7 +3851,8 @@ const PQ_DEF={lead:8, move:1, cycle:21, win:60, cs:12, minPacks:24, minOn:1, def
   gauge:0, waitD:7, afterD:7, safeD:3, grow:1, gcapD:42,
   fastWk:8, slowWk:3, fastMin:24, fastStep:12, slowMin:12, slowStep:6, vslowMin:6, vslowStep:6,
   learn:1, bufMax:2, bufMin:0.5,
-  capOn:1, capPk:0};   /* kitchen limit: capPk 0 = learn it from the last 4 weeks made */
+  capOn:1, capPk:0,
+  topN:20, topSafeD:5};   /* top sellers by ₱ (steady ones) get more safety — Zeus 18 Nov */   /* kitchen limit: capPk 0 = learn it from the last 4 weeks made */
 let PQ=Object.assign({},PQ_DEF);
 try{ PQ=Object.assign({},PQ_DEF,JSON.parse(localStorage.getItem('wr_packreq')||'{}')); }catch(e){}
 let PQ_MOVE={};   // per-SKU movement override — the one variable that is genuinely per product
@@ -3956,9 +3957,14 @@ function pqCalcGauge(r){
   const coming=Math.max(0,+((window._mrpComing||{})[r.sku])||0);   // still being cooked from the last plan (see mrpComingLoad)
   const cur=(+r.shop||0)+(+r.other||0)+coming, shelf=+r.shop||0;
   const ltd=perDay*waitD, redLine=ltd, yellowLine=perDay*(waitD+afterD*mult);
-  const target=perDay*(waitD+(afterD+safeD)*mult);
+  const top=!!((window._mrpTop20||{})[r.sku]);
+  const sdUse=top?Math.max(safeD,+PQ.topSafeD||5):safeD;
+  const target=perDay*(waitD+(afterD+sdUse)*mult);
   const T=pqTier(perDay);
   const zone= perDay<=0 ? 'none' : (cur<redLine?'red':(cur<yellowLine?'yellow':'green'));
+  /* PRIORITY COLOUR (Zeus 18 Nov): bright red = top seller running out before the
+     van · red · orange = top seller that won't last 2 weeks · yellow · green. */
+  const band= zone==='red' ? (top?'bred':'red') : zone==='yellow' ? (top?'orange':'yellow') : zone;
   const need=target-cur, rawNeed=Math.max(0,Math.ceil(need));
   let produce=0, deferred=false, deferDays=null, smallWait=false, capped=false;
   const ceilTo=(x,st)=>st>0?Math.ceil(x/st)*st:Math.ceil(x);
@@ -3978,7 +3984,7 @@ function pqCalcGauge(r){
   const padded=Math.max(0,produce-rawNeed), coverAfter=perDay>0?(cur+produce)/perDay:null;
   const cover=perDay>0?shelf/perDay:(shelf>0?999:null);
   const shelfShort=Math.max(0,target-shelf), toMove=Math.min(Math.round(shelfShort),Math.max(0,Math.round(+r.other||0)));
-  return {perDay, lead:waitD, move:mult, ltd, safety:perDay*safeD*mult, rop:redLine, par:target, newPar:Math.ceil(target), cur, coming, produce,
+  return {perDay, lead:waitD, move:mult, ltd, safety:perDay*sdUse*mult, top, band, rop:redLine, par:target, newPar:Math.ceil(target), cur, coming, produce,
     cover, toMove, toMake:produce, target, minOn:true, rawNeed, padded, coverAfter, deferred, deferDays, capped, smallWait,
     batch:T.min, tier:T.tier, zone, mult, yellowLine,
     covPct:(target>0?cur/target:null), shelfPct:(target>0?shelf/target:null), alert:(zone==='red'), pct:(target>0?cur/target:null)};
@@ -12031,6 +12037,7 @@ async function _renderMRP(){
   try{ await mrpComingLoad(); }catch(e){}
   try{
     const _b=await pqBuildRows();
+    try{ await mrpTop20Load(_b.rows); }catch(e){}
     (_b.rows||[]).forEach(r=>{ try{ window._mrpCalc[r.sku]={r, c:pqCalc(r)}; }catch(e){} });
   }catch(e){}
   dh+=mrpPhaseHtml(prods, _allP);
@@ -12314,9 +12321,11 @@ async function _renderMRP(){
        reorder view reads. */
     const _noCush=/no stock cushion/i.test(String(it.notes||''));
     if(_noCush){
-      const nextWk=(+C.perDay||0)*7;
-      leadBuf=nextWk; trigger=0; target=rawNeed+nextWk;
-      lowStock=(avail < rawNeed+nextWk);
+      /* Zeus 18 Nov: "crocodile when the plan needs it" — only this plan's own
+         need, no next-week use, no buffer. A 0.9 kg gap no longer becomes a
+         20 kg (₱16,000) order. */
+      leadBuf=0; trigger=0; target=rawNeed;
+      lowStock=(rawNeed>0 && avail < rawNeed);
     }
     if(!lowStock && manualKg<=0 && added<=0) return;          // above the trigger, nothing added → nothing to order
     const buf=trigger;
@@ -12639,7 +12648,7 @@ function mrpGaugeCompare(){ const C=window._mrpCalc||{}; const rows=Object.value
   rows.forEach(({r})=>{ const k=pqCalcClassic(r), g=pqCalcGauge(r);
     if(k.produce>0){a.n++; a.pk+=k.produce;} if(g.produce>0){b.n++; b.pk+=g.produce;}
     if(k.coverAfter!=null&&k.coverAfter<900){a.cov+=k.coverAfter;a.cn++;} if(g.coverAfter!=null&&g.coverAfter<900){b.cov+=g.coverAfter;b.cn++;}
-    if(g.zone==='red')b.red++; else if(g.zone==='yellow')b.yel++; else if(g.zone==='green')b.grn++; });
+    if(g.zone==='red')b.red++; else if(g.zone==='yellow')b.yel++; else if(g.zone==='green')b.grn++; b.bands=b.bands||{}; b.bands[g.band]=(b.bands[g.band]||0)+1; });
   const n0=v=>Math.round(+v||0).toLocaleString('en-PH'), avg=o=>o.cn?Math.round(o.cov/o.cn):'—';
   return `<section class="mrp-sec"><div class="mrp-sechead"><div><h3>Old way vs fuel gauge — this week</h3>
       <div class="mini" style="color:var(--muted)">Same stock, same sales. Now using: <b>${(+PQ.gauge)?'fuel gauge':'old way'}</b>${(typeof curRole==='function'&&curRole()==='Admin')?' · switch it in ⚙ Settings':''}</div></div></div>
@@ -12647,7 +12656,7 @@ function mrpGaugeCompare(){ const C=window._mrpCalc||{}; const rows=Object.value
       <tr><td>Old way (21-day par + lead)</td><td class="num">${a.n}</td><td class="num">${n0(a.pk)}</td><td class="num">${avg(a)}</td></tr>
       <tr><td><b>Fuel gauge</b> (${+PQ.waitD||14}-day wait + ${+PQ.afterD||7}+${+PQ.safeD||3} days)</td><td class="num"><b>${b.n}</b></td><td class="num"><b>${n0(b.pk)}</b></td><td class="num"><b>${avg(b)}</b></td></tr>
     </tbody></table>
-    <div class="mini" style="margin-top:8px">Gauge today: <span class="mrp-lasts mrp-lr">${b.red} red</span> make now · <span class="mrp-lasts mrp-ly">${b.yel} yellow</span> make now (won't last 2 weeks) · <span class="mrp-lasts mrp-lg">${b.grn} green</span> skip</div></section>`; }
+    <div class="mini" style="margin-top:8px">Today: ${['bred','red','orange','yellow','green'].map(k=>mrpBandTag(k)+' '+((b.bands||{})[k]||0)).join(' · ')} <span style="color:var(--muted)">— cook in this order; green is skipped</span></div></section>`; }
 function mrpPqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0); savePackReq(); renderMRP(); }
 function mrpPqToggle(k){ PQ[k]=(+PQ[k])?0:1; savePackReq(); renderMRP(); }
 /* The week's two fixed days, here where planners look (Zeus 17 Nov: "Settings
@@ -12803,7 +12812,7 @@ async function mrpSimpleView(o){
     const lbl=String(p.variant||'').trim()||prodLabel({...p},{noSku:true});
     return `<tr class="mrp-prow" data-q="${esc((prodLabel({...p},{noSku:true})+' '+lbl+' '+p.sku).toLowerCase())}"><td class="mrp-vname" title="${esc(prodLabel({...p},{noSku:true}))} · ${esc(p.sku)}">${esc(lbl)}${_to?' <span class="mini" style="color:var(--earth,#b5762a)">· phasing out</span>':''}</td>
       <td class="num"><b>${n0(c.cur)}</b><div class="mini" style="color:var(--muted)">Pasig ${n0(r.shop)} · Bulacan ${n0(r.other)}</div></td>
-      <td class="num"><span class="mrp-lasts ${c.zone?({red:'mrp-lr',yellow:'mrp-ly',green:'mrp-lg'}[c.zone]||'mrp-lz'):tone(d)}" title="${c.zone?('Fuel gauge: '+c.zone+' · '+({fast:'fast seller',slow:'slow seller',vslow:'very slow seller'}[c.tier]||'')):''}">${d==null?'—':(Math.round(d*10)/10)+' d'}</span>${mrpTrend(r)}</td>
+      <td class="num"><span class="mrp-lasts ${c.band?'':(c.zone?({red:'mrp-lr',yellow:'mrp-ly',green:'mrp-lg'}[c.zone]||'mrp-lz'):tone(d))}" style="${c.band&&MRP_BAND[c.band]?('background:'+MRP_BAND[c.band].bg+';color:'+MRP_BAND[c.band].c):''}" title="${c.band?((MRP_BAND[c.band]||{}).n+(c.top?(' · top '+(window._mrpTop20||{})[r.sku]+' seller'):'')+' · '+({fast:'fast seller',slow:'slow seller',vslow:'very slow seller'}[c.tier]||'')):''}">${d==null?'—':(Math.round(d*10)/10)+' d'}</span>${mrpTrend(r)}</td>
       <td class="num">${box}${(L?(+LC[p.sku]||0):mrpCoPartOf(p.sku))>0?`<div class="mini" style="color:var(--muted)">+ ${L?(+LC[p.sku]||0):mrpCoPartOf(p.sku)} custom</div>`:''}${!L&&sg>0&&sg!==m?`<div class="mini" style="color:var(--muted)">suggested ${n0(sg)}</div>`:''}${c.deferred&&!m?'<div class="mini" style="color:#3a8276">can wait</div>':''}${(+PQ.gauge)&&!L?`<div class="mini" style="color:var(--muted)">batch ${c.batch||'—'}${c.tier?' · steps of '+pqTier(+c.perDay||0).step:''}</div>`:''}</td></tr>`; };
   /* TABS FOLLOW THE SHOP MENU: group (tab) → section (folded) → line → variant. */
   const TAB=window._mrpTab||'all';
@@ -12836,9 +12845,8 @@ async function mrpSimpleView(o){
       <div class="mini" style="color:var(--muted)">Stock = Pasig (Shopify) + Bulacan finished packs${(()=>{ const c=window._mrpComing||{}; const n=Object.values(c).reduce((a,v)=>a+(+v||0),0); return n>0?(' + <b>'+Math.round(n)+' packs still being cooked</b> from '+esc(window._mrpComingRef||'the last plan')):''; })()}</div></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">${L?'':`${(+PQ.gauge)?'':`<button class="btn sm sec" onclick="demStepToggle()">${demStepOn()?'✓':'✕'} Round to ${DEM_MIN} / ${DEM_INC}</button>`}
       <button class="btn sm" onclick="mrpPullPackReq()">🧮 Pull the week</button>`}</div></div>
-    ${(!L && (window._mrpCapHeld||[]).length)?`<details class="mrp-note" style="background:#f6faf9"><summary><b>Kitchen limit:</b> ${window._mrpCapHeld.length} product(s) / ${n0(window._mrpCapHeld.reduce((a,x)=>a+x.packs,0))} pack(s) wait for next week — the week was filled red first, then yellow</summary>
-      <div class="mini" style="margin-top:6px">${window._mrpCapHeld.map(x=>`${esc(nm[x.sku]||x.name||x.sku)} — ${n0(x.packs)}${x.part?' more':''} <span class="mrp-lasts ${x.zone==='red'?'mrp-lr':'mrp-ly'}">${esc(x.zone||'')}</span>`).join(' · ')}</div>
-      <div class="mini" style="color:var(--muted);margin-top:4px">Type a number on any of them to add it anyway.</div></details>`:''}
+    ${(!L && (window._mrpCapHeld||[]).length)?`<details class="mrp-note" style="background:#f6faf9"><summary><b>Bigger than a usual kitchen week:</b> if the kitchen is short, these ${window._mrpCapHeld.length} product(s) / ${n0(window._mrpCapHeld.reduce((a,x)=>a+x.packs,0))} pack(s) at the end of the cook order may slip — they stay in the plan</summary>
+      <div class="mini" style="margin-top:6px">${window._mrpCapHeld.map(x=>`${esc(nm[x.sku]||x.name||x.sku)} — ${n0(x.packs)}${x.part?' more':''} ${mrpBandTag(x.band||x.zone)}`).join(' · ')}</div></details>`:''}
     ${L?'':(SHSYNC.url?`<div class="mrp-sync mini" style="color:var(--muted)">Pull the week gets the latest Shopify stock first · last reading <span id="sh_syncage">${esc(shAgeText())}</span></div>`:`<div class="mrp-sync">${shSyncBtn()}</div>`)}
     <div class="mrp-kpis"><div><span>Products to make</span><b>${kMake}</b></div><div><span>Packs to make</span><b>${n0(kPk)}</b></div>
       <div><span>Running low (under 5 days)</span><b>${kLow}</b></div><div><span>Can wait</span><b>${kWait}</b></div></div>
@@ -13328,6 +13336,7 @@ async function confirmSaveMRPPlan(hasExisting){
      asks why the week missed can read it instead of guessing. */
   const _pf=await planReadyStamp();
   const data={ref:g.ref,locked:true,demand:{...mrpDemand},coPart:_mrpCoPartSnap(),manual:{...mrpManual},add:{...mrpAdd},remarks:{...mrpRemarks},by:CURRENT_USER,saved_at:new Date().toISOString(),
+    band:(()=>{ const o={}; Object.keys(mrpDemand||{}).forEach(k=>{ const x=(window._mrpCalc||{})[k]; if(x&&x.c&&x.c.band) o[k]={b:x.c.band, d:(x.c.perDay>0?Math.round((x.c.cur/x.c.perDay)*10)/10:null), top:(window._mrpTop20||{})[k]||0}; }); return o; })(),   /* cook-order colours for the kitchen (display only) */
     preflight:_pf,
     /* the judgement, kept with the document it was made on — see mrpPullPackReq */
     omitted:_om.omitted, trimmed:_om.trimmed, extra:_om.extra, offeredN:_om.offeredN,
@@ -13504,6 +13513,21 @@ async function coCloseOutRef(ref, reason){
    counts them — otherwise it plans them a second time. Only a plan whose van is
    still AFTER this plan date counts: on a Saturday the last plan's van is today,
    its batch is already in stock, and anything it did not make is not coming. */
+/* TOP SELLERS BY MONEY (Zeus 18 Nov): ₱ sold in the window (packs × price),
+   counting only steady sellers — one big order does not make a top product if
+   it has barely sold in the last 30 days. Recomputed every time stock is read. */
+async function mrpTop20Load(rows){
+  window._mrpTop20={};
+  try{
+    const prods=await db.list('products',{}); const pr={}; (prods||[]).forEach(p=>{ if(p&&p.sku) pr[p.sku]=+p.sell_price||0; });
+    const L=(rows||[]).filter(r=>r&&r.sku&&!/^CUST-/i.test(String(r.sku)))
+      .map(r=>({sku:r.sku, v:(+r.sold||0)*(pr[r.sku]||0), steady:(+r.sold30||0)>=0.25*(+r.sold||0) && (+r.sold30||0)>0}))
+      .filter(x=>x.v>0 && x.steady).sort((a,b)=>b.v-a.v).slice(0, Math.max(0,+PQ.topN||20));
+    L.forEach((x,i)=>{ window._mrpTop20[x.sku]=i+1; });
+  }catch(e){ window._mrpTop20={}; }
+}
+const MRP_BAND={bred:{n:'Bright red',c:'#b42318',bg:'#fde2df',r:0}, red:{n:'Red',c:'#c2410c',bg:'#fdecea',r:1}, orange:{n:'Orange',c:'#b45309',bg:'#ffedd5',r:2}, yellow:{n:'Yellow',c:'#7a4a06',bg:'#fff3dd',r:3}, green:{n:'Green',c:'#1f5248',bg:'#e7f2ef',r:4}, none:{n:'—',c:'#8c887e',bg:'#f3f3f1',r:5}};
+function mrpBandTag(b){ const B=MRP_BAND[b]||MRP_BAND.none; return `<span class="mrp-lasts" style="background:${B.bg};color:${B.c}">${B.n}</span>`; }
 async function mrpComingLoad(){
   window._mrpComing={}; window._mrpComingRef='';
   try{
@@ -13547,6 +13571,7 @@ async function mrpPullPackReq(){
   try{ await mrpComingLoad(); }catch(e){}
   try{ built=await pqBuildRows(); }
   catch(e){ hideBusy(); toast('Could not read stock or sales — '+saveErrMsg(e),true); return; }
+  try{ await mrpTop20Load(built.rows); }catch(e){}
   hideBusy();
 
   /* Orders that look delivered are asked about BEFORE anything is loaded —
@@ -13603,18 +13628,20 @@ async function mrpPullPackReq(){
      makes, red first (soonest out), then yellow. Ingredients follow the plan,
      so nothing is bought for packs that will not be made. What does not fit
      is named and waits — next week's gauge sees it again. */
+  /* KITCHEN LIMIT WARNS, NEVER CUTS (Zeus 18 Nov). The plan asks for the whole
+     need; the kitchen cooks in colour order (bright red → red → orange → yellow).
+     If the week is bigger than the kitchen usually makes, the products at the
+     bottom of that order are named as the ones that may slip. */
   window._mrpCapHeld=[]; let _cap=null;
   if((+PQ.gauge) && (+PQ.capOn)){
     try{ _cap=await mrpKitchenCapacity(); }catch(e){ _cap=null; }
     if(_cap && _cap.packs>0){
       let room=_cap.packs-Math.round(coPacks||0);
-      const zr=z=>z==='red'?0:(z==='yellow'?1:2);
-      const ord=cat.slice().sort((a,b)=>zr(a.c.zone)-zr(b.c.zone) || ((+a.c.cover||0)-(+b.c.cover||0)));
-      const keep=new Set();
-      ord.forEach(x=>{ const q=+x.c.produce||0; if(q<=room){ keep.add(x); room-=q; }
-        else { const mn=+x.c.batch||0; if(x.c.zone==='red' && mn>0 && mn<=room){ x.c.produce=Math.min(q,Math.floor(room/mn)*mn); keep.add(x); room-=x.c.produce; window._mrpCapHeld.push({sku:x.r.sku, name:x.r.name, packs:q-x.c.produce, zone:x.c.zone, part:true}); }
-          else window._mrpCapHeld.push({sku:x.r.sku, name:x.r.name, packs:q, zone:x.c.zone}); } });
-      cat=cat.filter(x=>keep.has(x));
+      const br=x=>((MRP_BAND[x.c.band]||MRP_BAND.none).r);
+      const ord=cat.slice().sort((a,b)=>br(a)-br(b) || ((+a.c.cover||0)-(+b.c.cover||0)));
+      ord.forEach(x=>{ const q=+x.c.produce||0; if(q<=room){ room-=q; return; }
+        const fit=Math.max(0,room); room=0;
+        window._mrpCapHeld.push({sku:x.r.sku, name:x.r.name, packs:q-fit, zone:x.c.zone, band:x.c.band, part:fit>0}); });
     }
   }
   const catPacks=cat.reduce((a,x)=>a+x.c.produce,0);
@@ -13630,7 +13657,7 @@ async function mrpPullPackReq(){
     +'CATALOGUE — '+cat.length+' product(s) / '+Math.round(catPacks)+' pack(s), rounded to '+DEM_MIN+' minimum then steps of '+DEM_INC+'\n\n'
     +cat.slice(0,8).map(x=>'• '+x.r.name+' — '+Math.round(x.c.produce)).join('\n')
     +(cat.length>8?('\n… and '+(cat.length-8)+' more'):'')
-    +((window._mrpCapHeld||[]).length?('\n\nKITCHEN LIMIT — about '+(_cap&&_cap.packs)+' packs a week: '+window._mrpCapHeld.length+' product(s) / '+window._mrpCapHeld.reduce((a,x)=>a+x.packs,0)+' pack(s) wait for next week'):'')
+    +((window._mrpCapHeld||[]).length?('\n\nKITCHEN LIMIT — about '+(_cap&&_cap.packs)+' packs a week: '+window._mrpCapHeld.length+' product(s) / '+window._mrpCapHeld.reduce((a,x)=>a+x.packs,0)+' pack(s) may slip if the kitchen is short (they are still in the plan; cook in colour order)'):'')
     +'\n\nWorked out at: lead '+PQ.lead+'d · movement '+PQ.move+'× · cycle '+PQ.cycle+'d · window '+PQ.win+'d · case '+PQ.cs
     +'\nSellable read from '+built.src+'.'
     +(noSales?('\n\n'+noSales+' product(s) have no sales in the window and so ask for nothing.'):'')
@@ -21019,7 +21046,7 @@ async function planTargets(opt){
     const saved=String((d&&d.saved_at)||rec.saved_at||rec.created_at||'')||(date?date+'T00:00:00':'');
     const om={}; ((d&&d.omitted)||[]).forEach(o=>{ if(o&&o.sku) om[o.sku]=o; });
     return {date, ref:(d&&d.ref)||rec.ref||'', savedAt:saved,
-            from:(saved?isoLocal(new Date(saved)):date), demand:{...((d&&d.demand)||{})}, omit:om, coPart:((d&&d.coPart)?{...d.coPart}:null)}; };
+            from:(saved?isoLocal(new Date(saved)):date), demand:{...((d&&d.demand)||{})}, omit:om, coPart:((d&&d.coPart)?{...d.coPart}:null), band:((d&&d.band)||{})}; };
   let P=null;
   if(opt.plot) P=mk(opt.plot);
   else{
@@ -21413,7 +21440,7 @@ function drawProdPlan(){
   const inLines=new Set(prodPlanLines.map(l=>l.product_sku));
   const _avail=(window._prodAllProducts||[]).filter(p=>!inLines.has(p.sku));
   // (the old quick-add <select> is gone — 🔎 Search & add products is the picker)
-  let h=`<div class="repcard"><div class="repbar"><span>Production date</span>
+  let h=prodCookOrderHtml()+`<div class="repcard"><div class="repbar"><span>Production date</span>
     <input type="date" value="${prodPlanDate}" onchange="prodPlanDate=this.value;renderProdPlan()">
     ${prodRunRef?'<span>· <b>'+esc(prodRunRef)+'</b></span>':''}
     <span class="mini" style="color:var(--muted)">the day this run was actually made — it does not choose which demand is shown</span>
@@ -21812,6 +21839,32 @@ function _prodOutNetHtml(l){
 }
 
 /* ---- Kitchen cart: searchable/filterable picker for what to produce (#2/#7/#8) ---- */
+/* COOK ORDER (Zeus 18 Nov) — display only; it changes no target and no number.
+   The plan's colours (saved with the plan) grouped the way the kitchen works:
+   by protein, so the deboning bottleneck (duck) is done in one go. The protein
+   group holding the most urgent product goes first; inside it, most urgent first. */
+const PROTEIN_OF={DU:'Duck',BU:'Buffalo',OS:'Ostrich',CR:'Crocodile',GT:'Goat',PK:'Pork',CH:'Chicken',BF:'Beef',QU:'Quail',RA:'Rabbit',LA:'Lamb',MC:'Mackerel',SD:'Sardine'};
+function prodCookOrderHtml(){
+  try{
+    const T=window._prodPlan; if(!T||!T.plot) return '';
+    const band=T.plot.band||{}; if(!Object.keys(band).length) return '';
+    const nm={}; (window._prodAllProductsAny||window._prodAllProducts||[]).forEach(p=>{ if(p&&p.sku) nm[p.sku]=prodLabel(p,{noSku:true})||p.name||p.sku; });
+    const rows=(T.rows||[]).filter(r=>r&&r.sku&&!/^CUST-/i.test(String(r.sku))&&r.kind!=='order'&&band[r.sku])
+      .map(r=>({sku:r.sku, left:Math.max(0,(+r.target||0)-(+r.made||0)), b:band[r.sku].b, d:band[r.sku].d, top:band[r.sku].top}))
+      .filter(x=>x.left>0);
+    if(!rows.length) return '';
+    const rk=b=>((MRP_BAND[b]||MRP_BAND.none).r);
+    const G={}; rows.forEach(x=>{ const pr=PROTEIN_OF[String(x.sku).slice(0,2).toUpperCase()]||'Other'; (G[pr]=G[pr]||[]).push(x); });
+    const groups=Object.keys(G).map(k=>({k, rows:G[k].sort((a,b)=>rk(a.b)-rk(b.b)||((a.d==null?999:a.d)-(b.d==null?999:b.d))),
+      best:Math.min(...G[k].map(x=>rk(x.b))), packs:G[k].reduce((a,x)=>a+x.left,0)}))
+      .sort((a,b)=>a.best-b.best||b.packs-a.packs);
+    return `<details class="repcard" open style="margin-bottom:12px"><summary style="cursor:pointer"><b>Cook order this week</b> <span class="mini" style="color:var(--muted)">— by protein; most urgent first · ${rows.reduce((a,x)=>a+x.left,0)} pack(s) still to make</span></summary>
+      <div class="mini" style="margin:6px 0 4px">${['bred','red','orange','yellow'].map(mrpBandTag).join(' ')} <span style="color:var(--muted)">bright red = top seller running out first</span></div>
+      ${groups.map(g=>`<div style="margin-top:10px"><b>${esc(g.k)}</b> <span class="mini" style="color:var(--muted)">${g.packs} pack(s)</span>
+        <div style="display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:4px">${g.rows.map(x=>`<span style="white-space:nowrap">${mrpBandTag(x.b)} ${esc(nm[x.sku]||x.sku)} <b>${x.left}</b></span>`).join('')}</div></div>`).join('')}
+    </details>`;
+  }catch(e){ return ''; }
+}
 function prodKitchenCart(){
   const prods=(window._prodAllProducts||[]); if(!prods.length){ toast('No products loaded',true); return; }
   window._kcQty={}; prodPlanLines.forEach(l=>{ window._kcQty[l.product_sku]=+l.good_packs||0; });   // start from the saved plan
