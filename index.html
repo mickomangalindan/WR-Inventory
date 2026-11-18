@@ -10630,14 +10630,15 @@ try{ RP=Object.assign({},RP_DEF,JSON.parse(localStorage.getItem('wr_rawpar')||'{
    week  — arrives by Tue/Wed, in time for THIS week's cooking: buy this week's
            need plus the use while waiting (lead × cushion). No extra week.
    ahead — arrives late in the week: buy for next week too (the review week).
-   two   — Saturday route, cooked the Monday after next Saturday: 14 days.
+   two   — Saturday route (Zeus 18 Nov): ordered Saturday, picked up Tue/Wed,
+           on the Saturday truck to Bulacan, cooked Monday: 9 days.
    `lead` is how many days until it can be cooked. Saved for everyone in
    app_settings 'supplier_timing'; anything not listed keeps the old rule. */
 const SUPT_DEF={
   'Mayee Gajudo':{t:'week',lead:4}, 'Jojo Santillan':{t:'week',lead:2}, 'SVC':{t:'week',lead:3},
   'KGM Manila':{t:'week',lead:3}, 'Iana Ignacio':{t:'week',lead:3}, 'Sheila David':{t:'week',lead:3}, 'Bukid sa Manila':{t:'week',lead:4},
   'EDL Farms and Feeds Manufacturing, Inc.':{t:'ahead',lead:7}, 'Local Goat Raisers':{t:'ahead',lead:7}, 'NutriFruits':{t:'ahead',lead:7}, 'JSJ Goat Farm':{t:'ahead',lead:7},
-  'Frozen Farm':{t:'two',lead:14}, 'Coral Agri Farm':{t:'two',lead:14}, 'Golden Acre':{t:'two',lead:14}, 'Helen Marie Laurente':{t:'two',lead:14}, 'JIA2 Corp':{t:'two',lead:14} };
+  'Frozen Farm':{t:'two',lead:9}, 'Coral Agri Farm':{t:'two',lead:9}, 'Golden Acre':{t:'two',lead:9}, 'Helen Marie Laurente':{t:'two',lead:9}, 'JIA2 Corp':{t:'two',lead:9} };
 let SUPT=JSON.parse(JSON.stringify(SUPT_DEF));
 try{ const _st=JSON.parse(localStorage.getItem('wr_supt')||'null'); if(_st&&typeof _st==='object') SUPT=_st; }catch(e){}
 async function loadSupTiming(){ if(window._suptLoaded||!isLive()) return; window._suptLoaded=true;
@@ -12383,7 +12384,7 @@ async function _renderMRP(){
     ${(window._rpTooSmall||[]).length?`<div class="hint" style="margin:6px 0 0">
       <b>${window._rpTooSmall.length} line(s) can wait for next week's plot</b> and are not on the plan below — each still has enough left, after this week's production, to outlast the next buying round.
       <div class="mini" style="margin-top:3px">${window._rpTooSmall.slice(0,8).map(x=>esc(x.name)+' — '+x.wanted+' kg wanted, but '+x.days+' days still left after this week'+(x.byLead?(' · needs '+x.needDays+' days because its lead time is '+x.lead+'d'):(' · the floor is '+x.needDays+' days'))).join('<br>')}${window._rpTooSmall.length>8?('<br>…and '+(window._rpTooSmall.length-8)+' more'):''}</div>
-      <div class="mini" style="margin-top:3px;color:var(--muted)">Type a quantity against any of them to buy it anyway — a figure you type is never held back. The threshold is <b>Buy under (days)</b> above, or the item's own lead time (7 days for most suppliers, 14 for Saturday-pickup ones), whichever is longer.</div></div>`:''}
+      <div class="mini" style="margin-top:3px;color:var(--muted)">Type a quantity against any of them to buy it anyway — a figure you type is never held back. The threshold is <b>Buy under (days)</b> above, or the item's own lead time (2–7 days for most suppliers, 9 for Saturday-truck ones), whichever is longer.</div></div>`:''}
     ${(+RP.spike)?`<div class="hint" style="border-left:4px solid var(--earth,#b5762a);margin:6px 0 0">The lead-time buffer is being sized on <b>this week's demand</b>, not on the steady rate. A week running above the normal rate will buy a proportionally bigger buffer and still be holding it weeks later — on 3 Oct that put <b>79 days</b> of cover on buffalo. Switch it to <b>steady rate</b> unless you have a reason.</div>`:''}
     <div class="hint" style="margin:0 0 8px">${RP_ON
       ? `Every ingredient has its <b>own</b> ceiling now, worked out from how fast it is actually used — not one 5 kg line for all of them.
@@ -12702,14 +12703,14 @@ function mrpBuySettingsHtml(){
   const row=(k,l,why,u)=>`<div class="mrp-setrow"><div><b>${l}</b><div class="mini" style="color:var(--muted)">${why}</div></div>
       <div style="white-space:nowrap"><input type="number" step="any" class="mrp-in" value="${esc(String(RP[k]))}" onchange="mrpRpSet('${k}',this.value)"> <span class="mini" style="color:var(--muted)">${u||''}</span></div></div>`;
   return `<section class="mrp-sec"><h3>Ingredients — when to buy</h3>
-    ${row('minCoverD','Buy when less than this is left','After this week\'s cooking. Saturday-pickup suppliers are checked 14 days ahead.','days')}
+    ${row('minCoverD','Buy when less than this is left','After this week\'s cooking. Saturday-truck suppliers are checked 9 days ahead.','days')}
     ${row('cushion','Cushion','Extra on top of what you use while waiting for delivery. 0.5 = half again, 1 = double.','×')}
     ${row('review','How often you buy','7 = once a week.','days')}
-    <div class="mrp-setrow" style="border-bottom:0"><div><b>Order timing per supplier</b><div class="mini" style="color:var(--muted)">This week = arrives by Tue/Wed in time to cook · A week ahead = arrives late in the week · 14 days = Saturday route. Days = until it can be cooked.</div></div>
+    <div class="mrp-setrow" style="border-bottom:0"><div><b>Order timing per supplier</b><div class="mini" style="color:var(--muted)">This week = arrives by Tue/Wed in time to cook · A week ahead = arrives late in the week · Saturday truck = picked up mid-week, cooked the Monday after (9 days). Days = until it can be cooked.</div></div>
       <button class="btn sm ${(+RP.timingOn)?'':'sec'}" onclick="mrpRpSet('timingOn',(+RP.timingOn)?0:1)">${(+RP.timingOn)?'On':'Off'}</button></div>
     ${(+RP.timingOn)?`<table class="mrp-t"><tbody>${Object.keys(SUPT).sort((a,b)=>({week:0,ahead:1,two:2}[SUPT[a].t]-{week:0,ahead:1,two:2}[SUPT[b].t])||a.localeCompare(b)).map(sp=>`<tr><td>${esc(sp)}</td>
       <td><select onchange="supTimingSet(${esc(JSON.stringify(sp))},'t',this.value)" style="padding:4px 6px;border:1px solid #cfd8d6;border-radius:6px">
-        ${[['week','This week'],['ahead','A week ahead'],['two','14 days ahead']].map(([k,l])=>`<option value="${k}"${SUPT[sp].t===k?' selected':''}>${l}</option>`).join('')}</select></td>
+        ${[['week','This week'],['ahead','A week ahead'],['two','Saturday truck']].map(([k,l])=>`<option value="${k}"${SUPT[sp].t===k?' selected':''}>${l}</option>`).join('')}</select></td>
       <td class="num"><input type="number" class="mrp-in" style="width:60px" value="${esc(String(SUPT[sp].lead))}" onchange="supTimingSet(${esc(JSON.stringify(sp))},'lead',this.value)"> <span class="mini" style="color:var(--muted)">days</span></td></tr>`).join('')}</tbody></table>
       <div class="mini" style="color:var(--muted);margin-top:4px">Suppliers not listed keep the general rule above.</div>`:''}
     <details class="mrp-adv"><summary>Advanced</summary>${rpSettingsHtml(window._mrpPlan||[],1)}</details></section>`; }
