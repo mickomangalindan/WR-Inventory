@@ -98,8 +98,13 @@
   /* The heading has to carry its own background or the rows scroll THROUGH it. */
   .stickyhead thead th{background:var(--pale,#f2f2ec)}
   /* Ingredient details (Zeus 18 Nov): a header you can't miss, frozen and solid while the rows scroll */
+  .mrp-ingtab .mrp-thd{font-weight:400;font-size:10.5px;opacity:.85;margin-top:2px;text-transform:none;letter-spacing:0}
+  .mrp-ingtab .mrp-thg th{background:var(--berry-d-2,#245b51) !important;font-size:11px !important;text-transform:uppercase !important;letter-spacing:.06em !important;padding:5px 8px !important;border-left:1px solid rgba(255,255,255,.25)}
+  .mrp-ingtab tr.mrp-ingrow{cursor:pointer}
+  .mrp-ingtab tr.mrp-ingrow:hover td{background:#f7f6f0}
   .mrp-ingtab{max-height:72vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
-  .mrp-ingtab thead th{min-width:64px;position:sticky;top:0;z-index:4;background:var(--berry-d,#2f7366) !important;color:#fff !important;font-weight:700 !important;font-size:12.5px !important;padding:10px !important;border-bottom:0 !important;white-space:normal;vertical-align:middle !important;text-align:center !important;line-height:1.25}
+  .mrp-ingtab thead{position:sticky;top:0;z-index:4}
+  .mrp-ingtab thead th{min-width:58px;position:static !important;background:var(--berry-d,#2f7366) !important;color:#fff !important;font-weight:700 !important;font-size:12.5px !important;padding:10px !important;border-bottom:0 !important;white-space:normal;vertical-align:middle !important;text-align:center !important;line-height:1.25}
   /* the header must be opaque or rows show through it while scrolling */
   thead th{background:#fbfbfc}
   .mscroll thead th{position:sticky;top:0;z-index:3;background:#fbfbfc}
@@ -12413,12 +12418,27 @@ async function _renderMRP(){
     </details>
     ${(window._mrpNoYield&&window._mrpNoYield.length)?`<div style="background:#fff8e1;border:1px solid #e0b400;border-radius:6px;padding:9px 11px;margin:0 0 10px;font-size:12.5px">⚠ These processed ingredients roll up to something we buy but carry <b>no yield %</b>, so the plan has had to assume 100% — one kilo of raw per kilo of cut, which for a carcass cut is a small fraction of the truth and <b>under-orders silently</b>: <b>${window._mrpNoYield.map(esc).join(', ')}</b>. Set <i>Yield %</i> on them (Ingredients → 🥩 Item &amp; yield), stated <b>against the thing we buy</b> — the live animal, not the dressed carcass.</div>`:''}
     ${(window._mrpUnmapped&&window._mrpUnmapped.length)?`<div style="background:#fdf0ed;border:1px solid var(--danger);border-radius:6px;padding:9px 11px;margin:0 0 10px;color:var(--danger);font-size:12.5px">⚠ These processed ingredients have demand but no purchasable parent set (Raw input / source), so their need could <b>not</b> be rolled up to a WD and is not in the plan: <b>${window._mrpUnmapped.map(esc).join(', ')}</b>. Set their <i>Raw input (what you buy)</i> to the matching WD ingredient's name in Ingredients.</div>`:''}
-    <div class="stickyhead mrp-ingtab"><table><thead><tr><th>Ingredient</th><th class="num">Use / wk</th><th class="num">Use / day</th><th class="num">Need (week)</th><th class="num" title="prepped stock in the freezer">Premix</th><th class="num">Need to complete the production (raw)</th><th class="num">On hand (raw)</th><th class="num">On order</th><th class="num">Stock after the week's batch (raw)</th><th class="num">Days to wait before delivery</th><th class="num">Cushion</th><th class="num">No. of days plan</th><th class="num" title="ROP: use/day × days to wait × cushion">Buy when below (ROP)</th><th class="num" title="PAR: use/day × (days to wait + days plan) × cushion">Should always be on stock after the week's batch (PAR)</th><th class="num">To order to fill up</th><th class="num">MOQ</th><th class="num">Order</th><th title="ordered on the plan day; about when it arrives">Arrives ~</th></tr></thead><tbody>`;
-  const _rowHtml=(l)=>`<tr><td>${esc(l.name)}
+    <div class="stickyhead mrp-ingtab"><table><thead><tr class="mrp-thg"><th></th><th>Use</th><th colspan="3">This week</th><th colspan="3">What we have</th><th colspan="5">Rules</th><th colspan="4">Buy</th></tr><tr><th class="">Ingredient<div class="mrp-thd">tap a row for its math</div></th><th class="num">Use/day<div class="mrp-thd">from 60-day sales</div></th><th class="num">Need<div class="mrp-thd">this week, raw</div></th><th class="num">Premix<div class="mrp-thd">on hand · = raw</div></th><th class="num">Still need<div class="mrp-thd">need − premix</div></th><th class="num">Raw<div class="mrp-thd">on hand</div></th><th class="num">Coming<div class="mrp-thd">on order</div></th><th class="num">After batch<div class="mrp-thd">raw + coming − still need</div></th><th class="num">Wait<div class="mrp-thd">days to delivery</div></th><th class="num">Plan<div class="mrp-thd">days to next plan</div></th><th class="num">Cushion<div class="mrp-thd">× safety</div></th><th class="num">ROP<div class="mrp-thd">use/day × wait × cushion</div></th><th class="num">PAR<div class="mrp-thd">use/day × (wait + plan) × cushion</div></th><th class="num">To buy<div class="mrp-thd">PAR − after batch</div></th><th class="num">MOQ<div class="mrp-thd">supplier minimum</div></th><th class="num">Order<div class="mrp-thd">rounded to MOQ</div></th><th class="">Arrives<div class="mrp-thd">about</div></th></tr></thead><tbody>`;
+  /* TAP A ROW, SEE ITS MATH (Zeus 18 Nov) — the same numbers as the row, written
+     the way Zeus works them out: 0.72 × 9 × 1.5 = 9.70. */
+  const _mathRow=(l)=>{ const f=v=>(Math.round((+v||0)/10)/100).toFixed(2); const d=(+l.perDay||0)/1000;
+    const u=(window._mrpPmxUsed||{})[l.sku]||{g:0,raw:0}; const cu=(1+(+RP.cushion||0)); const wt=+l.wait||0;
+    const pl=(l.trigger>0&&l.target>l.trigger+1)?(+RP.review||7):0; const L=[];
+    if(d>0) L.push(`Use/day: ${f(l.perWeek)} a week ÷ 7 = <b>${d.toFixed(2)}</b>`);
+    L.push(`Need this week: ${f(l.rawNeed+u.raw)}`+(u.raw>0?` − premix ${f(u.g)} prepped (= ${f(u.raw)} raw) = still need <b>${f(l.rawNeed)}</b>`:` = still need <b>${f(l.rawNeed)}</b>`));
+    L.push(`After batch: ${f(l.oh)} raw`+((+l.wip||0)>0?` + ${f(l.wip)} premix left (as raw)`:'')+` + ${f(l.inc)} coming − ${f(l.rawNeed)} still need = <b>${f(l.endInv)}</b>`+(d>0?` (lasts ${Math.max(0,Math.round((l.endInv/1000)/d))} days)`:''));
+    if(l.trigger>0){
+      L.push(`ROP: ${d.toFixed(2)} × ${wt} days wait × ${cu.toFixed(1)} = <b>${f(l.trigger)}</b> → after batch ${f(l.endInv)} is ${(l.endInv<l.trigger)?'<b>below</b> → buy':'above → no need to buy'}`);
+      L.push(`PAR: ${d.toFixed(2)} × (${wt} wait + ${pl} plan) × ${cu.toFixed(1)} = <b>${f(l.target)}</b>`+(pl===0?' <span style="color:var(--muted)">(delivers every week, so no extra week)</span>':''));
+      L.push(`To buy: ${f(l.target)} − ${f(l.endInv)} = <b>${f(l.base)}</b>`);
+    } else if(l.lowStock){ L.push(`No cushion item: buy only the shortfall = <b>${f(l.base)}</b>`); }
+    if(l.tooSmall) L.push(`Can it wait? lasts ${Math.round((l.endInv/1000)/(d||1))} days ≥ ${wt} wait + 7 → <b>waits for next week</b>`);
+    else if(l.final>0) L.push(`Order: ${f(l.base)}${(+l.final>(+l.base||0)+5)?(' → rounded up to the minimum / case = <b>'+f(l.final)+'</b>'):(' = <b>'+f(l.final)+'</b>')}`);
+    return `<tr class="mrp-math" style="display:none"><td colspan="17" style="background:#fbfaf6;padding:8px 14px;font-size:12.5px;line-height:1.7">${L.join('<br>')}</td></tr>`; };
+  const _rowHtml=(l)=>`<tr class="mrp-ingrow" onclick="mrpIngMath(this)" title="tap to see this line's math"><td>${esc(l.name)}
     ${l.isSupply?'<span class="tagf" style="background:#e8e6df;color:#57544c">supply</span>':(l.isProcessed?'<span class="tagf tagf-proc">processed</span>':'')}
     <div class="mini">${l.isSupply?('per '+esc(l.unit)):('yield '+(+(ings.find(x=>x.sku===l.sku)||{}).yield_pct||100)+'%')}</div>${l.remark?`<div class="mini" style="color:var(--berry)">📝 ${esc(l.remark)}</div>`:''}</td>
-    <td class="num" style="color:var(--muted)" title="${l.perDay>0?('the steady rate this ceiling is sized on — '+(Math.round(l.perDay/10)/100)+' kg a day'):'no sales history in the window: this ingredient has no ceiling, and is bought only against the week\'s own demand'}">${l.perWeek>0?kgf(l.perWeek):'—'}</td>
-    <td class="num" style="color:var(--muted)">${l.perDay>0?(Math.round(l.perDay/10)/100).toFixed(2):'—'}</td>
+    <td class="num" style="color:var(--muted)">${l.perDay>0?(Math.round(l.perDay/10)/100).toFixed(2):'—'}${l.perWeek>0?`<div class="mini" style="font-weight:400">${kgf(l.perWeek)}/wk</div>`:''}</td>
     <td class="num">${(()=>{ const u=(window._mrpPmxUsed||{})[l.sku]; return kgf(l.rawNeed+((u&&u.raw)||0)); })()}</td>
     <td class="num" style="${(+l.wip||0)>0?'color:#6a4ea8;font-weight:600':'color:var(--muted)'}" title="${(+l.wip||0)>0?('processed stock converted back to raw through yield, less drip: '+((window._mrpWipSrc||{})[l.sku]||[]).map(w=>w.name+' '+(Math.round(w.g/10)/100)+' kg → '+(Math.round(w.rawEq/10)/100)+' kg raw').join('; ')):'no processed stock held for this raw'}">${(+l.wip||0)>0?(()=>{ /* WIP SHOWS THE PREPPED WEIGHT (Zeus 18 Nov): what is actually on the shelf, prepped. The raw-equivalent that Have adds up sits underneath. */
       const pg=((window._mrpWipSrc||{})[l.sku]||[]).reduce((a,w)=>a+(+w.g||0),0);
@@ -12431,8 +12451,8 @@ async function _renderMRP(){
     <td class="num" style="${(+l.inc||0)>0?'color:#1e6b2e;font-weight:600':'color:var(--muted)'}" title="${l.eta?('earliest expected '+esc(l.eta)):'confirmed POs not yet received'}">${(+l.inc||0)>0?kgf(l.inc)+(l.eta?`<div class="mini" style="font-weight:400">eta ${esc(l.eta)}</div>`:''):'—'}</td>
     <td class="num" title="need − premix − raw − on order: what is left once this week is cooked"><b style="${(+l.endInv||0)<0?'color:var(--danger)':''}">${kgf(l.endInv)}</b>${l.perDay>0?`<div class="mini" style="font-weight:400;color:${(l.endInv/l.perDay)<(+l.wait||0)?'var(--danger)':'var(--muted)'}">lasts ${Math.max(0,Math.round(l.endInv/l.perDay))}d</div>`:''}</td>
     <td class="num" title="days from ordering until it can be cooked (lead time)">${+l.wait||0}</td>
-    <td class="num" title="1 + cushion: extra in case sales jump or the delivery is late">${l.trigger>0?(1+(+RP.cushion||0)).toFixed(1):'—'}</td>
     <td class="num" title="days until the next plan (7) — 0 for suppliers that deliver every week">${l.trigger>0?(l.target>l.trigger+1?(+RP.review||7):0):'—'}</td>
+    <td class="num" title="1 + cushion: extra in case sales jump or the delivery is late">${l.trigger>0?(1+(+RP.cushion||0)).toFixed(1):'—'}</td>
     <td class="num" style="color:var(--muted)" title="LT demand × cushion — below this after cooking, buy">${l.trigger>0?kgf(l.trigger):'—'}</td>
     <td class="num" title="what should be left after cooking: daily use × (wait + 7 days) × cushion; fast suppliers: wait only">${l.target>0?kgf(l.target):'—'}${(l.perDay>0&&l.target>0)?`<div class="mini" style="font-weight:400;color:var(--muted)">~${Math.round(l.target/l.perDay)}d of use</div>`:''}</td>
     <td class="num"><b>${kgf(Math.max(0,l.base))}</b></td>
@@ -12440,7 +12460,7 @@ async function _renderMRP(){
     <td class="num"><b style="color:var(--berry)">${l.final>0?(l.isSupply?(l.final+' '+esc(l.unit)):kgf(l.final)):'—'}</b>${(()=>{ const it=ings.find(x=>x.sku===l.sku)||{}; const sub=Math.max(0,+l.base||0)+(+l.manualKg||0)*1000; if(l.isSupply||!(l.final>sub+5)) return '';
       const mn=+it.min_order_kg||0, ps=+it.pack_size_kg||0;
       return `<div class="mini" style="color:var(--muted)" title="what the plan needs plus anything typed, then rounded up">${kgf(sub)} → up to ${mn>0&&l.final<=mn*1000+5?('min '+mn+' kg'):(ps>0?('whole cases of '+ps+' kg'):'min')}</div>`; })()}${(()=>{ const it=ings.find(x=>x.sku===l.sku)||{}; const ps=+it.pack_size_kg||0; return (l.final>0&&ps>0&&/bottle|head/i.test(it.uom||''))?`<div class="mini">= ${Math.round(l.final/1000/ps)} ${/head/i.test(it.uom||'')?'head':('bottle(s) of '+(ps>=1?ps+' L':Math.round(ps*1000)+' ml'))}</div>`:''; })()}${l.added>0?`<div class="mini" style="color:var(--muted)">incl. ${l.added} added by hand <span class="x" style="cursor:pointer;color:var(--danger)" onclick="mrpAddSet('${esc(l.sku)}',0)">✕</span></div>`:''}</td>
-    <td>${l.arrive||'—'}</td></tr>`;
+    <td>${l.arrive||'—'}</td></tr>${_mathRow(l)}`;
   // group the plan per supplier (matches how POs are generated), with a per-supplier subtotal + total kg
   const _bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no default supplier — set one)'; (_bySup[s]=_bySup[s]||[]).push(l); });
   const _supKg=(arr)=>arr.reduce((s,l)=>s+(+l.final||0),0);                 // total order grams for a supplier
@@ -12448,13 +12468,13 @@ async function _renderMRP(){
     const arr=_bySup[sup]; const sItems=arr.filter(l=>l.final>0); const sVal=sItems.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); const sKg=_supKg(arr);
     const minG=supMin[sup]||0; const shortG=minG>0?(minG-sKg):0;
     const minTag = minG>0 ? (shortG>0 ? ` · <span style="color:var(--danger)">min ${kgf(minG)} — short ${kgf(shortG)}</span>` : ` · <span style="color:#4e7a3e">✓ meets min ${kgf(minG)}</span>`) : '';
-    rh+=`<tr class="mrp-suprow"><td colspan="18" style="background:var(--hi,#e7f2ef);font-weight:700;color:#1f2a28;padding:8px 10px;font-size:13px;border-bottom:1px solid #e6ebea">${esc(sup)} <span style="color:var(--muted);font-weight:400;font-size:13px">— ${sItems.length} item(s) · <b>${kgf(sKg)} kg</b> · est. ₱${Math.round(sVal).toLocaleString('en-PH')}${minTag}</span></td></tr>`;
+    rh+=`<tr class="mrp-suprow"><td colspan="17" style="background:var(--hi,#e7f2ef);font-weight:700;color:#1f2a28;padding:8px 10px;font-size:13px;border-bottom:1px solid #e6ebea">${esc(sup)} <span style="color:var(--muted);font-weight:400;font-size:13px">— ${sItems.length} item(s) · <b>${kgf(sKg)} kg</b> · est. ₱${Math.round(sVal).toLocaleString('en-PH')}${minTag}</span></td></tr>`;
     arr.sort((a,b)=>b.final-a.final).forEach(l=>{ rh+=_rowHtml(l); });
   });
-  if(_supLedIng.length) rh+=`<tr><td colspan="18" style="background:#fff8e1;border-left:3px solid #e0b400;padding:7px 9px;font-size:12.5px">
+  if(_supLedIng.length) rh+=`<tr><td colspan="17" style="background:#fff8e1;border-left:3px solid #e0b400;padding:7px 9px;font-size:12.5px">
     <b>${_supLedIng.length} supply-led ingredient(s) are never put on a purchase order</b> — ${esc(_supLedIng.slice(0,8).map(i=>i.name||i.sku).join(', '))}${_supLedIng.length>8?' …':''}.
     The supplier tells us when there is material, not the other way round, so an order for them is a wish. Put one on this order by hand with <b>＋ Add item to order</b> when a supplier has actually offered stock.</td></tr>`;
-  if(!plan.length && !_supLedIng.length) rh+=`<tr><td colspan="18" class="empty">Enter demand above — nothing is ordered until an ingredient falls through its own trigger. Or use <b>＋ Add item to order</b> to put something on the order yourself.</td></tr>`;
+  if(!plan.length && !_supLedIng.length) rh+=`<tr><td colspan="17" class="empty">Enter demand above — nothing is ordered until an ingredient falls through its own trigger. Or use <b>＋ Add item to order</b> to put something on the order yourself.</td></tr>`;
   const toBuy=plan.filter(l=>l.final>0); const totVal=toBuy.reduce((s,l)=>s+(l.final/1000)*l.price,0); const totKg=_supKg(plan);
   rh+=`</tbody></table></div>
     <div style="margin-top:8px"><button class="btn sec sm" onclick="mrpAddOpen()">＋ Add item to order</button>
@@ -12600,6 +12620,7 @@ async function mrpEditPlan(){
 }
 function mrpEditCancel(){ window._mrpEditRef=null; window._mrpEditDate=null; mrpDemand={}; mrpCoPart={}; mrpManual={}; mrpAdd={}; mrpRemarks={}; renderMRP(); }
 const MRP_VIEWS=['plan','packs','ingredients','checks','history','settings'];
+function mrpIngMath(tr){ const n=tr&&tr.nextElementSibling; if(n&&n.classList.contains('mrp-math')) n.style.display=(n.style.display==='none'?'':'none'); }
 function mrpView(){ let v=''; try{ v=localStorage.getItem('wr_mrp_view')||''; if(!v && localStorage.getItem('wr_mrp_full')==='1') v='packs'; }catch(e){}
   if(v==='settings' && !(typeof curRole==='function' && curRole()==='Admin')) v='plan';
   return MRP_VIEWS.includes(v)?v:'plan'; }
@@ -28897,9 +28918,9 @@ function drawStickerReorder(){
   const _supOf=r=>/supplier\s*2|gently\s*cook/i.test(String(r.supplier||''))?'2':'1';
   const shown=rows.filter(r=>!_stkRoSup || _supOf(r)===_stkRoSup);
   hierGroups(shown,{g1:'group_1',g2:'group_2'}).forEach(G=>{
-    h+=`<tr style="background:#d7e7db"><td colspan="18"><b style="font-size:13.5px">${esc(G.g1)}</b></td></tr>`;
+    h+=`<tr style="background:#d7e7db"><td colspan="17"><b style="font-size:13.5px">${esc(G.g1)}</b></td></tr>`;
     G.subs.forEach(S=>{
-      h+=`<tr style="background:#eef3ea"><td colspan="18" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
+      h+=`<tr style="background:#eef3ea"><td colspan="17" style="padding-left:22px">▸ <b>${esc(S.g2)}</b></td></tr>`;
       S.items.forEach(r=>{
         n++; totNeed+=(r.need>0?(+r.order||r.need):0); const q=+_stkRoQty[r.sku]||0; totOrder+=q; totVal+=q*(+r.price||0);
         const sh=stickerSheets(q, r.perSheet);
