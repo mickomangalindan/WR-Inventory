@@ -12858,7 +12858,10 @@ async function mrpSimpleView(o){
   const focus=cat.filter(p=>make(p)>0||sugg(p)>0||(cov(p)!=null&&cov(p)<10));
   if(window._mrpShowAll===undefined) window._mrpShowAll=true;   // every product can take a number; sections fold
   const show=window._mrpShowAll?cat:focus;
-  const kMake=cat.filter(p=>make(p)>0).length, kPk=cat.reduce((a,p)=>a+make(p),0);
+  const _hSrc=L?(L.demand||{}):(mrpDemand||{}), _hCp=L?(L.coPart||{}):null, _SL=window._mrpSupLed||{};
+  const _hold=Object.keys(_hSrc).filter(k=>_SL[k]).map(k=>Math.max(0,(+_hSrc[k]||0)-(_hCp?(+_hCp[k]||0):mrpCoPartOf(k)))).filter(n=>n>0);
+  /* on-hold products added by hand count in the totals too (Zeus 18 Nov) */
+  const kMake=cat.filter(p=>make(p)>0).length+_hold.length, kPk=cat.reduce((a,p)=>a+make(p),0)+_hold.reduce((a,n)=>a+n,0);
   const kLow=cat.filter(p=>cov(p)!=null&&cov(p)<5).length;
   const kWait=cat.filter(p=>((calc[p.sku]||{}).c||{}).deferred).length;
   const tone=d=>d==null?'mrp-lz':d<5?'mrp-lr':d<10?'mrp-ly':'mrp-lg';
