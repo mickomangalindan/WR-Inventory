@@ -11731,7 +11731,37 @@ async function planReadyStamp(){
    scrolling box it can find, and puts it back once the new screen is in. A
    change of route (a fresh visit) still starts at the top. */
 let _mrpScrollRoute='';
+/* ---- DEMAND/MRP SPEED (Zeus 21 Nov: "ang bagal") ----------------------------
+   One redraw made 41 database reads one after another (~7 s) — the same
+   production batches 9 times — and typing in Extra paid that every time.
+   While Demand/MRP draws, identical reads share one answer; a quick redraw
+   (Extra typed) reuses the last draw's answers if they are under a minute old.
+   A full redraw (opening the page, Pull the week, Save) always reads fresh, and
+   any write clears the store. Nothing is cached outside Demand/MRP. */
+const _mrpNet={on:false, at:0, map:{}};
+(function(){ if(typeof window==='undefined'||!window.fetch||window._mrpNetWrapped) return; window._mrpNetWrapped=true;
+  const _of=window.fetch;
+  window.fetch=function(u,o){
+    const url=String((u&&u.url)||u||''); const m=String((o&&o.method)||(u&&u.method)||'GET').toUpperCase();
+    if(!/\/rest\/v1\//.test(url)) return _of.apply(this,arguments);
+    if(m!=='GET' && m!=='HEAD'){ _mrpNet.map={}; _mrpNet.at=0; return _of.apply(this,arguments); }
+    if(!_mrpNet.on) return _of.apply(this,arguments);
+    let h=''; try{ const H=new Headers((o&&o.headers)||(u&&u.headers)||{}); h=(H.get('range')||'')+'|'+(H.get('prefer')||'')+'|'+(H.get('accept')||''); }catch(e){}
+    const k=m+' '+url+' '+h;
+    if(!_mrpNet.map[k]){
+      _mrpNet.map[k]=_of.apply(this,arguments).then(async r=>({status:r.status, statusText:r.statusText, headers:[...r.headers.entries()], body:await r.text()}));
+      _mrpNet.map[k].catch(()=>{ delete _mrpNet.map[k]; });
+    }
+    return _mrpNet.map[k].then(c=>{ if(c.status>=400) delete _mrpNet.map[k]; return new Response(c.body,{status:c.status, statusText:c.statusText, headers:c.headers}); });
+  };
+})();
 async function renderMRP(){
+  const _quick=!!window._mrpQuick; window._mrpQuick=false;
+  if(!(_quick && _mrpNet.at && (Date.now()-_mrpNet.at)<60000)){ _mrpNet.map={}; _mrpNet.at=Date.now(); }
+  _mrpNet.on=true;
+  try{ return await _renderMRPKeep(); } finally{ _mrpNet.on=false; }
+}
+async function _renderMRPKeep(){
   const route=String(location.hash||'');
   const sameRoute=(_mrpScrollRoute===route);
   _mrpScrollRoute=route;
@@ -12729,7 +12759,7 @@ function mrpGoPOs(){ try{ sessionStorage.setItem('wr_back_mrp','1'); }catch(e){}
    is not the need. Same window._mrpPlan the full table and the POs use; the
    Extra box writes the same mrpManual the old "Manual ±" box wrote. */
 function mrpIngAll(on){ try{ localStorage.setItem('wr_ing_all', on?'1':'0'); }catch(e){} renderMRP(); }
-function mrpIngExtra(sku,v,btlKg){ const y=window.scrollY; mrpManual[sku]=(+v||0)*((+btlKg||0)>0?(+btlKg):1); try{ mrpAutosave(); }catch(e){}
+function mrpIngExtra(sku,v,btlKg){ const y=window.scrollY; window._mrpQuick=true; mrpManual[sku]=(+v||0)*((+btlKg||0)>0?(+btlKg):1); try{ mrpAutosave(); }catch(e){}
   Promise.resolve(renderMRP()).then(()=>{ window.scrollTo(0,y); const el=document.querySelector('[data-ingx="'+CSS.escape(sku)+'"]'); if(el){ try{ el.focus({preventScroll:true}); }catch(e){ el.focus(); } } }); }
 function mrpIngRows(ings){
   const P=(window._mrpPlan||[]).filter(l=>(+l.final||0)>0 || (+l.manualKg||0)!==0);
