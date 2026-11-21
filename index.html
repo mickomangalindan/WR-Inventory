@@ -1736,7 +1736,7 @@ const db = {
       if(await _maskedWrite(T)){ await sb(T,{method:'POST',prefer:'return=minimal',body:JSON.stringify(rec)}); return {...rec}; }
       return (await sb(T, {method:'POST', body:JSON.stringify(rec)}))[0];
     }
-    DEMO[T]=DEMO[T]||[]; rec.id=rec.id||('loc'+Date.now()+Math.floor(Math.random()*999)); DEMO[T].push(rec); return rec;
+    DEMO[T]=DEMO[T]||[]; rec.id=rec.id||('loc'+Date.now()+Math.floor(Math.random()*999)); if(rec.created_at==null) rec.created_at=new Date().toISOString(); DEMO[T].push(rec); return rec;
   },
   async update(model, pk, pkval, rec){
     const T=(MODELS[model]&&MODELS[model].srcTable)||model;
@@ -3905,12 +3905,14 @@ function savePackReq(){
    third more after-arrival stock; three GREEN plots in a row take a quarter off.
    Bounded by bufMin..bufMax. Stored in app_settings 'pack_buf' for everyone. */
 function pqLearn(){ if(!(+PQ.gauge) || !(+PQ.learn)) return; const C=window._mrpCalc||{}; let n=0;
+  if(PQ_BUF._week===MRPDATE) return;   // one lesson per week — Edit plan / a second lock does not teach again (19 Nov)
   Object.keys(C).forEach(sku=>{ const z=((C[sku]||{}).c||{}).zone; if(!z||z==='none') return;
     const b=PQ_BUF[sku]||{m:1,g:0};
     if(z==='red'){ b.m=Math.min(+PQ.bufMax||2,(+b.m||1)*1.33); b.g=0; }
     else if(z==='green'){ b.g=(+b.g||0)+1; if(b.g>=3){ b.m=Math.max(+PQ.bufMin||0.5,(+b.m||1)*0.75); b.g=0; } }
     else b.g=0;
     b.m=Math.round(b.m*100)/100; PQ_BUF[sku]=b; n++; });
+  if(n) PQ_BUF._week=MRPDATE;
   if(n && isLive()) sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',
     body:JSON.stringify({key:'pack_buf',value:PQ_BUF})}).catch(()=>{}); }
 function pqSet(k,v){ PQ[k]=(v===''||v==null)?PQ_DEF[k]:(parseFloat(v)||0);
@@ -5666,6 +5668,7 @@ async function psPrint(){
 }
 
 async function renderLiveStock(){
+  try{ await rawRopLoad(); }catch(e){}
   $('cp').innerHTML=`<div class="title">Live Stock <span onclick="openKB('stock_balance')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn" onclick="renderLiveStock()">↻ Recompute</button>
     <span class="mini" style="margin-left:8px">Site <select onchange="LS_LOC=this.value;renderLiveStock()">
@@ -5817,7 +5820,7 @@ async function renderLiveStock(){
     const name=(isProd
         ? prodLabel({...it, sku:a.sku},{noSku:true})
         : ((it.name||a.sku)+((!isSup&&it.is_intermediate)?' — processed':'')));
-    const par=isProd?(+it.par_packs||0):(+it.reorder_g||+it.par_g||0);
+    const par=isProd?(+it.par_packs||0):(isSup?(+it.reorder_g||+it.par_g||0):rawRopOf(it));
     const below=par>0 && end<par, neg=end< -0.0001;
     return {sku:a.sku, name, variant:(it.variant||''), g1, g2, grank, unit, div, kind, begin:a.begin, recv:a.recv, prod:a.prod, cons:a.cons, tf:a.tf,
             sold:a.sold, back:a.back, adj:a.adj, end, value:a.val, par, below, neg, sort_order:it.sort_order,
@@ -10666,6 +10669,22 @@ try{ RAW_CUSH=JSON.parse(localStorage.getItem('wr_rawcush')||'{}')||{}; }catch(e
 function rawCush(sku){ const v=(RAW_CUSH[sku]||{}).c; return (v!=null && isFinite(+v)) ? +v : Math.max(0,+RP.cushion||0); }
 async function loadRawCush(){ if(window._rawCushLoaded||!isLive()) return; window._rawCushLoaded=true;
   try{ const r=await sb('app_settings?select=value&key=eq.raw_cush'); const v=r&&r[0]&&r[0].value; if(v&&typeof v==='object'&&!Array.isArray(v)) RAW_CUSH=v; }catch(e){} }
+/* ---- THE PLAN'S ROP, FOR THE OTHER SCREENS (21 Nov) ---------------------------
+   Live Stock, the Dashboard and the low-stock list warned "below reorder" from the
+   typed par_g / reorder_g, which the release clears (G12). On every lock the plan
+   writes each ingredient's ROP (raw g) to app_settings 'raw_rop'; those screens
+   fall back to it, so the warning keeps working — from the same number the
+   plan uses. */
+let RAW_ROP=null;
+try{ RAW_ROP=JSON.parse(localStorage.getItem('wr_rawrop')||'null'); }catch(e){}
+async function rawRopLoad(){ if(window._rawRopLoaded) return RAW_ROP||{}; window._rawRopLoaded=true;
+  if(isLive()){ try{ const r=await sb('app_settings?select=value&key=eq.raw_rop'); const v=r&&r[0]&&r[0].value; if(v&&typeof v==='object') RAW_ROP=v; }catch(e){} }
+  return RAW_ROP||{}; }
+function rawRopOf(i){ const t=+i.reorder_g||+i.par_g||0; if(t>0) return t; return +((RAW_ROP||{})[i.sku])||0; }
+function rpSaveRop(){ const A=window._mrpAllIng||[]; if(!A.length) return; const o={};
+  A.forEach(x=>{ if(x.trigger>0) o[x.sku]=Math.round(x.trigger); }); RAW_ROP=o; window._rawRopLoaded=true;
+  try{ localStorage.setItem('wr_rawrop',JSON.stringify(o)); }catch(e){}
+  if(isLive()) sb('app_settings',{method:'POST',prefer:'resolution=merge-duplicates,return=minimal',body:JSON.stringify({key:'raw_rop',value:o})}).catch(()=>{}); }
 function rpLearn(){ const P=window._mrpPlan||[]; if(!P.length) return 0;
   if(RAW_CUSH._week===MRPDATE) return 0;            // one lesson per week — Edit plan does not teach twice
   let n=0; const base=Math.max(0,+RP.cushion||0);
@@ -12286,7 +12305,7 @@ async function _renderMRP(){
      rather than made, a raw with healthy stock you want to top up anyway. The
      quantity is in the ITEM'S OWN unit (kg for food, the uom for supplies), which
      is why the row carries `unit` from here on. */
-  const _supLedIng=[]; const _rpTooSmall=[]; const _slChk=[];
+  const _supLedIng=[]; const _rpTooSmall=[]; const _slChk=[]; const _allIng=[];
   ings.forEach(it=>{
     const added=+mrpAdd[it.sku]||0;
     const sup=isSupplyItem(it);
@@ -12376,6 +12395,7 @@ async function _renderMRP(){
       leadBuf=0; trigger=0; target=0;   // nothing kept after cooking
       lowStock=(rawNeed>0 && avail < rawNeed);
     }
+    _allIng.push({sku:it.sku,name:it.name,rawNeed,avail,endInv,trigger,target,lowStock,perDay:(+C.perDay||0),wait:(_tLead!=null?_tLead:lead)});   // every ingredient looked at — for the checks
     if(!lowStock && manualKg<=0 && added<=0) return;          // above the trigger, nothing added → nothing to order
     const buf=trigger;
     /* ORDER FROM THE FULL WEEK (Zeus 18 Nov): need − premix − raw − on order = left
@@ -12427,7 +12447,7 @@ async function _renderMRP(){
       remark:(mrpRemarks[it.sku]||''),wait:(_tLead!=null?_tLead:lead),cush:(_noCush?0:+C.cush||0),supplier:defSup,price:+it.list_price_kg||0,orderBy:MRPDATE,arrive:addDaysISO(MRPDATE,(_tLead!=null?_tLead:lead))});   /* order on the plan day; it arrives about lead days later (was plan day − lead = always in the past, 18 Nov) */
   });
   plan.sort((a,b)=>b.final-a.final);
-  window._mrpPlan=plan; window._mrpSupLedIng=_supLedIng; window._mrpSlChk=_slChk; window._rpTooSmall=_rpTooSmall;
+  window._mrpPlan=plan; window._mrpSupLedIng=_supLedIng; window._mrpSlChk=_slChk; window._mrpAllIng=_allIng; window._rpTooSmall=_rpTooSmall;
   const _pu=window._mrpProcUse||{}; const _puN=Object.keys(_pu).length;
   let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">${mrpView()==='ingredients'?'Ingredients to order':'2 · Replenishment plan'}</h3>
     <div class="mini" style="color:var(--muted);margin:0 0 8px">The formula is under each column name. <b>Tap a row</b> to see its math.</div>
@@ -13449,6 +13469,7 @@ async function confirmSaveMRPPlan(hasExisting){
      asks why the week missed can read it instead of guessing. */
   const _pf=await planReadyStamp();
   const data={ref:g.ref,locked:true,demand:{...mrpDemand},coPart:_mrpCoPartSnap(),manual:{...mrpManual},add:{...mrpAdd},remarks:{...mrpRemarks},by:CURRENT_USER,saved_at:new Date().toISOString(),
+    onOrderAtLock:{...(window._mrpOnOrder||{})},   /* what Step 3 already counted as Coming — the PO window takes off only what came after (21 Nov) */
     band:(()=>{ const o={}; Object.keys(mrpDemand||{}).forEach(k=>{ const x=(window._mrpCalc||{})[k]; if(x&&x.c&&x.c.band) o[k]={b:x.c.band, d:(x.c.perDay>0?Math.round((x.c.cur/x.c.perDay)*10)/10:null), top:(window._mrpTop20||{})[k]||0}; }); return o; })(),   /* cook-order colours for the kitchen (display only) */
     preflight:_pf,
     /* the judgement, kept with the document it was made on — see mrpPullPackReq */
@@ -13482,6 +13503,7 @@ async function confirmSaveMRPPlan(hasExisting){
     try{ await coSyncStatuses(); }catch(e){}
     try{ pqLearn(); }catch(e){}             // the fuel gauge learns once per locked plot
     try{ rpLearn(); }catch(e){}             // and each ingredient's cushion, once per week
+    try{ rpSaveRop(); }catch(e){}           // and the ROP the other screens warn from
     if(_pf && _pf.tier!=='ok'){
       const _st=(_pf.failed||[]).filter(f=>f.tier==='stop');
       if(_st.length) sysLog('mrp',g.ref,'⚠ saved while '+_st.length+' data check(s) were failing — '
@@ -14254,7 +14276,13 @@ async function planPOOpen(i){
 
   const rows=lines.map(l=>{
     const recv=Math.max(0, +since[l.sku]||0);
-    const oo  =Math.max(0, +onOrd[l.sku]||0);
+    /* NOT TWICE (21 Nov). The plot's order already took off what was "Coming"
+       when it was locked (Step 3), and it records that figure. Only what has been
+       put on order since is taken off here — otherwise live goat came out 5 kg
+       instead of 45 and ostrich 0 instead of 10 in the simulation. Older plots
+       without the record keep the old rule. */
+    const _atLock=(d.onOrderAtLock&&typeof d.onOrderAtLock==='object')?(+d.onOrderAtLock[l.sku]||0):null;
+    const oo  =Math.max(0, (+onOrd[l.sku]||0) - (_atLock==null?0:_atLock));
     const left=Math.max(0, (+l.final||0)-recv-oo);
     const isSup=!!l.isSupply;
     const planP=+l.price||0, mp=+mprice[l.sku]||0;
@@ -14401,7 +14429,7 @@ function planPODraw(){
         <div class="mini" style="margin-top:4px">${esc(S.already.map(o=>o.po_ref+(o.supplier_name?(' · '+o.supplier_name):'')).join(' · '))}</div>
         <div class="mini" style="margin-top:4px">If those are the ones that were missed, there is nothing to do here — open Purchasing and send them.</div></div>`:''}
       ${asked.length?`<div style="border:1px solid #3c6ea5;background:#eef4fa;border-radius:6px;padding:10px 11px;margin-bottom:10px;font-size:12.5px">
-        <b>${asked.length} line(s) are ALREADY ON ORDER</b> — asked for on a purchase order that is still live, whichever plot it was tagged to. Those quantities are subtracted, so the supplier is not asked twice.
+        <b>${asked.length} line(s) are ALREADY ON ORDER</b> — put on order after this plan was locked. Those quantities are subtracted, so the supplier is not asked twice. (What was already coming when it was locked is counted in the plan itself.)
         <div class="mini" style="margin-top:4px">${asked.slice(0,8).map(r=>esc(r.name||r.sku)+' — '+(Math.round(r._oo/10)/100)+' kg on '+[...new Set(r._ooRef.map(x=>x.ref))].join(', ')).join('<br>')}${asked.length>8?('<br>… and '+(asked.length-8)+' more'):''}</div></div>`:''}
       ${fully.length?`<div style="border:1px solid #cfe0cf;background:#f1f7f1;border-radius:6px;padding:9px 11px;margin-bottom:10px;font-size:12.5px">
         ✓ <b>${fully.length} line(s) need nothing</b> — already delivered or already on order in full. They are set to 0 and will not appear on any new PO.</div>`:''}
@@ -16362,7 +16390,8 @@ async function renderDashboard(){
   const _momRows=_mom.map(r=>{ const stk=stock[r.sku]!=null?stock[r.sku]:0; const met=momMetrics(r,stk); const q=momQuad(met.mom,met.cover,met.hasSales); return {sku:r.sku,product:(prodBy[r.sku]&&prodBy[r.sku].name)||r.product||r.sku,...met,q}; }).filter(r=>r.hasSales);
   const momStockout=_momRows.filter(r=>r.q.key==='stockout'); const momOver=_momRows.filter(r=>r.q.key==='overstock').length;
   const momUrgent=_momRows.slice().sort((a,b)=>a.cover-b.cover)[0];
-  const belowReorder = ing.filter(active).filter(i=>!isSupplyItem(i)).filter(i=>{const oh=stock[i.sku]||0;const thr=+i.reorder_g||+i.par_g||0;return thr>0&&oh<thr;}).length
+  try{ await rawRopLoad(); }catch(e){}
+  const belowReorder = ing.filter(active).filter(i=>!isSupplyItem(i)).filter(i=>{const oh=stock[i.sku]||0;const thr=rawRopOf(i);return thr>0&&oh<thr;}).length
     + prod.filter(active).filter(p=>{const oh=stock[p.sku]||0;const thr=+p.par_packs||0;return thr>0&&oh<thr;}).length;
   // Estimated value of the open PO pipeline (not yet received), valued at the vendor price if set, else historical price.
   const _ingP={}; ing.forEach(i=>_ingP[i.sku]=(+i.moving_avg_cost_kg||+i.list_price_kg||0));   // covers raw + supplies
@@ -27422,7 +27451,8 @@ async function lowStockHtml(){
   let stock={}; if(isLive()){ try{ (await db.list('stock_balance',{})).forEach(s=>{ if(String(s.kind||'')==='product') return; const k=(s.kind||'')+':'+s.ref_sku; stock[k]=(stock[k]||0)+(+s.on_hand||0); }); }catch(e){} }
   /* products from the one stock picture, never the shop's ledger */
   try{ const _P=await stockPicture(); if(_P&&_P.by) Object.keys(_P.by).forEach(k=>{ stock['product:'+k]=+((_P.by[k]||{}).current)||0; }); }catch(e){}
-  const ig=ings.map(i=>{ const oh=stock['ingredient:'+i.sku]||0; const thr=+i.reorder_g||+i.par_g||0; const sup=isSupplyItem(i); return {name:i.name,sku:i.sku,oh,thr,short:thr-oh,unit:sup?(i.uom||'units'):'g'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
+  try{ await rawRopLoad(); }catch(e){}
+  const ig=ings.map(i=>{ const oh=stock['ingredient:'+i.sku]||0; const thr=isSupplyItem(i)?(+i.reorder_g||+i.par_g||0):rawRopOf(i); const sup=isSupplyItem(i); return {name:i.name,sku:i.sku,oh,thr,short:thr-oh,unit:sup?(i.uom||'units'):'g'}; }).filter(r=>r.thr>0&&r.oh<r.thr).sort((a,b)=>b.short-a.short);
   const pg=prods.map(p=>{ const oh=stock['product:'+p.sku]||0; const thr=+p.par_packs||0; return {name:p.name,variant:p.variant,sku:p.sku,oh,thr,short:thr-oh,unit:'packs',group_1:prodG1(p),group_2:prodG2(p),sort_order:p.sort_order}; }).filter(r=>r.thr>0&&r.oh<r.thr);
   const lrow=(r,model)=>`<tr style="cursor:pointer" onclick="gotoRecord('${model}','${esc(String(r.sku)).replace(/'/g,'&#39;')}')" title="Open record"><td>${esc(r.name)}</td><td><code>${esc(r.sku)}</code></td><td class="num">${num(Math.round(r.oh))}</td><td class="num">${num(r.thr)}</td><td class="num"><b style="color:var(--danger)">${num(Math.round(r.short))} ${r.unit}</b></td></tr>`;
   const tbl=(title,rows,model)=>`<div class="repcard" style="margin-bottom:14px"><h3 style="margin:0 0 8px">${title}</h3>
