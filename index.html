@@ -11782,12 +11782,23 @@ async function _renderMRP(){
      'confirmed' (issued to the supplier) and stops counting the moment it is
      received, because receiving posts the quantity into stock_balance. */
   const onOrder={}, onOrderEta={};
+  window._mrpPoUnconf={};
   try{
-    const openRefs={};
+    const openRefs={}, draftRefs={};
     (await db.list('purchase_orders',{})).forEach(o=>{
       const st=String(o.status||'').toLowerCase();
       // A partially received PO is still bringing the REST of its order in.
-      if(st==='confirmed'||st==='partial') openRefs[o.po_ref]=o.expected_delivery||''; });
+      if(st==='confirmed'||st==='partial') openRefs[o.po_ref]=o.expected_delivery||'';
+      else if(st==='open'||st==='rfq'||st==='quoted') draftRefs[o.po_ref]=st; });
+    /* POs made but NOT yet confirmed (Zeus 21 Nov: "may PO open na 4 kilos" —
+       the plan asked for 2 kg more and nothing on screen said why). They are
+       still NOT counted — only a confirmed PO is coming — but Check ingredients
+       shows them beside Coming, so nobody orders the same meat twice. */
+    if(Object.keys(draftRefs).length){
+      (await db.list('po_lines',{})).forEach(l=>{ if(!(l.po_ref in draftRefs)) return;
+        const g=poRemainQty(l)*1000; if(!(g>0)) return;
+        const u=window._mrpPoUnconf[l.ingredient_sku]=window._mrpPoUnconf[l.ingredient_sku]||{g:0,refs:[]};
+        u.g+=g; if(u.refs.indexOf(l.po_ref)<0) u.refs.push(l.po_ref); }); }
     if(Object.keys(openRefs).length){
       (await db.list('po_lines',{})).forEach(l=>{
         if(!(l.po_ref in openRefs)) return;
@@ -12729,10 +12740,16 @@ function mrpIngTable(x, ings, ro){
     if(ps>0 && mn>ps+0.01) return mn+' kg<div class="mini" style="font-weight:400">'+(Math.round(mn/ps*10)/10)+' cases × '+ps+' kg</div>';
     if(ps>0) return ps+' kg per case';
     return mn>0?(mn+' kg'):'—'; };
-  return `<table class="mrp-t mrp-ingt"><colgroup><col><col style="width:105px"><col style="width:105px"><col style="width:150px"><col style="width:105px"><col style="width:96px"></colgroup>
-    <thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num" title="raw in the freezer + premix / processed counted back as raw + already on order">Have</th><th class="num" title="supplier minimum order / case size">MOQ</th><th class="num">Order</th><th class="num" title="type 10 to add, -5 for less">Extra</th></tr></thead><tbody>
-    ${x.rows.map(l=>{ const it=itOf(l); const have=(+l.oh||0)+(+l.wip||0)+(+l.inc||0);
-      return `<tr><td>${esc(l.name)}</td><td class="num">${q(l,l.rawNeed)}</td><td class="num" style="color:var(--muted)">${q(l,have)}</td>
+  /* HAVE, SPLIT (Zeus 21 Nov: "meron have pero on the way pa lang") — what is
+     in the freezer and what is still coming are two different facts. Coming
+     counts confirmed POs only; a PO made but not yet confirmed is shown under
+     it, in brown, and is NOT counted. The order maths is unchanged. */
+  const unc=l=>(window._mrpPoUnconf||{})[l.sku]||null;
+  return `<table class="mrp-t mrp-ingt"><colgroup><col><col style="width:95px"><col style="width:95px"><col style="width:120px"><col style="width:140px"><col style="width:95px"><col style="width:90px"></colgroup>
+    <thead><tr><th>Ingredient</th><th class="num">Need</th><th class="num" title="raw in the freezer + premix / processed counted back as raw">In freezer</th><th class="num" title="confirmed POs not yet received — counted. A PO made but not yet confirmed shows underneath and is NOT counted until it is confirmed.">Coming</th><th class="num" title="supplier minimum order / case size">MOQ</th><th class="num">Order</th><th class="num" title="type 10 to add, -5 for less">Extra</th></tr></thead><tbody>
+    ${x.rows.map(l=>{ const it=itOf(l); const frz=(+l.oh||0)+(+l.wip||0), inc=(+l.inc||0), u=unc(l);
+      return `<tr><td>${esc(l.name)}</td><td class="num">${q(l,l.rawNeed)}</td><td class="num" style="color:var(--muted)">${q(l,frz)}</td>
+        <td class="num" style="color:var(--muted)">${inc>0?q(l,inc):'—'}${u?`<div class="mini" style="color:var(--earth,#b5762a);font-weight:600" title="${esc(u.refs.join(', '))} — not confirmed yet, so not counted">+ ${q(l,u.g)} PO not confirmed</div>`:''}</td>
         <td class="num mini" style="${why(l)?'color:#1f5248;font-weight:700':'color:var(--muted)'}" title="${esc(why(l))}">${moq(l)}</td>
         <td class="num"><b style="color:#1f5248">${q(l,l.final)}</b></td>
         <td class="num"><input type="number" step="any" data-ingx="${esc(l.sku)}"${ro?' disabled':''} class="mrp-in" style="width:72px" placeholder="0" value="${(+l.manualKg||0)?(btl(it)?Math.round(+l.manualKg/(+it.pack_size_kg)):+l.manualKg):''}" onchange="mrpIngExtra('${esc(String(l.sku)).replace(/'/g,'&#39;')}',this.value,${btl(it)?(+it.pack_size_kg):0})"></td></tr>`; }).join('')}
@@ -12743,7 +12760,7 @@ function mrpIngSimpleHtml(ings){
   const {P,sups,tot}=mrpIngRows(ings);
   if(!P.length) return `<section class="mrp-sec"><h3>Ingredients to order</h3><div class="mini" style="color:var(--muted)">Nothing to order yet. Go back and press <b>Pull the week</b> first.</div></section>`;
   return `<section class="mrp-sec"><h3>Ingredients to order</h3>
-    <div class="mini" style="color:var(--muted)">${P.length} item(s) · ${sups.length} supplier(s) · about <b>${peso(tot)}</b>. <b>Have</b> = raw in the freezer + premix (counted as raw) + already ordered. <b>Extra</b>: type 10 to add, -5 for less.</div></section>
+    <div class="mini" style="color:var(--muted)">${P.length} item(s) · ${sups.length} supplier(s) · about <b>${peso(tot)}</b>. <b>In freezer</b> = raw + premix (counted as raw). <b>Coming</b> = confirmed POs; a PO not yet confirmed shows in brown and is not counted. <b>Extra</b>: type 10 to add, -5 for less.</div></section>
     ${sups.map(x=>`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>${esc(x.s)}</h3><div class="mini" style="color:var(--muted)">${x.rows.length} item(s) · ${peso(x.v)}</div></div></div>${mrpIngTable(x,ings)}</section>`).join('')}`;
 }
 function mrpSetView(v){ try{ localStorage.setItem('wr_mrp_view', v); localStorage.removeItem('wr_mrp_full'); }catch(e){} renderMRP(); }
@@ -13021,7 +13038,7 @@ async function mrpSimpleView(o){
     ${sups.length?(()=>{ const R=mrpIngRows(window._mrpIngsAll||[]); const O=window._mrpIngOpen||{};
       return R.sups.map(x=>`<details class="mrp-ingsup" data-s="${esc(x.s)}"${O[x.s]?' open':''} ontoggle="(window._mrpIngOpen=window._mrpIngOpen||{})[this.dataset.s]=this.open">
         <summary><b>${esc(x.s)}</b> <span class="mini" style="color:var(--muted)">${x.rows.length} item(s)</span><span style="float:right">${peso(x.v)}</span></summary>${mrpIngTable(x,window._mrpIngsAll||[],!!L)}</details>`).join(''); })():''}
-    <div class="mini" style="color:var(--muted);margin-top:8px">${L?'Locked — to add extra, press <b>Edit plan</b> at the top, change it here, Save, then <b>Order what\'s new</b>.':'Open a supplier to add extra (type 10 to add, -5 for less).'} <b>Have</b> = raw in the freezer + premix (as raw) + already ordered.</div></section>`;
+    <div class="mini" style="color:var(--muted);margin-top:8px">${L?'Locked — to add extra, press <b>Edit plan</b> at the top, change it here, Save, then <b>Order what\'s new</b>.':'Open a supplier to add extra (type 10 to add, -5 for less).'} <b>In freezer</b> = raw + premix (as raw). <b>Coming</b> = confirmed POs; a PO not yet confirmed shows in brown and is not counted.</div></section>`;
   const sec4=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>5 · Purchase orders</h3></div></div>${sec4body}</section>`;
   let head=''; try{ head=await mrpStepHeader(true); }catch(e){}
   return `<div class="mrp-simple">${head}${sec1}${sec2}${secIng}${sec3}${sec4}
