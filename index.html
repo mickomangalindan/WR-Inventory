@@ -1975,8 +1975,27 @@ function openModel(model){
 // Deep-links used by clickable dashboard tiles & report rows.
 async function gotoRecord(model, pkval){ if(!MODELS[model]||pkval==null) return; state={model,view:'form',search:'',groupBy:'',recId:null,sel:[]}; renderSide(); try{ await openForm(encodeURIComponent(String(pkval))); }catch(e){ toast('Could not open record',true); } }
 function gotoReport(id){ if(typeof repTab!=='undefined'){ repTab='standard'; repActive=id; } openModel('reporting'); }
+function routeLive(seq){ return seq===window._routeSeq; }
+/* ROWS STAY PUT WHILE YOU EDIT (Zeus 21 Nov: typing in Extra made the list
+   jump, because it is sorted by ₱ and the row's ₱ changes). The first draw
+   after a page visit or a Pull the week sorts normally and remembers the
+   order; redraws after that keep it, new rows going to the end. */
+function mrpKeepOrder(kind, arr, key){
+  const M=window._mrpOrd=window._mrpOrd||{}; const prev=M[kind]; let out=arr.slice();   // always a new array: callers refill the original from it
+  if(prev&&prev.length){ const pos={}; prev.forEach((k,i)=>{ pos[k]=i; }); const BIG=1e9;
+    out=arr.map((x,i)=>({x,i,p:(pos[key(x)]!=null?pos[key(x)]:BIG)})).sort((a,b)=>(a.p-b.p)||(a.i-b.i)).map(o=>o.x); }
+  M[kind]=out.map(key); return out; }
 function route(){
   try{ _mrpScrollRoute=''; }catch(e){}   // a fresh visit starts at the top (see renderMRP)
+  /* STALE SCREENS (Zeus 21 Nov: "nag-click ako ng production plan, iba yung
+     lumalabas"). Demand/MRP and the Production Plan take seconds to load; a
+     click elsewhere while one is loading used to let it finish and paint over
+     the new page. Every visit gets a number; a slow screen checks it is still
+     the current visit before it draws (routeLive). A real change of page also
+     clears the old screen straight away, and forgets the frozen row order. */
+  window._routeSeq=(window._routeSeq||0)+1;
+  if(window._routeModel!==state.model){ window._routeModel=state.model; window._mrpOrd=null;
+    const m0=MODELS[state.model]; if(m0&&m0.special){ const c=$('content'); if(c) c.innerHTML='<div class="empty">Loading…</div>'; } }
   renderSide();
   refreshMentionBell();
   if(state.model==='home'){ return renderDashboard(); }
@@ -10200,6 +10219,7 @@ function wdtPickPlot(ref){
   renderWDT();
 }
 async function renderWDT(){
+  const _seq=window._routeSeq;
   const _tabs=`<button class="btn ${_wdtTab==='products'?'':'sec'} sm" onclick="wdtSetTab('products')">📦 Products</button><button class="btn ${_wdtTab==='movement'?'':'sec'} sm" onclick="wdtSetTab('movement')" title="ingredients, supplies and stickers — what moved, day by day. This was the Production Schedule.">📅 Movement</button>`;
   if(_wdtTab==='movement'){
     $('crumb').innerHTML=crumbBack()+'<b>Weekly Demand Target</b> › Movement';
@@ -10290,6 +10310,7 @@ async function renderWDT(){
           <td class="num mini" style="color:${short?'var(--danger)':(x.ohRawG>0?'#7a6432':'var(--muted)')}">${x.rawSku?_kgs(x.ohRawG):'—'}${short?' ⚠':''}</td></tr>`; });
       return out||'<tr><td colspan="8" class="empty">Nothing outstanding.</td></tr>'; })()}
     </tbody></table></div><div class="pager">${_wdtRaw.length} ingredient(s) · ${num(Math.round(_wdtRaw.reduce((a,x)=>a+(+x.plotKg||0),0)*100)/100)} kg ordered on ${esc(_rawRef||'no plot')}</div></div>`;
+  if(!routeLive(_seq)) return;
   $('content').innerHTML=h;
 }
 /* ---- PRINTING THE SHEET ------------------------------------------------
@@ -11716,14 +11737,16 @@ async function renderMRP(){
   _mrpScrollRoute=route;
   const boxes=[document.scrollingElement, document.querySelector('.main'), $('content')].filter(Boolean);
   const keep=sameRoute ? boxes.map(b=>b.scrollTop) : null;
+  const _seq=window._routeSeq;
   try{ mrpAutosave(); }catch(e){}
   try{ return await _renderMRP(); }
   finally{
-    if(keep){ const put=()=>boxes.forEach((b,i)=>{ if(keep[i]>0) b.scrollTop=keep[i]; });
+    if(keep && routeLive(_seq)){ const put=()=>boxes.forEach((b,i)=>{ if(keep[i]>0) b.scrollTop=keep[i]; });
       put(); try{ requestAnimationFrame(put); }catch(e){} }
   }
 }
 async function _renderMRP(){
+  const _seq=window._routeSeq;
   /* THE SETTINGS ARE SHARED, SO THEY HAVE TO BE READ. saveRawPar writes them to
      app_settings and the strip says "saved for everyone, not just this browser"
      — but nothing ever read them back, so a second person got RP_DEF and the
@@ -12447,6 +12470,7 @@ async function _renderMRP(){
       remark:(mrpRemarks[it.sku]||''),wait:(_tLead!=null?_tLead:lead),cush:(_noCush?0:+C.cush||0),supplier:defSup,price:+it.list_price_kg||0,orderBy:MRPDATE,arrive:addDaysISO(MRPDATE,(_tLead!=null?_tLead:lead))});   /* order on the plan day; it arrives about lead days later (was plan day − lead = always in the past, 18 Nov) */
   });
   plan.sort((a,b)=>b.final-a.final);
+  const _pk=mrpKeepOrder('plan',plan,l=>l.sku); plan.length=0; _pk.forEach(l=>plan.push(l));
   window._mrpPlan=plan; window._mrpSupLedIng=_supLedIng; window._mrpSlChk=_slChk; window._mrpAllIng=_allIng; window._rpTooSmall=_rpTooSmall;
   const _pu=window._mrpProcUse||{}; const _puN=Object.keys(_pu).length;
   let rh=`<div class="repcard" style="margin-top:14px"><h3 style="margin:0 0 4px">${mrpView()==='ingredients'?'Ingredients to order':'2 · Replenishment plan'}</h3>
@@ -12501,12 +12525,12 @@ async function _renderMRP(){
   // group the plan per supplier (matches how POs are generated), with a per-supplier subtotal + total kg
   const _bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no default supplier — set one)'; (_bySup[s]=_bySup[s]||[]).push(l); });
   const _supKg=(arr)=>arr.reduce((s,l)=>s+(+l.final||0),0);                 // total order grams for a supplier
-  Object.keys(_bySup).sort((a,b)=>{ const av=_bySup[a].reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0), bv=_bySup[b].reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); return bv-av; }).forEach(sup=>{
+  mrpKeepOrder('supT',Object.keys(_bySup).sort((a,b)=>{ const av=_bySup[a].reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0), bv=_bySup[b].reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); return bv-av; }),k=>k).forEach(sup=>{
     const arr=_bySup[sup]; const sItems=arr.filter(l=>l.final>0); const sVal=sItems.reduce((s,l)=>s+(l.final/1000)*(+l.price||0),0); const sKg=_supKg(arr);
     const minG=supMin[sup]||0; const shortG=minG>0?(minG-sKg):0;
     const minTag = minG>0 ? (shortG>0 ? ` · <span style="color:var(--danger)">min ${kgf(minG)} — short ${kgf(shortG)}</span>` : ` · <span style="color:#4e7a3e">✓ meets min ${kgf(minG)}</span>`) : '';
     rh+=`<tr class="mrp-suprow"><td colspan="17" style="background:var(--hi,#e7f2ef);font-weight:700;color:#1f2a28;padding:8px 10px;font-size:13px;border-bottom:1px solid #e6ebea">${esc(sup)} <span style="color:var(--muted);font-weight:400;font-size:13px">— ${sItems.length} item(s) · <b>${kgf(sKg)} kg</b> · est. ₱${Math.round(sVal).toLocaleString('en-PH')}${minTag}</span></td></tr>`;
-    arr.sort((a,b)=>b.final-a.final).forEach(l=>{ rh+=_rowHtml(l); });
+    mrpKeepOrder('rowT:'+sup,arr.slice().sort((a,b)=>b.final-a.final),l=>l.sku).forEach(l=>{ rh+=_rowHtml(l); });
   });
   if(_supLedIng.length) rh+=`<tr><td colspan="17" style="background:#fff8e1;border-left:3px solid #e0b400;padding:7px 9px;font-size:12.5px">
     <details><summary style="cursor:pointer">⏸ <b>On hold — not ordered:</b> ${_supLedIng.length} item(s) (rabbit, lamb, mackerel…). Use <b>＋ Add item to order</b> when a supplier has stock.</summary>
@@ -12576,6 +12600,7 @@ async function _renderMRP(){
         <div class="mini" style="color:var(--muted)">Which places' stock counts as ours: Pasig (Shopify) and Bulacan. Set once, rarely changed.</div></div><button class="btn sm sec" onclick="openPlanLocs()">Open</button></div></section></div>`;
   }
   if(!_body){ _body=`<div id="mrpClean" class="${_notes?'':'mrp-clean'}">`+_head+dh+rh+`<details class="mrp-more" style="margin-top:18px"><summary>More details</summary>`+_pre+_more+`</details></div>`; }
+  if(!routeLive(_seq)) return;   // the user has moved to another page while this loaded
   $('content').innerHTML=_body;
   if(_view==='packs') mrpReadOnly($('content').querySelector('.mrp-ro'));
   if(_view==='ingredients') mrpReadOnly($('content').querySelector('.mrp-ingv'));
@@ -12676,11 +12701,12 @@ function mrpGoPOs(){ try{ sessionStorage.setItem('wr_back_mrp','1'); }catch(e){}
    Extra box writes the same mrpManual the old "Manual ±" box wrote. */
 function mrpIngAll(on){ try{ localStorage.setItem('wr_ing_all', on?'1':'0'); }catch(e){} renderMRP(); }
 function mrpIngExtra(sku,v,btlKg){ const y=window.scrollY; mrpManual[sku]=(+v||0)*((+btlKg||0)>0?(+btlKg):1); try{ mrpAutosave(); }catch(e){}
-  Promise.resolve(renderMRP()).then(()=>{ window.scrollTo(0,y); const el=document.querySelector('[data-ingx="'+CSS.escape(sku)+'"]'); if(el) el.focus(); }); }
+  Promise.resolve(renderMRP()).then(()=>{ window.scrollTo(0,y); const el=document.querySelector('[data-ingx="'+CSS.escape(sku)+'"]'); if(el){ try{ el.focus({preventScroll:true}); }catch(e){ el.focus(); } } }); }
 function mrpIngRows(ings){
   const P=(window._mrpPlan||[]).filter(l=>(+l.final||0)>0 || (+l.manualKg||0)!==0);
   const by={}; P.forEach(l=>{ const s=(l.supplier||'').trim()||'(no supplier set)'; (by[s]=by[s]||[]).push(l); });
   const sups=Object.keys(by).map(s=>({s, rows:by[s].slice().sort((a,b)=>String(a.name).localeCompare(String(b.name))), v:by[s].reduce((a,l)=>a+((+l.final||0)/1000)*(+l.price||0),0)})).sort((a,b)=>b.v-a.v);
+  const _supsK=mrpKeepOrder('supS',sups,x=>x.s); sups.length=0; _supsK.forEach(x=>sups.push(x));
   return {P, sups, tot:sups.reduce((a,x)=>a+x.v,0)};
 }
 /* One supplier's lines. Every supplier's table uses the same fixed columns, so
@@ -12987,7 +13013,7 @@ async function mrpSimpleView(o){
      look at what it needs, add extras on the Ingredients tab, then lock, then
      order. The supplier totals are the same numbers the POs are made from. */
   const bySup={}; plan.forEach(l=>{ const s=(l.supplier||'').trim()||'(no supplier set)'; (bySup[s]=bySup[s]||[]).push(l); });
-  const sups=Object.keys(bySup).map(s=>({s, n:bySup[s].length, v:bySup[s].reduce((a,l)=>a+(l.final/1000)*(+l.price||0),0)})).sort((a,b)=>b.v-a.v);
+  const sups=mrpKeepOrder('supC',Object.keys(bySup).map(s=>({s, n:bySup[s].length, v:bySup[s].reduce((a,l)=>a+(l.final/1000)*(+l.price||0),0)})).sort((a,b)=>b.v-a.v),x=>x.s);
   const _ingTot=sups.reduce((a,x)=>a+x.v,0);
   const secIng=`<section class="mrp-sec"><div class="mrp-sechead"><div><h3>3 · Check ingredients</h3>
       <div class="mini" style="color:var(--muted)">${plan.length?(plan.length+' ingredient(s) to buy from '+sups.length+' supplier(s) · about '+peso(_ingTot)):'Nothing to buy yet — pull the week first.'}</div></div>
@@ -13682,6 +13708,7 @@ async function mrpComingLoad(){
   }catch(e){ window._mrpComing={}; }
 }
 async function mrpPullPackReq(){
+  window._mrpOrd=null;   // a new pull sorts afresh (see mrpKeepOrder)
   /* A LOCKED WEEK DOES NOT TAKE NEW WORK — the same refusal ＋ Add uses.
      Ingredients have been bought against a saved plot and the run is scheduled
      from it, so this cannot quietly add to it. */
@@ -20760,6 +20787,7 @@ let prodPlanLines=[]; let prodRunRef='';
 let prodOutLines=[];   // standalone output (processed) ingredients to make to stock: {ingredient_sku,name,needed_kg}
 let prodTargetMap={}, prodProducedMap={}, prodMadeMap={};
 async function renderProdPlan(){
+  const _seq=window._routeSeq;
   const _nSub=Object.keys(window._prodSub||{}).length;
   $('cp').innerHTML=`<div class="title">Production Plan <span onclick="openKB('production_batches')" title="guide" style="cursor:pointer;color:var(--muted);font-size:14px;font-weight:400">❔</span></div>
     <button class="btn sec" onclick="prodOpenDrafts()">📂 Drafts</button>
@@ -20793,6 +20821,7 @@ async function renderProdPlan(){
      means the figures are missing. Record which. */
   try{ window._prodNeedRows=await prodNeedRows(); window._prodNeedErr=''; }
   catch(e){ window._prodNeedRows=[]; window._prodNeedErr=String((e&&e.message)||e).slice(0,200); }
+  if(!routeLive(_seq)) return;   // moved to another page while this loaded
   drawProdPlan();
 }
 // Load the most-recent SAVED DRAFT plan for the production date, so the plan/cart persist across browsers.
