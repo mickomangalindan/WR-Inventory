@@ -11869,6 +11869,23 @@ async function _renderMRP(){
     else { window._mrpEditRef=null; window._mrpEditDate=null; }
   }
   window._mrpLocked=_lockedPlot;
+  /* A LOCKED WEEK SHOWS WHAT WAS LOCKED (Zeus 21 Nov: after a refresh Check
+     ingredients asked for 2 kg of trimmings the locked plan had already put on
+     a PO). The header read the locked plot, but the ingredient maths ran on the
+     editor, which a refresh leaves empty — so it worked out top-ups for a week
+     with nothing in it. A locked week now loads its own demand, custom part,
+     extras and added items into the maths; leaving it (another week, no lock)
+     empties them again so the next plan does not start from last week's.
+     Editing is untouched: Edit plan sets _mrpEditRef and owns the editor. */
+  if(_lockedPlot && !window._mrpEditRef){
+    const _sig=String(_lockedPlot.ref||'')+'|'+MRPDATE+'|'+String(_lockedPlot.saved_at||'');
+    if(window._mrpLockedLoaded!==_sig){
+      mrpDemand=Object.assign({},_lockedPlot.demand||{}); mrpCoPart=Object.assign({},_lockedPlot.coPart||{});
+      mrpManual=Object.assign({},_lockedPlot.manual||{}); mrpAdd=Object.assign({},_lockedPlot.add||{});
+      window._mrpLockedLoaded=_sig; }
+  } else if(!_lockedPlot && !window._mrpEditRef && window._mrpLockedLoaded){
+    mrpDemand={}; mrpCoPart={}; mrpManual={}; mrpAdd={}; window._mrpLockedLoaded=null;
+  }
   const _nextMon=(()=>{ try{ const dt=new Date(MRPDATE+'T00:00:00'); dt.setDate(dt.getDate()+7); return isoLocal(dt); }catch(e){ return ''; } })();
   window._mrpNextRun=_nextMon;
   const coPend={};
@@ -12679,6 +12696,7 @@ async function mrpStepHeader(simple){
   </div>`;
 }
 async function mrpEditPlan(){
+  window._mrpLockedLoaded=null;   // the editor now belongs to the edit; reload the lock if it is cancelled
   const L=window._mrpLockedReal; if(!L){ toast('This week is not locked',true); return; }
   let pos=[]; try{ pos=((await db.list('purchase_orders',{}))||[]).filter(x=>String(x.order_date||'').slice(0,10)===MRPDATE && x.status!=='cancelled'); }catch(e){}
   /* After POs: still allowed. Ordering from the new version nets off what is
@@ -12691,7 +12709,7 @@ async function mrpEditPlan(){
   window._mrpEditRef=String(L.ref||''); window._mrpEditDate=MRPDATE;
   loadMRPPlan(i);
 }
-function mrpEditCancel(){ window._mrpEditRef=null; window._mrpEditDate=null; mrpDemand={}; mrpCoPart={}; mrpManual={}; mrpAdd={}; mrpRemarks={}; renderMRP(); }
+function mrpEditCancel(){ window._mrpEditRef=null; window._mrpEditDate=null; window._mrpLockedLoaded=null; mrpDemand={}; mrpCoPart={}; mrpManual={}; mrpAdd={}; mrpRemarks={}; renderMRP(); }
 const MRP_VIEWS=['plan','packs','ingredients','checks','history','settings'];
 function mrpIngMath(tr){ const n=tr&&tr.nextElementSibling; if(n&&n.classList.contains('mrp-math')) n.style.display=(n.style.display==='none'?'':'none'); }
 function mrpView(){ let v=''; try{ v=localStorage.getItem('wr_mrp_view')||''; if(!v && localStorage.getItem('wr_mrp_full')==='1') v='packs'; }catch(e){}
